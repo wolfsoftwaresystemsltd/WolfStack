@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WolfStack Console</title>
+    <link rel="stylesheet" href="/css/xterm.min.css" />
+    <script src="/js/vendor/xterm.min.js"></script>
+    <script src="/js/vendor/xterm-addon-fit.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #0a0a0a;
+            color: #f0f0f0;
+            font-family: 'Inter', 'Segoe UI', sans-serif;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 16px;
+            background: #16162a;
+            border-bottom: 1px solid #333;
+            flex-shrink: 0;
+        }
+
+        .toolbar h1 {
+            font-size: 14px;
+            font-weight: 600;
+            color: #e0e0e0;
+        }
+
+        .toolbar .status {
+            font-size: 12px;
+            padding: 3px 10px;
+            border-radius: 12px;
+            background: #333;
+            color: #888;
+        }
+
+        .toolbar .status.connected {
+            background: rgba(16, 185, 129, 0.15);
+            color: #10b981;
+        }
+
+        .toolbar .status.error {
+            background: rgba(239, 68, 68, 0.15);
+            color: #ef4444;
+        }
+
+        #terminal-container {
+            flex: 1;
+            padding: 4px;
+            overflow: hidden;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="toolbar">
+        <h1 id="title">💻 WolfStack Console</h1>
+        <span id="status" class="status">Connecting...</span>
+    </div>
+    <div id="terminal-container"></div>
+
+    <script>
+        const params = new URLSearchParams(window.location.search);
+        const type = params.get('type') || 'lxc';
+        const name = params.get('name') || '';
+
+        document.title = `Console — ${name}`;
+        document.getElementById('title').textContent = `💻 Console — ${name} (${type})`;
+
+        const statusEl = document.getElementById('status');
+
+        // Create terminal
+        const term = new Terminal({
+            cursorBlink: true,
+            fontSize: 15,
+            fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", "Courier New", monospace',
+            theme: {
+                background: '#0a0a0a',
+                foreground: '#f0f0f0',
+                cursor: '#10b981',
+                selectionBackground: 'rgba(16, 185, 129, 0.3)'
+            },
+            scrollback: 5000
+        });
+
+        const fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        term.open(document.getElementById('terminal-container'));
+
+        function doFit() {
+            try { fitAddon.fit(); } catch (e) { }
+        }
+        setTimeout(doFit, 100);
+        window.addEventListener('resize', doFit);
+
+        term.writeln('\x1b[33mConnecting to ' + type + ' container: ' + name + '...\x1b[0m');
+
+        // WebSocket
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = protocol + '//' + window.location.host + '/ws/console/' + type + '/' + encodeURIComponent(name);
+        const ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = () => {
+            statusEl.textContent = 'Connected';
+            statusEl.className = 'status connected';
+            term.writeln('\x1b[32mConnected!\x1b[0m\r\n');
+            doFit();
+            term.focus();
+        };
+
+        ws.onmessage = (event) => {
+            if (typeof event.data === 'string') {
+                term.write(event.data);
+            } else {
+                term.write(new Uint8Array(event.data));
+            }
+        };
+
+        ws.onclose = (e) => {
+            statusEl.textContent = 'Disconnected';
+            statusEl.className = 'status error';
+            term.writeln('\r\n\x1b[31mConnection closed (code: ' + e.code + ').\x1b[0m');
+        };
+
+        ws.onerror = () => {
+            statusEl.textContent = 'Error';
+            statusEl.className = 'status error';
+            term.writeln('\r\n\x1b[31mWebSocket connection failed.\x1b[0m');
+        };
+
+        term.onData(data => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(data);
+            }
+        });
+    </script>
+</body>
+
+</html>

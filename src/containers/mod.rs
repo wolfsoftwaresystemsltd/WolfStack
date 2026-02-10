@@ -325,16 +325,37 @@ fn lxc_apply_wolfnet(container: &str) {
         std::thread::sleep(std::time::Duration::from_secs(3));
 
         // Step 1: Ensure container has a bridge IPv4 (10.0.3.x) on eth0
-        //         This is REQUIRED — without it, ARP fails on lxcbr0
         let mut bridge_ip = get_container_ipv4(container);
+
         if bridge_ip.is_empty() {
-            info!("No IPv4 on eth0, trying dhclient...");
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "dhclient", "-4", "eth0"])
-                .output();
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            bridge_ip = get_container_ipv4(container);
+            // Check if container uses systemd-networkd — fix its config for DHCPv4
+            let has_networkd = Command::new("lxc-attach")
+                .args(["-n", container, "--", "test", "-d", "/etc/systemd/network"])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+            if has_networkd {
+                info!("Container uses systemd-networkd, enabling DHCPv4...");
+                let networkd_conf = "[Match]\nName=eth0\n\n[Network]\nDHCP=ipv4\n\n[DHCPv4]\nUseDNS=yes\nUseRoutes=yes\n";
+                let _ = Command::new("lxc-attach")
+                    .args(["-n", container, "--", "sh", "-c",
+                        &format!("printf '{}' > /etc/systemd/network/eth0.network && systemctl restart systemd-networkd", networkd_conf)])
+                    .output();
+                // Wait for DHCP lease
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                bridge_ip = get_container_ipv4(container);
+            } else {
+                // Try dhclient for non-systemd distros
+                info!("Trying dhclient...");
+                let _ = Command::new("lxc-attach")
+                    .args(["-n", container, "--", "dhclient", "-4", "eth0"])
+                    .output();
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                bridge_ip = get_container_ipv4(container);
+            }
         }
+
         if bridge_ip.is_empty() {
             // Static fallback: derive 10.0.3.x from last octet of WolfNet IP
             let last: u8 = ip.split('.').last()
@@ -342,7 +363,7 @@ fn lxc_apply_wolfnet(container: &str) {
                 .unwrap_or(50)
                 .wrapping_add(100);
             bridge_ip = format!("10.0.3.{}", last);
-            info!("dhclient failed, assigning static bridge IP: {}", bridge_ip);
+            info!("DHCP failed, assigning static bridge IP: {}", bridge_ip);
             let _ = Command::new("lxc-attach")
                 .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", bridge_ip), "dev", "eth0"])
                 .output();
@@ -983,23 +1004,33 @@ fn lxc_post_start_setup(container: &str) {
 
     info!("Running first-boot setup for container {}", container);
 
-    // Wait for container init to finish
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    // Wait for container networking to settle (wolfnet setup runs first)
+    std::thread::sleep(std::time::Duration::from_secs(5));
 
     // Install openssh-server
-    let _ = Command::new("lxc-attach")
+    let ssh_install = Command::new("lxc-attach")
         .args(["-n", container, "--", "sh", "-c",
-            "apt-get update -qq && apt-get install -y -qq openssh-server 2>/dev/null || yum install -y openssh-server 2>/dev/null || apk add openssh 2>/dev/null || true"])
+            "apt-get update -qq && apt-get install -y -qq openssh-server 2>/dev/null || \
+             yum install -y openssh-server 2>/dev/null || \
+             apk add openssh 2>/dev/null"])
         .output();
 
-    // Enable root SSH login
-    let _ = Command::new("lxc-attach")
-        .args(["-n", container, "--", "sh", "-c",
-            "sed -i 's/#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; \
-             sed -i 's/#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; \
-             mkdir -p /run/sshd; \
-             service ssh restart 2>/dev/null || systemctl restart sshd 2>/dev/null || /usr/sbin/sshd 2>/dev/null || true"])
-        .output();
+    let ssh_ok = ssh_install.as_ref().map(|o| o.status.success()).unwrap_or(false);
+
+    if ssh_ok {
+        // Enable root SSH login and start sshd
+        let _ = Command::new("lxc-attach")
+            .args(["-n", container, "--", "sh", "-c",
+                "sed -i 's/#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; \
+                 sed -i 's/#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; \
+                 mkdir -p /run/sshd; \
+                 systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || /usr/sbin/sshd 2>/dev/null || true; \
+                 systemctl enable sshd 2>/dev/null || update-rc.d ssh enable 2>/dev/null || true"])
+            .output();
+        info!("SSH installed and configured for container {}", container);
+    } else {
+        info!("SSH install failed for {} (no network?), will retry next boot", container);
+    }
 
     // Create WolfStack MOTD
     let motd = r#"
@@ -1017,9 +1048,11 @@ fn lxc_post_start_setup(container: &str) {
         .args(["-n", container, "--", "sh", "-c", &format!("cat > /etc/motd << 'MOTD'\n{}\nMOTD", motd)])
         .output();
 
-    // Mark setup as done
-    let _ = std::fs::write(&marker, "done");
-    info!("First-boot setup complete for container {}", container);
+    // Only mark done if SSH was installed successfully
+    if ssh_ok {
+        let _ = std::fs::write(&marker, "done");
+        info!("First-boot setup complete for container {}", container);
+    }
 }
 
 /// Stop an LXC container
