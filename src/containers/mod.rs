@@ -299,22 +299,32 @@ fn lxc_apply_wolfnet(container: &str) {
         info!("Applying WolfNet IP {} to container {}", ip, container);
 
         // Wait for container networking to be ready
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_secs(3));
 
-        // Add WolfNet IP as secondary address on eth0 inside the container
+        // 1. Configure container side
+        // Add IP as /32 to avoid subnet overlap with host routing
         let _ = Command::new("lxc-attach")
-            .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", ip), "dev", "eth0"])
+            .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "eth0"])
             .output();
 
-        // Add route on host for this container IP through wolfnet0
+        // Add route for entire WolfNet subnet via host bridge IP (10.0.3.1)
+        // Adjust subnet mask if needed (assuming /24 for now, typical WolfNet default)
+        let subnet = "10.10.10.0/24"; 
+        let _ = Command::new("lxc-attach")
+            .args(["-n", container, "--", "ip", "route", "add", subnet, "via", "10.0.3.1"])
+            .output();
+
+        // 2. Configure Host side
+        // Route traffic for this container IP to the lxcbr0 bridge
+        // The host will ARP for it on the bridge
         let _ = Command::new("ip")
-            .args(["route", "add", &format!("{}/32", ip), "dev", "wolfnet0"])
+            .args(["route", "add", &format!("{}/32", ip), "dev", "lxcbr0"])
             .output();
-
-        // Enable proxy ARP on wolfnet0 so other nodes can reach this container
-        let _ = Command::new("sh")
-            .args(["-c", "echo 1 > /proc/sys/net/ipv4/conf/wolfnet0/proxy_arp"])
-            .output();
+            
+        // Enable forwarding between wolfnet0 and lxcbr0
+        let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.all.forwarding=1"]).output();
+        let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output();
+        let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "lxcbr0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
     }
 }
 
