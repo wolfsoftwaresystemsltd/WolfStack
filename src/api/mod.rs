@@ -549,6 +549,7 @@ pub struct LxcCreateRequest {
     pub release: String,
     pub architecture: String,
     pub wolfnet_ip: Option<String>,
+    pub storage_path: Option<String>,
 }
 
 /// POST /api/containers/lxc/create — create an LXC container from template
@@ -558,7 +559,8 @@ pub async fn lxc_create(
     body: web::Json<LxcCreateRequest>,
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    match containers::lxc_create(&body.name, &body.distribution, &body.release, &body.architecture) {
+    let storage = body.storage_path.as_deref();
+    match containers::lxc_create(&body.name, &body.distribution, &body.release, &body.architecture, storage) {
         Ok(msg) => {
             // Attach WolfNet if requested
             if let Some(ip) = &body.wolfnet_ip {

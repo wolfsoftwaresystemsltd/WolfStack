@@ -1564,6 +1564,18 @@ async function loadLxcTemplates() {
                                 style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-tertiary); color:var(--text-primary);">
                         </div>
                     </div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                        <div>
+                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">💾 Storage Location</label>
+                            <select id="lxc-create-storage"
+                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                                <option value="/var/lib/lxc">/var/lib/lxc (default)</option>
+                            </select>
+                        </div>
+                        <div style="display:flex; align-items:end;">
+                            <span id="lxc-storage-info" style="font-size:12px; color:var(--text-muted); padding-bottom:10px;"></span>
+                        </div>
+                    </div>
                     <div id="lxc-wolfnet-section" style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
                         <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
                             <span>🐺</span>
@@ -1619,6 +1631,31 @@ function selectLxcTemplate(distro, release, arch) {
     document.getElementById('lxc-create-name').value = `${distro}-${release}`;
     document.getElementById('lxc-create-name').focus();
 
+    // Populate storage dropdown from disk metrics
+    const node = currentNodeId ? allNodes.find(n => n.id === currentNodeId) : null;
+    const storageSelect = document.getElementById('lxc-create-storage');
+    const storageInfo = document.getElementById('lxc-storage-info');
+    if (node?.metrics?.disks) {
+        storageSelect.innerHTML = '<option value="/var/lib/lxc">/var/lib/lxc (default)</option>';
+        node.metrics.disks.forEach(d => {
+            if (d.mount_point !== '/' && d.available > 1073741824) { // >1GB free
+                const free = formatBytes(d.available);
+                const path = d.mount_point + '/lxc';
+                storageSelect.innerHTML += `<option value="${path}">${path} (${free} free)</option>`;
+            }
+        });
+        // Show info for default
+        const rootDisk = node.metrics.disks.find(d => d.mount_point === '/');
+        if (rootDisk) {
+            storageInfo.textContent = `Root: ${formatBytes(rootDisk.available)} free`;
+        }
+        storageSelect.onchange = () => {
+            const sel = storageSelect.value;
+            const disk = node.metrics.disks.find(d => sel.startsWith(d.mount_point));
+            storageInfo.textContent = disk ? `${formatBytes(disk.available)} free` : '';
+        };
+    }
+
     // Fetch WolfNet status and suggest an IP
     fetch(apiUrl('/api/wolfnet/status'))
         .then(r => r.json())
@@ -1648,6 +1685,7 @@ async function createLxcContainer() {
     const release = document.getElementById('lxc-create-release').value.trim();
     const architecture = document.getElementById('lxc-create-arch').value.trim();
     const wolfnet_ip = document.getElementById('lxc-wolfnet-ip')?.value?.trim() || '';
+    const storage_path = document.getElementById('lxc-create-storage')?.value || '';
 
     if (!name || !distribution || !release || !architecture) {
         showToast('Please select a template and enter a container name', 'error');
@@ -1661,7 +1699,7 @@ async function createLxcContainer() {
         const resp = await fetch(apiUrl('/api/containers/lxc/create'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, distribution, release, architecture, wolfnet_ip }),
+            body: JSON.stringify({ name, distribution, release, architecture, wolfnet_ip, storage_path }),
         });
         const data = await resp.json();
         if (resp.ok) {

@@ -849,24 +849,37 @@ pub fn lxc_list_templates() -> Vec<LxcTemplate> {
 }
 
 /// Create an LXC container from a download template
-pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &str) -> Result<String, String> {
+pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &str, storage_path: Option<&str>) -> Result<String, String> {
     info!("Creating LXC container {} ({} {} {})", name, distribution, release, architecture);
 
+    let mut args = vec![
+        "-t", "download",
+        "-n", name,
+    ];
+
+    // Custom storage path
+    let path_str;
+    if let Some(path) = storage_path {
+        if !path.is_empty() && path != "/var/lib/lxc" {
+            path_str = path.to_string();
+            args.push("-P");
+            args.push(&path_str);
+        }
+    }
+
+    args.extend_from_slice(&["--", "-d", distribution, "-r", release, "-a", architecture]);
+
     let output = Command::new("lxc-create")
-        .args([
-            "-t", "download",
-            "-n", name,
-            "--",
-            "-d", distribution,
-            "-r", release,
-            "-a", architecture,
-        ])
+        .args(&args)
         .output()
         .map_err(|e| format!("Failed to create LXC container: {}", e))?;
 
     if output.status.success() {
         info!("LXC container {} created successfully", name);
-        Ok(format!("Container '{}' created ({} {} {})", name, distribution, release, architecture))
+        let storage_info = storage_path.filter(|p| !p.is_empty() && *p != "/var/lib/lxc")
+            .map(|p| format!(" on {}", p))
+            .unwrap_or_default();
+        Ok(format!("Container '{}' created ({} {} {}){}", name, distribution, release, architecture, storage_info))
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("Failed to create container: {}", stderr))
