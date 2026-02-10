@@ -1386,6 +1386,19 @@ function showDockerCreate() {
                     <input id="docker-create-env" type="text" placeholder="MYSQL_ROOT_PASSWORD=secret"
                         style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
                 </div>
+                <div id="docker-wolfnet-section" style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
+                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                        <span>🐺</span>
+                        <strong style="font-size:13px;">WolfNet Networking</strong>
+                        <span id="docker-wolfnet-status" style="font-size:12px; color:var(--text-muted);">Checking...</span>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <label style="font-size:13px; white-space:nowrap;">Assign IP:</label>
+                        <input id="docker-wolfnet-ip" type="text" placeholder="auto"
+                            style="flex:1; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                        <span style="font-size:12px; color:var(--text-muted);">Leave empty for no WolfNet</span>
+                    </div>
+                </div>
                 <div style="display:flex; gap:8px;">
                     <button class="btn btn-primary" onclick="createDockerContainer()">🐳 Pull & Create</button>
                     <button class="btn" onclick="closeContainerDetail()">Cancel</button>
@@ -1438,6 +1451,27 @@ function selectDockerImage(imageName) {
     document.getElementById('docker-create-image').value = imageName;
     document.getElementById('docker-create-name').value = imageName.replace(/[\/:.]/g, '-');
     document.getElementById('docker-create-name').focus();
+
+    // Fetch WolfNet status
+    fetch(apiUrl('/api/wolfnet/status'))
+        .then(r => r.json())
+        .then(status => {
+            const statusEl = document.getElementById('docker-wolfnet-status');
+            const ipInput = document.getElementById('docker-wolfnet-ip');
+            if (status.available) {
+                statusEl.innerHTML = '<span style="color:var(--success);">● Active</span> — ' + status.subnet;
+                ipInput.value = status.next_available_ip;
+                ipInput.placeholder = status.next_available_ip;
+            } else {
+                statusEl.innerHTML = '<span style="color:var(--text-muted);">● Not available</span>';
+                ipInput.value = '';
+                ipInput.placeholder = 'WolfNet not running';
+                ipInput.disabled = true;
+            }
+        })
+        .catch(() => {
+            document.getElementById('docker-wolfnet-status').textContent = 'unavailable';
+        });
 }
 
 async function createDockerContainer() {
@@ -1445,6 +1479,7 @@ async function createDockerContainer() {
     const image = document.getElementById('docker-create-image').value.trim();
     const portsStr = document.getElementById('docker-create-ports').value.trim();
     const envStr = document.getElementById('docker-create-env').value.trim();
+    const wolfnet_ip = document.getElementById('docker-wolfnet-ip')?.value?.trim() || '';
 
     if (!name || !image) {
         showToast('Please enter a container name and image', 'error');
@@ -1459,7 +1494,7 @@ async function createDockerContainer() {
 
     try {
         // Pull the image first
-        const pullResp = await fetch('/api/containers/docker/pull', {
+        const pullResp = await fetch(apiUrl('/api/containers/docker/pull'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ image }),
@@ -1472,10 +1507,10 @@ async function createDockerContainer() {
         showToast(pullData.message || `Image ${image} pulled`, 'success');
 
         // Create the container
-        const createResp = await fetch('/api/containers/docker/create', {
+        const createResp = await fetch(apiUrl('/api/containers/docker/create'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, image, ports, env }),
+            body: JSON.stringify({ name, image, ports, env, wolfnet_ip }),
         });
         const createData = await createResp.json();
         if (createResp.ok) {
