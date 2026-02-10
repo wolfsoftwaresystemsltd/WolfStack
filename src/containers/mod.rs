@@ -660,12 +660,20 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                     let parts: Vec<&str> = line.split('\t').collect();
                     let name = parts.get(1).unwrap_or(&"").to_string();
                     // Get IP from docker inspect for this container
-                    let ip = Command::new("docker")
+                    let raw_ip = Command::new("docker")
                         .args(["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", &name])
                         .output()
                         .ok()
                         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                         .unwrap_or_default();
+                    // Validate: only keep actual IPs (Docker returns garbage for non-running containers)
+                    let ip = raw_ip.split_whitespace()
+                        .find(|s| {
+                            let parts: Vec<&str> = s.split('.').collect();
+                            parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok())
+                        })
+                        .unwrap_or("")
+                        .to_string();
                     ContainerInfo {
                         id: parts.first().unwrap_or(&"").to_string(),
                         name,
