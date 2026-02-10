@@ -28,6 +28,7 @@ struct CreateVmRequest {
     memory_mb: u32,
     disk_size_gb: u32,
     iso_path: Option<String>,
+    wolfnet_ip: Option<String>,
 }
 
 async fn create_vm(req: HttpRequest, state: web::Data<AppState>, body: web::Json<CreateVmRequest>) -> HttpResponse {
@@ -41,6 +42,7 @@ async fn create_vm(req: HttpRequest, state: web::Data<AppState>, body: web::Json
         body.disk_size_gb
     );
     config.iso_path = body.iso_path.clone();
+    config.wolfnet_ip = body.wolfnet_ip.clone();
 
     match manager.create_vm(config) {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "success": true })),

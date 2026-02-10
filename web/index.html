@@ -627,6 +627,7 @@
                                     <th>Status</th>
                                     <th>CPU/RAM</th>
                                     <th>Disk</th>
+                                    <th>WolfNet IP</th>
                                     <th>VNC</th>
                                     <th>Actions</th>
                                 </tr>
@@ -669,6 +670,13 @@
                             <label>ISO Path (Optional)</label>
                             <input type="text" class="form-control" id="new-vm-iso"
                                 placeholder="/var/lib/wolfstack/isos/ubuntu.iso">
+                        </div>
+                        <div class="form-group">
+                            <label>WolfNet IP (Optional)</label>
+                            <input type="text" class="form-control" id="new-vm-wolfnet-ip"
+                                placeholder="Auto-assign or e.g. 10.10.10.120">
+                            <small style="color:var(--text-muted);">Leave blank for user-mode networking, or enter an IP
+                                for WolfNet TAP networking</small>
                         </div>
                     </div>
                     <div class="modal-footer">

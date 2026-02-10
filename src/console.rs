@@ -57,6 +57,11 @@ async fn console_session(
         "lxc" => {
             cmd.arg(format!("lxc-attach -n {} -- /bin/bash 2>/dev/null || lxc-attach -n {} -- /bin/sh", name, name));
         }
+        "vm" => {
+            // Connect to QEMU serial console via socat
+            let serial_sock = format!("/var/lib/wolfstack/vms/{}.serial.sock", name);
+            cmd.arg(format!("socat -,raw,echo=0 UNIX-CONNECT:{}", serial_sock));
+        }
         _ => {
             let _ = session.text("\r\n\x1b[31mUnknown container type\x1b[0m\r\n").await;
             let _ = session.close(None).await;

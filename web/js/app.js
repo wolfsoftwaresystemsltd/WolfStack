@@ -670,18 +670,22 @@ function renderVms(vms) {
             vncText = `<span class="badge" title="Connect with VNC Viewer to IP:${vm.vnc_port}">:${vm.vnc_port}</span>`;
         }
 
+        const wolfnetIp = vm.wolfnet_ip || '—';
+
         return `
             <tr>
                 <td><strong>${vm.name}</strong></td>
                 <td><span style="color:${statusColor}">● ${statusText}</span></td>
                 <td>${vm.cpus} vCPU / ${vm.memory_mb} MB</td>
                 <td>${vm.disk_size_gb} GB</td>
+                <td>${wolfnetIp !== '—' ? `<span class="badge" style="background:var(--accent-bg); color:var(--accent);">${wolfnetIp}</span>` : '—'}</td>
                 <td>${vncText}</td>
                 <td>
                     ${vm.running ?
-                `<button class="btn btn-danger btn-sm" onclick="vmAction('${vm.name}', 'stop')">Stop</button>` :
-                `<button class="btn btn-success btn-sm" onclick="vmAction('${vm.name}', 'start')">Start</button>
-                         <button class="btn btn-danger btn-sm" onclick="deleteVm('${vm.name}')">Delete</button>`
+                `<button class="btn btn-sm" style="margin:2px;" onclick="openVmConsole('${vm.name}')" title="Terminal">💻</button>
+                         <button class="btn btn-danger btn-sm" style="margin:2px;" onclick="vmAction('${vm.name}', 'stop')">Stop</button>` :
+                `<button class="btn btn-success btn-sm" style="margin:2px;" onclick="vmAction('${vm.name}', 'start')">Start</button>
+                         <button class="btn btn-danger btn-sm" style="margin:2px;" onclick="deleteVm('${vm.name}')">Delete</button>`
             }
                 </td>
             </tr>
@@ -703,6 +707,7 @@ async function createVm() {
     const memory = parseInt(document.getElementById('new-vm-memory').value);
     const disk = parseInt(document.getElementById('new-vm-disk').value);
     const iso = document.getElementById('new-vm-iso').value.trim() || null;
+    const wolfnetIp = document.getElementById('new-vm-wolfnet-ip').value.trim() || null;
 
     if (!name) { showToast('Enter VM name', 'error'); return; }
 
@@ -716,7 +721,8 @@ async function createVm() {
                 cpus,
                 memory_mb: memory,
                 disk_size_gb: disk,
-                iso_path: iso
+                iso_path: iso,
+                wolfnet_ip: wolfnetIp
             })
         });
         const data = await resp.json();
@@ -2199,6 +2205,10 @@ function openConsole(type, name) {
 function fitConsole() { }
 function consoleKeyHandler() { }
 function closeConsole() { }
+
+function openVmConsole(name) {
+    openConsole('vm', name);
+}
 
 // ─── Install Script Copy ───
 

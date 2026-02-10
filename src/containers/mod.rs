@@ -132,6 +132,28 @@ pub fn wolfnet_allocate_ip(host_ip: &str, extra_used: &[u8]) -> String {
         }
     }
 
+    // Check VM configs for wolfnet_ip
+    let vm_dir = std::path::Path::new("/var/lib/wolfstack/vms");
+    if let Ok(entries) = std::fs::read_dir(vm_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(vm) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(ip_str) = vm.get("wolfnet_ip").and_then(|v| v.as_str()) {
+                            let ip_parts: Vec<&str> = ip_str.split('.').collect();
+                            if ip_parts.len() == 4 {
+                                if let Ok(last) = ip_parts[3].parse::<u8>() {
+                                    used_ips.insert(last);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Check ARP table on wolfnet0 for any other IPs in use
     if let Ok(output) = Command::new("ip")
         .args(["neigh", "show", "dev", "wolfnet0"])
@@ -205,6 +227,23 @@ pub fn wolfnet_used_ips() -> Vec<String> {
             if let Some(ip) = line.split_whitespace().next() {
                 if ip.contains('.') {
                     ips.push(ip.to_string());
+                }
+            }
+        }
+    }
+
+    // VM WolfNet IPs
+    let vm_dir = std::path::Path::new("/var/lib/wolfstack/vms");
+    if let Ok(entries) = std::fs::read_dir(vm_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(vm) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(ip_str) = vm.get("wolfnet_ip").and_then(|v| v.as_str()) {
+                            ips.push(ip_str.to_string());
+                        }
+                    }
                 }
             }
         }
