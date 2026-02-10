@@ -142,14 +142,14 @@
         document.getElementById('vm-name').textContent = vmName;
         document.title = `${vmName} — VM Console`;
 
+        let rfb = null;
+
         if (!wsPort) {
             document.getElementById('status-overlay').innerHTML =
                 '<p style="color:#fca5a5;">❌ No WebSocket port specified.<br>The VM may not be running.</p>';
         } else {
             connectVNC(host, wsPort);
         }
-
-        let rfb = null;
 
         function connectVNC(host, port) {
             const url = `ws://${host}:${port}`;
