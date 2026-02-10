@@ -1615,6 +1615,7 @@ pub fn lxc_clone(container: &str, new_name: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to clone LXC container: {}", e))?;
 
     if output.status.success() {
+        lxc_clone_fixup_ip(new_name);
         Ok(format!("LXC container cloned as '{}'", new_name))
     } else {
         Err(format!(
@@ -1634,6 +1635,7 @@ pub fn lxc_clone_snapshot(container: &str, new_name: &str) -> Result<String, Str
         .map_err(|e| format!("Failed to snapshot-clone LXC container: {}", e))?;
 
     if output.status.success() {
+        lxc_clone_fixup_ip(new_name);
         Ok(format!("LXC container snapshot-cloned as '{}'", new_name))
     } else {
         Err(format!(
@@ -1641,6 +1643,83 @@ pub fn lxc_clone_snapshot(container: &str, new_name: &str) -> Result<String, Str
             String::from_utf8_lossy(&output.stderr)
         ))
     }
+}
+
+/// After cloning, assign a new unique IP so the clone doesn't conflict with the original
+fn lxc_clone_fixup_ip(new_name: &str) {
+    // Collect IPs currently in use by scanning all container networkd configs
+    let mut used_ips: Vec<u8> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
+        for entry in entries.flatten() {
+            let net_file = entry.path().join("rootfs/etc/systemd/network/eth0.network");
+            if let Ok(content) = std::fs::read_to_string(&net_file) {
+                // Parse "Address=10.0.3.X/24"
+                for line in content.lines() {
+                    if let Some(addr) = line.strip_prefix("Address=10.0.3.") {
+                        if let Some(last) = addr.split('/').next().and_then(|s| s.parse::<u8>().ok()) {
+                            used_ips.push(last);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Pick a new IP in 10.0.3.100-254 that's not in use
+    let new_last = (100u8..=254).find(|i| !used_ips.contains(i));
+    let new_last = match new_last {
+        Some(l) => l,
+        None => {
+            error!("No free IPs in 10.0.3.100-254 for clone {}", new_name);
+            return;
+        }
+    };
+    let new_ip = format!("10.0.3.{}", new_last);
+    info!("Assigning new bridge IP {} to cloned container {}", new_ip, new_name);
+
+    // Rewrite networkd config
+    let network_dir = format!("/var/lib/lxc/{}/rootfs/etc/systemd/network", new_name);
+    if std::path::Path::new(&network_dir).exists() {
+        let networkd_conf = format!(
+            "[Match]\nName=eth0\n\n[Network]\nAddress={}/24\nGateway=10.0.3.1\nDNS=10.0.3.1\nDNS=8.8.8.8\n",
+            new_ip
+        );
+        let _ = std::fs::write(format!("{}/eth0.network", network_dir), &networkd_conf);
+    }
+
+    // Rewrite resolv.conf
+    let resolv_path = format!("/var/lib/lxc/{}/rootfs/etc/resolv.conf", new_name);
+    let _ = std::fs::remove_file(&resolv_path);
+    let _ = std::fs::write(&resolv_path, "nameserver 10.0.3.1\nnameserver 8.8.8.8\n");
+
+    // Remove WolfNet IP marker from clone (it shouldn't inherit the original's WolfNet IP)
+    let wolfnet_dir = format!("/var/lib/lxc/{}/.wolfnet", new_name);
+    let _ = std::fs::remove_dir_all(&wolfnet_dir);
+
+    // Also update the LXC config hwaddr to generate a unique MAC
+    let config_path = format!("/var/lib/lxc/{}/config", new_name);
+    if let Ok(config) = std::fs::read_to_string(&config_path) {
+        let new_mac = format!("00:16:3e:{:02x}:{:02x}:{:02x}",
+            rand_byte(), rand_byte(), new_last);
+        let updated = config.lines().map(|line| {
+            if line.starts_with("lxc.net.0.hwaddr") {
+                format!("lxc.net.0.hwaddr = {}", new_mac)
+            } else {
+                line.to_string()
+            }
+        }).collect::<Vec<_>>().join("\n");
+        let _ = std::fs::write(&config_path, updated);
+    }
+}
+
+fn rand_byte() -> u8 {
+    let mut buf = [0u8; 1];
+    if let Ok(f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let mut f = f;
+        let _ = f.read_exact(&mut buf);
+    }
+    buf[0]
 }
 
 // ─── Installation ───
