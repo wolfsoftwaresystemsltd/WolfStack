@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use tracing::info;
+use tracing::{info, error};
 
 // ─── WolfNet Integration ───
 
@@ -324,30 +324,68 @@ fn lxc_apply_wolfnet(container: &str) {
         // Wait for container networking to be ready
         std::thread::sleep(std::time::Duration::from_secs(3));
 
-        // 1. Configure container side
-        // Add IP as /32 to avoid subnet overlap with host routing
+        // Get the container's actual eth0 IP on lxcbr0 (assigned by DHCP, e.g. 10.0.3.x)
+        let container_eth0_ip = Command::new("lxc-attach")
+            .args(["-n", container, "--", "sh", "-c",
+                "ip -4 addr show eth0 | grep -oP 'inet \\K[0-9.]+' | head -1"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default();
+        let container_eth0_ip = container_eth0_ip.trim();
+        info!("Container {} eth0 IP: {}", container, container_eth0_ip);
+
+        // 1. Add the WolfNet IP as a secondary address on the container's loopback
+        //    This makes the container accept traffic destined for this IP
         let _ = Command::new("lxc-attach")
-            .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "eth0"])
+            .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "lo"])
             .output();
 
-        // Add route for entire WolfNet subnet via host bridge IP (10.0.3.1)
-        // Adjust subnet mask if needed (assuming /24 for now, typical WolfNet default)
-        let subnet = "10.10.10.0/24"; 
-        let _ = Command::new("lxc-attach")
-            .args(["-n", container, "--", "ip", "route", "add", subnet, "via", "10.0.3.1"])
-            .output();
+        // 2. On the HOST: route traffic for this WolfNet IP to the container's real IP via lxcbr0
+        //    The /32 route is more specific than the /24 on wolfnet0, so it takes priority
+        if !container_eth0_ip.is_empty() {
+            // Remove any old route first
+            let _ = Command::new("ip")
+                .args(["route", "del", &format!("{}/32", ip)])
+                .output();
 
-        // 2. Configure Host side
-        // Route traffic for this container IP to the lxcbr0 bridge
-        // The host will ARP for it on the bridge
-        let _ = Command::new("ip")
-            .args(["route", "add", &format!("{}/32", ip), "dev", "lxcbr0"])
-            .output();
-            
-        // Enable forwarding between wolfnet0 and lxcbr0
+            // Add route: packets for 10.10.10.100 go to container's 10.0.3.x via lxcbr0
+            let out = Command::new("ip")
+                .args(["route", "add", &format!("{}/32", ip), "via", container_eth0_ip, "dev", "lxcbr0"])
+                .output();
+            match out {
+                Ok(ref o) if o.status.success() => {
+                    info!("Added host route: {}/32 via {} dev lxcbr0", ip, container_eth0_ip);
+                }
+                Ok(ref o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    error!("Failed to add host route for {}: {}", ip, stderr);
+                }
+                Err(e) => error!("Failed to execute ip route add: {}", e),
+            }
+
+            // 3. NAT: rewrite packets arriving on wolfnet0 for this IP to the container's real IP
+            //    DNAT incoming traffic
+            let _ = Command::new("iptables")
+                .args(["-t", "nat", "-A", "PREROUTING", "-i", "wolfnet0", "-d", ip, "-j", "DNAT", 
+                       "--to-destination", container_eth0_ip])
+                .output();
+
+            // SNAT return traffic so the container sends replies back through the host
+            let _ = Command::new("iptables")
+                .args(["-t", "nat", "-A", "POSTROUTING", "-o", "lxcbr0", "-d", container_eth0_ip, 
+                       "-j", "MASQUERADE"])
+                .output();
+        }
+
+        // 4. Enable forwarding between wolfnet0 and lxcbr0
         let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.all.forwarding=1"]).output();
+        let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.proxy_arp=1"]).output();
         let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output();
         let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "lxcbr0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
+
+        info!("WolfNet networking configured for container {} (WolfNet IP: {}, Container IP: {})", 
+              container, ip, container_eth0_ip);
     }
 }
 
