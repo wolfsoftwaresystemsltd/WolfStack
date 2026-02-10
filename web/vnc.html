@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WolfStack — VM Console</title>
-    <script src="https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/lib/rfb.js" type="module"></script>
+    <script src="https://esm.sh/@novnc/novnc@1.4.0/lib/rfb.js" type="module"></script>
     <style>
         * {
             margin: 0;
@@ -132,7 +132,7 @@
     </div>
 
     <script type="module">
-        import RFB from 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/lib/rfb.js';
+        import RFB from 'https://esm.sh/@novnc/novnc@1.4.0/lib/rfb.js';
 
         const params = new URLSearchParams(window.location.search);
         const vmName = params.get('name') || 'unknown';
