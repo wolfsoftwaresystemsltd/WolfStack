@@ -1418,10 +1418,15 @@ pub fn docker_pull(image: &str) -> Result<String, String> {
 /// Create a Docker container from an image
 /// If wolfnet_ip is provided, the container will be connected to the WolfNet overlay network
 pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], wolfnet_ip: Option<&str>, 
-                     memory: Option<&str>, cpus: Option<&str>, storage: Option<&str>) -> Result<String, String> {
+                     memory: Option<&str>, cpus: Option<&str>, _storage: Option<&str>) -> Result<String, String> {
     info!("Creating Docker container {} from image {}", name, image);
 
-    let mut args = vec!["create".to_string(), "--name".to_string(), name.to_string()];
+    let mut args = vec![
+        "create".to_string(),
+        "--name".to_string(), name.to_string(),
+        "-it".to_string(),                           // interactive + tty (keeps container running)
+        "--restart".to_string(), "unless-stopped".to_string(), // auto-restart
+    ];
 
     // Add resource limits
     if let Some(mem) = memory {
@@ -1436,12 +1441,7 @@ pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], 
             args.push(cpu.to_string());
         }
     }
-    if let Some(store) = storage {
-        if !store.is_empty() {
-            args.push("--storage-opt".to_string());
-            args.push(format!("size={}", store));
-        }
-    }
+    // Note: --storage-opt requires devicemapper driver (not overlay2), so we skip it
 
     // Label with WolfNet IP so it can be re-applied on start/restart
     if let Some(ip) = wolfnet_ip {

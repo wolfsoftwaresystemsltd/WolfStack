@@ -1596,18 +1596,6 @@ function selectDockerImage(imageName) {
                         <option value="8">8 cores</option>
                     </select>
                 </div>
-                <div>
-                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">💾 Storage Limit</label>
-                    <select id="docker-create-storage"
-                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
-                        <option value="">Unlimited</option>
-                        <option value="1G">1 GB</option>
-                        <option value="5G">5 GB</option>
-                        <option value="10G" selected>10 GB</option>
-                        <option value="20G">20 GB</option>
-                        <option value="50G">50 GB</option>
-                    </select>
-                </div>
             </div>
             <div id="docker-wolfnet-section" style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
                 <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
