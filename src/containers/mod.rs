@@ -215,7 +215,20 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
 
     let gateway = if gateway.is_empty() { "172.17.0.1".to_string() } else { gateway };
 
-    // 2. Configure Container Side
+    // 2. Get the container's actual bridge IP (e.g. 172.17.0.2)
+    let container_bridge_ip = Command::new("docker")
+        .args(["inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", container])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    if container_bridge_ip.is_empty() {
+        return Err(format!("Container '{}' has no bridge IP — is it running?", container));
+    }
+
+    info!("Container {} bridge IP: {}, WolfNet IP: {}", container, container_bridge_ip, ip);
+
+    // 3. Configure Container Side
     // Add IP alias /32 (idempotent — ignore EEXIST)
     let _ = Command::new("docker")
         .args(["exec", container, "ip", "addr", "add", &format!("{}/32", ip), "dev", "eth0"])
@@ -227,7 +240,13 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
         .args(["exec", container, "ip", "route", "replace", subnet, "via", &gateway])
         .output();
 
-    // 3. Configure Host Side (idempotent — check before adding)
+    // 4. Configure Host Side
+    // Enable proxy_arp on docker0 so the host answers ARP queries from containers
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.docker0.proxy_arp=1"]).output();
+    // Enable forwarding
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]).output();
+
+    // iptables FORWARD rules (idempotent — check before adding)
     let check = Command::new("iptables")
         .args(["-C", "FORWARD", "-i", "wolfnet0", "-o", "docker0", "-j", "ACCEPT"]).output();
     if check.map(|o| !o.status.success()).unwrap_or(true) {
@@ -235,13 +254,28 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
         let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "docker0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
     }
 
-    // Route traffic for this container IP to docker0
+    // Route traffic for this WolfNet IP via the container's actual bridge IP
+    // This is the key fix: without "via <bridge_ip>", the kernel can't deliver packets
+    // because it doesn't know which container on docker0 owns the WolfNet IP.
     let _ = Command::new("ip").args(["route", "del", &format!("{}/32", ip)]).output();
-    let _ = Command::new("ip")
-        .args(["route", "add", &format!("{}/32", ip), "dev", "docker0"])
+    let route_result = Command::new("ip")
+        .args(["route", "add", &format!("{}/32", ip), "via", &container_bridge_ip, "dev", "docker0"])
         .output();
 
-    Ok(format!("Container '{}' routed to WolfNet at {}", container, ip))
+    match route_result {
+        Ok(o) if o.status.success() => {
+            info!("Host route added: {}/32 via {} dev docker0", ip, container_bridge_ip);
+        }
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            info!("Route add warning (may already exist): {}", err.trim());
+        }
+        Err(e) => {
+            return Err(format!("Failed to add host route: {}", e));
+        }
+    }
+
+    Ok(format!("Container '{}' routed to WolfNet at {} (via bridge {})", container, ip, container_bridge_ip))
 }
 
 /// Ensure lxcbr0 bridge exists for default LXC container networking (with DHCP/NAT)
