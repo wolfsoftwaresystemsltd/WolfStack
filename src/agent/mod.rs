@@ -26,6 +26,10 @@ pub struct Node {
     pub components: Vec<ComponentStatus>,
     pub online: bool,
     pub is_self: bool,
+    #[serde(default)]
+    pub docker_count: u32,
+    #[serde(default)]
+    pub lxc_count: u32,
 }
 
 /// Cluster state
@@ -81,7 +85,7 @@ impl ClusterState {
     }
 
     /// Update this node's own status
-    pub fn update_self(&self, metrics: SystemMetrics, components: Vec<ComponentStatus>) {
+    pub fn update_self(&self, metrics: SystemMetrics, components: Vec<ComponentStatus>, docker_count: u32, lxc_count: u32) {
         let mut nodes = self.nodes.write().unwrap();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         nodes.insert(self.self_id.clone(), Node {
@@ -94,6 +98,8 @@ impl ClusterState {
             components,
             online: true,
             is_self: true,
+            docker_count,
+            lxc_count,
         });
     }
 
@@ -137,6 +143,8 @@ impl ClusterState {
             components: vec![],
             online: false,
             is_self: false,
+            docker_count: 0,
+            lxc_count: 0,
         });
         drop(nodes);
         self.save_nodes();
@@ -164,6 +172,10 @@ pub enum AgentMessage {
         hostname: String,
         metrics: SystemMetrics,
         components: Vec<ComponentStatus>,
+        #[serde(default)]
+        docker_count: u32,
+        #[serde(default)]
+        lxc_count: u32,
     },
     /// "Give me your status"
     StatusRequest,
@@ -192,7 +204,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>) {
                 match client.get(&url).send().await {
                     Ok(resp) => {
                         if let Ok(msg) = resp.json::<AgentMessage>().await {
-                            if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components } = msg {
+                            if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components, docker_count, lxc_count } = msg {
                                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                                 cluster.update_remote(Node {
                                     id: node.id.clone(),
@@ -204,6 +216,8 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>) {
                                     components,
                                     online: true,
                                     is_self: false,
+                                    docker_count,
+                                    lxc_count,
                                 });
                             }
                         }

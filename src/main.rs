@@ -103,7 +103,9 @@ async fn main() -> std::io::Result<()> {
         let mut mon = monitor;
         let metrics = mon.collect();
         let components = installer::get_all_status();
-        cluster.update_self(metrics, components);
+        let docker_count = containers::docker_list_all().len() as u32;
+        let lxc_count = containers::lxc_list_all().len() as u32;
+        cluster.update_self(metrics, components, docker_count, lxc_count);
 
         // Create app state
         let app_state = web::Data::new(api::AppState {
@@ -124,7 +126,9 @@ async fn main() -> std::io::Result<()> {
                     let c = installer::get_all_status();
                     (m, c)
                 };
-                cluster_clone.update_self(metrics, components);
+                let docker_count = containers::docker_list_all().len() as u32;
+                let lxc_count = containers::lxc_list_all().len() as u32;
+                cluster_clone.update_self(metrics, components, docker_count, lxc_count);
             }
         });
 

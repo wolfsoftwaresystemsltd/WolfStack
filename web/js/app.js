@@ -130,9 +130,11 @@ function buildServerTree(nodes) {
                 </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="containers" onclick="selectServerView('${node.id}', 'containers')">
                     <span class="icon">🐳</span> Docker
+                    ${node.docker_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.docker_count}</span>` : ''}
                 </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="lxc" onclick="selectServerView('${node.id}', 'lxc')">
                     <span class="icon">📦</span> LXC
+                    ${node.lxc_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.lxc_count}</span>` : ''}
                 </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="certificates" onclick="selectServerView('${node.id}', 'certificates')">
                     <span class="icon">🔒</span> Certificates
@@ -882,7 +884,7 @@ async function installRuntime(runtime) {
     btn.disabled = true;
 
     try {
-        const resp = await fetch('/api/containers/install', {
+        const resp = await fetch(apiUrl('/api/containers/install'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ runtime }),
@@ -1081,7 +1083,7 @@ async function deleteDockerImage(id, name) {
     if (!confirm(`Delete Docker image '${name}'?\n\nThis will fail if the image is used by any container.`)) return;
 
     try {
-        const resp = await fetch(`/api/containers/docker/images/${encodeURIComponent(id)}`, {
+        const resp = await fetch(apiUrl(`/api/containers/docker/images/${encodeURIComponent(id)}`), {
             method: 'DELETE',
         });
         const data = await resp.json();
@@ -1101,7 +1103,7 @@ async function dockerAction(container, action) {
     if (action === 'remove' && !confirm(`Remove container '${container}'? This cannot be undone.`)) return;
 
     try {
-        const resp = await fetch(`/api/containers/docker/${container}/action`, {
+        const resp = await fetch(apiUrl(`/api/containers/docker/${container}/action`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action }),
@@ -1194,7 +1196,7 @@ async function lxcAction(container, action) {
     if (action === 'destroy' && !confirm(`Destroy LXC container '${container}'? This cannot be undone.`)) return;
 
     try {
-        const resp = await fetch(`/api/containers/lxc/${container}/action`, {
+        const resp = await fetch(apiUrl(`/api/containers/lxc/${container}/action`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action }),
@@ -1223,7 +1225,7 @@ async function viewContainerLogs(runtime, container) {
     modal.classList.add('active');
 
     try {
-        const resp = await fetch(`/api/containers/${runtime}/${container}/logs`);
+        const resp = await fetch(apiUrl(`/api/containers/${runtime}/${container}/logs`));
         const data = await resp.json();
         const logs = data.logs || [];
 
@@ -1354,7 +1356,7 @@ async function cloneDockerContainer(name) {
 
     showToast(`Cloning ${name}...`, 'info');
     try {
-        const resp = await fetch(`/api/containers/docker/${name}/clone`, {
+        const resp = await fetch(apiUrl(`/api/containers/docker/${name}/clone`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ new_name: newName }),
@@ -1454,7 +1456,7 @@ async function doMigrate(name) {
     showToast(`Migrating ${name} to ${targetUrl}... This may take a while.`, 'info');
 
     try {
-        const resp = await fetch(`/api/containers/docker/${name}/migrate`, {
+        const resp = await fetch(apiUrl(`/api/containers/docker/${name}/migrate`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ target_url: targetUrl, remove_source: removeSource }),
@@ -1477,7 +1479,7 @@ async function cloneLxcContainer(name) {
 
     showToast(`Cloning ${name}...`, 'info');
     try {
-        const resp = await fetch(`/api/containers/lxc/${name}/clone`, {
+        const resp = await fetch(apiUrl(`/api/containers/lxc/${name}/clone`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ new_name: newName }),
@@ -1538,7 +1540,7 @@ async function searchDockerHub() {
     results.innerHTML = '<p style="color:var(--text-muted); text-align:center; padding:12px;">Searching Docker Hub...</p>';
 
     try {
-        const resp = await fetch(`/api/containers/docker/search?q=${encodeURIComponent(query)}`);
+        const resp = await fetch(apiUrl(`/api/containers/docker/search?q=${encodeURIComponent(query)}`));
         const data = await resp.json();
 
         if (!data.length) {
@@ -1758,7 +1760,7 @@ async function loadLxcTemplates() {
 
     try {
         if (!lxcTemplatesCache) {
-            const resp = await fetch('/api/containers/lxc/templates');
+            const resp = await fetch(apiUrl('/api/containers/lxc/templates'));
             lxcTemplatesCache = await resp.json();
         }
 

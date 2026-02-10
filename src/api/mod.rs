@@ -352,11 +352,15 @@ pub async fn agent_status(state: web::Data<AppState>) -> HttpResponse {
     let metrics = state.monitor.lock().unwrap().collect();
     let components = installer::get_all_status();
     let hostname = metrics.hostname.clone();
+    let docker_count = containers::docker_list_all().len() as u32;
+    let lxc_count = containers::lxc_list_all().len() as u32;
     let msg = AgentMessage::StatusReport {
         node_id: state.cluster.self_id.clone(),
         hostname,
         metrics,
         components,
+        docker_count,
+        lxc_count,
     };
     HttpResponse::Ok().json(msg)
 }
