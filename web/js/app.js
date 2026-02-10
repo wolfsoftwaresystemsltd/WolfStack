@@ -786,7 +786,52 @@ async function showVmCreate() {
     // Clear extra disks from previous use
     document.getElementById('vm-extra-disks-container').innerHTML = '';
     vmExtraDiskCounter = 0;
+    // Reset to tab 1
+    switchVmTab(1);
     document.getElementById('create-vm-modal').classList.add('active');
+}
+
+let currentVmTab = 1;
+
+function switchVmTab(tab) {
+    const totalTabs = 3;
+
+    if (tab === 'next') {
+        tab = Math.min(currentVmTab + 1, totalTabs);
+    } else if (tab === 'prev') {
+        tab = Math.max(currentVmTab - 1, 1);
+    }
+
+    currentVmTab = tab;
+
+    // Show/hide tab pages
+    for (let i = 1; i <= totalTabs; i++) {
+        const page = document.getElementById(`vm-tab-${i}`);
+        if (page) page.style.display = i === tab ? 'block' : 'none';
+    }
+
+    // Update tab buttons styling
+    document.querySelectorAll('.vm-tab-btn').forEach(btn => {
+        const btnTab = parseInt(btn.getAttribute('data-tab'));
+        if (btnTab === tab) {
+            btn.classList.add('active');
+            btn.style.color = 'var(--text-primary)';
+            btn.style.borderBottomColor = 'var(--accent)';
+        } else {
+            btn.classList.remove('active');
+            btn.style.color = 'var(--text-muted)';
+            btn.style.borderBottomColor = 'transparent';
+        }
+    });
+
+    // Update footer buttons
+    const backBtn = document.getElementById('vm-tab-back-btn');
+    const nextBtn = document.getElementById('vm-tab-next-btn');
+    const createBtn = document.getElementById('vm-tab-create-btn');
+
+    if (backBtn) backBtn.style.display = tab > 1 ? 'inline-block' : 'none';
+    if (nextBtn) nextBtn.style.display = tab < totalTabs ? 'inline-block' : 'none';
+    if (createBtn) createBtn.style.display = tab === totalTabs ? 'inline-block' : 'none';
 }
 
 function closeVmCreate() {
