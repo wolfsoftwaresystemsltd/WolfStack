@@ -850,6 +850,97 @@ body {
     background: var(--text-muted);
 }
 
+/* ─── Sidebar Footer ─── */
+.sidebar-footer {
+    padding: 16px 16px 20px;
+    border-top: 1px solid var(--border);
+    margin-top: auto;
+}
+
+.sidebar-footer .copyright {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+
+.sidebar-footer .copyright a {
+    color: var(--accent-light);
+    text-decoration: none;
+    transition: var(--transition);
+}
+
+.sidebar-footer .copyright a:hover {
+    text-decoration: underline;
+    color: var(--text-primary);
+}
+
+/* ─── Config Editor ─── */
+.config-editor {
+    width: 100%;
+    min-height: 350px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    line-height: 1.7;
+    padding: 16px;
+    resize: vertical;
+    tab-size: 4;
+    white-space: pre;
+    overflow-x: auto;
+    transition: border-color 0.3s;
+}
+
+.config-editor:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/* ─── Log Viewer ─── */
+.log-viewer {
+    background: #050810;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 16px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    line-height: 1.8;
+    color: #a0aec0;
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.log-viewer .log-line {
+    padding: 2px 0;
+    border-bottom: 1px solid rgba(30, 42, 74, 0.3);
+}
+
+.log-viewer .log-line:hover {
+    background: rgba(99, 102, 241, 0.05);
+}
+
+/* ─── Clickable Component Cards ─── */
+.component-card {
+    cursor: pointer;
+}
+
+.component-card .component-header .detail-arrow {
+    color: var(--text-muted);
+    font-size: 18px;
+    transition: var(--transition);
+}
+
+.component-card:hover .detail-arrow {
+    color: var(--accent-light);
+    transform: translateX(3px);
+}
+
 /* ─── Responsive ─── */
 @media (max-width: 1024px) {
     .sidebar {

@@ -9,10 +9,11 @@
 
 mod api;
 mod agent;
+mod auth;
 mod monitoring;
 mod installer;
 
-use actix_web::{web, App, HttpServer};
+use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_files;
 use clap::Parser;
 use std::sync::{Arc, Mutex};
@@ -30,6 +31,29 @@ struct Cli {
     /// Bind address
     #[arg(short, long, default_value = "0.0.0.0")]
     bind: String,
+}
+
+/// Serve the login page for unauthenticated requests to /
+async fn index_handler(req: HttpRequest, state: web::Data<api::AppState>) -> HttpResponse {
+    // Check if authenticated
+    let authenticated = req.cookie("wolfstack_session")
+        .and_then(|c| state.sessions.validate(c.value()))
+        .is_some();
+
+    let web_dir = find_web_dir();
+    if authenticated {
+        let path = format!("{}/index.html", web_dir);
+        match std::fs::read_to_string(&path) {
+            Ok(content) => HttpResponse::Ok().content_type("text/html").body(content),
+            Err(_) => HttpResponse::InternalServerError().body("Web UI not found"),
+        }
+    } else {
+        let path = format!("{}/login.html", web_dir);
+        match std::fs::read_to_string(&path) {
+            Ok(content) => HttpResponse::Ok().content_type("text/html").body(content),
+            Err(_) => HttpResponse::InternalServerError().body("Login page not found"),
+        }
+    }
 }
 
 #[actix_web::main]
@@ -62,6 +86,9 @@ async fn main() -> std::io::Result<()> {
     // Initialize monitoring
     let monitor = monitoring::SystemMonitor::new();
 
+    // Initialize session manager
+    let sessions = Arc::new(auth::SessionManager::new());
+
     // Initialize cluster state
     let cluster = Arc::new(agent::ClusterState::new(
         node_id.clone(),
@@ -80,6 +107,7 @@ async fn main() -> std::io::Result<()> {
         let app_state = web::Data::new(api::AppState {
             monitor: Mutex::new(mon),
             cluster: cluster.clone(),
+            sessions: sessions.clone(),
         });
 
         // Background: periodic self-monitoring update
@@ -107,6 +135,15 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
+        // Background: session cleanup
+        let sessions_cleanup = sessions.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(300)).await;
+                sessions_cleanup.cleanup();
+            }
+        });
+
         // Determine web directory
         let web_dir = find_web_dir();
         info!("  Serving web UI from: {}", web_dir);
@@ -117,7 +154,8 @@ async fn main() -> std::io::Result<()> {
             App::new()
                 .app_data(app_state.clone())
                 .configure(api::configure)
-                .service(actix_files::Files::new("/", &web_dir).index_file("index.html"))
+                .route("/", web::get().to(index_handler))
+                .service(actix_files::Files::new("/", &web_dir).index_file("login.html"))
         })
         .bind(format!("{}:{}", cli.bind, cli.port))?
         .run()

@@ -2,6 +2,7 @@
 
 // ─── State ───
 let currentPage = 'dashboard';
+let currentComponent = null;
 let cpuHistory = [];
 let memHistory = [];
 const MAX_HISTORY = 60;
@@ -25,6 +26,7 @@ function navigateTo(page) {
         dashboard: 'Dashboard',
         servers: 'Servers',
         components: 'Components',
+        'component-detail': 'Component Detail',
         services: 'Services',
         certificates: 'Certificates',
         monitoring: 'Live Metrics',
@@ -76,10 +78,20 @@ function setGauge(id, percent, valId, display) {
     if (valEl) valEl.textContent = display || `${Math.round(percent)}%`;
 }
 
+// ─── Auth redirect on 401 ───
+function handleAuthError(resp) {
+    if (resp.status === 401) {
+        window.location.href = '/login.html';
+        return true;
+    }
+    return false;
+}
+
 // ─── Metrics Polling ───
 async function fetchMetrics() {
     try {
         const resp = await fetch('/api/metrics');
+        if (handleAuthError(resp)) return;
         const m = await resp.json();
         updateDashboard(m);
     } catch (e) {
@@ -335,19 +347,20 @@ function renderComponents(components) {
         const statusColor = c.running ? 'var(--success)' : c.installed ? 'var(--text-muted)' : 'var(--warning)';
 
         return `
-            <div class="component-card">
+            <div class="component-card" onclick="openComponentDetail('${c.component}')">
                 <div class="component-header">
                     <div class="component-icon">${icon}</div>
-                    <div>
+                    <div style="flex: 1;">
                         <div class="component-name">${c.component.charAt(0).toUpperCase() + c.component.slice(1)}</div>
                         <div class="component-desc">${c.version || ''}</div>
                     </div>
+                    <span class="detail-arrow">→</span>
                 </div>
                 <div class="component-status">
                     <div class="status-dot ${statusClass}"></div>
                     <span style="color: ${statusColor};">${statusText}</span>
                 </div>
-                <div class="component-actions">
+                <div class="component-actions" onclick="event.stopPropagation()">
                     ${!c.installed ?
                 `<button class="btn btn-primary btn-sm" onclick="installComponent('${c.component}')">Install</button>` :
                 c.running ?
@@ -500,6 +513,131 @@ function showToast(message, type = 'info') {
         toast.style.transform = 'translateX(100%)';
         setTimeout(() => toast.remove(), 300);
     }, 4000);
+}
+
+// ─── Component Detail ───
+async function openComponentDetail(name) {
+    currentComponent = name;
+    navigateTo('component-detail');
+    const pageTitle = document.getElementById('page-title');
+    const cName = name.charAt(0).toUpperCase() + name.slice(1);
+    pageTitle.textContent = cName;
+    await refreshComponentDetail(name);
+}
+
+async function refreshComponentDetail(name) {
+    try {
+        const resp = await fetch(`/api/components/${name}/detail`);
+        if (handleAuthError(resp)) return;
+        const d = await resp.json();
+
+        // Header
+        document.getElementById('detail-component-icon').textContent = componentIcons[name] || '📦';
+        document.getElementById('detail-component-name').textContent = d.name;
+        document.getElementById('detail-component-desc').textContent = d.description;
+
+        // Status cards
+        const state = d.unit_info?.active_state || 'unknown';
+        const sub = d.unit_info?.sub_state || '';
+        document.getElementById('detail-status').textContent = state === 'active' ? 'Active' : state;
+        document.getElementById('detail-active-since').textContent = sub ? `(${sub})` : '';
+
+        const statusIcon = document.getElementById('detail-status-icon');
+        if (d.running) {
+            statusIcon.style.background = 'var(--success-bg)';
+            statusIcon.style.color = 'var(--success)';
+        } else {
+            statusIcon.style.background = 'var(--danger-bg)';
+            statusIcon.style.color = 'var(--danger)';
+        }
+
+        // Memory
+        const memBytes = parseInt(d.unit_info?.memory_current) || 0;
+        document.getElementById('detail-memory').textContent = memBytes > 0 ? formatBytes(memBytes) : '—';
+
+        // PID
+        const pid = d.unit_info?.main_pid || '0';
+        document.getElementById('detail-pid').textContent = pid !== '0' ? pid : '—';
+
+        // Restarts
+        document.getElementById('detail-restarts').textContent = d.unit_info?.restart_count || '0';
+
+        // Action buttons
+        document.getElementById('detail-btn-start').style.display = d.running ? 'none' : '';
+        document.getElementById('detail-btn-restart').style.display = d.running ? '' : 'none';
+        document.getElementById('detail-btn-stop').style.display = d.running ? '' : 'none';
+
+        // Config
+        const configSection = document.getElementById('detail-config-section');
+        if (d.config_path && d.config !== null) {
+            configSection.style.display = '';
+            document.getElementById('detail-config-path').textContent = d.config_path;
+            document.getElementById('detail-config-editor').value = d.config || '';
+        } else if (d.config_path && d.config === null) {
+            configSection.style.display = '';
+            document.getElementById('detail-config-path').textContent = d.config_path + ' (not found)';
+            document.getElementById('detail-config-editor').value = '# Config file not found at ' + d.config_path;
+        } else {
+            configSection.style.display = 'none';
+        }
+
+        // Logs
+        const logsEl = document.getElementById('detail-logs');
+        if (d.logs && d.logs.length > 0) {
+            logsEl.innerHTML = d.logs.map(line => {
+                const escaped = line.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                return `<div class="log-line">${escaped}</div>`;
+            }).join('');
+            logsEl.scrollTop = logsEl.scrollHeight;
+        } else {
+            logsEl.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 20px;">No logs available</div>';
+        }
+    } catch (e) {
+        console.error('Failed to load component detail:', e);
+        showToast('Failed to load component details', 'error');
+    }
+}
+
+async function detailServiceAction(action) {
+    if (!currentComponent) return;
+    showToast(`${action}ing ${currentComponent}...`, 'info');
+    try {
+        const resp = await fetch(`/api/services/${currentComponent}/action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action })
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message, 'success');
+        } else {
+            showToast(data.error || 'Action failed', 'error');
+        }
+        setTimeout(() => refreshComponentDetail(currentComponent), 1000);
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function saveConfig() {
+    if (!currentComponent) return;
+    const content = document.getElementById('detail-config-editor').value;
+    showToast('Saving config...', 'info');
+    try {
+        const resp = await fetch(`/api/components/${currentComponent}/config`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content })
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message, 'success');
+        } else {
+            showToast(data.error || 'Save failed', 'error');
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
 }
 
 // ─── Polling Loop ───

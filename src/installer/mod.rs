@@ -54,6 +54,18 @@ impl Component {
         }
     }
 
+    pub fn config_path(&self) -> Option<&'static str> {
+        match self {
+            Component::WolfNet => Some("/etc/wolfnet/config.toml"),
+            Component::WolfProxy => Some("/etc/wolfproxy/config.toml"),
+            Component::WolfServe => Some("/etc/wolfserve/config.toml"),
+            Component::WolfDisk => Some("/etc/wolfdisk/config.toml"),
+            Component::WolfScale => Some("/etc/wolfscale/config.toml"),
+            Component::MariaDB => Some("/etc/mysql/mariadb.conf.d/50-server.cnf"),
+            Component::Certbot => None,
+        }
+    }
+
     pub fn all() -> &'static [Component] {
         &[
             Component::WolfNet,
