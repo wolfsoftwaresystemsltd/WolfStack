@@ -90,6 +90,13 @@ function buildServerTree(nodes) {
         return;
     }
 
+    // Preserve expanded state before rebuild
+    const expandedNodes = new Set();
+    document.querySelectorAll('.server-node-children.expanded').forEach(el => {
+        const id = el.id?.replace('children-', '');
+        if (id) expandedNodes.add(id);
+    });
+
     // Sort: self first, then alphabetically
     const sorted = [...nodes].sort((a, b) => {
         if (a.is_self) return -1;
@@ -97,15 +104,20 @@ function buildServerTree(nodes) {
         return a.hostname.localeCompare(b.hostname);
     });
 
-    tree.innerHTML = sorted.map(node => `
+    // On first build (no expanded state saved yet), expand self node
+    const isFirstBuild = expandedNodes.size === 0;
+
+    tree.innerHTML = sorted.map(node => {
+        const shouldExpand = isFirstBuild ? node.is_self : expandedNodes.has(node.id);
+        return `
         <div class="server-tree-node">
             <div class="server-node-header" onclick="toggleServerNode('${node.id}')">
-                <span class="tree-toggle ${node.is_self ? 'expanded' : ''}" id="toggle-${node.id}">▶</span>
+                <span class="tree-toggle ${shouldExpand ? 'expanded' : ''}" id="toggle-${node.id}">▶</span>
                 <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
                 <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">🖥️ ${node.hostname}</span>
                 ${node.is_self ? '<span class="self-badge">this</span>' : ''}
             </div>
-            <div class="server-node-children ${node.is_self ? 'expanded' : ''}" id="children-${node.id}">
+            <div class="server-node-children ${shouldExpand ? 'expanded' : ''}" id="children-${node.id}">
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="dashboard" onclick="selectServerView('${node.id}', 'dashboard')">
                     <span class="icon">📊</span> Dashboard
                 </a>
@@ -130,7 +142,13 @@ function buildServerTree(nodes) {
                 </a>
             </div>
         </div>
-    `).join('');
+    `}).join('');
+
+    // Restore active highlight
+    if (currentNodeId && currentPage) {
+        const active = document.querySelector(`.server-child-item[data-node="${currentNodeId}"][data-view="${currentPage}"]`);
+        if (active) active.classList.add('active');
+    }
 }
 
 function toggleServerNode(nodeId) {

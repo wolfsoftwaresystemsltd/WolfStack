@@ -37,12 +37,46 @@ pub struct ClusterState {
 }
 
 impl ClusterState {
+    const NODES_FILE: &'static str = "/etc/wolfstack/nodes.json";
+
     pub fn new(self_id: String, self_address: String, port: u16) -> Self {
-        Self {
+        let state = Self {
             nodes: RwLock::new(HashMap::new()),
             self_id,
             self_address,
             port,
+        };
+        // Load persisted remote nodes
+        state.load_nodes();
+        state
+    }
+
+    /// Load saved remote nodes from disk
+    fn load_nodes(&self) {
+        if let Ok(data) = std::fs::read_to_string(Self::NODES_FILE) {
+            if let Ok(saved) = serde_json::from_str::<Vec<Node>>(&data) {
+                let mut nodes = self.nodes.write().unwrap();
+                for mut node in saved {
+                    node.online = false; // Will be updated by polling
+                    node.is_self = false;
+                    nodes.insert(node.id.clone(), node);
+                }
+                debug!("Loaded {} saved nodes from {}", nodes.len(), Self::NODES_FILE);
+            }
+        }
+    }
+
+    /// Save remote nodes to disk
+    fn save_nodes(&self) {
+        let nodes = self.nodes.read().unwrap();
+        let remote_nodes: Vec<&Node> = nodes.values()
+            .filter(|n| !n.is_self)
+            .collect();
+        if let Ok(json) = serde_json::to_string_pretty(&remote_nodes) {
+            let _ = std::fs::create_dir_all("/etc/wolfstack");
+            if let Err(e) = std::fs::write(Self::NODES_FILE, json) {
+                warn!("Failed to save nodes: {}", e);
+            }
         }
     }
 
@@ -88,7 +122,7 @@ impl ClusterState {
         nodes.get(id).cloned()
     }
 
-    /// Add a server by address
+    /// Add a server by address — persists to disk
     pub fn add_server(&self, address: String, port: u16) -> String {
         let id = format!("node-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
@@ -104,13 +138,20 @@ impl ClusterState {
             online: false,
             is_self: false,
         });
+        drop(nodes);
+        self.save_nodes();
         id
     }
 
-    /// Remove a server
+    /// Remove a server — persists to disk
     pub fn remove_server(&self, id: &str) -> bool {
         let mut nodes = self.nodes.write().unwrap();
-        nodes.remove(id).is_some()
+        let removed = nodes.remove(id).is_some();
+        drop(nodes);
+        if removed {
+            self.save_nodes();
+        }
+        removed
     }
 }
 

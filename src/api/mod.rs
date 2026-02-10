@@ -516,6 +516,7 @@ pub struct DockerCreateRequest {
     pub image: String,
     pub ports: Option<Vec<String>>,
     pub env: Option<Vec<String>>,
+    pub wolfnet_ip: Option<String>,
 }
 
 /// POST /api/containers/docker/create — create a Docker container
@@ -527,7 +528,8 @@ pub async fn docker_create(
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let ports = body.ports.as_deref().unwrap_or(&[]);
     let env = body.env.as_deref().unwrap_or(&[]);
-    match containers::docker_create(&body.name, &body.image, ports, env) {
+    let wolfnet_ip = body.wolfnet_ip.as_deref();
+    match containers::docker_create(&body.name, &body.image, ports, env, wolfnet_ip) {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
@@ -546,6 +548,7 @@ pub struct LxcCreateRequest {
     pub distribution: String,
     pub release: String,
     pub architecture: String,
+    pub wolfnet_ip: Option<String>,
 }
 
 /// POST /api/containers/lxc/create — create an LXC container from template
@@ -556,9 +559,36 @@ pub async fn lxc_create(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     match containers::lxc_create(&body.name, &body.distribution, &body.release, &body.architecture) {
-        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(msg) => {
+            // Attach WolfNet if requested
+            if let Some(ip) = &body.wolfnet_ip {
+                if !ip.is_empty() {
+                    match containers::lxc_attach_wolfnet(&body.name, ip) {
+                        Ok(wn_msg) => {
+                            return HttpResponse::Ok().json(serde_json::json!({
+                                "message": format!("{} — {}", msg, wn_msg)
+                            }));
+                        }
+                        Err(e) => {
+                            return HttpResponse::Ok().json(serde_json::json!({
+                                "message": msg,
+                                "wolfnet_warning": e
+                            }));
+                        }
+                    }
+                }
+            }
+            HttpResponse::Ok().json(serde_json::json!({ "message": msg }))
+        }
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
+}
+
+/// GET /api/wolfnet/status — get WolfNet networking status for container creation
+pub async fn wolfnet_network_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let status = containers::wolfnet_status();
+    HttpResponse::Ok().json(status)
 }
 
 /// GET /api/containers/docker/stats — Docker container stats
@@ -846,6 +876,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/lxc/{name}/config", web::put().to(lxc_save_config))
         .route("/api/containers/lxc/{name}/action", web::post().to(lxc_action))
         .route("/api/containers/lxc/{name}/clone", web::post().to(lxc_clone))
+        // WolfNet
+        .route("/api/wolfnet/status", web::get().to(wolfnet_network_status))
         // Agent (no auth — used by other WolfStack nodes)
         .route("/api/agent/status", web::get().to(agent_status))
         // Node proxy — forward API calls to remote nodes (must be last — wildcard path)

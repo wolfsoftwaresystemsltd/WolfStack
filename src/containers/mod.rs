@@ -2,10 +2,228 @@
 //!
 //! Docker: communicates via /var/run/docker.sock REST API
 //! LXC: communicates via lxc-* CLI commands
+//! WolfNet: Optional overlay network integration for container networking
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use tracing::info;
+
+// ─── WolfNet Integration ───
+
+/// WolfNet status for container networking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WolfNetStatus {
+    pub available: bool,
+    pub interface: String,
+    pub ip: String,
+    pub subnet: String,
+    pub next_available_ip: String,
+}
+
+/// Check if WolfNet is running and get network info
+pub fn wolfnet_status() -> WolfNetStatus {
+    // Check if wolfnet0 interface exists
+    let output = Command::new("ip")
+        .args(["addr", "show", "wolfnet0"])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            // Parse IP: look for inet 10.10.10.X/24
+            let ip = text.lines()
+                .find(|l| l.contains("inet "))
+                .and_then(|l| l.trim().split_whitespace().nth(1))
+                .and_then(|s| s.split('/').next())
+                .unwrap_or("")
+                .to_string();
+
+            let subnet = if !ip.is_empty() {
+                // Derive subnet from IP (e.g., 10.10.10.0/24)
+                let parts: Vec<&str> = ip.split('.').collect();
+                if parts.len() == 4 {
+                    format!("{}.{}.{}.0/24", parts[0], parts[1], parts[2])
+                } else {
+                    "10.10.10.0/24".to_string()
+                }
+            } else {
+                String::new()
+            };
+
+            let next_ip = wolfnet_allocate_ip(&ip);
+
+            WolfNetStatus {
+                available: !ip.is_empty(),
+                interface: "wolfnet0".to_string(),
+                ip,
+                subnet,
+                next_available_ip: next_ip,
+            }
+        }
+        _ => WolfNetStatus {
+            available: false,
+            interface: String::new(),
+            ip: String::new(),
+            subnet: String::new(),
+            next_available_ip: String::new(),
+        },
+    }
+}
+
+/// Allocate the next available WolfNet IP for a container
+/// Scans existing containers and picks the next free IP in 10.10.10.100-254 range
+pub fn wolfnet_allocate_ip(host_ip: &str) -> String {
+    let parts: Vec<&str> = host_ip.split('.').collect();
+    if parts.len() != 4 {
+        return "10.10.10.100".to_string();
+    }
+    let prefix = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+
+    // Get all IPs currently in use on the wolfnet0 subnet
+    let mut used_ips = std::collections::HashSet::new();
+
+    // Host IP
+    if let Ok(last) = parts[3].parse::<u8>() {
+        used_ips.insert(last);
+    }
+
+    // Check Docker containers connected to wolfnet
+    if let Ok(output) = Command::new("docker")
+        .args(["network", "inspect", "wolfnet", "--format",
+               "{{range .Containers}}{{.IPv4Address}} {{end}}"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for addr in text.split_whitespace() {
+            if let Some(ip) = addr.split('/').next() {
+                let ip_parts: Vec<&str> = ip.split('.').collect();
+                if ip_parts.len() == 4 {
+                    if let Ok(last) = ip_parts[3].parse::<u8>() {
+                        used_ips.insert(last);
+                    }
+                }
+            }
+        }
+    }
+
+    // Check LXC containers too
+    if let Ok(output) = Command::new("ip")
+        .args(["neigh", "show", "dev", "wolfnet0"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            if let Some(ip) = line.split_whitespace().next() {
+                let ip_parts: Vec<&str> = ip.split('.').collect();
+                if ip_parts.len() == 4 {
+                    if let Ok(last) = ip_parts[3].parse::<u8>() {
+                        used_ips.insert(last);
+                    }
+                }
+            }
+        }
+    }
+
+    // Allocate from 100-254 range (reserving 1-99 for hosts)
+    for i in 100..=254u8 {
+        if !used_ips.contains(&i) {
+            return format!("{}.{}", prefix, i);
+        }
+    }
+
+    format!("{}.100", prefix) // Fallback
+}
+
+/// Ensure the Docker 'wolfnet' network exists (macvlan on wolfnet0)
+pub fn ensure_docker_wolfnet_network() -> Result<(), String> {
+    // Check if network already exists
+    let check = Command::new("docker")
+        .args(["network", "inspect", "wolfnet"])
+        .output()
+        .map_err(|e| format!("Docker not available: {}", e))?;
+
+    if check.status.success() {
+        return Ok(());
+    }
+
+    // Get the WolfNet subnet info
+    let status = wolfnet_status();
+    if !status.available {
+        return Err("WolfNet not running".to_string());
+    }
+
+    info!("Creating Docker 'wolfnet' network on wolfnet0 (subnet {})", status.subnet);
+
+    // Create macvlan network on wolfnet0
+    let output = Command::new("docker")
+        .args([
+            "network", "create",
+            "-d", "macvlan",
+            "--subnet", &status.subnet,
+            "--ip-range", &format!("{}100/25", &status.subnet[..status.subnet.rfind('.').unwrap_or(0) + 1]),
+            "--gateway", &status.ip,
+            "-o", "parent=wolfnet0",
+            "wolfnet",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to create network: {}", e))?;
+
+    if output.status.success() {
+        info!("Docker 'wolfnet' network created");
+        Ok(())
+    } else {
+        Err(format!("Failed to create wolfnet Docker network: {}",
+            String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+/// Connect a Docker container to the wolfnet network with a specific IP
+pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, String> {
+    ensure_docker_wolfnet_network()?;
+
+    info!("Connecting Docker container {} to wolfnet with IP {}", container, ip);
+
+    let output = Command::new("docker")
+        .args(["network", "connect", "--ip", ip, "wolfnet", container])
+        .output()
+        .map_err(|e| format!("Failed to connect to wolfnet: {}", e))?;
+
+    if output.status.success() {
+        Ok(format!("Container '{}' connected to wolfnet at {}", container, ip))
+    } else {
+        Err(format!("Failed to connect: {}", String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+/// Configure an LXC container's network to use WolfNet
+pub fn lxc_attach_wolfnet(container: &str, ip: &str) -> Result<String, String> {
+    info!("Configuring LXC container {} for wolfnet with IP {}", container, ip);
+
+    // Add a veth pair connected to wolfnet0 via a bridge
+    // First, create the bridge if it doesn't exist
+    let _ = Command::new("ip")
+        .args(["link", "add", "wolfbr0", "type", "bridge"])
+        .output();
+    let _ = Command::new("ip")
+        .args(["link", "set", "wolfbr0", "up"])
+        .output();
+
+    // Write network config to the LXC container
+    let config_path = format!("/var/lib/lxc/{}/config", container);
+    if let Ok(existing) = std::fs::read_to_string(&config_path) {
+        if !existing.contains("wolfnet") {
+            let append = format!(
+                "\n# WolfNet networking\nlxc.net.1.type = veth\nlxc.net.1.link = wolfbr0\nlxc.net.1.flags = up\nlxc.net.1.ipv4.address = {}/24\nlxc.net.1.name = eth1\n",
+                ip
+            );
+            if let Err(e) = std::fs::write(&config_path, format!("{}{}", existing, append)) {
+                return Err(format!("Failed to write LXC config: {}", e));
+            }
+        }
+    }
+
+    Ok(format!("LXC container '{}' configured for wolfnet at {}", container, ip))
+}
 
 // ─── Common types ───
 
@@ -546,35 +764,87 @@ pub struct LxcTemplate {
     pub variant: String,
 }
 
-/// List available LXC templates from the download server
+/// List available LXC templates from the LXC image server
 pub fn lxc_list_templates() -> Vec<LxcTemplate> {
-    let output = Command::new("lxc-create")
-        .args(["-t", "download", "--", "--list", "--no-validate"])
+    // Try fetching from lxc image server index
+    let output = Command::new("wget")
+        .args(["-qO-", "https://images.linuxcontainers.org/meta/1.0/index-system"])
         .output();
 
-    match output {
-        Ok(o) => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            text.lines()
-                .skip(3) // Skip header lines
-                .filter(|l| !l.trim().is_empty() && !l.starts_with("---"))
-                .filter_map(|line| {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 3 {
-                        Some(LxcTemplate {
-                            distribution: parts[0].to_string(),
-                            release: parts[1].to_string(),
-                            architecture: parts[2].to_string(),
-                            variant: parts.get(3).unwrap_or(&"default").to_string(),
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect()
+    // If wget isn't available, try curl
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => {
+            match Command::new("curl")
+                .args(["-sL", "https://images.linuxcontainers.org/meta/1.0/index-system"])
+                .output()
+            {
+                Ok(o) if o.status.success() => o,
+                _ => {
+                    // Return a curated list of common templates as fallback
+                    return vec![
+                        LxcTemplate { distribution: "ubuntu".into(), release: "24.04".into(), architecture: "amd64".into(), variant: "default".into() },
+                        LxcTemplate { distribution: "ubuntu".into(), release: "22.04".into(), architecture: "amd64".into(), variant: "default".into() },
+                        LxcTemplate { distribution: "ubuntu".into(), release: "20.04".into(), architecture: "amd64".into(), variant: "default".into() },
+                        LxcTemplate { distribution: "debian".into(), release: "bookworm".into(), architecture: "amd64".into(), variant: "default".into() },
+                        LxcTemplate { distribution: "debian".into(), release: "bullseye".into(), architecture: "amd64".into(), variant: "default".into() },
+                        LxcTemplate { distribution: "alpine".into(), release: "3.19".into(), architecture: "amd64".into(), variant: "default".into() },
+                        LxcTemplate { distribution: "alpine".into(), release: "3.18".into(), architecture: "amd64".into(), variant: "default".into() },
+                        LxcTemplate { distribution: "fedora".into(), release: "39".into(), architecture: "amd64".into(), variant: "default".into() },
+                        LxcTemplate { distribution: "centos".into(), release: "9-Stream".into(), architecture: "amd64".into(), variant: "default".into() },
+                        LxcTemplate { distribution: "archlinux".into(), release: "current".into(), architecture: "amd64".into(), variant: "default".into() },
+                        LxcTemplate { distribution: "rockylinux".into(), release: "9".into(), architecture: "amd64".into(), variant: "default".into() },
+                        LxcTemplate { distribution: "opensuse".into(), release: "15.5".into(), architecture: "amd64".into(), variant: "default".into() },
+                    ];
+                }
+            }
         }
-        Err(_) => vec![],
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut templates = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for line in text.lines() {
+        // Format: distribution;release;architecture;variant;...
+        let parts: Vec<&str> = line.split(';').collect();
+        if parts.len() >= 4 {
+            let dist = parts[0].trim();
+            let rel = parts[1].trim();
+            let arch = parts[2].trim();
+            let variant = parts[3].trim();
+
+            // Only include amd64 and arm64, skip empty or weird entries
+            if (arch == "amd64" || arch == "arm64") && !dist.is_empty() && !rel.is_empty() {
+                let key = format!("{}-{}-{}-{}", dist, rel, arch, variant);
+                if seen.insert(key) {
+                    templates.push(LxcTemplate {
+                        distribution: dist.to_string(),
+                        release: rel.to_string(),
+                        architecture: arch.to_string(),
+                        variant: if variant.is_empty() { "default".to_string() } else { variant.to_string() },
+                    });
+                }
+            }
+        }
     }
+
+    // Sort by distribution, then release descending
+    templates.sort_by(|a, b| {
+        a.distribution.cmp(&b.distribution)
+            .then(b.release.cmp(&a.release))
+    });
+
+    if templates.is_empty() {
+        // If parsing failed, return fallback
+        return vec![
+            LxcTemplate { distribution: "ubuntu".into(), release: "24.04".into(), architecture: "amd64".into(), variant: "default".into() },
+            LxcTemplate { distribution: "debian".into(), release: "bookworm".into(), architecture: "amd64".into(), variant: "default".into() },
+            LxcTemplate { distribution: "alpine".into(), release: "3.19".into(), architecture: "amd64".into(), variant: "default".into() },
+        ];
+    }
+
+    templates
 }
 
 /// Create an LXC container from a download template
@@ -660,7 +930,8 @@ pub fn docker_pull(image: &str) -> Result<String, String> {
 }
 
 /// Create a Docker container from an image
-pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String]) -> Result<String, String> {
+/// If wolfnet_ip is provided, the container will be connected to the WolfNet overlay network
+pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], wolfnet_ip: Option<&str>) -> Result<String, String> {
     info!("Creating Docker container {} from image {}", name, image);
 
     let mut args = vec!["create".to_string(), "--name".to_string(), name.to_string()];
@@ -692,7 +963,23 @@ pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String]) 
     if output.status.success() {
         let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
         info!("Docker container {} created ({})", name, &id[..12.min(id.len())]);
-        Ok(format!("Container '{}' created ({})", name, &id[..12.min(id.len())]))
+
+        // Connect to WolfNet if requested
+        if let Some(ip) = wolfnet_ip {
+            if !ip.is_empty() {
+                match docker_connect_wolfnet(name, ip) {
+                    Ok(msg) => info!("{}", msg),
+                    Err(e) => info!("WolfNet connect warning: {} (container still created)", e),
+                }
+            }
+        }
+
+        let wolfnet_msg = wolfnet_ip
+            .filter(|ip| !ip.is_empty())
+            .map(|ip| format!(" [WolfNet: {}]", ip))
+            .unwrap_or_default();
+
+        Ok(format!("Container '{}' created ({}){}", name, &id[..12.min(id.len())], wolfnet_msg))
     } else {
         Err(format!(
             "Create failed: {}",
