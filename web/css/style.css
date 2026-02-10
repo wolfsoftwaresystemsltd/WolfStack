@@ -223,6 +223,25 @@ body {
     font-weight: 500;
 }
 
+.server-node-header .remove-server-btn {
+    font-size: 12px;
+    opacity: 0;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 4px;
+    transition: opacity 0.2s, background 0.2s;
+    margin-left: auto;
+}
+
+.server-node-header:hover .remove-server-btn {
+    opacity: 0.6;
+}
+
+.server-node-header .remove-server-btn:hover {
+    opacity: 1;
+    background: rgba(239, 68, 68, 0.2);
+}
+
 .server-node-children {
     display: none;
     padding-left: 14px;

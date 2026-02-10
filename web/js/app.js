@@ -115,7 +115,7 @@ function buildServerTree(nodes) {
                 <span class="tree-toggle ${shouldExpand ? 'expanded' : ''}" id="toggle-${node.id}">▶</span>
                 <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
                 <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">🖥️ ${node.hostname}</span>
-                ${node.is_self ? '<span class="self-badge">this</span>' : ''}
+                ${node.is_self ? '<span class="self-badge">this</span>' : `<span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemoveServer('${node.id}', '${node.hostname}')" title="Remove server">🗑️</span>`}
             </div>
             <div class="server-node-children ${shouldExpand ? 'expanded' : ''}" id="children-${node.id}">
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="dashboard" onclick="selectServerView('${node.id}', 'dashboard')">
@@ -657,6 +657,12 @@ async function removeServer(id) {
         fetchNodes();
     } catch (e) {
         showToast('Failed to remove server', 'error');
+    }
+}
+
+function confirmRemoveServer(id, hostname) {
+    if (confirm(`Remove server "${hostname}" from the cluster?`)) {
+        removeServer(id);
     }
 }
 
@@ -1558,6 +1564,19 @@ async function loadLxcTemplates() {
                                 style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-tertiary); color:var(--text-primary);">
                         </div>
                     </div>
+                    <div id="lxc-wolfnet-section" style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
+                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                            <span>🐺</span>
+                            <strong style="font-size:13px;">WolfNet Networking</strong>
+                            <span id="lxc-wolfnet-status" style="font-size:12px; color:var(--text-muted);">Checking...</span>
+                        </div>
+                        <div id="lxc-wolfnet-ip-row" style="display:flex; align-items:center; gap:8px;">
+                            <label style="font-size:13px; white-space:nowrap;">Assign IP:</label>
+                            <input id="lxc-wolfnet-ip" type="text" placeholder="auto"
+                                style="flex:1; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                            <span style="font-size:12px; color:var(--text-muted);">Leave empty for no WolfNet</span>
+                        </div>
+                    </div>
                     <div style="display:flex; gap:8px;">
                         <button class="btn btn-primary" onclick="createLxcContainer()">📦 Create</button>
                         <button class="btn" onclick="closeContainerDetail()">Cancel</button>
@@ -1599,6 +1618,28 @@ function selectLxcTemplate(distro, release, arch) {
     document.getElementById('lxc-create-arch').value = arch;
     document.getElementById('lxc-create-name').value = `${distro}-${release}`;
     document.getElementById('lxc-create-name').focus();
+
+    // Fetch WolfNet status and suggest an IP
+    fetch(apiUrl() + '/api/wolfnet/status')
+        .then(r => r.json())
+        .then(status => {
+            const section = document.getElementById('lxc-wolfnet-section');
+            const statusEl = document.getElementById('lxc-wolfnet-status');
+            const ipInput = document.getElementById('lxc-wolfnet-ip');
+            if (status.available) {
+                statusEl.innerHTML = '<span style="color:var(--success);">● Active</span> — ' + status.subnet;
+                ipInput.value = status.next_available_ip;
+                ipInput.placeholder = status.next_available_ip;
+            } else {
+                statusEl.innerHTML = '<span style="color:var(--text-muted);">● Not available</span>';
+                ipInput.value = '';
+                ipInput.placeholder = 'WolfNet not running';
+                ipInput.disabled = true;
+            }
+        })
+        .catch(() => {
+            document.getElementById('lxc-wolfnet-status').textContent = 'unavailable';
+        });
 }
 
 async function createLxcContainer() {
@@ -1606,6 +1647,7 @@ async function createLxcContainer() {
     const distribution = document.getElementById('lxc-create-distro').value.trim();
     const release = document.getElementById('lxc-create-release').value.trim();
     const architecture = document.getElementById('lxc-create-arch').value.trim();
+    const wolfnet_ip = document.getElementById('lxc-wolfnet-ip')?.value?.trim() || '';
 
     if (!name || !distribution || !release || !architecture) {
         showToast('Please select a template and enter a container name', 'error');
@@ -1616,10 +1658,10 @@ async function createLxcContainer() {
     showToast(`Creating LXC container '${name}' (${distribution} ${release})... This may take a minute.`, 'info');
 
     try {
-        const resp = await fetch('/api/containers/lxc/create', {
+        const resp = await fetch(apiUrl() + '/api/containers/lxc/create', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, distribution, release, architecture }),
+            body: JSON.stringify({ name, distribution, release, architecture, wolfnet_ip }),
         });
         const data = await resp.json();
         if (resp.ok) {

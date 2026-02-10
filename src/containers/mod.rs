@@ -814,15 +814,16 @@ pub fn lxc_list_templates() -> Vec<LxcTemplate> {
             let arch = parts[2].trim();
             let variant = parts[3].trim();
 
-            // Only include amd64 and arm64, skip empty or weird entries
-            if (arch == "amd64" || arch == "arm64") && !dist.is_empty() && !rel.is_empty() {
-                let key = format!("{}-{}-{}-{}", dist, rel, arch, variant);
+            // Only include amd64 default variant to keep list manageable
+            let variant_str = if variant.is_empty() { "default" } else { variant };
+            if arch == "amd64" && variant_str == "default" && !dist.is_empty() && !rel.is_empty() {
+                let key = format!("{}-{}-{}", dist, rel, arch);
                 if seen.insert(key) {
                     templates.push(LxcTemplate {
                         distribution: dist.to_string(),
                         release: rel.to_string(),
                         architecture: arch.to_string(),
-                        variant: if variant.is_empty() { "default".to_string() } else { variant.to_string() },
+                        variant: variant_str.to_string(),
                     });
                 }
             }
@@ -859,7 +860,6 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
             "-d", distribution,
             "-r", release,
             "-a", architecture,
-            "--no-validate",
         ])
         .output()
         .map_err(|e| format!("Failed to create LXC container: {}", e))?;
