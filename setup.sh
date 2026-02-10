@@ -50,11 +50,11 @@ echo "Installing system dependencies..."
 
 if [ "$PKG_MANAGER" = "apt" ]; then
     apt update -qq
-    apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev
+    apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils
 elif [ "$PKG_MANAGER" = "dnf" ]; then
-    dnf install -y git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel
+    dnf install -y git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils
 elif [ "$PKG_MANAGER" = "yum" ]; then
-    yum install -y git curl gcc gcc-c++ make openssl-devel pkgconfig
+    yum install -y git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils
 fi
 
 echo "✓ System dependencies installed"
@@ -417,19 +417,51 @@ fi
 
 # ─── Set up lxcbr0 bridge for LXC containers ────────────────────────────────
 if command -v lxc-ls &> /dev/null; then
-    if ! ip link show lxcbr0 &> /dev/null; then
-        echo ""
-        echo "Setting up lxcbr0 bridge for LXC containers..."
+    echo ""
+    echo "Configuring LXC networking (lxc-net)..."
+    
+    # Ensure USE_LXC_BRIDGE="true" in /etc/default/lxc-net
+    if [ -f "/etc/default/lxc-net" ]; then
+        if grep -q "USE_LXC_BRIDGE" /etc/default/lxc-net; then
+            sed -i 's/^#\?USE_LXC_BRIDGE=.*/USE_LXC_BRIDGE="true"/' /etc/default/lxc-net
+        else
+            echo 'USE_LXC_BRIDGE="true"' >> /etc/default/lxc-net
+        fi
+    else
+        echo 'USE_LXC_BRIDGE="true"' > /etc/default/lxc-net
+    fi
+
+    # Enable and start lxc-net service
+    systemctl enable lxc-net 2>/dev/null || true
+    systemctl restart lxc-net 2>/dev/null || true
+    
+    # Check if dnsmasq is running on lxcbr0
+    sleep 2
+    if pgrep -f "dnsmasq.*lxcbr0" > /dev/null; then
+        echo "✓ LXC networking active (lxcbr0 + dnsmasq)"
+    else
+        echo "⚠ LXC networking service started but dnsmasq not detected on lxcbr0."
+        echo "  Attempting manual fallback..."
+        systemctl stop lxc-net 2>/dev/null || true
+        
         ip link add lxcbr0 type bridge 2>/dev/null || true
         ip addr add 10.0.3.1/24 dev lxcbr0 2>/dev/null || true
         ip link set lxcbr0 up 2>/dev/null || true
+        
+        # NAT
         echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
         iptables -t nat -A POSTROUTING -s 10.0.3.0/24 ! -d 10.0.3.0/24 -j MASQUERADE 2>/dev/null || true
         iptables -A FORWARD -i lxcbr0 -j ACCEPT 2>/dev/null || true
         iptables -A FORWARD -o lxcbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-        echo "✓ lxcbr0 bridge created (10.0.3.1/24 with NAT)"
-    else
-        echo "✓ lxcbr0 bridge already exists"
+        
+        # DNSMasq
+        mkdir -p /run/lxc
+        dnsmasq --strict-order --bind-interfaces --pid-file=/run/lxc/dnsmasq.pid \
+            --listen-address 10.0.3.1 --dhcp-range 10.0.3.2,10.0.3.254 \
+            --dhcp-lease-max=253 --dhcp-no-override --except-interface=lo \
+            --interface=lxcbr0 --conf-file= 2>/dev/null || true
+            
+        echo "✓ Manually configured lxcbr0 and dnsmasq"
     fi
 fi
 
