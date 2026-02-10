@@ -81,6 +81,7 @@ function selectServerView(nodeId, view) {
         // Open host terminal directly
         openConsole('host', hostname);
     }
+    if (view === 'vms') loadVms();
 }
 
 // ─── Server Tree ───
@@ -148,6 +149,9 @@ function buildServerTree(nodes) {
                 </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
                     <span class="icon">💻</span> Terminal
+                </a>
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="vms" onclick="selectServerView('${node.id}', 'vms')">
+                    <span class="icon">🖥️</span> VMs
                 </a>
             </div>
         </div>
@@ -618,6 +622,143 @@ async function serviceAction(service, action) {
         loadComponents();
     } catch (e) {
         showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+// ─── Virtual Machines ───
+async function loadVms() {
+    try {
+        const resp = await fetch(apiUrl('/api/vms'));
+        if (handleAuthError(resp)) return;
+        const vms = await resp.json();
+        renderVms(vms);
+    } catch (e) {
+        console.error('Failed to load VMs:', e);
+        showToast('Failed to load VMs', 'error');
+    }
+}
+
+function renderVms(vms) {
+    const table = document.getElementById('vms-table');
+    const empty = document.getElementById('vms-empty');
+    if (!table || !empty) return;
+
+    if (vms.length === 0) {
+        table.parentElement.style.display = 'none';
+        empty.style.display = 'block';
+        return;
+    }
+
+    table.parentElement.style.display = '';
+    empty.style.display = 'none';
+
+    table.innerHTML = vms.map(vm => {
+        const statusClass = vm.running ? 'running' : 'stopped';
+        const statusText = vm.running ? 'Running' : 'Stopped';
+        const statusColor = vm.running ? 'var(--success)' : 'var(--danger)';
+
+        let vncText = '—';
+        if (vm.running && vm.vnc_port) {
+            vncText = `<span class="badge" title="Connect with VNC Viewer to IP:${vm.vnc_port}">:${vm.vnc_port}</span>`;
+        }
+
+        return `
+            <tr>
+                <td><strong>${vm.name}</strong></td>
+                <td><span style="color:${statusColor}">● ${statusText}</span></td>
+                <td>${vm.cpus} vCPU / ${vm.memory_mb} MB</td>
+                <td>${vm.disk_size_gb} GB</td>
+                <td>${vncText}</td>
+                <td>
+                    ${vm.running ?
+                `<button class="btn btn-danger btn-sm" onclick="vmAction('${vm.name}', 'stop')">Stop</button>` :
+                `<button class="btn btn-success btn-sm" onclick="vmAction('${vm.name}', 'start')">Start</button>
+                         <button class="btn btn-danger btn-sm" onclick="deleteVm('${vm.name}')">Delete</button>`
+            }
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function showVmCreate() {
+    document.getElementById('create-vm-modal').classList.add('active');
+}
+
+function closeVmCreate() {
+    document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('active'));
+}
+
+async function createVm() {
+    const name = document.getElementById('new-vm-name').value.trim();
+    const cpus = parseInt(document.getElementById('new-vm-cpus').value);
+    const memory = parseInt(document.getElementById('new-vm-memory').value);
+    const disk = parseInt(document.getElementById('new-vm-disk').value);
+    const iso = document.getElementById('new-vm-iso').value.trim() || null;
+
+    if (!name) { showToast('Enter VM name', 'error'); return; }
+
+    try {
+        showToast('Creating VM...', 'info');
+        const resp = await fetch(apiUrl('/api/vms/create'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name,
+                cpus,
+                memory_mb: memory,
+                disk_size_gb: disk,
+                iso_path: iso
+            })
+        });
+        const data = await resp.json();
+
+        if (resp.ok) {
+            showToast('VM created successfully', 'success');
+            closeVmCreate();
+            loadVms();
+        } else {
+            showToast(data.error || 'Failed to create VM', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function vmAction(name, action) {
+    try {
+        showToast(`${action}ing VM...`, 'info');
+        const resp = await fetch(apiUrl(`/api/vms/${name}/action`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action })
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`VM ${action}ed`, 'success');
+            setTimeout(loadVms, 2000); // Wait for state change
+        } else {
+            showToast(data.error || 'Action failed', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function deleteVm(name) {
+    if (!confirm(`Delete VM "${name}"? This will delete the disk image permanently.`)) return;
+
+    try {
+        const resp = await fetch(apiUrl(`/api/vms/${name}`), { method: 'DELETE' });
+        if (resp.ok) {
+            showToast('VM deleted', 'success');
+            loadVms();
+        } else {
+            const data = await resp.json();
+            showToast(data.error || 'Failed to delete VM', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
     }
 }
 

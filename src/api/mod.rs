@@ -19,6 +19,7 @@ pub struct AppState {
     pub monitor: std::sync::Mutex<SystemMonitor>,
     pub cluster: Arc<ClusterState>,
     pub sessions: Arc<SessionManager>,
+    pub vms: std::sync::Mutex<crate::vms::manager::VmManager>,
 }
 
 // ─── Auth helpers ───
@@ -30,7 +31,7 @@ fn get_session_token(req: &HttpRequest) -> Option<String> {
 }
 
 /// Check if request is authenticated; returns username or error response
-fn require_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<String, HttpResponse> {
+pub fn require_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<String, HttpResponse> {
     // Accept internal proxy requests from other WolfStack nodes
     // (The originating node already validated the user's session)
     if let Some(val) = req.headers().get("X-WolfStack-Internal") {
@@ -962,6 +963,7 @@ async fn list_running_containers(
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
+        .configure(crate::vms::api::config)
         // Auth (no auth required)
         .route("/api/auth/login", web::post().to(login))
         .route("/api/auth/logout", web::post().to(logout))

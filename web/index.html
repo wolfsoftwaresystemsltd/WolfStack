@@ -21,7 +21,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v5.4.6</span>
+                <span class="version">v5.6.0</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -608,6 +608,72 @@
                             No LXC containers found. Click <strong>+ Create Container</strong> to browse available
                             templates.
                         </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ Virtual Machines Page ═══ -->
+            <div id="page-vms" class="page-view" style="display:none;">
+                <div class="card">
+                    <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>Virtual Machines (KVM/QEMU)</h3>
+                        <button class="btn btn-sm btn-primary" onclick="showVmCreate()">+ Create VM</button>
+                    </div>
+                    <div class="card-body">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>Status</th>
+                                    <th>CPU/RAM</th>
+                                    <th>Disk</th>
+                                    <th>VNC</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="vms-table"></tbody>
+                        </table>
+                        <p id="vms-empty"
+                            style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
+                            No virtual machines found. Click <strong>+ Create VM</strong> to start one.
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Create VM Modal -->
+            <div class="modal-overlay" id="create-vm-modal">
+                <div class="modal">
+                    <div class="modal-header">
+                        <h3>Create Virtual Machine</h3>
+                        <button class="modal-close" onclick="closeVmCreate()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-group">
+                            <label>Name</label>
+                            <input type="text" class="form-control" id="new-vm-name" placeholder="my-vm">
+                        </div>
+                        <div class="form-group">
+                            <label>CPUs</label>
+                            <input type="number" class="form-control" id="new-vm-cpus" value="1" min="1">
+                        </div>
+                        <div class="form-group">
+                            <label>Memory (MB)</label>
+                            <input type="number" class="form-control" id="new-vm-memory" value="1024" min="256">
+                        </div>
+                        <div class="form-group">
+                            <label>Disk Size (GB)</label>
+                            <input type="number" class="form-control" id="new-vm-disk" value="10" min="1">
+                        </div>
+                        <div class="form-group">
+                            <label>ISO Path (Optional)</label>
+                            <input type="text" class="form-control" id="new-vm-iso"
+                                placeholder="/var/lib/wolfstack/isos/ubuntu.iso">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" onclick="closeVmCreate()">Cancel</button>
+                        <button class="btn btn-primary" onclick="createVm()">Create</button>
                     </div>
                 </div>
             </div>

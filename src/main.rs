@@ -14,6 +14,7 @@ mod monitoring;
 mod installer;
 mod containers;
 mod console;
+mod vms;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_files;
@@ -98,6 +99,9 @@ async fn main() -> std::io::Result<()> {
         cli.port,
     ));
 
+    // Initialize VM manager
+    let vms_manager = vms::manager::VmManager::new();
+
     // Initial self-update
     {
         let mut mon = monitor;
@@ -112,6 +116,7 @@ async fn main() -> std::io::Result<()> {
             monitor: Mutex::new(mon),
             cluster: cluster.clone(),
             sessions: sessions.clone(),
+            vms: Mutex::new(vms_manager),
         });
 
         // Background: periodic self-monitoring update
