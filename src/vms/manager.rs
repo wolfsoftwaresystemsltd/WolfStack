@@ -241,20 +241,47 @@ impl VmManager {
         }
 
         let config_path = self.vm_config_path(name);
+        let log_path = self.base_dir.join(format!("{}.log", name));
+
+        // Helper: append to log file
+        let write_log = |msg: &str| {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                let _ = writeln!(f, "[{}] {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), msg);
+            }
+        };
+
+        write_log(&format!("=== Starting VM '{}' ===", name));
+
         let content = fs::read_to_string(&config_path)
-            .map_err(|e| format!("VM config not found: {}", e))?;
+            .map_err(|e| { 
+                let msg = format!("VM config not found: {}", e);
+                write_log(&msg); msg
+            })?;
         let config: VmConfig = serde_json::from_str(&content)
-            .map_err(|e| format!("Invalid VM config: {}", e))?;
+            .map_err(|e| {
+                let msg = format!("Invalid VM config: {}", e);
+                write_log(&msg); msg
+            })?;
+
+        write_log(&format!("Config: cpus={}, memory={}MB, disk={}GB, iso={:?}, wolfnet_ip={:?}", 
+                  config.cpus, config.memory_mb, config.disk_size_gb, config.iso_path, config.wolfnet_ip));
 
         // Check if qemu-system-x86_64 is available
-        if Command::new("which").arg("qemu-system-x86_64").output()
-            .map(|o| !o.status.success()).unwrap_or(true) {
-            return Err("qemu-system-x86_64 not found. Install QEMU: apt install qemu-system-x86 qemu-utils".to_string());
-        }
+        let qemu_check = Command::new("which").arg("qemu-system-x86_64").output();
+        let qemu_path = match &qemu_check {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => {
+                let msg = "qemu-system-x86_64 not found. Install QEMU: apt install qemu-system-x86 qemu-utils";
+                write_log(msg);
+                return Err(msg.to_string());
+            }
+        };
+        write_log(&format!("QEMU binary: {}", qemu_path));
 
         let mut rng = rand::thread_rng();
         let vnc_num: u16 = rng.gen_range(10..99); 
-        let ws_port: u16 = 6080 + vnc_num;  // WebSocket port for noVNC
+        let ws_port: u16 = 6080 + vnc_num;
         let vnc_arg = format!(":{},websocket={}", vnc_num, ws_port);
         
         let serial_sock = self.vm_serial_socket(name);
@@ -262,14 +289,18 @@ impl VmManager {
 
         // Check if KVM is available
         let kvm_available = std::path::Path::new("/dev/kvm").exists();
+        write_log(&format!("KVM available: {}", kvm_available));
         if !kvm_available {
             info!("KVM not available for VM {} — using software emulation (slower)", name);
         }
 
         let disk_path = self.vm_disk_path(name);
         if !disk_path.exists() {
-            return Err(format!("Disk image not found: {}", disk_path.display()));
+            let msg = format!("Disk image not found: {}", disk_path.display());
+            write_log(&msg);
+            return Err(msg);
         }
+        write_log(&format!("Disk: {} (exists)", disk_path.display()));
 
         let mut cmd = Command::new("qemu-system-x86_64");
         cmd.arg("-name").arg(name)
@@ -303,31 +334,35 @@ impl VmManager {
         if let Some(iso) = &config.iso_path {
              if !iso.is_empty() {
                  if !std::path::Path::new(iso).exists() {
-                     return Err(format!("ISO file not found: {}", iso));
+                     let msg = format!("ISO file not found: {}", iso);
+                     write_log(&msg);
+                     return Err(msg);
                  }
+                 write_log(&format!("ISO: {} (exists)", iso));
                  cmd.arg("-cdrom").arg(iso);
                  cmd.arg("-boot").arg("d");
              }
         }
 
+        write_log(&format!("Launching QEMU: VNC :{}, WS :{}, KVM: {}", vnc_num, ws_port, kvm_available));
         info!("Starting VM {}: qemu-system-x86_64 (KVM: {}, VNC :{}, WS :{})", 
               name, kvm_available, vnc_num, ws_port);
 
-        // Log QEMU stderr so we can diagnose startup failures
-        let log_path = self.base_dir.join(format!("{}.log", name));
-        let log_file = std::fs::File::create(&log_path).ok();
-
-        // Configure stderr redirect
-        if let Some(log) = log_file {
-            cmd.stderr(std::process::Stdio::from(log));
+        // Redirect QEMU stderr to log file (append mode, don't overwrite diagnostics)
+        if let Ok(log_file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            cmd.stderr(std::process::Stdio::from(log_file));
         }
 
-        let output = cmd.output().map_err(|e| format!("Failed to execute QEMU: {}", e))?;
+        let output = cmd.output().map_err(|e| {
+            let msg = format!("Failed to execute QEMU: {}", e);
+            write_log(&msg); msg
+        })?;
         
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let log_content = fs::read_to_string(&log_path).unwrap_or_default();
-            let err_msg = if !stderr.is_empty() { stderr } else { log_content };
+            let err_msg = if !stderr.is_empty() { stderr } else { log_content.clone() };
+            write_log(&format!("QEMU exit with error: {}", err_msg));
             error!("QEMU failed for VM {}: {}", name, err_msg);
             
             if config.wolfnet_ip.is_some() {
@@ -338,11 +373,11 @@ impl VmManager {
         }
 
         // -daemonize makes QEMU fork, so output.status may be 0 even if the child crashes.
-        // Wait a moment and verify the process is actually running.
         std::thread::sleep(std::time::Duration::from_secs(1));
         
         if !self.check_running(name) {
             let log_content = fs::read_to_string(&log_path).unwrap_or_else(|_| "no log available".to_string());
+            write_log("VM exited immediately after daemonize — check QEMU errors above");
             error!("VM {} exited immediately after daemonize. Log: {}", name, log_content);
             
             if config.wolfnet_ip.is_some() {
@@ -351,6 +386,8 @@ impl VmManager {
             }
             return Err(format!("VM crashed immediately after starting. QEMU log:\n{}", log_content));
         }
+
+        write_log(&format!("VM started successfully. VNC :{} (port {}), WS :{}", vnc_num, 5900 + vnc_num, ws_port));
 
         // Save runtime port info so frontend can connect
         let runtime = serde_json::json!({
