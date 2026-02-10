@@ -976,18 +976,16 @@ function renderDockerContainers(containers) {
             <td style="font-size:11px;">${ports}</td>
             <td>
                 ${isRunning ? `
-                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'stop')" title="Stop">⏹</button>
-                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'restart')" title="Restart">🔄</button>
-                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'pause')" title="Pause">⏸</button>
-                ` : isPaused ? `
-                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'unpause')" title="Unpause">▶</button>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.id}', 'stop')" title="Stop">⏹</button>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.id}', 'restart')" title="Restart">🔄</button>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="openConsole('docker', '${c.id}')" title="Console">💻</button>
                 ` : `
-                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'start')" title="Start">▶</button>
-                    <button class="btn btn-sm" style="margin:2px;color:#ef4444;" onclick="dockerAction('${c.name}', 'remove')" title="Remove">🗑</button>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.id}', 'start')" title="Start">▶</button>
+                    <button class="btn btn-sm" style="margin:2px;color:#ef4444;" onclick="dockerAction('${c.id}', 'remove')" title="Remove">🗑</button>
                 `}
-                <button class="btn btn-sm" style="margin:2px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs">📜</button>
-                <button class="btn btn-sm" style="margin:2px;" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button>
-                <button class="btn btn-sm" style="margin:2px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>
+                <button class="btn btn-sm" style="margin:2px;" onclick="dockerLogs('${c.id}')" title="Logs">📜</button>
+                <button class="btn btn-sm" style="margin:2px;" onclick="cloneDockerContainer('${c.id}')" title="Clone">📋</button>
+                <button class="btn btn-sm" style="margin:2px;" onclick="moveDockerContainer('${c.id}')" title="Migrate">🚀</button>
             </td>
         </tr>`;
     }).join('');
@@ -1134,6 +1132,7 @@ function renderLxcContainers(containers, stats) {
                     <button class="btn btn-sm" style="margin:2px;" onclick="lxcAction('${c.name}', 'stop')" title="Stop">⏹</button>
                     <button class="btn btn-sm" style="margin:2px;" onclick="lxcAction('${c.name}', 'restart')" title="Restart">🔄</button>
                     <button class="btn btn-sm" style="margin:2px;" onclick="lxcAction('${c.name}', 'freeze')" title="Freeze">⏸</button>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="openConsole('lxc', '${c.name}')" title="Console">💻</button>
                 ` : `
                     <button class="btn btn-sm" style="margin:2px;" onclick="lxcAction('${c.name}', 'start')" title="Start">▶</button>
                     <button class="btn btn-sm" style="margin:2px;color:#ef4444;" onclick="lxcAction('${c.name}', 'destroy')" title="Destroy">🗑</button>
@@ -1839,4 +1838,107 @@ async function createLxcContainer() {
     } catch (e) {
         showToast(`Create failed: ${e.message}`, 'error');
     }
+}
+
+// ─── Console Logic ───
+let consoleTerm = null;
+let consoleWs = null;
+let consoleFitAddon = null;
+
+function openConsole(type, name) {
+    const modal = document.getElementById('console-modal');
+    modal.classList.add('active');
+
+    // Init terminal
+    if (consoleTerm) consoleTerm.dispose();
+
+    // Check if xterm loaded
+    if (typeof Terminal === 'undefined') {
+        alert('xterm.js not loaded!');
+        return;
+    }
+
+    consoleTerm = new Terminal({
+        cursorBlink: true,
+        fontSize: 14,
+        fontFamily: '"JetBrains Mono", monospace, "fira-code", monospace',
+        theme: {
+            background: '#0a0a0a',
+            foreground: '#f0f0f0'
+        }
+    });
+
+    consoleFitAddon = new FitAddon.FitAddon();
+    consoleTerm.loadAddon(consoleFitAddon);
+
+    document.getElementById('terminal-container').innerHTML = '';
+    consoleTerm.open(document.getElementById('terminal-container'));
+
+    // Wait for layout
+    setTimeout(() => { consoleFitAddon.fit(); }, 100);
+
+    consoleTerm.write(`Connecting to console for ${name} (${type})...\r\n`);
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    // Use window.location.host so it works if accessed via proxy URL or direct IP
+    // For now, assume console only works on the node directly accessed
+    const wsUrl = `${protocol}//${window.location.host}/ws/console/${type}/${name}`;
+
+    consoleWs = new WebSocket(wsUrl);
+
+    consoleWs.onopen = () => {
+        consoleTerm.write(`\x1b[32mConnected!\x1b[0m\r\n`);
+        consoleFitAddon.fit();
+        // Send initial enter to prompt?
+        consoleWs.send('\n');
+    };
+
+    consoleWs.onmessage = (event) => {
+        if (event.data instanceof Blob) {
+            const reader = new FileReader();
+            reader.onload = () => consoleTerm.write(reader.result);
+            reader.readAsText(event.data);
+        } else {
+            consoleTerm.write(event.data);
+        }
+    };
+
+    consoleWs.onclose = () => {
+        consoleTerm.write(`\r\n\x1b[31mConnection closed.\x1b[0m\r\n`);
+    };
+
+    consoleWs.onerror = (e) => {
+        consoleTerm.write(`\r\n\x1b[31mWebSocket Error.\x1b[0m\r\n`);
+    };
+
+    consoleTerm.onData(data => {
+        if (consoleWs && consoleWs.readyState === WebSocket.OPEN) {
+            consoleWs.send(data);
+        }
+    });
+
+    window.addEventListener('resize', fitConsole);
+
+    // Focus terminal
+    consoleTerm.focus();
+}
+
+function fitConsole() {
+    if (consoleFitAddon) consoleFitAddon.fit();
+}
+
+function closeConsole() {
+    const modal = document.getElementById('console-modal');
+    modal.classList.remove('active');
+
+    if (consoleWs) {
+        consoleWs.close();
+        consoleWs = null;
+    }
+    if (consoleTerm) {
+        consoleTerm.dispose();
+        consoleTerm = null;
+        consoleFitAddon = null;
+    }
+    window.removeEventListener('resize', fitConsole);
 }

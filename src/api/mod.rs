@@ -12,6 +12,8 @@ use crate::containers;
 use crate::agent::{ClusterState, AgentMessage};
 use crate::auth::SessionManager;
 
+mod console;
+
 /// Shared application state
 pub struct AppState {
     pub monitor: std::sync::Mutex<SystemMonitor>,
@@ -936,6 +938,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/lxc/{name}/clone", web::post().to(lxc_clone))
         // WolfNet
         .route("/api/wolfnet/status", web::get().to(wolfnet_network_status))
+        // Console WebSocket
+        .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
         // Agent (no auth — used by other WolfStack nodes)
         .route("/api/agent/status", web::get().to(agent_status))
         .route("/api/wolfnet/used-ips", web::get().to(wolfnet_used_ips_endpoint))
