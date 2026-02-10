@@ -550,6 +550,7 @@ pub struct LxcCreateRequest {
     pub architecture: String,
     pub wolfnet_ip: Option<String>,
     pub storage_path: Option<String>,
+    pub root_password: Option<String>,
 }
 
 /// POST /api/containers/lxc/create — create an LXC container from template
@@ -562,25 +563,29 @@ pub async fn lxc_create(
     let storage = body.storage_path.as_deref();
     match containers::lxc_create(&body.name, &body.distribution, &body.release, &body.architecture, storage) {
         Ok(msg) => {
+            let mut messages = vec![msg];
+
+            // Set root password if provided — start container, set password, stop it
+            if let Some(ref password) = body.root_password {
+                if !password.is_empty() {
+                    match containers::lxc_set_root_password(&body.name, password) {
+                        Ok(pw_msg) => messages.push(pw_msg),
+                        Err(e) => messages.push(format!("Password warning: {}", e)),
+                    }
+                }
+            }
+
             // Attach WolfNet if requested
             if let Some(ip) = &body.wolfnet_ip {
                 if !ip.is_empty() {
                     match containers::lxc_attach_wolfnet(&body.name, ip) {
-                        Ok(wn_msg) => {
-                            return HttpResponse::Ok().json(serde_json::json!({
-                                "message": format!("{} — {}", msg, wn_msg)
-                            }));
-                        }
-                        Err(e) => {
-                            return HttpResponse::Ok().json(serde_json::json!({
-                                "message": msg,
-                                "wolfnet_warning": e
-                            }));
-                        }
+                        Ok(wn_msg) => messages.push(wn_msg),
+                        Err(e) => messages.push(format!("WolfNet warning: {}", e)),
                     }
                 }
             }
-            HttpResponse::Ok().json(serde_json::json!({ "message": msg }))
+
+            HttpResponse::Ok().json(serde_json::json!({ "message": messages.join(" — ") }))
         }
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }

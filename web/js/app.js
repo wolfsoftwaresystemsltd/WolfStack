@@ -1603,6 +1603,16 @@ async function loadLxcTemplates() {
                     </div>
                     <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
                         <div>
+                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">🔑 Root Password</label>
+                            <input id="lxc-create-password" type="password" placeholder="Set root password"
+                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                        </div>
+                        <div style="display:flex; align-items:end;">
+                            <span style="font-size:12px; color:var(--text-muted); padding-bottom:10px;">Required to log in to the container</span>
+                        </div>
+                    </div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                        <div>
                             <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">💾 Storage Location</label>
                             <select id="lxc-create-storage"
                                 style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
@@ -1723,9 +1733,15 @@ async function createLxcContainer() {
     const architecture = document.getElementById('lxc-create-arch').value.trim();
     const wolfnet_ip = document.getElementById('lxc-wolfnet-ip')?.value?.trim() || '';
     const storage_path = document.getElementById('lxc-create-storage')?.value || '';
+    const root_password = document.getElementById('lxc-create-password')?.value?.trim() || '';
 
     if (!name || !distribution || !release || !architecture) {
         showToast('Please select a template and enter a container name', 'error');
+        return;
+    }
+
+    if (!root_password) {
+        showToast('Please set a root password for the container', 'error');
         return;
     }
 
@@ -1736,7 +1752,7 @@ async function createLxcContainer() {
         const resp = await fetch(apiUrl('/api/containers/lxc/create'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, distribution, release, architecture, wolfnet_ip, storage_path }),
+            body: JSON.stringify({ name, distribution, release, architecture, wolfnet_ip, storage_path, root_password }),
         });
         const data = await resp.json();
         if (resp.ok) {

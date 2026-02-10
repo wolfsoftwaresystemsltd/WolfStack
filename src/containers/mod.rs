@@ -780,6 +780,48 @@ pub fn lxc_logs(container: &str, lines: u32) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Set the root password on an LXC container
+/// Starts the container briefly, sets the password via chpasswd, then stops it
+pub fn lxc_set_root_password(container: &str, password: &str) -> Result<String, String> {
+    info!("Setting root password for LXC container {}", container);
+
+    // Ensure bridge exists before starting
+    ensure_lxc_bridge();
+
+    // Start the container
+    let start = Command::new("lxc-start")
+        .args(["-n", container])
+        .output()
+        .map_err(|e| format!("Failed to start container: {}", e))?;
+
+    if !start.status.success() {
+        return Err(format!("Failed to start container for password setup: {}",
+            String::from_utf8_lossy(&start.stderr)));
+    }
+
+    // Wait for container to be ready
+    let _ = Command::new("lxc-wait")
+        .args(["-n", container, "-s", "RUNNING", "-t", "10"])
+        .output();
+
+    // Set root password via chpasswd
+    let chpasswd = Command::new("lxc-attach")
+        .args(["-n", container, "--", "sh", "-c", &format!("echo 'root:{}' | chpasswd", password)])
+        .output()
+        .map_err(|e| format!("Failed to set password: {}", e))?;
+
+    // Stop the container
+    let _ = Command::new("lxc-stop")
+        .args(["-n", container])
+        .output();
+
+    if chpasswd.status.success() {
+        Ok("Root password set".to_string())
+    } else {
+        Err(format!("Failed to set password: {}", String::from_utf8_lossy(&chpasswd.stderr)))
+    }
+}
+
 /// Start an LXC container
 pub fn lxc_start(container: &str) -> Result<String, String> {
     ensure_lxc_bridge();
