@@ -536,6 +536,9 @@ pub struct DockerCreateRequest {
     pub memory_limit: Option<String>,
     pub cpu_cores: Option<String>,
     pub storage_limit: Option<String>,
+    /// Volume mounts: ["host:container", "volume_name:/data", ...]
+    #[serde(default)]
+    pub volumes: Vec<String>,
 }
 
 /// POST /api/containers/docker/create — create a Docker container
@@ -551,7 +554,7 @@ pub async fn docker_create(
     let memory = body.memory_limit.as_deref();
     let cpus = body.cpu_cores.as_deref();
     let storage = body.storage_limit.as_deref();
-    match containers::docker_create(&body.name, &body.image, ports, env, wolfnet_ip, memory, cpus, storage) {
+    match containers::docker_create(&body.name, &body.image, ports, env, wolfnet_ip, memory, cpus, storage, &body.volumes) {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
@@ -862,6 +865,75 @@ pub async fn lxc_clone(
     }
 }
 
+// ─── Mount / Volume Management Endpoints ───
+
+/// GET /api/containers/docker/{id}/volumes — list Docker container volumes
+pub async fn docker_volumes(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let mounts = containers::docker_list_volumes(&id);
+    HttpResponse::Ok().json(mounts)
+}
+
+/// GET /api/containers/lxc/{name}/mounts — list LXC container bind mounts
+pub async fn lxc_mounts(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    let mounts = containers::lxc_list_mounts(&name);
+    HttpResponse::Ok().json(mounts)
+}
+
+#[derive(Deserialize)]
+pub struct AddMountRequest {
+    pub host_path: String,
+    pub container_path: String,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// POST /api/containers/lxc/{name}/mounts — add bind mount to LXC container
+pub async fn lxc_add_mount(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<AddMountRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match containers::lxc_add_mount(&name, &body.host_path, &body.container_path, body.read_only) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RemoveMountRequest {
+    pub host_path: String,
+}
+
+/// DELETE /api/containers/lxc/{name}/mounts — remove bind mount from LXC container
+pub async fn lxc_remove_mount(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<RemoveMountRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match containers::lxc_remove_mount(&name, &body.host_path) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// POST /api/containers/docker/import — receive a migrated container image
 /// Accepts the tar file as raw body bytes, container name via query param
 pub async fn docker_import(
@@ -1001,6 +1073,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/docker/{id}/action", web::post().to(docker_action))
         .route("/api/containers/docker/{id}/clone", web::post().to(docker_clone))
         .route("/api/containers/docker/{id}/migrate", web::post().to(docker_migrate))
+        .route("/api/containers/docker/{id}/volumes", web::get().to(docker_volumes))
         .route("/api/containers/docker/import", web::post().to(docker_import))
         // LXC
         .route("/api/containers/lxc", web::get().to(lxc_list))
@@ -1012,6 +1085,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/lxc/{name}/config", web::put().to(lxc_save_config))
         .route("/api/containers/lxc/{name}/action", web::post().to(lxc_action))
         .route("/api/containers/lxc/{name}/clone", web::post().to(lxc_clone))
+        .route("/api/containers/lxc/{name}/mounts", web::get().to(lxc_mounts))
+        .route("/api/containers/lxc/{name}/mounts", web::post().to(lxc_add_mount))
+        .route("/api/containers/lxc/{name}/mounts", web::delete().to(lxc_remove_mount))
         // WolfNet
         .route("/api/wolfnet/status", web::get().to(wolfnet_network_status))
         // Console WebSocket

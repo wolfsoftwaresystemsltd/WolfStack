@@ -1,9 +1,45 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{info, error};
+use tracing::{info, error, warn};
 use rand::Rng;
+
+/// A storage volume that can be attached to a VM
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StorageVolume {
+    /// Volume name (used for filename)
+    pub name: String,
+    /// Size in GB
+    pub size_gb: u32,
+    /// Storage path (directory where the volume file lives)
+    pub storage_path: String,
+    /// Disk format (qcow2, raw)
+    #[serde(default = "default_format")]
+    pub format: String,
+    /// Bus type (virtio, scsi, ide)
+    #[serde(default = "default_bus")]
+    pub bus: String,
+}
+
+fn default_format() -> String { "qcow2".to_string() }
+fn default_bus() -> String { "virtio".to_string() }
+
+/// Summary of a storage location available on the host
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StorageLocation {
+    pub path: String,
+    pub total_gb: u64,
+    pub available_gb: u64,
+    pub fs_type: String,
+}
+
+impl StorageVolume {
+    /// Full path to the volume file
+    pub fn file_path(&self) -> PathBuf {
+        Path::new(&self.storage_path).join(format!("{}.{}", self.name, self.format))
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct VmConfig {
@@ -20,6 +56,12 @@ pub struct VmConfig {
     pub auto_start: bool,
     #[serde(default)]
     pub wolfnet_ip: Option<String>,
+    /// Storage path for the OS disk (defaults to /var/lib/wolfstack/vms)
+    #[serde(default)]
+    pub storage_path: Option<String>,
+    /// Extra disks attached to this VM
+    #[serde(default)]
+    pub extra_disks: Vec<StorageVolume>,
 }
 
 impl VmConfig {
@@ -36,6 +78,8 @@ impl VmConfig {
             mac_address: Some(generate_mac()),
             auto_start: false,
             wolfnet_ip: None,
+            storage_path: None,
+            extra_disks: Vec::new(),
         }
     }
 }
@@ -91,6 +135,15 @@ impl VmManager {
         self.base_dir.join(format!("{}.qcow2", name))
     }
 
+    /// Get the OS disk path, respecting custom storage_path if set
+    fn vm_os_disk_path(&self, config: &VmConfig) -> PathBuf {
+        if let Some(ref sp) = config.storage_path {
+            Path::new(sp).join(format!("{}.qcow2", config.name))
+        } else {
+            self.vm_disk_path(&config.name)
+        }
+    }
+
     /// TAP interface name for a VM
     fn tap_name(name: &str) -> String {
         // TAP names limited to 15 chars
@@ -122,9 +175,14 @@ impl VmManager {
             }
         }
 
-        let disk_path = self.vm_disk_path(&config.name);
+        // Ensure storage path exists
+        if let Some(ref sp) = config.storage_path {
+            fs::create_dir_all(sp).map_err(|e| format!("Failed to create storage path: {}", e))?;
+        }
+
+        let disk_path = self.vm_os_disk_path(&config);
         
-        // Create disk
+        // Create OS disk
         let output = Command::new("qemu-img")
             .arg("create")
             .arg("-f")
@@ -138,12 +196,188 @@ impl VmManager {
              return Err(String::from_utf8_lossy(&output.stderr).to_string());
         }
 
+        // Create any extra disks specified at creation time
+        for vol in &config.extra_disks {
+            self.create_volume_file(vol)?;
+        }
+
         // Save config
         let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
         fs::write(self.vm_config_path(&config.name), json).map_err(|e| e.to_string())?;
         
-        info!("Created VM: {} (WolfNet: {:?})", config.name, config.wolfnet_ip);
+        info!("Created VM: {} (WolfNet: {:?}, disks: {})", 
+              config.name, config.wolfnet_ip, 1 + config.extra_disks.len());
         Ok(())
+    }
+
+    /// Create a volume's disk file
+    fn create_volume_file(&self, vol: &StorageVolume) -> Result<(), String> {
+        fs::create_dir_all(&vol.storage_path)
+            .map_err(|e| format!("Failed to create storage dir {}: {}", vol.storage_path, e))?;
+
+        let path = vol.file_path();
+        if path.exists() {
+            return Err(format!("Volume file already exists: {}", path.display()));
+        }
+
+        let output = Command::new("qemu-img")
+            .args(["create", "-f", &vol.format, &path.to_string_lossy(), &format!("{}G", vol.size_gb)])
+            .output()
+            .map_err(|e| format!("qemu-img create failed: {}", e))?;
+
+        if !output.status.success() {
+            return Err(format!("Failed to create volume: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+
+        info!("Created volume: {} ({}G, {})", vol.name, vol.size_gb, path.display());
+        Ok(())
+    }
+
+    /// Add a new storage volume to an existing VM (must be stopped)
+    pub fn add_volume(&self, vm_name: &str, vol_name: &str, size_gb: u32, 
+                      storage_path: Option<&str>, format: Option<&str>,
+                      bus: Option<&str>) -> Result<(), String> {
+        if self.check_running(vm_name) {
+            return Err("Cannot add volume while VM is running. Stop it first.".to_string());
+        }
+
+        let config_path = self.vm_config_path(vm_name);
+        let content = fs::read_to_string(&config_path)
+            .map_err(|e| format!("VM not found: {}", e))?;
+        let mut config: VmConfig = serde_json::from_str(&content)
+            .map_err(|e| format!("Invalid config: {}", e))?;
+
+        // Check for duplicate volume name
+        if config.extra_disks.iter().any(|d| d.name == vol_name) {
+            return Err(format!("Volume '{}' already exists on VM '{}'", vol_name, vm_name));
+        }
+
+        // Default storage path: same dir as the VM base
+        let sp = storage_path
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.base_dir.to_string_lossy().to_string());
+
+        let vol = StorageVolume {
+            name: format!("{}-{}", vm_name, vol_name),
+            size_gb,
+            storage_path: sp,
+            format: format.unwrap_or("qcow2").to_string(),
+            bus: bus.unwrap_or("virtio").to_string(),
+        };
+
+        self.create_volume_file(&vol)?;
+        config.extra_disks.push(vol);
+
+        let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+        fs::write(&config_path, json).map_err(|e| e.to_string())?;
+
+        info!("Added volume '{}' ({}G) to VM '{}'", vol_name, size_gb, vm_name);
+        Ok(())
+    }
+
+    /// Remove a storage volume from a VM (must be stopped)
+    pub fn remove_volume(&self, vm_name: &str, vol_name: &str, delete_file: bool) -> Result<(), String> {
+        if self.check_running(vm_name) {
+            return Err("Cannot remove volume while VM is running. Stop it first.".to_string());
+        }
+
+        let config_path = self.vm_config_path(vm_name);
+        let content = fs::read_to_string(&config_path)
+            .map_err(|e| format!("VM not found: {}", e))?;
+        let mut config: VmConfig = serde_json::from_str(&content)
+            .map_err(|e| format!("Invalid config: {}", e))?;
+
+        let full_name = format!("{}-{}", vm_name, vol_name);
+        let idx = config.extra_disks.iter().position(|d| d.name == full_name || d.name == vol_name)
+            .ok_or_else(|| format!("Volume '{}' not found on VM '{}'", vol_name, vm_name))?;
+
+        let vol = config.extra_disks.remove(idx);
+
+        if delete_file {
+            let path = vol.file_path();
+            if path.exists() {
+                fs::remove_file(&path)
+                    .map_err(|e| format!("Failed to delete volume file: {}", e))?;
+                info!("Deleted volume file: {}", path.display());
+            }
+        }
+
+        let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+        fs::write(&config_path, json).map_err(|e| e.to_string())?;
+
+        info!("Removed volume '{}' from VM '{}'", vol_name, vm_name);
+        Ok(())
+    }
+
+    /// Resize a storage volume (grow only, must be stopped)
+    pub fn resize_volume(&self, vm_name: &str, vol_name: &str, new_size_gb: u32) -> Result<(), String> {
+        if self.check_running(vm_name) {
+            return Err("Cannot resize volume while VM is running. Stop it first.".to_string());
+        }
+
+        let config_path = self.vm_config_path(vm_name);
+        let content = fs::read_to_string(&config_path)
+            .map_err(|e| format!("VM not found: {}", e))?;
+        let mut config: VmConfig = serde_json::from_str(&content)
+            .map_err(|e| format!("Invalid config: {}", e))?;
+
+        let full_name = format!("{}-{}", vm_name, vol_name);
+        let vol = config.extra_disks.iter_mut()
+            .find(|d| d.name == full_name || d.name == vol_name)
+            .ok_or_else(|| format!("Volume '{}' not found", vol_name))?;
+
+        if new_size_gb <= vol.size_gb {
+            return Err(format!("New size must be larger than current size ({}G)", vol.size_gb));
+        }
+
+        let path = vol.file_path();
+        let output = Command::new("qemu-img")
+            .args(["resize", &path.to_string_lossy(), &format!("{}G", new_size_gb)])
+            .output()
+            .map_err(|e| format!("qemu-img resize failed: {}", e))?;
+
+        if !output.status.success() {
+            return Err(format!("Resize failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+
+        vol.size_gb = new_size_gb;
+
+        let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+        fs::write(&config_path, json).map_err(|e| e.to_string())?;
+
+        info!("Resized volume '{}' on VM '{}' to {}G", vol_name, vm_name, new_size_gb);
+        Ok(())
+    }
+
+    /// List available storage locations (mounted filesystems with usable space)
+    pub fn list_storage_locations(&self) -> Vec<StorageLocation> {
+        let mut locations = Vec::new();
+        if let Ok(output) = Command::new("df").args(["-BG", "--output=target,size,avail,fstype"]).output() {
+            if let Ok(text) = String::from_utf8(output.stdout) {
+                for line in text.lines().skip(1) {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 4 {
+                        let mount = parts[0];
+                        let total = parts[1].trim_end_matches('G').parse::<u64>().unwrap_or(0);
+                        let avail = parts[2].trim_end_matches('G').parse::<u64>().unwrap_or(0);
+                        let fstype = parts[3];
+                        // Skip pseudo-filesystems
+                        if mount.starts_with('/') && !mount.starts_with("/snap") 
+                           && !mount.starts_with("/sys") && !mount.starts_with("/proc")
+                           && !mount.starts_with("/dev") && !mount.starts_with("/run")
+                           && total > 0 {
+                            locations.push(StorageLocation {
+                                path: mount.to_string(),
+                                total_gb: total,
+                                available_gb: avail,
+                                fs_type: fstype.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        locations
     }
 
     /// Update VM settings (must be stopped)
@@ -267,21 +501,49 @@ impl VmManager {
             info!("KVM not available for VM {} — using software emulation (slower)", name);
         }
 
-        let disk_path = self.vm_disk_path(name);
+        let disk_path = self.vm_os_disk_path(&config);
         if !disk_path.exists() {
-            let msg = format!("Disk image not found: {}", disk_path.display());
-            write_log(&msg);
-            return Err(msg);
+            // Fall back to default path for backwards compat
+            let fallback = self.vm_disk_path(name);
+            if !fallback.exists() {
+                let msg = format!("Disk image not found: {}", disk_path.display());
+                write_log(&msg);
+                return Err(msg);
+            }
+            warn!("OS disk not at configured path, using fallback: {}", fallback.display());
         }
-        write_log(&format!("Disk: {} (exists)", disk_path.display()));
+        let actual_disk = if disk_path.exists() { &disk_path } else { &self.vm_disk_path(name) };
+        write_log(&format!("OS Disk: {} (exists)", actual_disk.display()));
 
         let mut cmd = Command::new("qemu-system-x86_64");
         cmd.arg("-name").arg(name)
            .arg("-m").arg(format!("{}M", config.memory_mb))
            .arg("-smp").arg(format!("{}", config.cpus))
-           .arg("-drive").arg(format!("file={},format=qcow2,if=virtio", disk_path.display()))
+           .arg("-drive").arg(format!("file={},format=qcow2,if=virtio,index=0", actual_disk.display()))
            .arg("-vnc").arg(&vnc_arg)
            .arg("-daemonize");
+
+        // Attach extra storage volumes
+        for (i, vol) in config.extra_disks.iter().enumerate() {
+            let vol_path = vol.file_path();
+            if !vol_path.exists() {
+                write_log(&format!("WARNING: Volume '{}' not found at {}, skipping", vol.name, vol_path.display()));
+                warn!("Volume file not found: {}", vol_path.display());
+                continue;
+            }
+            let idx = i + 1; // OS disk is index 0
+            let drive_arg = match vol.bus.as_str() {
+                "scsi" => format!("file={},format={},if=none,id=disk{}", vol_path.display(), vol.format, idx),
+                "ide" => format!("file={},format={},if=ide,index={}", vol_path.display(), vol.format, idx),
+                _ => format!("file={},format={},if=virtio,index={}", vol_path.display(), vol.format, idx),
+            };
+            cmd.arg("-drive").arg(&drive_arg);
+            // For SCSI, also add the device
+            if vol.bus == "scsi" {
+                cmd.arg("-device").arg(format!("scsi-hd,drive=disk{}", idx));
+            }
+            write_log(&format!("Extra disk {}: {} ({}G, {})", idx, vol.name, vol.size_gb, vol.bus));
+        }
 
         // KVM or software emulation
         if kvm_available {
@@ -539,8 +801,24 @@ impl VmManager {
             let _ = self.stop_vm(name);
         }
 
+        // Load config to find extra disk files to clean up
+        if let Some(config) = self.get_vm(name) {
+            // Delete OS disk at custom path if applicable
+            let os_disk = self.vm_os_disk_path(&config);
+            let _ = fs::remove_file(&os_disk);
+
+            // Delete all extra volume files
+            for vol in &config.extra_disks {
+                let path = vol.file_path();
+                if path.exists() {
+                    let _ = fs::remove_file(&path);
+                    info!("Deleted volume file: {}", path.display());
+                }
+            }
+        }
+
         let _ = fs::remove_file(self.vm_config_path(name));
-        let _ = fs::remove_file(self.vm_disk_path(name));
+        let _ = fs::remove_file(self.vm_disk_path(name));  // fallback default path
         let _ = fs::remove_file(self.base_dir.join(format!("{}.runtime.json", name)));
         let _ = fs::remove_file(self.base_dir.join(format!("{}.log", name)));
         

@@ -678,7 +678,7 @@ function renderVms(vms) {
                 <td><strong>${vm.name}</strong>${vm.iso_path ? `<br><small style="color:var(--text-muted);">💿 ${vm.iso_path.split('/').pop()}</small>` : ''}</td>
                 <td><span style="color:${statusColor}">● ${statusText}</span></td>
                 <td>${vm.cpus} vCPU / ${vm.memory_mb} MB</td>
-                <td>${vm.disk_size_gb} GB</td>
+                <td>${vm.disk_size_gb} GiB${(vm.extra_disks && vm.extra_disks.length > 0) ? ` <span class="badge" style="font-size:10px;">+${vm.extra_disks.length} vol${vm.extra_disks.length > 1 ? 's' : ''}</span>` : ''}</td>
                 <td>${wolfnetIp !== '—' ? `<span class="badge" style="background:var(--accent-bg); color:var(--accent);">${wolfnetIp}</span>` : '—'}</td>
                 <td>${vncText}</td>
                 <td>
@@ -696,7 +696,96 @@ function renderVms(vms) {
     }).join('');
 }
 
-function showVmCreate() {
+// ─── VM Storage Management ───
+let vmStorageLocations = [];
+let vmExtraDiskCounter = 0;
+
+async function fetchStorageLocations() {
+    try {
+        const resp = await fetch(apiUrl('/api/vms/storage'));
+        if (resp.ok) {
+            vmStorageLocations = await resp.json();
+        }
+    } catch (e) {
+        console.error('Failed to fetch storage locations:', e);
+    }
+}
+
+function buildStorageOptions(selectedPath) {
+    let html = '<option value="">/var/lib/wolfstack/vms (default)</option>';
+    for (const loc of vmStorageLocations) {
+        const label = `${loc.path} (${loc.available_gb}G free, ${loc.fs_type})`;
+        const sel = loc.path === selectedPath ? ' selected' : '';
+        html += `<option value="${loc.path}"${sel}>${label}</option>`;
+    }
+    return html;
+}
+
+function addVmDiskRow() {
+    vmExtraDiskCounter++;
+    const container = document.getElementById('vm-extra-disks-container');
+    const id = vmExtraDiskCounter;
+    const row = document.createElement('div');
+    row.id = `vm-extra-disk-${id}`;
+    row.style.cssText = 'padding:10px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; margin-bottom:8px;';
+    row.innerHTML = `
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-weight:600; font-size:13px; color:var(--text-primary);">Disk ${id}</span>
+            </div>
+            <button class="btn btn-sm btn-danger" onclick="removeVmDiskRow(${id})" style="font-size:11px; padding:2px 8px;">✕</button>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:6px;">
+            <div>
+                <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Name</label>
+                <input type="text" class="form-control vm-disk-name" value="data${id}" style="font-size:13px;">
+            </div>
+            <div>
+                <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Size (GiB)</label>
+                <input type="number" class="form-control vm-disk-size" value="10" min="1" style="font-size:13px;">
+            </div>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
+            <div>
+                <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Storage</label>
+                <select class="form-control vm-disk-storage" style="font-size:13px;">${buildStorageOptions('')}</select>
+            </div>
+            <div>
+                <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Format</label>
+                <select class="form-control vm-disk-format" style="font-size:13px;">
+                    <option value="qcow2" selected>qcow2</option>
+                    <option value="raw">raw</option>
+                </select>
+            </div>
+            <div>
+                <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Bus</label>
+                <select class="form-control vm-disk-bus" style="font-size:13px;">
+                    <option value="virtio" selected>VirtIO</option>
+                    <option value="scsi">SCSI</option>
+                    <option value="ide">IDE</option>
+                </select>
+            </div>
+        </div>
+    `;
+    container.appendChild(row);
+}
+
+function removeVmDiskRow(id) {
+    const row = document.getElementById(`vm-extra-disk-${id}`);
+    if (row) row.remove();
+}
+
+async function showVmCreate() {
+    // Fetch storage locations before showing the modal
+    await fetchStorageLocations();
+    // Populate OS disk storage dropdown
+    const storageSelect = document.getElementById('new-vm-storage');
+    if (storageSelect) {
+        storageSelect.innerHTML = buildStorageOptions('');
+    }
+    // Clear extra disks from previous use
+    document.getElementById('vm-extra-disks-container').innerHTML = '';
+    vmExtraDiskCounter = 0;
     document.getElementById('create-vm-modal').classList.add('active');
 }
 
@@ -711,8 +800,23 @@ async function createVm() {
     const disk = parseInt(document.getElementById('new-vm-disk').value);
     const iso = document.getElementById('new-vm-iso').value.trim() || null;
     const wolfnetIp = document.getElementById('new-vm-wolfnet-ip').value.trim() || null;
+    const storagePath = document.getElementById('new-vm-storage').value || null;
 
     if (!name) { showToast('Enter VM name', 'error'); return; }
+
+    // Collect extra disks
+    const extraDisks = [];
+    const diskRows = document.getElementById('vm-extra-disks-container').children;
+    for (const row of diskRows) {
+        const diskName = row.querySelector('.vm-disk-name')?.value.trim();
+        const diskSize = parseInt(row.querySelector('.vm-disk-size')?.value) || 10;
+        const diskStorage = row.querySelector('.vm-disk-storage')?.value || '/var/lib/wolfstack/vms';
+        const diskFormat = row.querySelector('.vm-disk-format')?.value || 'qcow2';
+        const diskBus = row.querySelector('.vm-disk-bus')?.value || 'virtio';
+        if (diskName) {
+            extraDisks.push({ name: diskName, size_gb: diskSize, storage_path: diskStorage, format: diskFormat, bus: diskBus });
+        }
+    }
 
     try {
         showToast('Creating VM...', 'info');
@@ -725,7 +829,9 @@ async function createVm() {
                 memory_mb: memory,
                 disk_size_gb: disk,
                 iso_path: iso,
-                wolfnet_ip: wolfnetIp
+                wolfnet_ip: wolfnetIp,
+                storage_path: storagePath,
+                extra_disks: extraDisks
             })
         });
         const data = await resp.json();
@@ -1170,6 +1276,7 @@ function renderDockerContainers(containers) {
                     <button class="btn btn-sm" style="margin:2px;color:#ef4444;" onclick="dockerAction('${c.name}', 'remove')" title="Remove">🗑</button>
                 `}
                 <button class="btn btn-sm" style="margin:2px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs">📜</button>
+                <button class="btn btn-sm" style="margin:2px;" onclick="viewDockerVolumes('${c.name}')" title="Volumes">📁</button>
                 <button class="btn btn-sm" style="margin:2px;" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button>
                 <button class="btn btn-sm" style="margin:2px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>
             </td>
@@ -1282,6 +1389,54 @@ async function dockerAction(container, action) {
         }
     } catch (e) {
         showToast(`Failed: ${e.message}`, 'error');
+    }
+}
+
+async function viewDockerVolumes(container) {
+    const modal = document.getElementById('container-detail-modal');
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+
+    title.textContent = `${container} — Volumes`;
+    body.innerHTML = '<p style="color:var(--text-muted);">Loading volumes...</p>';
+    modal.classList.add('active');
+
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/docker/${encodeURIComponent(container)}/volumes`));
+        const mounts = await resp.json();
+
+        if (mounts.length === 0) {
+            body.innerHTML = `
+                <div style="text-align:center; padding:2rem; color:var(--text-muted);">
+                    <div style="font-size:32px; margin-bottom:8px;">📁</div>
+                    <p>No volumes mounted on this container.</p>
+                    <p style="font-size:12px;">Add volumes when creating the container using the Volumes section.</p>
+                </div>
+            `;
+        } else {
+            body.innerHTML = `
+                <div style="padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
+                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+                        <span>📁</span>
+                        <strong style="font-size:13px;">Volume Mounts (${mounts.length})</strong>
+                    </div>
+                    ${mounts.map(m => `
+                        <div style="display:flex; align-items:center; gap:8px; padding:8px; margin-bottom:4px; background:var(--bg-primary); border-radius:6px; border:1px solid var(--border);">
+                            <span class="badge" style="font-size:10px; min-width:45px; text-align:center;">${m.mount_type}</span>
+                            <code style="flex:1; font-size:12px; color:var(--accent); word-break:break-all;">${m.host_path}</code>
+                            <span style="color:var(--text-muted); font-size:12px;">→</span>
+                            <code style="flex:1; font-size:12px; color:var(--text-primary);">${m.container_path}</code>
+                            ${m.read_only ? '<span class="badge" style="font-size:10px; background:var(--warning-bg); color:var(--warning);">RO</span>' : '<span class="badge" style="font-size:10px;">RW</span>'}
+                        </div>
+                    `).join('')}
+                </div>
+                <div style="font-size:11px; color:var(--text-muted); margin-top:8px;">
+                    ⚠️ Docker volumes can only be modified by recreating the container.
+                </div>
+            `;
+        }
+    } catch (e) {
+        body.innerHTML = `<p style="color:#ef4444;">Failed to load volumes: ${e.message}</p>`;
     }
 }
 
@@ -1424,7 +1579,35 @@ async function openLxcSettings(name) {
         const data = await resp.json();
         const config = data.config || '';
 
+        // Also fetch current mounts
+        let mountsHtml = '';
+        try {
+            const mountResp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`));
+            const mounts = await mountResp.json();
+            if (mounts.length > 0) {
+                mountsHtml = `
+                    <div style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
+                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                            <span>📁</span>
+                            <strong style="font-size:13px;">Bind Mounts (${mounts.length})</strong>
+                        </div>
+                        ${mounts.map(m => `
+                            <div style="display:flex; align-items:center; gap:8px; padding:6px 8px; margin-bottom:4px; background:var(--bg-primary); border-radius:6px; border:1px solid var(--border);">
+                                <code style="flex:1; font-size:12px; color:var(--accent);">${m.host_path}</code>
+                                <span style="color:var(--text-muted); font-size:12px;">→</span>
+                                <code style="flex:1; font-size:12px; color:var(--text-primary);">${m.container_path}</code>
+                                ${m.read_only ? '<span class="badge" style="font-size:10px;">RO</span>' : ''}
+                                <button class="btn btn-sm" style="font-size:11px; padding:2px 6px; color:var(--danger);"
+                                    onclick="removeLxcMount('${name}', '${m.host_path.replace(/'/g, "\\'")}')" title="Remove mount">✕</button>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+            }
+        } catch (e) { /* ignore mount fetch errors */ }
+
         body.innerHTML = `
+            ${mountsHtml}
             <div style="margin-bottom: 12px;">
                 <div style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
                     <button class="btn btn-sm" onclick="addMountPoint('${name}')">📁 Add Mount Point</button>
@@ -1449,22 +1632,77 @@ async function openLxcSettings(name) {
     }
 }
 
-function addMountPoint(name) {
+async function addMountPoint(name) {
     const src = prompt('Host path (e.g. /mnt/data):');
     if (!src) return;
     const dest = prompt('Container path (e.g. /mnt/data):', src);
     if (!dest) return;
-    const editor = document.getElementById('lxc-config-editor');
-    editor.value += `\nlxc.mount.entry = ${src} ${dest.replace(/^\//, '')} none bind,create=dir 0 0\n`;
+    // Use the API to add the mount properly
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host_path: src, container_path: dest, read_only: false }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Mount added', 'success');
+            // Refresh the config editor
+            openLxcSettings(name);
+        } else {
+            showToast(data.error || 'Failed to add mount', 'error');
+        }
+    } catch (e) {
+        // Fallback to raw config
+        const editor = document.getElementById('lxc-config-editor');
+        editor.value += `\nlxc.mount.entry = ${src} ${dest.replace(/^\//, '')} none bind,create=dir 0 0\n`;
+        showToast('Added to config (save to apply)', 'info');
+    }
 }
 
-function addWolfDiskMount(name) {
+async function addWolfDiskMount(name) {
     const src = prompt('WolfDisk mount path on host (e.g. /mnt/wolfdisk):', '/mnt/wolfdisk');
     if (!src) return;
     const dest = prompt('Mount path inside container:', '/mnt/shared');
     if (!dest) return;
-    const editor = document.getElementById('lxc-config-editor');
-    editor.value += `\n# WolfDisk shared folder\nlxc.mount.entry = ${src} ${dest.replace(/^\//, '')} none bind,create=dir 0 0\n`;
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host_path: src, container_path: dest, read_only: false }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'WolfDisk mount added', 'success');
+            openLxcSettings(name);
+        } else {
+            showToast(data.error || 'Failed to add mount', 'error');
+        }
+    } catch (e) {
+        const editor = document.getElementById('lxc-config-editor');
+        editor.value += `\n# WolfDisk shared folder\nlxc.mount.entry = ${src} ${dest.replace(/^\//, '')} none bind,create=dir 0 0\n`;
+        showToast('Added to config (save to apply)', 'info');
+    }
+}
+
+async function removeLxcMount(name, hostPath) {
+    if (!confirm(`Remove mount ${hostPath}?`)) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`), {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host_path: hostPath }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Mount removed', 'success');
+            openLxcSettings(name);
+        } else {
+            showToast(data.error || 'Failed to remove mount', 'error');
+        }
+    } catch (e) {
+        showToast(`Remove failed: ${e.message}`, 'error');
+    }
 }
 
 function addMemoryLimit(name) {
@@ -1806,6 +2044,17 @@ function selectDockerImage(imageName) {
                     </select>
                 </div>
             </div>
+            <div style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span>📁</span>
+                        <strong style="font-size:13px;">Volumes / Bind Mounts</strong>
+                    </div>
+                    <button class="btn btn-sm" onclick="addDockerVolumeRow()" style="font-size:11px;">➕ Add Mount</button>
+                </div>
+                <div id="docker-volumes-list" style="display:flex; flex-direction:column; gap:6px;"></div>
+                <div style="font-size:11px; color:var(--text-muted); margin-top:6px;">Map host directories or named volumes into the container</div>
+            </div>
             <div id="docker-wolfnet-section" style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
                 <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
                     <span>🐺</span>
@@ -1861,6 +2110,20 @@ async function createDockerContainer() {
     const cpu_cores = document.getElementById('docker-create-cpus')?.value || '';
     const storage_limit = document.getElementById('docker-create-storage')?.value || '';
 
+    // Collect volume mounts
+    const volumeRows = document.querySelectorAll('.docker-volume-row');
+    const volumes = [];
+    volumeRows.forEach(row => {
+        const host = row.querySelector('.docker-vol-host')?.value?.trim();
+        const container = row.querySelector('.docker-vol-container')?.value?.trim();
+        const ro = row.querySelector('.docker-vol-ro')?.checked;
+        if (host && container) {
+            let mount = `${host}:${container}`;
+            if (ro) mount += ':ro';
+            volumes.push(mount);
+        }
+    });
+
     if (!name || !image) {
         showToast('Please enter a container name and image', 'error');
         return;
@@ -1890,7 +2153,7 @@ async function createDockerContainer() {
         const createResp = await fetch(apiUrl('/api/containers/docker/create'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, image, ports, env, wolfnet_ip, memory_limit, cpu_cores, storage_limit }),
+            body: JSON.stringify({ name, image, ports, env, wolfnet_ip, memory_limit, cpu_cores, storage_limit, volumes }),
         });
         const createData = await createResp.json();
         if (createResp.ok) {
@@ -1902,6 +2165,55 @@ async function createDockerContainer() {
     } catch (e) {
         showToast(`Create failed: ${e.message}`, 'error');
     }
+}
+// ─── Docker / LXC Volume Mount Helpers ───
+
+function addDockerVolumeRow() {
+    const list = document.getElementById('docker-volumes-list');
+    if (!list) return;
+    const row = document.createElement('div');
+    row.className = 'docker-volume-row';
+    row.style.cssText = 'display:flex; gap:6px; align-items:center;';
+    row.innerHTML = `
+        <input class="docker-vol-host" type="text" placeholder="/host/path or volume-name"
+            style="flex:2; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:12px;">
+        <span style="color:var(--text-muted); font-weight:600;">→</span>
+        <input class="docker-vol-container" type="text" placeholder="/container/path"
+            style="flex:2; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:12px;">
+        <label style="display:flex; align-items:center; gap:3px; font-size:11px; color:var(--text-muted); white-space:nowrap; cursor:pointer;">
+            <input class="docker-vol-ro" type="checkbox" style="margin:0;"> RO
+        </label>
+        <button class="btn btn-sm" onclick="removeDockerVolumeRow(this)" style="font-size:11px; padding:4px 8px; color:var(--danger);">✕</button>
+    `;
+    list.appendChild(row);
+}
+
+function removeDockerVolumeRow(btn) {
+    btn.closest('.docker-volume-row')?.remove();
+}
+
+function addLxcMountRow() {
+    const list = document.getElementById('lxc-mounts-list');
+    if (!list) return;
+    const row = document.createElement('div');
+    row.className = 'lxc-mount-row';
+    row.style.cssText = 'display:flex; gap:6px; align-items:center;';
+    row.innerHTML = `
+        <input class="lxc-mount-host" type="text" placeholder="/host/path"
+            style="flex:2; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:12px;">
+        <span style="color:var(--text-muted); font-weight:600;">→</span>
+        <input class="lxc-mount-container" type="text" placeholder="/container/path"
+            style="flex:2; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:12px;">
+        <label style="display:flex; align-items:center; gap:3px; font-size:11px; color:var(--text-muted); white-space:nowrap; cursor:pointer;">
+            <input class="lxc-mount-ro" type="checkbox" style="margin:0;"> RO
+        </label>
+        <button class="btn btn-sm" onclick="removeLxcMountRow(this)" style="font-size:11px; padding:4px 8px; color:var(--danger);">✕</button>
+    `;
+    list.appendChild(row);
+}
+
+function removeLxcMountRow(btn) {
+    btn.closest('.lxc-mount-row')?.remove();
 }
 
 // ─── LXC Container Creation ───
@@ -2075,6 +2387,17 @@ function selectLxcTemplate(distro, release, arch, variant) {
                     </select>
                 </div>
             </div>
+            <div style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span>📁</span>
+                        <strong style="font-size:13px;">Bind Mounts</strong>
+                    </div>
+                    <button class="btn btn-sm" onclick="addLxcMountRow()" style="font-size:11px;">➕ Add Mount</button>
+                </div>
+                <div id="lxc-mounts-list" style="display:flex; flex-direction:column; gap:6px;"></div>
+                <div style="font-size:11px; color:var(--text-muted); margin-top:6px;">Map host directories into the container (applied on start, requires restart)</div>
+            </div>
             <div id="lxc-wolfnet-section" style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
                 <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
                     <span>🐺</span>
@@ -2157,6 +2480,18 @@ async function createLxcContainer() {
     const memory_limit = document.getElementById('lxc-create-memory')?.value || '';
     const cpu_cores = document.getElementById('lxc-create-cpus')?.value || '';
 
+    // Collect bind mounts
+    const mountRows = document.querySelectorAll('.lxc-mount-row');
+    const mounts = [];
+    mountRows.forEach(row => {
+        const host = row.querySelector('.lxc-mount-host')?.value?.trim();
+        const container = row.querySelector('.lxc-mount-container')?.value?.trim();
+        const ro = row.querySelector('.lxc-mount-ro')?.checked || false;
+        if (host && container) {
+            mounts.push({ host_path: host, container_path: container, read_only: ro });
+        }
+    });
+
     if (!name || !distribution || !release || !architecture) {
         showToast('Please select a template and enter a container name', 'error');
         return;
@@ -2178,7 +2513,20 @@ async function createLxcContainer() {
         });
         const data = await resp.json();
         if (resp.ok) {
-            showToast(data.message || `Container '${name}' created!`, 'success');
+            // Apply bind mounts after creation
+            for (const mount of mounts) {
+                try {
+                    await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(mount),
+                    });
+                } catch (e) {
+                    showToast(`Mount warning: ${e.message}`, 'warning');
+                }
+            }
+            const mountMsg = mounts.length > 0 ? ` with ${mounts.length} mount(s)` : '';
+            showToast(data.message || `Container '${name}' created${mountMsg}!`, 'success');
             setTimeout(loadLxcContainers, 500);
         } else {
             showToast(data.error || 'Failed to create container', 'error');
@@ -2261,8 +2609,43 @@ async function showVmSettings(name) {
     modal.classList.add('active');
 
     try {
-        const resp = await fetch(apiUrl(`/api/vms/${name}`));
-        const vm = await resp.json();
+        const [vmResp, storageResp] = await Promise.all([
+            fetch(apiUrl(`/api/vms/${name}`)),
+            fetch(apiUrl('/api/vms/storage'))
+        ]);
+        const vm = await vmResp.json();
+        const storageLocations = storageResp.ok ? await storageResp.json() : [];
+
+        // Build storage options for the add-volume dropdown
+        let storageOpts = '<option value="">/var/lib/wolfstack/vms (default)</option>';
+        for (const loc of storageLocations) {
+            storageOpts += `<option value="${loc.path}">${loc.path} (${loc.available_gb}G free)</option>`;
+        }
+
+        // Build volumes list
+        const volumes = vm.extra_disks || [];
+        let volumesHtml = '';
+        if (volumes.length > 0) {
+            volumesHtml = volumes.map((vol, i) => `
+                <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 10px; 
+                    background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; margin-bottom:6px;">
+                    <div style="flex:1;">
+                        <span style="font-weight:600; font-size:13px;">${vol.name}</span>
+                        <span style="color:var(--text-muted); font-size:12px; margin-left:8px;">
+                            ${vol.size_gb}G · ${vol.format} · ${vol.bus} · ${vol.storage_path}
+                        </span>
+                    </div>
+                    <div style="display:flex; gap:4px;">
+                        <button class="btn btn-sm" onclick="resizeVmVolume('${name}', '${vol.name}', ${vol.size_gb})" 
+                            style="font-size:11px; padding:2px 8px;" title="Resize">📐</button>
+                        <button class="btn btn-sm btn-danger" onclick="removeVmVolume('${name}', '${vol.name}')" 
+                            style="font-size:11px; padding:2px 8px;" title="Delete">✕</button>
+                    </div>
+                </div>
+            `).join('');
+        } else {
+            volumesHtml = '<div style="color:var(--text-muted); font-size:13px; padding:8px;">No extra volumes attached</div>';
+        }
 
         body.innerHTML = `
             <div style="padding: 1rem;">
@@ -2281,10 +2664,56 @@ async function showVmSettings(name) {
                     </div>
                 </div>
                 <div class="form-group">
-                    <label>Disk Size (GB) <small style="color:var(--text-muted);">(can only grow)</small></label>
+                    <label>OS Disk Size (GiB) <small style="color:var(--text-muted);">(can only grow)</small></label>
                     <input type="number" class="form-control" id="edit-vm-disk" value="${vm.disk_size_gb}" min="${vm.disk_size_gb}">
                 </div>
-                <div class="form-group">
+
+                <!-- Storage Volumes Section -->
+                <div style="margin-top:16px; padding:14px; background:var(--bg-primary); border:1px solid var(--border); border-radius:10px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                        <h4 style="margin:0; font-size:14px;">💾 Storage Volumes</h4>
+                    </div>
+                    <div id="vm-settings-volumes">${volumesHtml}</div>
+
+                    <!-- Add Volume Form -->
+                    <div style="margin-top:10px; padding:10px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
+                        <div style="font-weight:600; font-size:12px; margin-bottom:8px; color:var(--text-secondary);">Add New Volume</div>
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:6px;">
+                            <div>
+                                <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Name</label>
+                                <input type="text" class="form-control" id="add-vol-name" placeholder="data1" style="font-size:13px;">
+                            </div>
+                            <div>
+                                <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Size (GiB)</label>
+                                <input type="number" class="form-control" id="add-vol-size" value="10" min="1" style="font-size:13px;">
+                            </div>
+                        </div>
+                        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-bottom:8px;">
+                            <div>
+                                <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Storage</label>
+                                <select class="form-control" id="add-vol-storage" style="font-size:13px;">${storageOpts}</select>
+                            </div>
+                            <div>
+                                <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Format</label>
+                                <select class="form-control" id="add-vol-format" style="font-size:13px;">
+                                    <option value="qcow2">qcow2</option>
+                                    <option value="raw">raw</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Bus</label>
+                                <select class="form-control" id="add-vol-bus" style="font-size:13px;">
+                                    <option value="virtio">VirtIO</option>
+                                    <option value="scsi">SCSI</option>
+                                    <option value="ide">IDE</option>
+                                </select>
+                            </div>
+                        </div>
+                        <button class="btn btn-sm btn-primary" onclick="addVmVolume('${name}')" style="font-size:12px;">➕ Add Volume</button>
+                    </div>
+                </div>
+
+                <div class="form-group" style="margin-top:16px;">
                     <label>ISO Path</label>
                     <input type="text" class="form-control" id="edit-vm-iso" value="${vm.iso_path || ''}" 
                         placeholder="Leave empty to detach ISO">
@@ -2305,6 +2734,76 @@ async function showVmSettings(name) {
         `;
     } catch (e) {
         body.innerHTML = `<p style="color:var(--danger); padding:1rem;">Failed to load VM: ${e.message}</p>`;
+    }
+}
+
+async function addVmVolume(vmName) {
+    const volName = document.getElementById('add-vol-name').value.trim();
+    const volSize = parseInt(document.getElementById('add-vol-size').value) || 10;
+    const volStorage = document.getElementById('add-vol-storage').value || null;
+    const volFormat = document.getElementById('add-vol-format').value || 'qcow2';
+    const volBus = document.getElementById('add-vol-bus').value || 'virtio';
+
+    if (!volName) { showToast('Enter a volume name', 'error'); return; }
+
+    try {
+        showToast('Adding volume...', 'info');
+        const resp = await fetch(apiUrl(`/api/vms/${vmName}/volumes`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: volName, size_gb: volSize, storage_path: volStorage, format: volFormat, bus: volBus })
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`Volume '${volName}' added`, 'success');
+            showVmSettings(vmName); // Refresh
+        } else {
+            showToast(data.error || 'Failed to add volume', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function removeVmVolume(vmName, volName) {
+    if (!confirm(`Delete volume '${volName}'? This will permanently delete the disk file.`)) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/vms/${vmName}/volumes/${encodeURIComponent(volName)}`), { method: 'DELETE' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`Volume '${volName}' removed`, 'success');
+            showVmSettings(vmName);
+        } else {
+            showToast(data.error || 'Failed to remove volume', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function resizeVmVolume(vmName, volName, currentSize) {
+    const newSize = prompt(`Resize volume '${volName}' (currently ${currentSize}G).\nEnter new size in GiB (must be larger):`, currentSize + 10);
+    if (!newSize) return;
+    const size = parseInt(newSize);
+    if (isNaN(size) || size <= currentSize) {
+        showToast(`Size must be larger than current ${currentSize}G`, 'error');
+        return;
+    }
+    try {
+        const resp = await fetch(apiUrl(`/api/vms/${vmName}/volumes/${encodeURIComponent(volName)}/resize`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ size_gb: size })
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`Volume resized to ${size}G`, 'success');
+            showVmSettings(vmName);
+        } else {
+            showToast(data.error || 'Resize failed', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
     }
 }
 

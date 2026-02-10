@@ -21,7 +21,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v5.6.0</span>
+                <span class="version">v5.7.0</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -644,39 +644,88 @@
 
             <!-- Create VM Modal -->
             <div class="modal-overlay" id="create-vm-modal">
-                <div class="modal">
+                <div class="modal" style="max-width: 720px; width: 95%;">
                     <div class="modal-header">
                         <h3>Create Virtual Machine</h3>
                         <button class="modal-close" onclick="closeVmCreate()">&times;</button>
                     </div>
                     <div class="modal-body">
-                        <div class="form-group">
-                            <label>Name</label>
-                            <input type="text" class="form-control" id="new-vm-name" placeholder="my-vm">
+                        <!-- General Settings -->
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                            <div class="form-group" style="grid-column: 1 / -1;">
+                                <label>Name</label>
+                                <input type="text" class="form-control" id="new-vm-name" placeholder="my-vm">
+                            </div>
+                            <div class="form-group">
+                                <label>CPUs</label>
+                                <input type="number" class="form-control" id="new-vm-cpus" value="1" min="1">
+                            </div>
+                            <div class="form-group">
+                                <label>Memory (MB)</label>
+                                <input type="number" class="form-control" id="new-vm-memory" value="1024" min="256">
+                            </div>
                         </div>
-                        <div class="form-group">
-                            <label>CPUs</label>
-                            <input type="number" class="form-control" id="new-vm-cpus" value="1" min="1">
+
+                        <!-- OS Disk Section -->
+                        <div
+                            style="margin-top:16px; padding:14px; background:var(--bg-primary); border:1px solid var(--border); border-radius:10px;">
+                            <div
+                                style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                                <h4 style="margin:0; font-size:14px; color:var(--text-primary);">💾 Disks</h4>
+                            </div>
+
+                            <!-- OS Disk (always present) -->
+                            <div
+                                style="padding:10px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; margin-bottom:8px;">
+                                <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                                    <span
+                                        style="font-weight:600; font-size:13px; color:var(--accent-light); min-width:60px;">OS
+                                        Disk</span>
+                                    <span style="font-size:11px; color:var(--text-muted);">Primary boot disk
+                                        (virtio)</span>
+                                </div>
+                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                                    <div>
+                                        <label
+                                            style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Storage</label>
+                                        <select id="new-vm-storage" class="form-control" style="font-size:13px;">
+                                            <option value="">/var/lib/wolfstack/vms (default)</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label
+                                            style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Disk
+                                            Size (GiB)</label>
+                                        <input type="number" class="form-control" id="new-vm-disk" value="32" min="1"
+                                            style="font-size:13px;">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Extra Disks Container -->
+                            <div id="vm-extra-disks-container"></div>
+
+                            <button class="btn btn-sm" onclick="addVmDiskRow()"
+                                style="margin-top:8px; font-size:12px; display:flex; align-items:center; gap:4px;">
+                                ➕ Add Disk
+                            </button>
                         </div>
-                        <div class="form-group">
-                            <label>Memory (MB)</label>
-                            <input type="number" class="form-control" id="new-vm-memory" value="1024" min="256">
-                        </div>
-                        <div class="form-group">
-                            <label>Disk Size (GB)</label>
-                            <input type="number" class="form-control" id="new-vm-disk" value="10" min="1">
-                        </div>
-                        <div class="form-group">
-                            <label>ISO Path (Optional)</label>
-                            <input type="text" class="form-control" id="new-vm-iso"
-                                placeholder="/var/lib/wolfstack/isos/ubuntu.iso">
-                        </div>
-                        <div class="form-group">
-                            <label>WolfNet IP (Optional)</label>
-                            <input type="text" class="form-control" id="new-vm-wolfnet-ip"
-                                placeholder="Auto-assign or e.g. 10.10.10.120">
-                            <small style="color:var(--text-muted);">Leave blank for user-mode networking, or enter an IP
-                                for WolfNet TAP networking</small>
+
+                        <!-- ISO & Networking -->
+                        <div style="margin-top:16px;">
+                            <div class="form-group">
+                                <label>ISO Path (Optional)</label>
+                                <input type="text" class="form-control" id="new-vm-iso"
+                                    placeholder="/var/lib/wolfstack/isos/ubuntu.iso">
+                            </div>
+                            <div class="form-group">
+                                <label>WolfNet IP (Optional)</label>
+                                <input type="text" class="form-control" id="new-vm-wolfnet-ip"
+                                    placeholder="Auto-assign or e.g. 10.10.10.120">
+                                <small style="color:var(--text-muted);">Leave blank for user-mode networking, or enter
+                                    an IP
+                                    for WolfNet TAP networking</small>
+                            </div>
                         </div>
                     </div>
                     <div class="modal-footer">

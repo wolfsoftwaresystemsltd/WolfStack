@@ -1620,8 +1620,10 @@ pub fn docker_pull(image: &str) -> Result<String, String> {
 
 /// Create a Docker container from an image
 /// If wolfnet_ip is provided, the container will be connected to the WolfNet overlay network
+/// volumes: list of volume mount specs, e.g. ["/host/path:/container/path", "myvolume:/data"]
 pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], wolfnet_ip: Option<&str>, 
-                     memory: Option<&str>, cpus: Option<&str>, _storage: Option<&str>) -> Result<String, String> {
+                     memory: Option<&str>, cpus: Option<&str>, _storage: Option<&str>,
+                     volumes: &[String]) -> Result<String, String> {
     info!("Creating Docker container {} from image {}", name, image);
 
     let mut args = vec![
@@ -1644,7 +1646,15 @@ pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], 
             args.push(cpu.to_string());
         }
     }
-    // Note: --storage-opt requires devicemapper driver (not overlay2), so we skip it
+
+    // Add volume mounts (-v host:container or -v named_volume:container)
+    for vol in volumes {
+        let vol = vol.trim();
+        if !vol.is_empty() {
+            args.push("-v".to_string());
+            args.push(vol.to_string());
+        }
+    }
 
     // Label with WolfNet IP so it can be re-applied on start/restart
     if let Some(ip) = wolfnet_ip {
@@ -2338,4 +2348,129 @@ pub fn list_running_containers() -> Vec<(String, String, String)> {
     }
 
     result
+}
+
+// ─── Volume / Mount Management ───
+
+/// A mount point for display in the UI
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerMount {
+    pub host_path: String,
+    pub container_path: String,
+    pub mount_type: String,  // "bind", "volume", "tmpfs"
+    pub read_only: bool,
+}
+
+/// Add a bind mount to an LXC container's config (container must be stopped)
+pub fn lxc_add_mount(container: &str, host_path: &str, container_path: &str, read_only: bool) -> Result<String, String> {
+    let config_path = format!("/var/lib/lxc/{}/config", container);
+    let mut config = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Container '{}' config not found: {}", container, e))?;
+
+    // Ensure host path exists (create it if it doesn't)
+    if !std::path::Path::new(host_path).exists() {
+        std::fs::create_dir_all(host_path)
+            .map_err(|e| format!("Failed to create host path '{}': {}", host_path, e))?;
+    }
+
+    // Build the mount entry
+    let ro_flag = if read_only { ",ro" } else { "" };
+    // Container path must not have a leading / for lxc.mount.entry
+    let clean_container_path = container_path.trim_start_matches('/');
+    let entry = format!("\nlxc.mount.entry = {} {} none bind,create=dir{} 0 0\n",
+        host_path, clean_container_path, ro_flag);
+
+    // Check for duplicate
+    if config.contains(&format!("{} {} none bind", host_path, clean_container_path)) {
+        return Err(format!("Mount {} -> {} already exists", host_path, container_path));
+    }
+
+    config.push_str(&entry);
+    std::fs::write(&config_path, config)
+        .map_err(|e| format!("Failed to write config: {}", e))?;
+
+    info!("Added mount {} -> {} to LXC container {}", host_path, container_path, container);
+    Ok(format!("Mount added: {} → {}", host_path, container_path))
+}
+
+/// Remove a bind mount from an LXC container's config
+pub fn lxc_remove_mount(container: &str, host_path: &str) -> Result<String, String> {
+    let config_path = format!("/var/lib/lxc/{}/config", container);
+    let config = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Container '{}' config not found: {}", container, e))?;
+
+    let filtered: Vec<&str> = config.lines()
+        .filter(|line| {
+            if line.trim().starts_with("lxc.mount.entry") && line.contains(host_path) {
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    let new_config = filtered.join("\n");
+    std::fs::write(&config_path, &new_config)
+        .map_err(|e| format!("Failed to write config: {}", e))?;
+
+    info!("Removed mount for {} from LXC container {}", host_path, container);
+    Ok(format!("Mount removed: {}", host_path))
+}
+
+/// List current bind mounts for an LXC container
+pub fn lxc_list_mounts(container: &str) -> Vec<ContainerMount> {
+    let config_path = format!("/var/lib/lxc/{}/config", container);
+    let config = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    config.lines()
+        .filter(|line| line.trim().starts_with("lxc.mount.entry"))
+        .filter_map(|line| {
+            // Format: lxc.mount.entry = /host/path container/path none bind,create=dir 0 0
+            let entry = line.split('=').nth(1)?.trim();
+            let parts: Vec<&str> = entry.split_whitespace().collect();
+            if parts.len() >= 4 && parts[3].contains("bind") {
+                Some(ContainerMount {
+                    host_path: parts[0].to_string(),
+                    container_path: format!("/{}", parts[1]),
+                    mount_type: "bind".to_string(),
+                    read_only: parts[3].contains("ro"),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// List volume mounts for a Docker container (uses docker inspect)
+pub fn docker_list_volumes(container: &str) -> Vec<ContainerMount> {
+    let output = Command::new("docker")
+        .args(["inspect", "--format", "{{range .Mounts}}{{.Type}}\t{{.Source}}\t{{.Destination}}\t{{.RW}}{{println}}{{end}}", container])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    if parts.len() >= 4 {
+                        Some(ContainerMount {
+                            host_path: parts[1].to_string(),
+                            container_path: parts[2].to_string(),
+                            mount_type: parts[0].to_string(),
+                            read_only: parts[3] != "true",
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
 }
