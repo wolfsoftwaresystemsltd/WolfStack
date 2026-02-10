@@ -254,47 +254,56 @@ pub fn ensure_lxc_bridge() {
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     // Check if lxcbr0 exists and has an IP
-    if let Ok(output) = Command::new("ip").args(["addr", "show", "lxcbr0"]).output() {
+    let bridge_ok = if let Ok(output) = Command::new("ip").args(["addr", "show", "lxcbr0"]).output() {
         if output.status.success() { 
-            // Check if dnsmasq is running on it (port 53/67)
-            // ps aux | grep dnsmasq | grep lxcbr0
+            // Check if dnsmasq is running on it
             let ps = Command::new("pgrep").args(["-f", "dnsmasq.*lxcbr0"]).output();
-            if let Ok(p) = ps {
-                if p.status.success() { return; }
-            }
-        }
+            ps.map(|p| p.status.success()).unwrap_or(false)
+        } else { false }
+    } else { false };
+
+    if !bridge_ok {
+        info!("Manually configuring lxcbr0 bridge and DHCP");
+
+        // Create bridge (idempotent)
+        let _ = Command::new("ip").args(["link", "add", "lxcbr0", "type", "bridge"]).output();
+        let _ = Command::new("ip").args(["addr", "add", "10.0.3.1/24", "dev", "lxcbr0"]).output();
+        let _ = Command::new("ip").args(["link", "set", "lxcbr0", "up"]).output();
+
+        // Start dnsmasq for DHCP
+        let _ = std::fs::create_dir_all("/run/lxc");
+        let _ = Command::new("dnsmasq")
+            .args([
+                "--strict-order",
+                "--bind-interfaces",
+                "--pid-file=/run/lxc/dnsmasq.pid",
+                "--listen-address", "10.0.3.1",
+                "--dhcp-range", "10.0.3.2,10.0.3.254",
+                "--dhcp-lease-max=253",
+                "--dhcp-no-override",
+                "--except-interface=lo",
+                "--interface=lxcbr0",
+                "--conf-file=" // avoid reading /etc/dnsmasq.conf
+            ])
+            .spawn(); // Run in background
     }
 
-    info!("Manually configuring lxcbr0 bridge and DHCP");
-
-    // Create bridge (idempotent)
-    let _ = Command::new("ip").args(["link", "add", "lxcbr0", "type", "bridge"]).output();
-    let _ = Command::new("ip").args(["addr", "add", "10.0.3.1/24", "dev", "lxcbr0"]).output();
-    let _ = Command::new("ip").args(["link", "set", "lxcbr0", "up"]).output();
-
-    // Enable NAT
+    // ALWAYS ensure NAT + forwarding for internet access (even if lxc-net is running)
     let _ = Command::new("sh").args(["-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"]).output();
-    let _ = Command::new("iptables").args(["-t", "nat", "-A", "POSTROUTING", "-s", "10.0.3.0/24", "!", "-d", "10.0.3.0/24", "-j", "MASQUERADE"]).output();
-    let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "lxcbr0", "-j", "ACCEPT"]).output();
-    let _ = Command::new("iptables").args(["-A", "FORWARD", "-o", "lxcbr0", "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"]).output();
-
-    // Start dnsmasq for DHCP
-    // dnsmasq --strict-order --bind-interfaces --pid-file=/run/lxc/dnsmasq.pid --listen-address 10.0.3.1 --dhcp-range 10.0.3.2,10.0.3.254 --dhcp-lease-max=253 --dhcp-no-override --except-interface=lo --interface=lxcbr0
-    let _ = std::fs::create_dir_all("/run/lxc");
-    let _ = Command::new("dnsmasq")
-        .args([
-            "--strict-order",
-            "--bind-interfaces",
-            "--pid-file=/run/lxc/dnsmasq.pid",
-            "--listen-address", "10.0.3.1",
-            "--dhcp-range", "10.0.3.2,10.0.3.254",
-            "--dhcp-lease-max=253",
-            "--dhcp-no-override",
-            "--except-interface=lo",
-            "--interface=lxcbr0",
-            "--conf-file=" // avoid reading /etc/dnsmasq.conf
-        ])
-        .spawn(); // Run in background
+    let nat_check = Command::new("iptables")
+        .args(["-t", "nat", "-C", "POSTROUTING", "-s", "10.0.3.0/24", "!", "-d", "10.0.3.0/24", "-j", "MASQUERADE"])
+        .output();
+    if nat_check.map(|o| !o.status.success()).unwrap_or(true) {
+        info!("Adding NAT masquerade for lxcbr0 -> internet");
+        let _ = Command::new("iptables").args(["-t", "nat", "-A", "POSTROUTING", "-s", "10.0.3.0/24", "!", "-d", "10.0.3.0/24", "-j", "MASQUERADE"]).output();
+    }
+    let fwd_check = Command::new("iptables")
+        .args(["-C", "FORWARD", "-i", "lxcbr0", "-j", "ACCEPT"])
+        .output();
+    if fwd_check.map(|o| !o.status.success()).unwrap_or(true) {
+        let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "lxcbr0", "-j", "ACCEPT"]).output();
+        let _ = Command::new("iptables").args(["-A", "FORWARD", "-o", "lxcbr0", "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"]).output();
+    }
 }
 
 /// Configure an LXC container's network to use WolfNet
@@ -1032,21 +1041,19 @@ fn lxc_post_start_setup(container: &str) {
         info!("SSH install failed for {} (no network?), will retry next boot", container);
     }
 
-    // Create WolfStack MOTD
-    let motd = r#"
- __        __    _  __ ____  _             _    
+    // Create WolfStack MOTD — write directly to rootfs (avoids shell escaping issues)
+    let motd_path = format!("/var/lib/lxc/{}/rootfs/etc/motd", container);
+    let _ = std::fs::write(&motd_path, r#"
+ __        __    _  __ ____  _             _
  \ \      / /__ | |/ _/ ___|| |_ __ _  ___| | __
   \ \ /\ / / _ \| | |_\___ \| __/ _` |/ __| |/ /
-   \ V  V / (_) | |  _|___) | || (_| | (__|   < 
+   \ V  V / (_) | |  _|___) | || (_| | (__|   <
     \_/\_/ \___/|_|_| |____/ \__\__,_|\___|_|\_\
 
   Managed by WolfStack — wolf.uk.com
   Container powered by Wolf Software Systems Ltd
 
-"#;
-    let _ = Command::new("lxc-attach")
-        .args(["-n", container, "--", "sh", "-c", &format!("cat > /etc/motd << 'MOTD'\n{}\nMOTD", motd)])
-        .output();
+"#);
 
     // Only mark done if SSH was installed successfully
     if ssh_ok {
