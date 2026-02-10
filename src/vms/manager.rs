@@ -318,15 +318,38 @@ impl VmManager {
             cmd.arg("-cpu").arg("qemu64");
         }
 
-        // Networking
+        // Networking: VMs configure their own IP inside the guest OS.
+        // If WolfNet IP is set, try TAP networking for direct L2 access.
+        // Otherwise (or if TAP fails), use user-mode networking which always works.
+        let mut using_tap = false;
         if let Some(ref wolfnet_ip) = config.wolfnet_ip {
             let tap = Self::tap_name(name);
-            self.setup_tap(&tap)?;
-            cmd.arg("-netdev").arg(format!("tap,id=net0,ifname={},script=no,downscript=no", tap))
-               .arg("-device").arg("virtio-net-pci,netdev=net0");
-            self.setup_wolfnet_routing(&tap, wolfnet_ip)?;
-            info!("VM {} using TAP {} with WolfNet IP {}", name, tap, wolfnet_ip);
-        } else {
+            write_log(&format!("Attempting TAP networking for WolfNet IP {} (configure this IP inside the guest OS)", wolfnet_ip));
+            
+            match self.setup_tap(&tap) {
+                Ok(_) => {
+                    write_log(&format!("TAP '{}' created successfully", tap));
+                    cmd.arg("-netdev").arg(format!("tap,id=net0,ifname={},script=no,downscript=no", tap))
+                       .arg("-device").arg("virtio-net-pci,netdev=net0");
+                    
+                    if let Err(e) = self.setup_wolfnet_routing(&tap, wolfnet_ip) {
+                        write_log(&format!("WolfNet routing warning: {} (VM will still start)", e));
+                    } else {
+                        write_log(&format!("WolfNet routing configured for {} via {}", wolfnet_ip, tap));
+                    }
+                    using_tap = true;
+                    info!("VM {} using TAP {} with WolfNet IP {}", name, tap, wolfnet_ip);
+                }
+                Err(e) => {
+                    write_log(&format!("TAP setup failed: {} — falling back to user-mode networking", e));
+                    write_log("Note: You can still configure the WolfNet IP inside the guest OS manually");
+                    info!("TAP setup failed for VM {}: {} — using user-mode", name, e);
+                }
+            }
+        }
+        
+        if !using_tap {
+            write_log("Networking: user-mode (NAT, VM can access host network)");
             cmd.arg("-netdev").arg("user,id=net0")
                .arg("-device").arg("virtio-net-pci,netdev=net0");
         }
