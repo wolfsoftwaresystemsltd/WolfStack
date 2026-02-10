@@ -1,6 +1,6 @@
-# 🐺 WolfStack — Server & Container Management Platform
+# 🐺 WolfStack — Server, VM & Container Management Platform
 
-The flagship management dashboard for the [Wolf Software Systems](https://wolf.uk.com/) infrastructure suite. Monitor servers, manage Docker and LXC containers, control services, edit configurations, and view logs — all from one beautiful, Proxmox-like web interface.
+The flagship management dashboard for the [Wolf Software Systems](https://wolf.uk.com/) infrastructure suite. Monitor servers, manage **virtual machines (KVM/QEMU)**, Docker and LXC containers, control services, edit configurations, and view logs — all from one beautiful, Proxmox-like web interface.
 
 ![WolfStack Dashboard](screenshot.png)
 
@@ -17,6 +17,7 @@ Then open `http://your-server:8553` and log in with your Linux system credential
 WolfStack is the **central control plane** for your entire infrastructure. Instead of SSH-ing into every server and running commands manually, WolfStack gives you a single dashboard to:
 
 - **Monitor** all your servers' CPU, memory, disk, and network in real time
+- **Manage virtual machines** — create, start, stop, and delete KVM/QEMU VMs with VNC console access
 - **Manage Docker containers** — list, start, stop, restart, pause, remove, view logs, and see resource usage
 - **Manage LXC containers** — list, start, stop, freeze, destroy, edit configs, and view logs
 - **Control services** — start, stop, restart any systemd service across your fleet
@@ -39,6 +40,17 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - Browse Docker images with size and creation info
 - **Web terminal** — interactive shell via xterm.js (WebSocket console)
 - **Install Docker** from the dashboard if not already present
+
+### 🖥️ Virtual Machine Management (KVM/QEMU)
+- Create VMs with configurable CPU, memory, and disk size
+- Boot from ISO images for OS installation
+- Start and stop VMs from the dashboard
+- KVM hardware acceleration for near-native performance
+- VNC console access — connect with any VNC viewer
+- Automatic disk image management (qcow2 format)
+- VNC port displayed in the dashboard for easy connection
+- Delete VMs and their disk images when no longer needed
+- QEMU/KVM installed automatically by setup.sh
 
 ### 📦 LXC Container Management
 - Auto-detects LXC installation and version
@@ -116,7 +128,11 @@ wolfstack/
 │   ├── monitoring/mod.rs    # System metrics via sysinfo
 │   ├── installer/mod.rs     # Component detection, install, systemd control
 │   ├── console.rs           # WebSocket PTY terminal for containers and host shells
-│   └── containers/mod.rs    # Docker & LXC management
+│   ├── containers/mod.rs    # Docker & LXC management
+│   └── vms/                 # Virtual machine management
+│       ├── mod.rs            # Module exports
+│       ├── manager.rs        # KVM/QEMU VM lifecycle (create, start, stop, delete)
+│       └── api.rs            # VM REST API endpoints
 ├── web/
 │   ├── login.html           # Login page
 │   ├── index.html           # Dashboard SPA
@@ -207,6 +223,16 @@ All endpoints require authentication (cookie-based session) except `/api/agent/s
 | POST | `/api/containers/lxc/{name}/action` | Start/stop/restart/freeze/unfreeze/destroy container |
 | POST | `/api/containers/lxc/{name}/clone` | Clone container (full copy or snapshot) |
 
+### Virtual Machines
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/vms` | List all VMs with status, resources, and VNC port |
+| POST | `/api/vms/create` | Create a new VM (name, cpus, memory, disk, iso) |
+| GET | `/api/vms/{name}` | Get details for a specific VM |
+| DELETE | `/api/vms/{name}` | Delete a VM and its disk image |
+| POST | `/api/vms/{name}/action` | Start or stop a VM |
+
 ### WolfNet & WebSocket
 
 | Method | Endpoint | Description |
@@ -238,6 +264,7 @@ All endpoints require authentication (cookie-based session) except `/api/agent/s
 Optional:
 - **Docker** — for Docker container management (can be installed from the dashboard)
 - **LXC** — for LXC container management (can be installed from the dashboard)
+- **QEMU/KVM** — for virtual machine management (installed automatically by setup.sh)
 
 ## Manual Build
 

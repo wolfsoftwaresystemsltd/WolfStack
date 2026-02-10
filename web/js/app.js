@@ -141,6 +141,9 @@ function buildServerTree(nodes) {
                     <span class="icon">📦</span> LXC
                     ${node.lxc_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.lxc_count}</span>` : ''}
                 </a>
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="vms" onclick="selectServerView('${node.id}', 'vms')">
+                    <span class="icon">🖥️</span> Virtual Machines
+                </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="certificates" onclick="selectServerView('${node.id}', 'certificates')">
                     <span class="icon">🔒</span> Certificates
                 </a>
@@ -149,9 +152,6 @@ function buildServerTree(nodes) {
                 </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
                     <span class="icon">💻</span> Terminal
-                </a>
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="vms" onclick="selectServerView('${node.id}', 'vms')">
-                    <span class="icon">🖥️</span> VMs
                 </a>
             </div>
         </div>
@@ -242,6 +242,14 @@ function renderDatacenterOverview() {
             </div>
         </div>`;
     }).join('');
+
+    // Add Patreon support card after server cards
+    container.innerHTML += `<div class="card" style="cursor:pointer; border: 1px dashed var(--border-color); display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:180px;" onclick="window.open('https://www.patreon.com/15362110/join', '_blank')">
+        <div style="font-size:40px; margin-bottom:12px;">❤️</div>
+        <h3 style="margin:0 0 8px 0; font-size:16px; color:var(--text-primary);">Support WolfStack</h3>
+        <p style="margin:0; color:var(--text-muted); font-size:13px; text-align:center; padding:0 20px;">Help us build amazing open source infrastructure tools</p>
+        <div style="margin-top:12px; padding:6px 16px; border-radius:6px; background:linear-gradient(135deg, #ff424d, #f96854); color:white; font-size:13px; font-weight:600;">Join on Patreon</div>
+    </div>`;
 }
 
 // Handle hash navigation
