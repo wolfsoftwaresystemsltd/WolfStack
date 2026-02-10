@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
-use tracing::{info, error, warn};
+use tracing::{info, error};
 use rand::Rng;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

@@ -763,7 +763,7 @@ pub async fn docker_migrate(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
-    let remove = body.remove_source.unwrap_or(true);
+    let remove = body.remove_source.unwrap_or(false);
     match containers::docker_migrate(&id, &body.target_url, remove) {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),

@@ -1800,9 +1800,12 @@ pub fn docker_migrate(container: &str, target_url: &str, remove_source: bool) ->
 
     // Step 4: Send the tar to the remote WolfStack node
     let import_url = format!("{}/api/containers/docker/import?name={}", target_url.trim_end_matches('/'), container);
+    info!("Sending container image to {}", import_url);
     let output = Command::new("curl")
         .args([
-            "-s", "-X", "POST",
+            "-s", "-f",          // --fail: return error on HTTP errors (4xx, 5xx)
+            "--max-time", "300", // 5 minute timeout for large images
+            "-X", "POST",
             "-H", "Content-Type: application/octet-stream",
             "--data-binary", &format!("@{}", export_path),
             &import_url,
@@ -1814,21 +1817,40 @@ pub fn docker_migrate(container: &str, target_url: &str, remove_source: bool) ->
     let _ = std::fs::remove_file(&export_path);
     let _ = Command::new("docker").args(["rmi", &temp_image]).output();
 
+    let response = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
     if !output.status.success() {
+        // curl --fail returns non-zero on HTTP errors — do NOT remove the source
+        error!("Migration transfer failed for {}: {} {}", container, stderr, response);
+        // Restart the source container since migration failed
+        let _ = docker_start(container);
         return Err(format!(
-            "Transfer failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "Transfer to remote node failed (container preserved on source): {}",
+            if stderr.is_empty() { &response } else { &stderr }
         ));
     }
 
-    let response = String::from_utf8_lossy(&output.stdout).to_string();
+    // Verify the remote actually confirmed success — check for "error" in response
+    if response.contains("\"error\"") {
+        error!("Remote import failed for {}: {}", container, response);
+        let _ = docker_start(container);
+        return Err(format!(
+            "Remote import failed (container preserved on source): {}",
+            response
+        ));
+    }
+
+    info!("Container {} successfully transferred to {}", container, target_url);
     
-    // Step 5: Optionally remove the source container
+    // Step 5: Optionally remove the source container (only after confirmed success)
     if remove_source {
         let _ = docker_remove(container);
-        info!("Container {} migrated to {} and removed from source", container, target_url);
+        info!("Source container {} removed after successful migration", container);
     } else {
-        info!("Container {} copied to {}", container, target_url);
+        // Restart the source container since we're keeping it
+        let _ = docker_start(container);
+        info!("Container {} copied to {} (source preserved)", container, target_url);
     }
 
     Ok(format!("Container migrated to {} successfully. {}", target_url, response))
