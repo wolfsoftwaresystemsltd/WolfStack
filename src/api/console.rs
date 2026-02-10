@@ -44,6 +44,12 @@ pub async fn console_ws(
                 "if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi"]);
             c.env("TERM", "xterm-256color");
             c
+        } else if ctype == "host" {
+            // Direct host shell — no container exec
+            let mut c = CommandBuilder::new("/bin/bash");
+            c.args(&["--login"]);
+            c.env("TERM", "xterm-256color");
+            c
         } else {
             let mut c = CommandBuilder::new("docker");
             // Use -it: -i keeps stdin open, -t allocates a TTY inside the container

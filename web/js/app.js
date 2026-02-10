@@ -77,6 +77,10 @@ function selectServerView(nodeId, view) {
     if (view === 'containers') loadDockerContainers();
     if (view === 'lxc') loadLxcContainers();
     if (view === 'monitoring') initCharts();
+    if (view === 'terminal') {
+        // Open host terminal directly
+        openConsole('host', hostname);
+    }
 }
 
 // ─── Server Tree ───
@@ -141,6 +145,9 @@ function buildServerTree(nodes) {
                 </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="monitoring" onclick="selectServerView('${node.id}', 'monitoring')">
                     <span class="icon">📈</span> Metrics
+                </a>
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
+                    <span class="icon">💻</span> Terminal
                 </a>
             </div>
         </div>
