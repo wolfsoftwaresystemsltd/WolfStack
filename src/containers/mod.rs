@@ -324,68 +324,63 @@ fn lxc_apply_wolfnet(container: &str) {
         // Wait for container networking to be ready
         std::thread::sleep(std::time::Duration::from_secs(3));
 
-        // Step 1: Ensure container has IPv4 on eth0 via DHCP
-        //         Some images don't auto-configure IPv4
-        let container_eth0_ip = get_container_ipv4(container);
-        if container_eth0_ip.is_empty() {
-            info!("Container {} has no IPv4 on eth0, running dhclient...", container);
+        // Step 1: Ensure container has a bridge IPv4 (10.0.3.x) on eth0
+        //         This is REQUIRED — without it, ARP fails on lxcbr0
+        let mut bridge_ip = get_container_ipv4(container);
+        if bridge_ip.is_empty() {
+            info!("No IPv4 on eth0, trying dhclient...");
             let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "dhclient", "eth0"])
+                .args(["-n", container, "--", "dhclient", "-4", "eth0"])
                 .output();
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            bridge_ip = get_container_ipv4(container);
         }
-        let container_eth0_ip = get_container_ipv4(container);
-        info!("Container {} eth0 IPv4: '{}'", container, container_eth0_ip);
+        if bridge_ip.is_empty() {
+            // Static fallback: derive 10.0.3.x from last octet of WolfNet IP
+            let last: u8 = ip.split('.').last()
+                .and_then(|s| s.parse::<u8>().ok())
+                .unwrap_or(50)
+                .wrapping_add(100);
+            bridge_ip = format!("10.0.3.{}", last);
+            info!("dhclient failed, assigning static bridge IP: {}", bridge_ip);
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", bridge_ip), "dev", "eth0"])
+                .output();
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "ip", "route", "add", "default", "via", "10.0.3.1"])
+                .output();
+        }
+        info!("Container {} bridge IP: {}", container, bridge_ip);
 
-        // Step 2: Add WolfNet IP on eth0 as /24 (matching WolfNet subnet)
-        //         This makes the container a proper participant on the 10.10.10.0/24 network
+        // Step 2: Add WolfNet IP as secondary /32 on eth0
         let _ = Command::new("lxc-attach")
-            .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", ip), "dev", "eth0"])
-            .output();
-        info!("Added {}/24 to container {} eth0", ip, container);
-
-        // Step 3: On the HOST — add /32 route so host can reach the WolfNet IP
-        //         /32 is more specific than the /24 on wolfnet0, so local traffic goes to lxcbr0
-        // Remove any stale route first
-        let _ = Command::new("ip")
-            .args(["route", "del", &format!("{}/32", ip)])
+            .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "eth0"])
             .output();
 
-        if !container_eth0_ip.is_empty() {
-            // Route via the container's bridge IP
-            let out = Command::new("ip")
-                .args(["route", "add", &format!("{}/32", ip), "via", &container_eth0_ip, "dev", "lxcbr0"])
-                .output();
-            if let Ok(ref o) = out {
-                if o.status.success() {
-                    info!("Host route: {}/32 via {} dev lxcbr0", ip, container_eth0_ip);
-                } else {
-                    error!("Failed to add host route: {}", String::from_utf8_lossy(&o.stderr));
-                }
+        // Step 3: Host route — via bridge IP so ARP resolves on lxcbr0
+        let _ = Command::new("ip").args(["route", "del", &format!("{}/32", ip)]).output();
+        let out = Command::new("ip")
+            .args(["route", "add", &format!("{}/32", ip), "via", &bridge_ip, "dev", "lxcbr0"])
+            .output();
+        if let Ok(ref o) = out {
+            if o.status.success() {
+                info!("Host route: {}/32 via {} dev lxcbr0", ip, bridge_ip);
+            } else {
+                error!("Host route failed: {}", String::from_utf8_lossy(&o.stderr));
             }
-        } else {
-            // No bridge IP — route directly to lxcbr0 and rely on ARP
-            let _ = Command::new("ip")
-                .args(["route", "add", &format!("{}/32", ip), "dev", "lxcbr0"])
-                .output();
-            info!("Host route: {}/32 dev lxcbr0 (direct)", ip);
         }
 
-        // Step 4: Enable forwarding and set up iptables
+        // Step 4: Forwarding + iptables
         let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.all.forwarding=1"]).output();
         let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.proxy_arp=1"]).output();
-        // Only add FORWARD rules if not already present (avoid duplicates)
-        let _ = Command::new("iptables").args(["-C", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output()
-            .and_then(|o| if o.status.success() { Ok(o) } else {
-                Command::new("iptables").args(["-A", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output()
-            });
-        let _ = Command::new("iptables").args(["-C", "FORWARD", "-i", "lxcbr0", "-o", "wolfnet0", "-j", "ACCEPT"]).output()
-            .and_then(|o| if o.status.success() { Ok(o) } else {
-                Command::new("iptables").args(["-A", "FORWARD", "-i", "lxcbr0", "-o", "wolfnet0", "-j", "ACCEPT"]).output()
-            });
+        let check = Command::new("iptables")
+            .args(["-C", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output();
+        if check.map(|o| !o.status.success()).unwrap_or(true) {
+            let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output();
+            let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "lxcbr0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
+        }
 
-        info!("WolfNet networking configured for container {} (WolfNet IP: {}/24, Bridge IP: {})", 
-              container, ip, container_eth0_ip);
+        info!("WolfNet ready: {} -> wolfnet={}, bridge={}", container, ip, bridge_ip);
     }
 }
 
