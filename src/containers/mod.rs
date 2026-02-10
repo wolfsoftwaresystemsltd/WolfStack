@@ -736,9 +736,46 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                     } else {
                         "Stopped".to_string()
                     };
-                    // IPV4 is the last field (index 4), may contain commas for multiple IPs
-                    let ip = parts.get(4..).map(|p| p.join(" ")).unwrap_or_default()
-                        .replace("-", "");
+
+                    // IP address: try multiple methods
+                    let mut ip = String::new();
+
+                    if state == "running" {
+                        // Method 1: Use lxc-info which reliably reports IP
+                        if let Ok(info_out) = Command::new("lxc-info")
+                            .args(["-n", &name, "-iH"])
+                            .output()
+                        {
+                            let info_ip = String::from_utf8_lossy(&info_out.stdout).trim().to_string();
+                            if !info_ip.is_empty() && info_ip != "-" {
+                                ip = info_ip;
+                            }
+                        }
+                    }
+
+                    // Method 2: If still no IP, try from lxc-ls output (after RAM column)
+                    if ip.is_empty() {
+                        // Skip NAME(0), STATE(1), PID(2), RAM(3), rest is IPV4
+                        let lxc_ip = parts.get(4..).map(|p| p.join(" ")).unwrap_or_default()
+                            .replace("-", "");
+                        if !lxc_ip.trim().is_empty() {
+                            ip = lxc_ip.trim().to_string();
+                        }
+                    }
+
+                    // Method 3: Check for WolfNet IP marker
+                    let wolfnet_ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", name);
+                    let wolfnet_ip = std::fs::read_to_string(&wolfnet_ip_file)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    if !wolfnet_ip.is_empty() {
+                        if ip.is_empty() {
+                            ip = format!("{} (wolfnet)", wolfnet_ip);
+                        } else if !ip.contains(&wolfnet_ip) {
+                            ip = format!("{}, {} (wolfnet)", ip, wolfnet_ip);
+                        }
+                    }
 
                     ContainerInfo {
                         id: name.clone(),
@@ -749,7 +786,7 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                         created: String::new(),
                         ports: vec![],
                         runtime: "lxc".to_string(),
-                        ip_address: ip.trim().to_string(),
+                        ip_address: ip,
                     }
                 })
                 .collect()
