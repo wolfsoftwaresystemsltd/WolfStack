@@ -791,6 +791,8 @@ async function showVmCreate() {
     if (busSelect) busSelect.value = 'virtio';
     const driversInput = document.getElementById('new-vm-drivers-iso');
     if (driversInput) driversInput.value = '';
+    const netSelect = document.getElementById('new-vm-net-model');
+    if (netSelect) netSelect.value = 'virtio';
     const busWarning = document.getElementById('vm-bus-warning');
     if (busWarning) busWarning.style.display = 'none';
     // Wire up bus warning
@@ -862,6 +864,7 @@ async function createVm() {
     const wolfnetIp = document.getElementById('new-vm-wolfnet-ip').value.trim() || null;
     const storagePath = document.getElementById('new-vm-storage').value || null;
     const osDiskBus = document.getElementById('new-vm-os-bus').value || 'virtio';
+    const netModel = document.getElementById('new-vm-net-model').value || 'virtio';
     const driversIso = document.getElementById('new-vm-drivers-iso').value.trim() || null;
 
     if (!name) { showToast('Enter VM name', 'error'); return; }
@@ -894,6 +897,7 @@ async function createVm() {
                 wolfnet_ip: wolfnetIp,
                 storage_path: storagePath,
                 os_disk_bus: osDiskBus,
+                net_model: netModel,
                 drivers_iso: driversIso,
                 extra_disks: extraDisks
             })

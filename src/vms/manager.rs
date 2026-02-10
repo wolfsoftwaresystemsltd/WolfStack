@@ -62,6 +62,9 @@ pub struct VmConfig {
     /// Bus type for the OS disk (virtio, ide, sata) — use ide/sata for Windows
     #[serde(default = "default_bus")]
     pub os_disk_bus: String,
+    /// Network adapter model (virtio, e1000, rtl8139) — use e1000 for Windows
+    #[serde(default = "default_net_model")]
+    pub net_model: String,
     /// Optional secondary ISO for VirtIO drivers (needed if OS disk is virtio on Windows)
     #[serde(default)]
     pub drivers_iso: Option<String>,
@@ -69,6 +72,8 @@ pub struct VmConfig {
     #[serde(default)]
     pub extra_disks: Vec<StorageVolume>,
 }
+
+fn default_net_model() -> String { "virtio".to_string() }
 
 impl VmConfig {
     pub fn new(name: String, cpus: u32, memory_mb: u32, disk_size_gb: u32) -> Self {
@@ -86,6 +91,7 @@ impl VmConfig {
             wolfnet_ip: None,
             storage_path: None,
             os_disk_bus: "virtio".to_string(),
+            net_model: "virtio".to_string(),
             drivers_iso: None,
             extra_disks: Vec::new(),
         }
@@ -569,6 +575,14 @@ impl VmManager {
             cmd.arg("-cpu").arg("qemu64");
         }
 
+        // Determine NIC model: virtio-net-pci (Linux), e1000 (Windows), rtl8139
+        let nic_device = match config.net_model.as_str() {
+            "e1000" => "e1000",
+            "rtl8139" => "rtl8139",
+            _ => "virtio-net-pci",
+        };
+        write_log(&format!("NIC model: {}", nic_device));
+
         // Networking: VMs configure their own IP inside the guest OS.
         // If WolfNet IP is set, try TAP networking for direct L2 access.
         // Otherwise (or if TAP fails), use user-mode networking which always works.
@@ -581,7 +595,7 @@ impl VmManager {
                 Ok(_) => {
                     write_log(&format!("TAP '{}' created successfully", tap));
                     cmd.arg("-netdev").arg(format!("tap,id=net0,ifname={},script=no,downscript=no", tap))
-                       .arg("-device").arg("virtio-net-pci,netdev=net0");
+                       .arg("-device").arg(format!("{},netdev=net0", nic_device));
                     
                     if let Err(e) = self.setup_wolfnet_routing(&tap, wolfnet_ip) {
                         write_log(&format!("WolfNet routing warning: {} (VM will still start)", e));
@@ -602,7 +616,7 @@ impl VmManager {
         if !using_tap {
             write_log("Networking: user-mode (NAT, VM can access host network)");
             cmd.arg("-netdev").arg("user,id=net0")
-               .arg("-device").arg("virtio-net-pci,netdev=net0");
+               .arg("-device").arg(format!("{},netdev=net0", nic_device));
         }
 
         // CD-ROM: installation ISO

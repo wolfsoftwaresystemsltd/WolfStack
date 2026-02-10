@@ -754,6 +754,16 @@
                                         target="_blank" style="color:var(--accent-light);">fedorapeople.org</a></small>
                             </div>
                             <div class="form-group" style="margin-top:12px;">
+                                <label>Network Adapter</label>
+                                <select id="new-vm-net-model" class="form-control" style="font-size:13px;">
+                                    <option value="virtio">VirtIO (fastest, Linux)</option>
+                                    <option value="e1000">Intel e1000 (Windows compatible)</option>
+                                    <option value="rtl8139">Realtek RTL8139</option>
+                                </select>
+                                <small style="color:var(--text-muted);">Windows needs Intel e1000 — VirtIO network
+                                    requires drivers</small>
+                            </div>
+                            <div class="form-group" style="margin-top:12px;">
                                 <label>WolfNet IP (Optional)</label>
                                 <input type="text" class="form-control" id="new-vm-wolfnet-ip"
                                     placeholder="Auto-assign or e.g. 10.10.10.120">
