@@ -1357,11 +1357,12 @@ pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], 
 
     args.push(image.to_string());
 
+    info!("Docker create command: docker {}", args.join(" "));
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let output = Command::new("docker")
         .args(&args_ref)
         .output()
-        .map_err(|e| format!("Failed to create container: {}", e))?;
+        .map_err(|e| format!("Failed to run docker create: {}", e))?;
 
     if output.status.success() {
         let id = String::from_utf8_lossy(&output.stdout).trim().to_string();

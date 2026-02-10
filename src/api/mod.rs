@@ -31,6 +31,13 @@ fn get_session_token(req: &HttpRequest) -> Option<String> {
 
 /// Check if request is authenticated; returns username or error response
 fn require_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<String, HttpResponse> {
+    // Accept internal proxy requests from other WolfStack nodes
+    // (The originating node already validated the user's session)
+    if let Some(val) = req.headers().get("X-WolfStack-Internal") {
+        if val.to_str().unwrap_or("") == "proxy" {
+            return Ok("proxy".to_string());
+        }
+    }
     match get_session_token(req) {
         Some(token) => {
             match state.sessions.validate(&token) {
@@ -400,17 +407,8 @@ pub async fn node_proxy(
     if let Some(ct) = req.headers().get("content-type") {
         builder = builder.header("content-type", ct.to_str().unwrap_or("application/json"));
     }
-    // Forward auth cookie/header so remote node accepts the request
-    if let Some(cookie_header) = req.headers().get("cookie") {
-        if let Ok(v) = cookie_header.to_str() {
-            builder = builder.header("cookie", v);
-        }
-    }
-    if let Some(auth) = req.headers().get("authorization") {
-        if let Ok(v) = auth.to_str() {
-            builder = builder.header("authorization", v);
-        }
-    }
+    // Internal proxy header — remote node trusts this since originating node already authed
+    builder = builder.header("X-WolfStack-Internal", "proxy");
     if !body.is_empty() {
         builder = builder.body(body.to_vec());
     }
