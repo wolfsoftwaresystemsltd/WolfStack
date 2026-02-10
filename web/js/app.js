@@ -1891,90 +1891,100 @@ let consoleWs = null;
 let consoleFitAddon = null;
 
 function openConsole(type, name) {
-    const modal = document.getElementById('console-modal');
-    modal.classList.add('active');
+    try {
+        const modal = document.getElementById('console-modal');
+        if (!modal) { alert('Console modal element not found!'); return; }
+        modal.style.display = 'flex';
 
-    // Init terminal
-    if (consoleTerm) consoleTerm.dispose();
+        // Update title
+        const titleEl = document.getElementById('console-title');
+        if (titleEl) titleEl.textContent = `💻 Console — ${name} (${type})`;
 
-    // Check if xterm loaded
-    if (typeof Terminal === 'undefined') {
-        alert('xterm.js not loaded!');
-        return;
+        // Cleanup previous
+        if (consoleWs) { consoleWs.close(); consoleWs = null; }
+        if (consoleTerm) { consoleTerm.dispose(); consoleTerm = null; }
+
+        // Check if xterm loaded
+        if (typeof Terminal === 'undefined') {
+            alert('xterm.js not loaded! Check that /js/vendor/xterm.min.js is served correctly.');
+            return;
+        }
+
+        const container = document.getElementById('terminal-container');
+        container.innerHTML = '';
+
+        consoleTerm = new Terminal({
+            cursorBlink: true,
+            fontSize: 14,
+            fontFamily: '"JetBrains Mono", "Fira Code", "Courier New", monospace',
+            theme: {
+                background: '#0a0a0a',
+                foreground: '#f0f0f0',
+                cursor: '#10b981'
+            }
+        });
+
+        consoleFitAddon = new FitAddon.FitAddon();
+        consoleTerm.loadAddon(consoleFitAddon);
+        consoleTerm.open(container);
+
+        // Fit after layout settles
+        setTimeout(() => {
+            try { consoleFitAddon.fit(); } catch (e) { }
+        }, 200);
+
+        consoleTerm.writeln(`\x1b[33mConnecting to ${type} container: ${name}...\x1b[0m`);
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws/console/${type}/${name}`;
+
+        consoleWs = new WebSocket(wsUrl);
+
+        consoleWs.onopen = () => {
+            consoleTerm.writeln(`\x1b[32mConnected!\x1b[0m`);
+            try { consoleFitAddon.fit(); } catch (e) { }
+        };
+
+        consoleWs.onmessage = (event) => {
+            if (typeof event.data === 'string') {
+                consoleTerm.write(event.data);
+            } else if (event.data instanceof Blob) {
+                event.data.text().then(text => consoleTerm.write(text));
+            } else if (event.data instanceof ArrayBuffer) {
+                consoleTerm.write(new Uint8Array(event.data));
+            }
+        };
+
+        consoleWs.onclose = (e) => {
+            consoleTerm.writeln(`\r\n\x1b[31mConnection closed (code: ${e.code}).\x1b[0m`);
+        };
+
+        consoleWs.onerror = () => {
+            consoleTerm.writeln(`\r\n\x1b[31mWebSocket connection failed.\x1b[0m`);
+        };
+
+        consoleTerm.onData(data => {
+            if (consoleWs && consoleWs.readyState === WebSocket.OPEN) {
+                consoleWs.send(data);
+            }
+        });
+
+        window.addEventListener('resize', fitConsole);
+        consoleTerm.focus();
+
+    } catch (e) {
+        alert('Console error: ' + e.message);
+        console.error('Console error:', e);
     }
-
-    consoleTerm = new Terminal({
-        cursorBlink: true,
-        fontSize: 14,
-        fontFamily: '"JetBrains Mono", monospace, "fira-code", monospace',
-        theme: {
-            background: '#0a0a0a',
-            foreground: '#f0f0f0'
-        }
-    });
-
-    consoleFitAddon = new FitAddon.FitAddon();
-    consoleTerm.loadAddon(consoleFitAddon);
-
-    document.getElementById('terminal-container').innerHTML = '';
-    consoleTerm.open(document.getElementById('terminal-container'));
-
-    // Wait for layout
-    setTimeout(() => { consoleFitAddon.fit(); }, 100);
-
-    consoleTerm.write(`Connecting to console for ${name} (${type})...\r\n`);
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // Use window.location.host so it works if accessed via proxy URL or direct IP
-    // For now, assume console only works on the node directly accessed
-    const wsUrl = `${protocol}//${window.location.host}/ws/console/${type}/${name}`;
-
-    consoleWs = new WebSocket(wsUrl);
-
-    consoleWs.onopen = () => {
-        consoleTerm.write(`\x1b[32mConnected!\x1b[0m\r\n`);
-        consoleFitAddon.fit();
-        // Send initial enter to prompt?
-        consoleWs.send('\n');
-    };
-
-    consoleWs.onmessage = (event) => {
-        if (event.data instanceof Blob) {
-            const reader = new FileReader();
-            reader.onload = () => consoleTerm.write(reader.result);
-            reader.readAsText(event.data);
-        } else {
-            consoleTerm.write(event.data);
-        }
-    };
-
-    consoleWs.onclose = () => {
-        consoleTerm.write(`\r\n\x1b[31mConnection closed.\x1b[0m\r\n`);
-    };
-
-    consoleWs.onerror = (e) => {
-        consoleTerm.write(`\r\n\x1b[31mWebSocket Error.\x1b[0m\r\n`);
-    };
-
-    consoleTerm.onData(data => {
-        if (consoleWs && consoleWs.readyState === WebSocket.OPEN) {
-            consoleWs.send(data);
-        }
-    });
-
-    window.addEventListener('resize', fitConsole);
-
-    // Focus terminal
-    consoleTerm.focus();
 }
 
 function fitConsole() {
-    if (consoleFitAddon) consoleFitAddon.fit();
+    try { if (consoleFitAddon) consoleFitAddon.fit(); } catch (e) { }
 }
 
 function closeConsole() {
     const modal = document.getElementById('console-modal');
-    modal.classList.remove('active');
+    if (modal) modal.style.display = 'none';
 
     if (consoleWs) {
         consoleWs.close();

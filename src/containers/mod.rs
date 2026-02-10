@@ -1012,8 +1012,9 @@ pub fn lxc_list_templates() -> Vec<LxcTemplate> {
             let arch = parts[2].trim();
             let variant = parts[3].trim();
 
-            // Include all variants so user can see what type of image it is
+            // Skip cloud variants - they require cloud-init and won't work with standard LXC
             let variant_str = if variant.is_empty() { "default" } else { variant };
+            if variant_str == "cloud" { continue; }
             if arch == "amd64" && !dist.is_empty() && !rel.is_empty() {
                 let key = format!("{}-{}-{}-{}", dist, rel, arch, variant_str);
                 if seen.insert(key) {
