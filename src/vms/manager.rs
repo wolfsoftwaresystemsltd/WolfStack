@@ -256,7 +256,7 @@ impl VmManager {
         let vnc_num: u16 = rng.gen_range(10..99); 
         let vnc_port: u16 = 5900 + vnc_num;
         let ws_port: u16 = 6080 + vnc_num;  // WebSocket port for noVNC
-        let vnc_arg = format!("0.0.0.0:{},websocket=0.0.0.0:{}", vnc_num, ws_port);
+        let vnc_arg = format!("0.0.0.0:{},websocket={}", vnc_num, ws_port);
         
         write_log(&format!("VNC display :{} (port {}), WebSocket port {}", vnc_num, vnc_port, ws_port));
 
