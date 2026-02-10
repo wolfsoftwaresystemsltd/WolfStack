@@ -50,11 +50,11 @@ echo "Installing system dependencies..."
 
 if [ "$PKG_MANAGER" = "apt" ]; then
     apt update -qq
-    apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils qemu-system-x86 qemu-utils
+    apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils qemu-system-x86 qemu-utils socat
 elif [ "$PKG_MANAGER" = "dnf" ]; then
-    dnf install -y git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img
+    dnf install -y git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat
 elif [ "$PKG_MANAGER" = "yum" ]; then
-    yum install -y git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img
+    yum install -y git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat
 fi
 
 echo "✓ System dependencies installed"

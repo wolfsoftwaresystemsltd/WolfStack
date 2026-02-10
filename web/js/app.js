@@ -667,14 +667,19 @@ function renderVms(vms) {
 
         let vncText = '—';
         if (vm.running && vm.vnc_port) {
-            vncText = `<span class="badge" title="Connect with VNC Viewer to IP:${vm.vnc_port}">:${vm.vnc_port}</span>`;
+            if (vm.vnc_ws_port) {
+                vncText = `<a href="/vnc.html?name=${encodeURIComponent(vm.name)}&port=${vm.vnc_ws_port}" target="_blank" 
+                            class="badge" style="cursor:pointer; text-decoration:none;" title="Open noVNC console">🖥️ :${vm.vnc_port}</a>`;
+            } else {
+                vncText = `<span class="badge" title="Connect with VNC Viewer to IP:${vm.vnc_port}">:${vm.vnc_port}</span>`;
+            }
         }
 
         const wolfnetIp = vm.wolfnet_ip || '—';
 
         return `
             <tr>
-                <td><strong>${vm.name}</strong></td>
+                <td><strong>${vm.name}</strong>${vm.iso_path ? `<br><small style="color:var(--text-muted);">💿 ${vm.iso_path.split('/').pop()}</small>` : ''}</td>
                 <td><span style="color:${statusColor}">● ${statusText}</span></td>
                 <td>${vm.cpus} vCPU / ${vm.memory_mb} MB</td>
                 <td>${vm.disk_size_gb} GB</td>
@@ -682,9 +687,11 @@ function renderVms(vms) {
                 <td>${vncText}</td>
                 <td>
                     ${vm.running ?
-                `<button class="btn btn-sm" style="margin:2px;" onclick="openVmConsole('${vm.name}')" title="Terminal">💻</button>
+                `<button class="btn btn-sm" style="margin:2px;" onclick="openVmConsole('${vm.name}')" title="Serial Terminal">💻</button>
+                         ${vm.vnc_ws_port ? `<button class="btn btn-sm" style="margin:2px;" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port})" title="VNC Console">🖥️</button>` : ''}
                          <button class="btn btn-danger btn-sm" style="margin:2px;" onclick="vmAction('${vm.name}', 'stop')">Stop</button>` :
-                `<button class="btn btn-success btn-sm" style="margin:2px;" onclick="vmAction('${vm.name}', 'start')">Start</button>
+                `<button class="btn btn-sm" style="margin:2px;" onclick="showVmSettings('${vm.name}')" title="Settings">⚙️</button>
+                         <button class="btn btn-success btn-sm" style="margin:2px;" onclick="vmAction('${vm.name}', 'start')">Start</button>
                          <button class="btn btn-danger btn-sm" style="margin:2px;" onclick="deleteVm('${vm.name}')">Delete</button>`
             }
                 </td>
@@ -2210,7 +2217,100 @@ function openVmConsole(name) {
     openConsole('vm', name);
 }
 
-// ─── Install Script Copy ───
+function openVmVnc(name, wsPort) {
+    const host = window.location.hostname;
+    window.open(`/vnc.html?name=${encodeURIComponent(name)}&port=${wsPort}&host=${host}`,
+        'vnc_' + name, 'width=1024,height=768,menubar=no,toolbar=no');
+}
+
+async function showVmSettings(name) {
+    const modal = document.getElementById('container-detail-modal');
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+
+    title.textContent = `VM Settings: ${name}`;
+    body.innerHTML = '<p style="color:var(--text-muted);">Loading...</p>';
+    modal.classList.add('active');
+
+    try {
+        const resp = await fetch(apiUrl(`/api/vms/${name}`));
+        const vm = await resp.json();
+
+        body.innerHTML = `
+            <div style="padding: 1rem;">
+                <div class="form-group">
+                    <label>Name</label>
+                    <input type="text" class="form-control" value="${vm.name}" disabled style="opacity:0.6;">
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                    <div class="form-group">
+                        <label>CPUs</label>
+                        <input type="number" class="form-control" id="edit-vm-cpus" value="${vm.cpus}" min="1">
+                    </div>
+                    <div class="form-group">
+                        <label>Memory (MB)</label>
+                        <input type="number" class="form-control" id="edit-vm-memory" value="${vm.memory_mb}" min="256">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Disk Size (GB) <small style="color:var(--text-muted);">(can only grow)</small></label>
+                    <input type="number" class="form-control" id="edit-vm-disk" value="${vm.disk_size_gb}" min="${vm.disk_size_gb}">
+                </div>
+                <div class="form-group">
+                    <label>ISO Path</label>
+                    <input type="text" class="form-control" id="edit-vm-iso" value="${vm.iso_path || ''}" 
+                        placeholder="Leave empty to detach ISO">
+                </div>
+                <div class="form-group">
+                    <label>WolfNet IP</label>
+                    <input type="text" class="form-control" id="edit-vm-wolfnet-ip" value="${vm.wolfnet_ip || ''}"
+                        placeholder="Leave empty for user-mode networking">
+                </div>
+                <div class="form-group" style="margin-top:4px;">
+                    <label style="color:var(--text-muted); font-size:13px;">MAC Address: ${vm.mac_address || 'auto'}</label>
+                </div>
+                <div style="display:flex; gap:8px; margin-top:16px;">
+                    <button class="btn btn-primary" onclick="saveVmSettings('${vm.name}')">💾 Save</button>
+                    <button class="btn" onclick="closeContainerDetail()">Cancel</button>
+                </div>
+            </div>
+        `;
+    } catch (e) {
+        body.innerHTML = `<p style="color:var(--danger); padding:1rem;">Failed to load VM: ${e.message}</p>`;
+    }
+}
+
+async function saveVmSettings(name) {
+    const cpus = parseInt(document.getElementById('edit-vm-cpus').value);
+    const memory = parseInt(document.getElementById('edit-vm-memory').value);
+    const disk = parseInt(document.getElementById('edit-vm-disk').value);
+    const iso = document.getElementById('edit-vm-iso').value.trim();
+    const wolfnetIp = document.getElementById('edit-vm-wolfnet-ip').value.trim();
+
+    try {
+        const resp = await fetch(apiUrl(`/api/vms/${name}`), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                cpus,
+                memory_mb: memory,
+                disk_size_gb: disk,
+                iso_path: iso,
+                wolfnet_ip: wolfnetIp,
+            })
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast('VM settings saved', 'success');
+            closeContainerDetail();
+            loadVms();
+        } else {
+            showToast(data.error || 'Failed to save', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
 
 const installCmds = {
     wolfnet: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh | sudo bash',

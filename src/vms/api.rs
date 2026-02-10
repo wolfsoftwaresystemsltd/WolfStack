@@ -1,5 +1,5 @@
 use actix_web::{web, HttpResponse, HttpRequest};
-use serde::{Deserialize};
+use serde::Deserialize;
 use crate::api::{AppState, require_auth};
 use super::manager::VmConfig;
 
@@ -9,6 +9,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
             .route("", web::get().to(list_vms))
             .route("/create", web::post().to(create_vm))
             .route("/{name}/action", web::post().to(vm_action))
+            .route("/{name}", web::put().to(update_vm))
             .route("/{name}", web::delete().to(delete_vm))
             .route("/{name}", web::get().to(get_vm))
     );
@@ -50,17 +51,35 @@ async fn create_vm(req: HttpRequest, state: web::Data<AppState>, body: web::Json
     }
 }
 
+#[derive(Deserialize)]
+struct UpdateVmRequest {
+    cpus: Option<u32>,
+    memory_mb: Option<u32>,
+    disk_size_gb: Option<u32>,
+    iso_path: Option<String>,
+    wolfnet_ip: Option<String>,
+}
+
+async fn update_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<UpdateVmRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    let manager = state.vms.lock().unwrap();
+    
+    match manager.update_vm(&name, body.cpus, body.memory_mb, body.iso_path.clone(), 
+                            body.wolfnet_ip.clone(), body.disk_size_gb) {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "success": true })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 async fn get_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
     let manager = state.vms.lock().unwrap();
     
-    // In future, optimize this. For now, list all and find one.
-    let vms = manager.list_vms();
-    if let Some(vm) = vms.into_iter().find(|v| v.name == name) {
-        HttpResponse::Ok().json(vm)
-    } else {
-        HttpResponse::NotFound().json(serde_json::json!({ "error": "VM not found" }))
+    match manager.get_vm(&name) {
+        Some(vm) => HttpResponse::Ok().json(vm),
+        None => HttpResponse::NotFound().json(serde_json::json!({ "error": "VM not found" })),
     }
 }
 
@@ -77,7 +96,7 @@ async fn delete_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path
 
 #[derive(Deserialize)]
 struct VmActionRequest {
-    action: String, // start, stop
+    action: String,
 }
 
 async fn vm_action(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<VmActionRequest>) -> HttpResponse {

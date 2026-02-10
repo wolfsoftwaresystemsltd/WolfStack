@@ -14,6 +14,8 @@ pub struct VmConfig {
     pub iso_path: Option<String>,
     pub running: bool,
     pub vnc_port: Option<u16>,
+    #[serde(default)]
+    pub vnc_ws_port: Option<u16>,
     pub mac_address: Option<String>,
     pub auto_start: bool,
     #[serde(default)]
@@ -30,6 +32,7 @@ impl VmConfig {
             iso_path: None,
             running: false,
             vnc_port: None,
+            vnc_ws_port: None,
             mac_address: Some(generate_mac()),
             auto_start: false,
             wolfnet_ip: None,
@@ -65,9 +68,11 @@ impl VmManager {
                          if let Ok(mut vm) = serde_json::from_str::<VmConfig>(&content) {
                              vm.running = self.check_running(&vm.name);
                              if vm.running {
-                                 vm.vnc_port = self.find_vnc_port(&vm.name); 
+                                 vm.vnc_port = self.find_vnc_port(&vm.name);
+                                 vm.vnc_ws_port = self.read_runtime_ws_port(&vm.name);
                              } else {
                                  vm.vnc_port = None;
+                                 vm.vnc_ws_port = None;
                              }
                              vms.push(vm);
                          }
@@ -168,73 +173,172 @@ impl VmManager {
         Ok(())
     }
 
+    /// Update VM settings (must be stopped)
+    pub fn update_vm(&self, name: &str, cpus: Option<u32>, memory_mb: Option<u32>, 
+                     iso_path: Option<String>, wolfnet_ip: Option<String>,
+                     disk_size_gb: Option<u32>) -> Result<(), String> {
+        if self.check_running(name) {
+            return Err("Cannot edit VM while it is running. Stop it first.".to_string());
+        }
+
+        let config_path = self.vm_config_path(name);
+        let content = fs::read_to_string(&config_path)
+            .map_err(|e| format!("VM not found: {}", e))?;
+        let mut config: VmConfig = serde_json::from_str(&content)
+            .map_err(|e| format!("Invalid config: {}", e))?;
+
+        if let Some(c) = cpus { if c > 0 { config.cpus = c; } }
+        if let Some(m) = memory_mb { if m >= 256 { config.memory_mb = m; } }
+        
+        // ISO: accept empty string to clear, or a path to set
+        if let Some(ref iso) = iso_path {
+            if iso.is_empty() {
+                config.iso_path = None;
+            } else {
+                config.iso_path = Some(iso.clone());
+            }
+        }
+
+        // WolfNet IP: accept empty string to clear
+        if let Some(ref ip) = wolfnet_ip {
+            if ip.is_empty() {
+                config.wolfnet_ip = None;
+            } else {
+                let parts: Vec<&str> = ip.split('.').collect();
+                if parts.len() != 4 || parts.iter().any(|p| p.parse::<u8>().is_err()) {
+                    return Err(format!("Invalid WolfNet IP: '{}'", ip));
+                }
+                config.wolfnet_ip = Some(ip.clone());
+            }
+        }
+
+        // Disk resize (grow only)
+        if let Some(new_size) = disk_size_gb {
+            if new_size > config.disk_size_gb {
+                let disk_path = self.vm_disk_path(name);
+                let output = Command::new("qemu-img")
+                    .args(["resize", &disk_path.to_string_lossy(), &format!("{}G", new_size)])
+                    .output()
+                    .map_err(|e| format!("Disk resize failed: {}", e))?;
+                if !output.status.success() {
+                    return Err(format!("Disk resize failed: {}", String::from_utf8_lossy(&output.stderr)));
+                }
+                config.disk_size_gb = new_size;
+                info!("Resized VM {} disk to {}G", name, new_size);
+            }
+        }
+
+        let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+        fs::write(&config_path, json).map_err(|e| e.to_string())?;
+        
+        info!("Updated VM: {}", name);
+        Ok(())
+    }
+
     pub fn start_vm(&self, name: &str) -> Result<(), String> {
         if self.check_running(name) {
              return Err("VM already running".to_string());
         }
 
         let config_path = self.vm_config_path(name);
-        let content = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
-        let config: VmConfig = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+        let content = fs::read_to_string(&config_path)
+            .map_err(|e| format!("VM config not found: {}", e))?;
+        let config: VmConfig = serde_json::from_str(&content)
+            .map_err(|e| format!("Invalid VM config: {}", e))?;
+
+        // Check if qemu-system-x86_64 is available
+        if Command::new("which").arg("qemu-system-x86_64").output()
+            .map(|o| !o.status.success()).unwrap_or(true) {
+            return Err("qemu-system-x86_64 not found. Install QEMU: apt install qemu-system-x86 qemu-utils".to_string());
+        }
 
         let mut rng = rand::thread_rng();
-        let vnc_num = rng.gen_range(10..99); 
-        let vnc_arg = format!(":{}", vnc_num);
+        let vnc_num: u16 = rng.gen_range(10..99); 
+        let ws_port: u16 = 6080 + vnc_num;  // WebSocket port for noVNC
+        let vnc_arg = format!(":{},websocket={}", vnc_num, ws_port);
         
         let serial_sock = self.vm_serial_socket(name);
-        // Remove stale socket
         let _ = fs::remove_file(&serial_sock);
+
+        // Check if KVM is available
+        let kvm_available = std::path::Path::new("/dev/kvm").exists();
+        if !kvm_available {
+            info!("KVM not available for VM {} — using software emulation (slower)", name);
+        }
+
+        let disk_path = self.vm_disk_path(name);
+        if !disk_path.exists() {
+            return Err(format!("Disk image not found: {}", disk_path.display()));
+        }
 
         let mut cmd = Command::new("qemu-system-x86_64");
         cmd.arg("-name").arg(name)
            .arg("-m").arg(format!("{}M", config.memory_mb))
            .arg("-smp").arg(format!("{}", config.cpus))
-           .arg("-enable-kvm") 
-           .arg("-cpu").arg("host")
-           .arg("-drive").arg(format!("file={},format=qcow2,if=virtio", self.vm_disk_path(name).display()))
+           .arg("-drive").arg(format!("file={},format=qcow2,if=virtio", disk_path.display()))
            .arg("-vnc").arg(&vnc_arg)
-           // Serial console via UNIX socket for web terminal
            .arg("-serial").arg(format!("unix:{},server,nowait", serial_sock.display()))
            .arg("-daemonize");
 
-        // Networking: TAP with WolfNet IP, or user-mode fallback
+        // KVM or software emulation
+        if kvm_available {
+            cmd.arg("-enable-kvm").arg("-cpu").arg("host");
+        } else {
+            cmd.arg("-cpu").arg("qemu64");
+        }
+
+        // Networking
         if let Some(ref wolfnet_ip) = config.wolfnet_ip {
             let tap = Self::tap_name(name);
-            
-            // Create TAP interface
             self.setup_tap(&tap)?;
-            
             cmd.arg("-netdev").arg(format!("tap,id=net0,ifname={},script=no,downscript=no", tap))
                .arg("-device").arg("virtio-net-pci,netdev=net0");
-
-            // Set up host-side routing for the WolfNet IP
             self.setup_wolfnet_routing(&tap, wolfnet_ip)?;
-
             info!("VM {} using TAP {} with WolfNet IP {}", name, tap, wolfnet_ip);
         } else {
-            cmd.arg("-net").arg("nic,model=virtio")
-               .arg("-net").arg("user");
+            cmd.arg("-netdev").arg("user,id=net0")
+               .arg("-device").arg("virtio-net-pci,netdev=net0");
         }
 
         if let Some(iso) = &config.iso_path {
              if !iso.is_empty() {
+                 if !std::path::Path::new(iso).exists() {
+                     return Err(format!("ISO file not found: {}", iso));
+                 }
                  cmd.arg("-cdrom").arg(iso);
                  cmd.arg("-boot").arg("d");
              }
         }
 
-        let output = cmd.output().map_err(|e| e.to_string())?;
+        info!("Starting VM {}: qemu-system-x86_64 (KVM: {}, VNC :{}, WS :{})", 
+              name, kvm_available, vnc_num, ws_port);
+
+        let output = cmd.output().map_err(|e| format!("Failed to execute QEMU: {}", e))?;
+        
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            error!("QEMU failed for VM {}: stderr={} stdout={}", name, stderr, stdout);
+            
             // Clean up TAP on failure
             if config.wolfnet_ip.is_some() {
                 let tap = Self::tap_name(name);
                 let _ = self.cleanup_tap(&tap);
             }
-            return Err(stderr);
+            return Err(format!("QEMU failed to start: {}", stderr));
         }
+
+        // Save runtime port info so frontend can connect
+        let runtime = serde_json::json!({
+            "vnc_port": 5900 + vnc_num,
+            "vnc_ws_port": ws_port,
+            "vnc_display": vnc_num,
+            "kvm": kvm_available,
+        });
+        let runtime_path = self.base_dir.join(format!("{}.runtime.json", name));
+        let _ = fs::write(&runtime_path, runtime.to_string());
         
-        info!("Started VM {} on VNC display {} (port {})", name, vnc_num, 5900 + vnc_num);
+        info!("Started VM {} on VNC :{} (port {}), WebSocket port {}", name, vnc_num, 5900 + vnc_num, ws_port);
         Ok(())
     }
 
@@ -355,8 +459,9 @@ impl VmManager {
             }
         }
 
-        // Clean up serial socket
+        // Clean up serial socket and runtime file
         let _ = fs::remove_file(self.vm_serial_socket(name));
+        let _ = fs::remove_file(self.base_dir.join(format!("{}.runtime.json", name)));
 
         info!("Stopped VM: {}", name);
         Ok(())
@@ -369,6 +474,7 @@ impl VmManager {
         vm.running = self.check_running(name);
         if vm.running {
             vm.vnc_port = self.find_vnc_port(name);
+            vm.vnc_ws_port = self.read_runtime_ws_port(name);
         }
         Some(vm)
     }
@@ -381,6 +487,7 @@ impl VmManager {
         let _ = fs::remove_file(self.vm_config_path(name));
         let _ = fs::remove_file(self.vm_disk_path(name));
         let _ = fs::remove_file(self.vm_serial_socket(name));
+        let _ = fs::remove_file(self.base_dir.join(format!("{}.runtime.json", name)));
         
         info!("Deleted VM: {}", name);
         Ok(())
@@ -395,5 +502,13 @@ impl VmManager {
             Ok(o) => o.status.success(),
             Err(_) => false,
         }
+    }
+
+    /// Read the WebSocket port from runtime file
+    fn read_runtime_ws_port(&self, name: &str) -> Option<u16> {
+        let runtime_path = self.base_dir.join(format!("{}.runtime.json", name));
+        let content = fs::read_to_string(&runtime_path).ok()?;
+        let runtime: serde_json::Value = serde_json::from_str(&content).ok()?;
+        runtime.get("vnc_ws_port").and_then(|v| v.as_u64()).map(|v| v as u16)
     }
 }
