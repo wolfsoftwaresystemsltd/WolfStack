@@ -2029,8 +2029,15 @@ let consoleWs = null;
 let consoleFitAddon = null;
 
 function openConsole(type, name) {
-    window.open('/console.html?type=' + encodeURIComponent(type) + '&name=' + encodeURIComponent(name),
-        'console_' + name, 'width=960,height=600,menubar=no,toolbar=no');
+    let url = '/console.html?type=' + encodeURIComponent(type) + '&name=' + encodeURIComponent(name);
+    // For remote nodes, pass the remote server's host so the WebSocket connects there
+    if (currentNodeId) {
+        const node = allNodes.find(n => n.id === currentNodeId);
+        if (node && !node.is_self) {
+            url += '&host=' + encodeURIComponent(node.address) + '&port=' + encodeURIComponent(node.port);
+        }
+    }
+    window.open(url, 'console_' + name, 'width=960,height=600,menubar=no,toolbar=no');
 }
 
 function fitConsole() { }
