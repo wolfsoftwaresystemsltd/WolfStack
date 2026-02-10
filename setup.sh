@@ -407,10 +407,30 @@ fi
 echo ""
 if command -v ufw &> /dev/null; then
     ufw allow "$WS_PORT/tcp" 2>/dev/null && echo "✓ Firewall: Opened port $WS_PORT/tcp (ufw)" || true
+    ufw allow 9600/udp 2>/dev/null && echo "✓ Firewall: Opened port 9600/udp for WolfNet (ufw)" || true
 elif command -v firewall-cmd &> /dev/null; then
     firewall-cmd --permanent --add-port="$WS_PORT/tcp" 2>/dev/null && \
+    firewall-cmd --permanent --add-port="9600/udp" 2>/dev/null && \
     firewall-cmd --reload 2>/dev/null && \
-    echo "✓ Firewall: Opened port $WS_PORT/tcp (firewalld)" || true
+    echo "✓ Firewall: Opened port $WS_PORT/tcp and 9600/udp (firewalld)" || true
+fi
+
+# ─── Set up lxcbr0 bridge for LXC containers ────────────────────────────────
+if command -v lxc-ls &> /dev/null; then
+    if ! ip link show lxcbr0 &> /dev/null; then
+        echo ""
+        echo "Setting up lxcbr0 bridge for LXC containers..."
+        ip link add lxcbr0 type bridge 2>/dev/null || true
+        ip addr add 10.0.3.1/24 dev lxcbr0 2>/dev/null || true
+        ip link set lxcbr0 up 2>/dev/null || true
+        echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
+        iptables -t nat -A POSTROUTING -s 10.0.3.0/24 ! -d 10.0.3.0/24 -j MASQUERADE 2>/dev/null || true
+        iptables -A FORWARD -i lxcbr0 -j ACCEPT 2>/dev/null || true
+        iptables -A FORWARD -o lxcbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+        echo "✓ lxcbr0 bridge created (10.0.3.1/24 with NAT)"
+    else
+        echo "✓ lxcbr0 bridge already exists"
+    fi
 fi
 
 # ─── Done ────────────────────────────────────────────────────────────────────

@@ -970,6 +970,7 @@ function renderDockerContainers(containers) {
             <td><strong>${c.name}</strong><br><span style="font-size:11px;color:var(--text-muted)">${c.id.substring(0, 12)}</span></td>
             <td>${c.image}</td>
             <td><span style="color:${stateColor}">●</span> ${c.status}</td>
+            <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
             <td class="cpu-cell">${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
             <td class="mem-cell">${s.memory_usage ? formatBytes(s.memory_usage) : '-'}</td>
             <td style="font-size:11px;">${ports}</td>
@@ -1125,6 +1126,7 @@ function renderLxcContainers(containers, stats) {
         return `<tr>
             <td><strong>${c.name}</strong></td>
             <td><span style="color:${stateColor}">●</span> ${c.state}</td>
+            <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
             <td>${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
             <td>${s.memory_usage ? formatBytes(s.memory_usage) + (s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : '') : '-'}</td>
             <td>

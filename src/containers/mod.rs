@@ -253,25 +253,40 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
     }
 }
 
+/// Ensure lxcbr0 bridge exists for default LXC container networking
+pub fn ensure_lxc_bridge() {
+    // Check if lxcbr0 already exists
+    if let Ok(output) = Command::new("ip").args(["link", "show", "lxcbr0"]).output() {
+        if output.status.success() { return; }
+    }
+
+    info!("Creating lxcbr0 bridge for LXC container networking");
+
+    // Create bridge
+    let _ = Command::new("ip").args(["link", "add", "lxcbr0", "type", "bridge"]).output();
+    let _ = Command::new("ip").args(["addr", "add", "10.0.3.1/24", "dev", "lxcbr0"]).output();
+    let _ = Command::new("ip").args(["link", "set", "lxcbr0", "up"]).output();
+
+    // Enable NAT for container internet access
+    let _ = Command::new("sh").args(["-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"]).output();
+    let _ = Command::new("iptables").args(["-t", "nat", "-A", "POSTROUTING", "-s", "10.0.3.0/24", "!", "-d", "10.0.3.0/24", "-j", "MASQUERADE"]).output();
+    let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "lxcbr0", "-j", "ACCEPT"]).output();
+    let _ = Command::new("iptables").args(["-A", "FORWARD", "-o", "lxcbr0", "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"]).output();
+}
+
 /// Configure an LXC container's network to use WolfNet
 pub fn lxc_attach_wolfnet(container: &str, ip: &str) -> Result<String, String> {
     info!("Configuring LXC container {} for wolfnet with IP {}", container, ip);
 
-    // Add a veth pair connected to wolfnet0 via a bridge
-    // First, create the bridge if it doesn't exist
-    let _ = Command::new("ip")
-        .args(["link", "add", "wolfbr0", "type", "bridge"])
-        .output();
-    let _ = Command::new("ip")
-        .args(["link", "set", "wolfbr0", "up"])
-        .output();
+    // Ensure default bridge exists first
+    ensure_lxc_bridge();
 
     // Write network config to the LXC container
     let config_path = format!("/var/lib/lxc/{}/config", container);
     if let Ok(existing) = std::fs::read_to_string(&config_path) {
         if !existing.contains("wolfnet") {
             let append = format!(
-                "\n# WolfNet networking\nlxc.net.1.type = veth\nlxc.net.1.link = wolfbr0\nlxc.net.1.flags = up\nlxc.net.1.ipv4.address = {}/24\nlxc.net.1.name = eth1\n",
+                "\n# WolfNet networking\nlxc.net.1.type = veth\nlxc.net.1.link = lxcbr0\nlxc.net.1.flags = up\nlxc.net.1.ipv4.address = {}/24\nlxc.net.1.ipv4.gateway = auto\nlxc.net.1.name = eth1\n",
                 ip
             );
             if let Err(e) = std::fs::write(&config_path, format!("{}{}", existing, append)) {
@@ -295,6 +310,7 @@ pub struct ContainerInfo {
     pub created: String,
     pub ports: Vec<String>,
     pub runtime: String,  // "docker" or "lxc"
+    pub ip_address: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,7 +457,7 @@ pub fn docker_list_running() -> Vec<ContainerInfo> {
 
 fn docker_list(all: bool) -> Vec<ContainerInfo> {
     let mut cmd = Command::new("docker");
-    cmd.args(["ps", "--format", "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.State}}\\t{{.CreatedAt}}\\t{{.Ports}}", "--no-trunc"]);
+    cmd.args(["ps", "--format", "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.State}}\\t{{.CreatedAt}}\\t{{.Ports}}\\t{{.Networks}}", "--no-trunc"]);
     if all {
         cmd.arg("-a");
     }
@@ -454,9 +470,17 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                 .filter(|l| !l.is_empty())
                 .map(|line| {
                     let parts: Vec<&str> = line.split('\t').collect();
+                    let name = parts.get(1).unwrap_or(&"").to_string();
+                    // Get IP from docker inspect for this container
+                    let ip = Command::new("docker")
+                        .args(["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", &name])
+                        .output()
+                        .ok()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .unwrap_or_default();
                     ContainerInfo {
                         id: parts.first().unwrap_or(&"").to_string(),
-                        name: parts.get(1).unwrap_or(&"").to_string(),
+                        name,
                         image: parts.get(2).unwrap_or(&"").to_string(),
                         status: parts.get(3).unwrap_or(&"").to_string(),
                         state: parts.get(4).unwrap_or(&"").to_string(),
@@ -467,6 +491,7 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                             .map(|p| p.to_string())
                             .collect(),
                         runtime: "docker".to_string(),
+                        ip_address: ip,
                     }
                 })
                 .collect()
@@ -603,7 +628,7 @@ fn run_docker_cmd(args: &[&str]) -> Result<String, String> {
 /// List all LXC containers
 pub fn lxc_list_all() -> Vec<ContainerInfo> {
     Command::new("lxc-ls")
-        .args(["-f", "-F", "NAME,STATE,PID,RAM,AUTOSTART"])
+        .args(["-f", "-F", "NAME,STATE,PID,RAM,IPV4"])
         .output()
         .ok()
         .map(|o| {
@@ -620,6 +645,9 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                     } else {
                         "Stopped".to_string()
                     };
+                    // IPV4 is the last field (index 4), may contain commas for multiple IPs
+                    let ip = parts.get(4..).map(|p| p.join(" ")).unwrap_or_default()
+                        .replace("-", "");
 
                     ContainerInfo {
                         id: name.clone(),
@@ -630,6 +658,7 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                         created: String::new(),
                         ports: vec![],
                         runtime: "lxc".to_string(),
+                        ip_address: ip.trim().to_string(),
                     }
                 })
                 .collect()
@@ -753,6 +782,7 @@ pub fn lxc_logs(container: &str, lines: u32) -> Vec<String> {
 
 /// Start an LXC container
 pub fn lxc_start(container: &str) -> Result<String, String> {
+    ensure_lxc_bridge();
     run_lxc_cmd(&["lxc-start", "-n", container])
 }
 
