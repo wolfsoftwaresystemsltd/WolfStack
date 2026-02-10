@@ -332,28 +332,9 @@ fn lxc_apply_wolfnet(container: &str) {
         // Wait for container to be ready
         std::thread::sleep(std::time::Duration::from_secs(2));
 
-        // Derive bridge IP from WolfNet IP last octet (e.g. 10.10.10.100 → 10.0.3.200)
-        let last: u8 = ip.split('.').last()
-            .and_then(|s| s.parse::<u8>().ok())
-            .unwrap_or(50)
-            .wrapping_add(100);
-        let bridge_ip = format!("10.0.3.{}", last);
+        // Assign a unique bridge IP (scans existing containers)
+        let bridge_ip = assign_container_bridge_ip(container);
         info!("Container {} → bridge={}, wolfnet={}", container, bridge_ip, ip);
-
-        // Write static networkd config directly to rootfs
-        let networkd_conf = format!(
-            "[Match]\nName=eth0\n\n[Network]\nAddress={}/24\nGateway=10.0.3.1\nDNS=10.0.3.1\nDNS=8.8.8.8\n",
-            bridge_ip
-        );
-        let network_dir = format!("/var/lib/lxc/{}/rootfs/etc/systemd/network", container);
-        if std::path::Path::new(&network_dir).exists() {
-            let _ = std::fs::write(format!("{}/eth0.network", network_dir), &networkd_conf);
-        }
-
-        // Write resolv.conf directly (fallback for containers without systemd-resolved)
-        let resolv_path = format!("/var/lib/lxc/{}/rootfs/etc/resolv.conf", container);
-        let _ = std::fs::remove_file(&resolv_path); // might be a symlink to systemd
-        let _ = std::fs::write(&resolv_path, "nameserver 10.0.3.1\nnameserver 8.8.8.8\n");
 
         // Apply IPs via lxc-attach (immediate effect)
         let _ = Command::new("lxc-attach")
@@ -362,9 +343,13 @@ fn lxc_apply_wolfnet(container: &str) {
         let _ = Command::new("lxc-attach")
             .args(["-n", container, "--", "ip", "route", "replace", "default", "via", "10.0.3.1"])
             .output();
-        // Restart networkd to pick up config (for persistence across container restarts)
+        // Restart networking (try all methods for distro compat)
         let _ = Command::new("lxc-attach")
-            .args(["-n", container, "--", "systemctl", "restart", "systemd-networkd"])
+            .args(["-n", container, "--", "sh", "-c",
+                "systemctl restart systemd-networkd 2>/dev/null; \
+                 netplan apply 2>/dev/null; \
+                 /etc/init.d/networking restart 2>/dev/null; \
+                 true"])
             .output();
 
         // Add WolfNet IP as secondary /32 on eth0
@@ -397,6 +382,108 @@ fn lxc_apply_wolfnet(container: &str) {
 
         info!("WolfNet ready: {} → wolfnet={}, bridge={}", container, ip, bridge_ip);
     }
+}
+
+/// Find the next free IP in 10.0.3.100-254 by scanning all container configs
+fn find_free_bridge_ip() -> u8 {
+    let mut used: Vec<u8> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
+        for entry in entries.flatten() {
+            // Check systemd-networkd config
+            let net_file = entry.path().join("rootfs/etc/systemd/network/eth0.network");
+            if let Ok(content) = std::fs::read_to_string(&net_file) {
+                for line in content.lines() {
+                    if let Some(addr) = line.strip_prefix("Address=10.0.3.") {
+                        if let Some(last) = addr.split('/').next().and_then(|s| s.parse::<u8>().ok()) {
+                            used.push(last);
+                        }
+                    }
+                }
+            }
+            // Check Netplan config
+            let netplan_file = entry.path().join("rootfs/etc/netplan/50-wolfstack.yaml");
+            if let Ok(content) = std::fs::read_to_string(&netplan_file) {
+                for line in content.lines() {
+                    let trimmed = line.trim().trim_start_matches("- ");
+                    if let Some(addr) = trimmed.strip_prefix("10.0.3.") {
+                        if let Some(last) = addr.split('/').next().and_then(|s| s.parse::<u8>().ok()) {
+                            used.push(last);
+                        }
+                    }
+                }
+            }
+            // Check /etc/network/interfaces
+            let ifaces_file = entry.path().join("rootfs/etc/network/interfaces");
+            if let Ok(content) = std::fs::read_to_string(&ifaces_file) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("address 10.0.3.") {
+                        if let Some(addr) = trimmed.strip_prefix("address 10.0.3.") {
+                            if let Ok(last) = addr.trim().parse::<u8>() {
+                                used.push(last);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (100u8..=254).find(|i| !used.contains(i)).unwrap_or(100)
+}
+
+/// Assign a unique bridge IP to a container, write network config, return IP string
+fn assign_container_bridge_ip(container: &str) -> String {
+    let last = find_free_bridge_ip();
+    let ip = format!("10.0.3.{}", last);
+    write_container_network_config(container, &ip);
+    ip
+}
+
+/// Write network config to container rootfs — supports systemd-networkd, Netplan,
+/// and /etc/network/interfaces for maximum distro compatibility
+fn write_container_network_config(container: &str, bridge_ip: &str) {
+    let rootfs = format!("/var/lib/lxc/{}/rootfs", container);
+
+    // Method 1: systemd-networkd (Debian Trixie, Arch, etc.)
+    let networkd_dir = format!("{}/etc/systemd/network", rootfs);
+    if std::path::Path::new(&networkd_dir).exists() {
+        let conf = format!(
+            "[Match]\nName=eth0\n\n[Network]\nAddress={}/24\nGateway=10.0.3.1\nDNS=10.0.3.1\nDNS=8.8.8.8\n",
+            bridge_ip
+        );
+        let _ = std::fs::write(format!("{}/eth0.network", networkd_dir), &conf);
+    }
+
+    // Method 2: Netplan (Ubuntu 18.04+)
+    let netplan_dir = format!("{}/etc/netplan", rootfs);
+    if std::path::Path::new(&netplan_dir).exists() {
+        let conf = format!(
+            "network:\n  version: 2\n  ethernets:\n    eth0:\n      addresses:\n        - {}/24\n      routes:\n        - to: default\n          via: 10.0.3.1\n      nameservers:\n        addresses: [10.0.3.1, 8.8.8.8]\n",
+            bridge_ip
+        );
+        // Remove conflicting configs
+        if let Ok(entries) = std::fs::read_dir(&netplan_dir) {
+            for e in entries.flatten() {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+        let _ = std::fs::write(format!("{}/50-wolfstack.yaml", netplan_dir), &conf);
+    }
+
+    // Method 3: /etc/network/interfaces (Debian Bullseye/Bookworm, Alpine)
+    let ifaces_path = format!("{}/etc/network/interfaces", rootfs);
+    if std::path::Path::new(&ifaces_path).exists() {
+        let conf = format!(
+            "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet static\n    address {}\n    netmask 255.255.255.0\n    gateway 10.0.3.1\n    dns-nameservers 10.0.3.1 8.8.8.8\n",
+            bridge_ip
+        );
+        let _ = std::fs::write(&ifaces_path, &conf);
+    }
+
+    // Always write resolv.conf as a fallback
+    let resolv_path = format!("{}/etc/resolv.conf", rootfs);
+    let _ = std::fs::remove_file(&resolv_path); // might be a symlink
+    let _ = std::fs::write(&resolv_path, "nameserver 10.0.3.1\nnameserver 8.8.8.8\n");
 }
 
 // ─── Common types ───
@@ -1004,7 +1091,32 @@ fn lxc_post_start_setup(container: &str) {
 
     info!("Running first-boot setup for container {}", container);
 
-    // Wait for container networking to settle (wolfnet setup runs first)
+    // Assign a unique bridge IP if not already configured by WolfNet
+    let wolfnet_file = format!("/var/lib/lxc/{}/.wolfnet/ip", container);
+    if !std::path::Path::new(&wolfnet_file).exists() {
+        let bridge_ip = assign_container_bridge_ip(container);
+        info!("Assigned bridge IP {} to container {}", bridge_ip, container);
+        // Apply immediately
+        let _ = Command::new("lxc-attach")
+            .args(["-n", container, "--", "ip", "addr", "flush", "dev", "eth0"])
+            .output();
+        let _ = Command::new("lxc-attach")
+            .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", bridge_ip), "dev", "eth0"])
+            .output();
+        let _ = Command::new("lxc-attach")
+            .args(["-n", container, "--", "ip", "route", "replace", "default", "via", "10.0.3.1"])
+            .output();
+        // Restart networking (multi-distro)
+        let _ = Command::new("lxc-attach")
+            .args(["-n", container, "--", "sh", "-c",
+                "systemctl restart systemd-networkd 2>/dev/null; \
+                 netplan apply 2>/dev/null; \
+                 /etc/init.d/networking restart 2>/dev/null; \
+                 true"])
+            .output();
+    }
+
+    // Wait for container networking to settle
     std::thread::sleep(std::time::Duration::from_secs(5));
 
     // Install openssh-server
@@ -1648,56 +1760,22 @@ pub fn lxc_clone_snapshot(container: &str, new_name: &str) -> Result<String, Str
 
 /// After cloning, assign a new unique IP so the clone doesn't conflict with the original
 fn lxc_clone_fixup_ip(new_name: &str) {
-    // Collect IPs currently in use by scanning all container networkd configs
-    let mut used_ips: Vec<u8> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
-        for entry in entries.flatten() {
-            let net_file = entry.path().join("rootfs/etc/systemd/network/eth0.network");
-            if let Ok(content) = std::fs::read_to_string(&net_file) {
-                // Parse "Address=10.0.3.X/24"
-                for line in content.lines() {
-                    if let Some(addr) = line.strip_prefix("Address=10.0.3.") {
-                        if let Some(last) = addr.split('/').next().and_then(|s| s.parse::<u8>().ok()) {
-                            used_ips.push(last);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Pick a new IP in 10.0.3.100-254 that's not in use
-    let new_last = (100u8..=254).find(|i| !used_ips.contains(i));
-    let new_last = match new_last {
-        Some(l) => l,
-        None => {
-            error!("No free IPs in 10.0.3.100-254 for clone {}", new_name);
-            return;
-        }
-    };
+    let new_last = find_free_bridge_ip();
     let new_ip = format!("10.0.3.{}", new_last);
     info!("Assigning new bridge IP {} to cloned container {}", new_ip, new_name);
 
-    // Rewrite networkd config
-    let network_dir = format!("/var/lib/lxc/{}/rootfs/etc/systemd/network", new_name);
-    if std::path::Path::new(&network_dir).exists() {
-        let networkd_conf = format!(
-            "[Match]\nName=eth0\n\n[Network]\nAddress={}/24\nGateway=10.0.3.1\nDNS=10.0.3.1\nDNS=8.8.8.8\n",
-            new_ip
-        );
-        let _ = std::fs::write(format!("{}/eth0.network", network_dir), &networkd_conf);
-    }
-
-    // Rewrite resolv.conf
-    let resolv_path = format!("/var/lib/lxc/{}/rootfs/etc/resolv.conf", new_name);
-    let _ = std::fs::remove_file(&resolv_path);
-    let _ = std::fs::write(&resolv_path, "nameserver 10.0.3.1\nnameserver 8.8.8.8\n");
+    // Write multi-distro network config
+    write_container_network_config(new_name, &new_ip);
 
     // Remove WolfNet IP marker from clone (it shouldn't inherit the original's WolfNet IP)
     let wolfnet_dir = format!("/var/lib/lxc/{}/.wolfnet", new_name);
     let _ = std::fs::remove_dir_all(&wolfnet_dir);
 
-    // Also update the LXC config hwaddr to generate a unique MAC
+    // Remove first-boot marker so the clone gets its own first-boot setup
+    let marker = format!("/var/lib/lxc/{}/.wolfstack_setup_done", new_name);
+    let _ = std::fs::remove_file(&marker);
+
+    // Update the LXC config hwaddr to generate a unique MAC
     let config_path = format!("/var/lib/lxc/{}/config", new_name);
     if let Ok(config) = std::fs::read_to_string(&config_path) {
         let new_mac = format!("00:16:3e:{:02x}:{:02x}:{:02x}",
