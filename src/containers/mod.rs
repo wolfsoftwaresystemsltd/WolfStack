@@ -21,7 +21,7 @@ pub struct WolfNetStatus {
 }
 
 /// Check if WolfNet is running and get network info
-pub fn wolfnet_status() -> WolfNetStatus {
+pub fn wolfnet_status(extra_used: &[u8]) -> WolfNetStatus {
     // Check if wolfnet0 interface exists
     let output = Command::new("ip")
         .args(["addr", "show", "wolfnet0"])
@@ -50,7 +50,7 @@ pub fn wolfnet_status() -> WolfNetStatus {
                 String::new()
             };
 
-            let next_ip = wolfnet_allocate_ip(&ip);
+            let next_ip = wolfnet_allocate_ip(&ip, extra_used);
 
             WolfNetStatus {
                 available: !ip.is_empty(),
@@ -72,7 +72,7 @@ pub fn wolfnet_status() -> WolfNetStatus {
 
 /// Allocate the next available WolfNet IP for a container
 /// Scans existing containers and picks the next free IP in 10.10.10.100-254 range
-pub fn wolfnet_allocate_ip(host_ip: &str) -> String {
+pub fn wolfnet_allocate_ip(host_ip: &str, extra_used: &[u8]) -> String {
     let parts: Vec<&str> = host_ip.split('.').collect();
     if parts.len() != 4 {
         return "10.10.10.100".to_string();
@@ -85,6 +85,11 @@ pub fn wolfnet_allocate_ip(host_ip: &str) -> String {
     // Host IP
     if let Ok(last) = parts[3].parse::<u8>() {
         used_ips.insert(last);
+    }
+
+    // Add extra IPs from remote cluster nodes
+    for &ip in extra_used {
+        used_ips.insert(ip);
     }
 
     // Check Docker containers connected to wolfnet
@@ -134,6 +139,59 @@ pub fn wolfnet_allocate_ip(host_ip: &str) -> String {
     format!("{}.100", prefix) // Fallback
 }
 
+/// Get list of WolfNet IPs currently in use on this node (for cluster-wide dedup)
+pub fn wolfnet_used_ips() -> Vec<String> {
+    let mut ips = Vec::new();
+
+    // Host IP from wolfnet0
+    if let Ok(output) = Command::new("ip")
+        .args(["addr", "show", "wolfnet0"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        if let Some(ip) = text.lines()
+            .find(|l| l.contains("inet "))
+            .and_then(|l| l.trim().split_whitespace().nth(1))
+            .and_then(|s| s.split('/').next())
+        {
+            ips.push(ip.to_string());
+        }
+    }
+
+    // Docker containers on wolfnet
+    if let Ok(output) = Command::new("docker")
+        .args(["network", "inspect", "wolfnet", "--format",
+               "{{range .Containers}}{{.IPv4Address}} {{end}}"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for addr in text.split_whitespace() {
+            if let Some(ip) = addr.split('/').next() {
+                if !ip.is_empty() {
+                    ips.push(ip.to_string());
+                }
+            }
+        }
+    }
+
+    // LXC containers (from ARP table)
+    if let Ok(output) = Command::new("ip")
+        .args(["neigh", "show", "dev", "wolfnet0"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            if let Some(ip) = line.split_whitespace().next() {
+                if ip.contains('.') {
+                    ips.push(ip.to_string());
+                }
+            }
+        }
+    }
+
+    ips
+}
+
 /// Ensure the Docker 'wolfnet' network exists (macvlan on wolfnet0)
 pub fn ensure_docker_wolfnet_network() -> Result<(), String> {
     // Check if network already exists
@@ -147,7 +205,7 @@ pub fn ensure_docker_wolfnet_network() -> Result<(), String> {
     }
 
     // Get the WolfNet subnet info
-    let status = wolfnet_status();
+    let status = wolfnet_status(&[]);
     if !status.available {
         return Err("WolfNet not running".to_string());
     }

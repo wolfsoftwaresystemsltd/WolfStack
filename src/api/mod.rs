@@ -587,10 +587,44 @@ pub async fn lxc_create(
 }
 
 /// GET /api/wolfnet/status — get WolfNet networking status for container creation
+/// Queries all cluster nodes for used IPs to avoid collisions
 pub async fn wolfnet_network_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let status = containers::wolfnet_status();
+
+    // Collect used IPs from all remote cluster nodes
+    let mut remote_used: Vec<u8> = Vec::new();
+    let nodes = state.cluster.get_all_nodes();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap_or_default();
+
+    for node in &nodes {
+        if node.is_self || !node.online { continue; }
+        let url = format!("http://{}:{}/api/wolfnet/used-ips", node.address, node.port);
+        if let Ok(resp) = client.get(&url).send().await {
+            if let Ok(ips) = resp.json::<Vec<String>>().await {
+                for ip_str in ips {
+                    let parts: Vec<&str> = ip_str.split('.').collect();
+                    if parts.len() == 4 {
+                        if let Ok(last) = parts[3].parse::<u8>() {
+                            remote_used.push(last);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let status = containers::wolfnet_status(&remote_used);
     HttpResponse::Ok().json(status)
+}
+
+/// GET /api/wolfnet/used-ips — returns WolfNet IPs in use on this node (no auth, cluster-internal)
+pub async fn wolfnet_used_ips_endpoint() -> HttpResponse {
+    let ips = containers::wolfnet_used_ips();
+    HttpResponse::Ok().json(ips)
 }
 
 /// GET /api/containers/docker/stats — Docker container stats
@@ -882,6 +916,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/wolfnet/status", web::get().to(wolfnet_network_status))
         // Agent (no auth — used by other WolfStack nodes)
         .route("/api/agent/status", web::get().to(agent_status))
+        .route("/api/wolfnet/used-ips", web::get().to(wolfnet_used_ips_endpoint))
         // Node proxy — forward API calls to remote nodes (must be last — wildcard path)
         .route("/api/nodes/{id}/proxy/{path:.*}", web::get().to(node_proxy))
         .route("/api/nodes/{id}/proxy/{path:.*}", web::post().to(node_proxy))
