@@ -34,6 +34,7 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - **Create containers** with ports, env vars, memory/CPU limits, and WolfNet IPs
 - **Clone containers** — create a copy with one click
 - **Migrate containers** to other WolfStack nodes
+- **Manage images** — use existing images to create containers, or delete unused images
 - View container logs with timestamps
 - Browse Docker images with size and creation info
 - **Web terminal** — interactive shell via xterm.js (WebSocket console)
@@ -84,6 +85,10 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - Add remote servers and monitor them from one dashboard
 - Works over WolfNet mesh VPN or direct IP
 - Polls remote WolfStack instances for metrics and component status
+- **Remote container management** — start, stop, restart, remove, clone, and migrate containers on any server in your cluster
+- **Container count badges** — sidebar shows how many Docker and LXC containers each server has
+- **Web terminal** — open an interactive shell on any server (local or remote) directly from the sidebar
+- All API calls automatically proxied through the node proxy for remote servers
 
 ### 🔒 Linux Authentication
 - Authenticates against your server's Linux user accounts (PAM/crypt)
@@ -110,7 +115,7 @@ wolfstack/
 │   ├── agent/mod.rs         # Multi-server cluster state, polling
 │   ├── monitoring/mod.rs    # System metrics via sysinfo
 │   ├── installer/mod.rs     # Component detection, install, systemd control
-│   ├── console.rs           # WebSocket PTY terminal for containers
+│   ├── console.rs           # WebSocket PTY terminal for containers and host shells
 │   └── containers/mod.rs    # Docker & LXC management
 ├── web/
 │   ├── login.html           # Login page
@@ -185,6 +190,7 @@ All endpoints require authentication (cookie-based session) except `/api/agent/s
 | POST | `/api/containers/docker/{id}/action` | Start/stop/restart/pause/unpause/remove container |
 | POST | `/api/containers/docker/{id}/clone` | Clone a Docker container |
 | POST | `/api/containers/docker/{id}/migrate` | Migrate container to another WolfStack node |
+| DELETE | `/api/containers/docker/images/{id}` | Delete a Docker image |
 | POST | `/api/containers/docker/import` | Receive a migrated container image (inter-node) |
 
 ### LXC Containers
@@ -207,7 +213,7 @@ All endpoints require authentication (cookie-based session) except `/api/agent/s
 |--------|----------|-------------|
 | GET | `/api/wolfnet/status` | WolfNet network status and peers |
 | GET | `/api/wolfnet/used-ips` | List all used WolfNet IPs |
-| WS | `/ws/console/{type}/{name}` | Interactive web terminal (Docker or LXC) |
+| WS | `/ws/console/{type}/{name}` | Interactive web terminal (Docker, LXC, or host) |
 
 ### Node Proxy
 
