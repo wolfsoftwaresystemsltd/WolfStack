@@ -278,24 +278,44 @@ pub fn ensure_lxc_bridge() {
 pub fn lxc_attach_wolfnet(container: &str, ip: &str) -> Result<String, String> {
     info!("Configuring LXC container {} for wolfnet with IP {}", container, ip);
 
-    // Ensure default bridge exists first
-    ensure_lxc_bridge();
-
-    // Write network config to the LXC container
-    let config_path = format!("/var/lib/lxc/{}/config", container);
-    if let Ok(existing) = std::fs::read_to_string(&config_path) {
-        if !existing.contains("wolfnet") {
-            let append = format!(
-                "\n# WolfNet networking\nlxc.net.1.type = veth\nlxc.net.1.link = lxcbr0\nlxc.net.1.flags = up\nlxc.net.1.ipv4.address = {}/24\nlxc.net.1.ipv4.gateway = auto\nlxc.net.1.name = eth1\n",
-                ip
-            );
-            if let Err(e) = std::fs::write(&config_path, format!("{}{}", existing, append)) {
-                return Err(format!("Failed to write LXC config: {}", e));
-            }
-        }
+    // wolfnet0 is a TUN device — can't be bridged.
+    // Instead, save the WolfNet IP as a marker; it will be applied inside the
+    // container at start time via lxc-attach + host routing.
+    let marker_dir = format!("/var/lib/lxc/{}/.wolfnet", container);
+    let _ = std::fs::create_dir_all(&marker_dir);
+    if let Err(e) = std::fs::write(format!("{}/ip", marker_dir), ip) {
+        return Err(format!("Failed to save WolfNet IP: {}", e));
     }
 
-    Ok(format!("LXC container '{}' configured for wolfnet at {}", container, ip))
+    Ok(format!("LXC container '{}' will use WolfNet IP {} on start", container, ip))
+}
+
+/// Apply WolfNet IP inside a running container (called after lxc-start)
+fn lxc_apply_wolfnet(container: &str) {
+    let ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", container);
+    if let Ok(ip) = std::fs::read_to_string(&ip_file) {
+        let ip = ip.trim();
+        if ip.is_empty() { return; }
+        info!("Applying WolfNet IP {} to container {}", ip, container);
+
+        // Wait for container networking to be ready
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // Add WolfNet IP as secondary address on eth0 inside the container
+        let _ = Command::new("lxc-attach")
+            .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", ip), "dev", "eth0"])
+            .output();
+
+        // Add route on host for this container IP through wolfnet0
+        let _ = Command::new("ip")
+            .args(["route", "add", &format!("{}/32", ip), "dev", "wolfnet0"])
+            .output();
+
+        // Enable proxy ARP on wolfnet0 so other nodes can reach this container
+        let _ = Command::new("sh")
+            .args(["-c", "echo 1 > /proc/sys/net/ipv4/conf/wolfnet0/proxy_arp"])
+            .output();
+    }
 }
 
 // ─── Common types ───
@@ -781,51 +801,66 @@ pub fn lxc_logs(container: &str, lines: u32) -> Vec<String> {
 }
 
 /// Set the root password on an LXC container
-/// Starts the container briefly, sets the password via chpasswd, then stops it
+/// Writes password hash directly to rootfs /etc/shadow (no need to start container)
 pub fn lxc_set_root_password(container: &str, password: &str) -> Result<String, String> {
     info!("Setting root password for LXC container {}", container);
 
-    // Ensure bridge exists before starting
-    ensure_lxc_bridge();
-
-    // Start the container
-    let start = Command::new("lxc-start")
-        .args(["-n", container])
+    // Generate password hash using openssl
+    let hash_output = Command::new("openssl")
+        .args(["passwd", "-6", password])
         .output()
-        .map_err(|e| format!("Failed to start container: {}", e))?;
+        .map_err(|e| format!("Failed to generate password hash: {}", e))?;
 
-    if !start.status.success() {
-        return Err(format!("Failed to start container for password setup: {}",
-            String::from_utf8_lossy(&start.stderr)));
+    if !hash_output.status.success() {
+        return Err("Failed to generate password hash".to_string());
     }
 
-    // Wait for container to be ready
-    let _ = Command::new("lxc-wait")
-        .args(["-n", container, "-s", "RUNNING", "-t", "10"])
-        .output();
+    let hash = String::from_utf8_lossy(&hash_output.stdout).trim().to_string();
 
-    // Set root password via chpasswd
-    let chpasswd = Command::new("lxc-attach")
-        .args(["-n", container, "--", "sh", "-c", &format!("echo 'root:{}' | chpasswd", password)])
-        .output()
-        .map_err(|e| format!("Failed to set password: {}", e))?;
+    // Find the rootfs — could be in default path or custom storage
+    let shadow_path = format!("/var/lib/lxc/{}/rootfs/etc/shadow", container);
+    
+    if let Ok(shadow) = std::fs::read_to_string(&shadow_path) {
+        let new_shadow: String = shadow.lines().map(|line| {
+            if line.starts_with("root:") {
+                let parts: Vec<&str> = line.splitn(3, ':').collect();
+                if parts.len() >= 3 {
+                    format!("root:{}:{}", hash, parts[2])
+                } else {
+                    format!("root:{}:19000:0:99999:7:::", hash)
+                }
+            } else {
+                line.to_string()
+            }
+        }).collect::<Vec<_>>().join("\n");
 
-    // Stop the container
-    let _ = Command::new("lxc-stop")
-        .args(["-n", container])
-        .output();
+        // Preserve trailing newline
+        let new_shadow = if shadow.ends_with('\n') && !new_shadow.ends_with('\n') {
+            format!("{}\n", new_shadow)
+        } else {
+            new_shadow
+        };
 
-    if chpasswd.status.success() {
+        std::fs::write(&shadow_path, new_shadow)
+            .map_err(|e| format!("Failed to write shadow file: {}", e))?;
+
         Ok("Root password set".to_string())
     } else {
-        Err(format!("Failed to set password: {}", String::from_utf8_lossy(&chpasswd.stderr)))
+        Err(format!("Shadow file not found at {}", shadow_path))
     }
 }
 
 /// Start an LXC container
 pub fn lxc_start(container: &str) -> Result<String, String> {
     ensure_lxc_bridge();
-    run_lxc_cmd(&["lxc-start", "-n", container])
+    let result = run_lxc_cmd(&["lxc-start", "-n", container]);
+    
+    // Apply WolfNet IP if configured
+    if result.is_ok() {
+        lxc_apply_wolfnet(container);
+    }
+    
+    result
 }
 
 /// Stop an LXC container
