@@ -14,8 +14,6 @@ pub struct VmConfig {
     pub iso_path: Option<String>,
     pub running: bool,
     pub vnc_port: Option<u16>,
-    #[serde(default)]
-    pub vnc_ws_port: Option<u16>,
     pub mac_address: Option<String>,
     pub auto_start: bool,
     #[serde(default)]
@@ -32,7 +30,6 @@ impl VmConfig {
             iso_path: None,
             running: false,
             vnc_port: None,
-            vnc_ws_port: None,
             mac_address: Some(generate_mac()),
             auto_start: false,
             wolfnet_ip: None,
@@ -68,11 +65,9 @@ impl VmManager {
                          if let Ok(mut vm) = serde_json::from_str::<VmConfig>(&content) {
                              vm.running = self.check_running(&vm.name);
                              if vm.running {
-                                 vm.vnc_port = self.find_vnc_port(&vm.name);
-                                 vm.vnc_ws_port = self.read_runtime_ws_port(&vm.name);
+                                 vm.vnc_port = self.read_runtime_vnc_port(&vm.name);
                              } else {
                                  vm.vnc_port = None;
-                                 vm.vnc_ws_port = None;
                              }
                              vms.push(vm);
                          }
@@ -83,39 +78,12 @@ impl VmManager {
         vms
     }
 
-    pub fn find_vnc_port(&self, name: &str) -> Option<u16> {
-         let output = Command::new("pgrep")
-            .arg("-a")
-            .arg("-f")
-            .arg(format!("qemu-system-x86_64.*-name {}", name))
-            .output().ok()?;
-        
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            if line.contains(&format!("-name {}", name)) {
-                if let Some(pos) = line.find("-vnc :") {
-                    let rest = &line[pos + 6..];
-                    let end = rest.find(' ').unwrap_or(rest.len());
-                    if let Ok(display) = rest[..end].parse::<u16>() {
-                        return Some(5900 + display);
-                    }
-                }
-            }
-        }
-        None
-    }
-
     fn vm_config_path(&self, name: &str) -> PathBuf {
         self.base_dir.join(format!("{}.json", name))
     }
     
     fn vm_disk_path(&self, name: &str) -> PathBuf {
         self.base_dir.join(format!("{}.qcow2", name))
-    }
-
-    /// Path to the QEMU monitor socket (for serial console)
-    pub fn vm_serial_socket(&self, name: &str) -> PathBuf {
-        self.base_dir.join(format!("{}.serial.sock", name))
     }
 
     /// TAP interface name for a VM
@@ -281,11 +249,10 @@ impl VmManager {
 
         let mut rng = rand::thread_rng();
         let vnc_num: u16 = rng.gen_range(10..99); 
-        let ws_port: u16 = 6080 + vnc_num;
-        let vnc_arg = format!(":{},websocket={}", vnc_num, ws_port);
+        let vnc_port: u16 = 5900 + vnc_num;
+        let vnc_arg = format!("0.0.0.0:{}", vnc_num);  // Bind to all interfaces
         
-        let serial_sock = self.vm_serial_socket(name);
-        let _ = fs::remove_file(&serial_sock);
+        write_log(&format!("VNC display :{} (port {})", vnc_num, vnc_port));
 
         // Check if KVM is available
         let kvm_available = std::path::Path::new("/dev/kvm").exists();
@@ -308,7 +275,6 @@ impl VmManager {
            .arg("-smp").arg(format!("{}", config.cpus))
            .arg("-drive").arg(format!("file={},format=qcow2,if=virtio", disk_path.display()))
            .arg("-vnc").arg(&vnc_arg)
-           .arg("-serial").arg(format!("unix:{},server,nowait", serial_sock.display()))
            .arg("-daemonize");
 
         // KVM or software emulation
@@ -367,9 +333,9 @@ impl VmManager {
              }
         }
 
-        write_log(&format!("Launching QEMU: VNC :{}, WS :{}, KVM: {}", vnc_num, ws_port, kvm_available));
-        info!("Starting VM {}: qemu-system-x86_64 (KVM: {}, VNC :{}, WS :{})", 
-              name, kvm_available, vnc_num, ws_port);
+        write_log(&format!("Launching QEMU: VNC :{} (port {}), KVM: {}", vnc_num, vnc_port, kvm_available));
+        info!("Starting VM {}: qemu-system-x86_64 (KVM: {}, VNC :{})", 
+              name, kvm_available, vnc_num);
 
         // Redirect QEMU stderr to log file (append mode, don't overwrite diagnostics)
         if let Ok(log_file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
@@ -410,19 +376,18 @@ impl VmManager {
             return Err(format!("VM crashed immediately after starting. QEMU log:\n{}", log_content));
         }
 
-        write_log(&format!("VM started successfully. VNC :{} (port {}), WS :{}", vnc_num, 5900 + vnc_num, ws_port));
+        write_log(&format!("VM started successfully. VNC :{} (port {})", vnc_num, vnc_port));
 
         // Save runtime port info so frontend can connect
         let runtime = serde_json::json!({
-            "vnc_port": 5900 + vnc_num,
-            "vnc_ws_port": ws_port,
+            "vnc_port": vnc_port,
             "vnc_display": vnc_num,
             "kvm": kvm_available,
         });
         let runtime_path = self.base_dir.join(format!("{}.runtime.json", name));
         let _ = fs::write(&runtime_path, runtime.to_string());
         
-        info!("Started VM {} on VNC :{} (port {}), WebSocket port {}", name, vnc_num, 5900 + vnc_num, ws_port);
+        info!("Started VM {} on VNC :{} (port {})", name, vnc_num, vnc_port);
         Ok(())
     }
 
@@ -543,8 +508,7 @@ impl VmManager {
             }
         }
 
-        // Clean up serial socket and runtime file
-        let _ = fs::remove_file(self.vm_serial_socket(name));
+        // Clean up runtime file
         let _ = fs::remove_file(self.base_dir.join(format!("{}.runtime.json", name)));
 
         info!("Stopped VM: {}", name);
@@ -557,8 +521,7 @@ impl VmManager {
         let mut vm: VmConfig = serde_json::from_str(&content).ok()?;
         vm.running = self.check_running(name);
         if vm.running {
-            vm.vnc_port = self.find_vnc_port(name);
-            vm.vnc_ws_port = self.read_runtime_ws_port(name);
+            vm.vnc_port = self.read_runtime_vnc_port(name);
         }
         Some(vm)
     }
@@ -570,8 +533,8 @@ impl VmManager {
 
         let _ = fs::remove_file(self.vm_config_path(name));
         let _ = fs::remove_file(self.vm_disk_path(name));
-        let _ = fs::remove_file(self.vm_serial_socket(name));
         let _ = fs::remove_file(self.base_dir.join(format!("{}.runtime.json", name)));
+        let _ = fs::remove_file(self.base_dir.join(format!("{}.log", name)));
         
         info!("Deleted VM: {}", name);
         Ok(())
@@ -588,11 +551,11 @@ impl VmManager {
         }
     }
 
-    /// Read the WebSocket port from runtime file
-    fn read_runtime_ws_port(&self, name: &str) -> Option<u16> {
+    /// Read the VNC port from runtime file
+    fn read_runtime_vnc_port(&self, name: &str) -> Option<u16> {
         let runtime_path = self.base_dir.join(format!("{}.runtime.json", name));
         let content = fs::read_to_string(&runtime_path).ok()?;
         let runtime: serde_json::Value = serde_json::from_str(&content).ok()?;
-        runtime.get("vnc_ws_port").and_then(|v| v.as_u64()).map(|v| v as u16)
+        runtime.get("vnc_port").and_then(|v| v.as_u64()).map(|v| v as u16)
     }
 }

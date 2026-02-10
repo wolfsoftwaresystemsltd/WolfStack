@@ -661,19 +661,12 @@ function renderVms(vms) {
     empty.style.display = 'none';
 
     table.innerHTML = vms.map(vm => {
-        const statusClass = vm.running ? 'running' : 'stopped';
         const statusText = vm.running ? 'Running' : 'Stopped';
         const statusColor = vm.running ? 'var(--success)' : 'var(--danger)';
 
-        let vncText = '—';
-        if (vm.running && vm.vnc_port) {
-            if (vm.vnc_ws_port) {
-                vncText = `<a href="/vnc.html?name=${encodeURIComponent(vm.name)}&port=${vm.vnc_ws_port}" target="_blank" 
-                            class="badge" style="cursor:pointer; text-decoration:none;" title="Open noVNC console">🖥️ :${vm.vnc_port}</a>`;
-            } else {
-                vncText = `<span class="badge" title="Connect with VNC Viewer to IP:${vm.vnc_port}">:${vm.vnc_port}</span>`;
-            }
-        }
+        const vncText = (vm.running && vm.vnc_port)
+            ? `<span class="badge" title="Connect with any VNC viewer to port ${vm.vnc_port}">:${vm.vnc_port}</span>`
+            : '—';
 
         const wolfnetIp = vm.wolfnet_ip || '—';
 
@@ -688,9 +681,7 @@ function renderVms(vms) {
                 <td>
                     <button class="btn btn-sm" style="margin:2px;" onclick="showVmLogs('${vm.name}')" title="Logs">📋</button>
                     ${vm.running ?
-                `<button class="btn btn-sm" style="margin:2px;" onclick="openVmConsole('${vm.name}')" title="Serial Terminal">💻</button>
-                         ${vm.vnc_ws_port ? `<button class="btn btn-sm" style="margin:2px;" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port})" title="VNC Console">🖥️</button>` : ''}
-                         <button class="btn btn-danger btn-sm" style="margin:2px;" onclick="vmAction('${vm.name}', 'stop')">Stop</button>` :
+                `<button class="btn btn-danger btn-sm" style="margin:2px;" onclick="vmAction('${vm.name}', 'stop')">Stop</button>` :
                 `<button class="btn btn-sm" style="margin:2px;" onclick="showVmSettings('${vm.name}')" title="Settings">⚙️</button>
                          <button class="btn btn-success btn-sm" style="margin:2px;" onclick="vmAction('${vm.name}', 'start')">Start</button>
                          <button class="btn btn-danger btn-sm" style="margin:2px;" onclick="deleteVm('${vm.name}')">Delete</button>`
