@@ -59,6 +59,12 @@ pub struct VmConfig {
     /// Storage path for the OS disk (defaults to /var/lib/wolfstack/vms)
     #[serde(default)]
     pub storage_path: Option<String>,
+    /// Bus type for the OS disk (virtio, ide, sata) — use ide/sata for Windows
+    #[serde(default = "default_bus")]
+    pub os_disk_bus: String,
+    /// Optional secondary ISO for VirtIO drivers (needed if OS disk is virtio on Windows)
+    #[serde(default)]
+    pub drivers_iso: Option<String>,
     /// Extra disks attached to this VM
     #[serde(default)]
     pub extra_disks: Vec<StorageVolume>,
@@ -79,6 +85,8 @@ impl VmConfig {
             auto_start: false,
             wolfnet_ip: None,
             storage_path: None,
+            os_disk_bus: "virtio".to_string(),
+            drivers_iso: None,
             extra_disks: Vec::new(),
         }
     }
@@ -516,10 +524,19 @@ impl VmManager {
         write_log(&format!("OS Disk: {} (exists)", actual_disk.display()));
 
         let mut cmd = Command::new("qemu-system-x86_64");
+        
+        // OS disk: use configured bus type (virtio by default, ide/sata for Windows)
+        let os_disk_if = match config.os_disk_bus.as_str() {
+            "ide" => "ide",
+            "sata" | "ahci" => "ide",  // QEMU uses ide for SATA in -drive syntax
+            _ => "virtio",
+        };
+        write_log(&format!("OS disk bus: {} (if={})", config.os_disk_bus, os_disk_if));
+        
         cmd.arg("-name").arg(name)
            .arg("-m").arg(format!("{}M", config.memory_mb))
            .arg("-smp").arg(format!("{}", config.cpus))
-           .arg("-drive").arg(format!("file={},format=qcow2,if=virtio,index=0", actual_disk.display()))
+           .arg("-drive").arg(format!("file={},format=qcow2,if={},index=0", actual_disk.display(), os_disk_if))
            .arg("-vnc").arg(&vnc_arg)
            .arg("-daemonize");
 
@@ -588,6 +605,8 @@ impl VmManager {
                .arg("-device").arg("virtio-net-pci,netdev=net0");
         }
 
+        // CD-ROM: installation ISO
+        let mut has_cdrom = false;
         if let Some(iso) = &config.iso_path {
              if !iso.is_empty() {
                  if !std::path::Path::new(iso).exists() {
@@ -597,8 +616,25 @@ impl VmManager {
                  }
                  write_log(&format!("ISO: {} (exists)", iso));
                  cmd.arg("-cdrom").arg(iso);
-                 cmd.arg("-boot").arg("d");
+                 has_cdrom = true;
              }
+        }
+
+        // Secondary CD-ROM: VirtIO drivers (for Windows with virtio disk)
+        if let Some(ref drivers) = config.drivers_iso {
+            if !drivers.is_empty() {
+                if std::path::Path::new(drivers).exists() {
+                    write_log(&format!("VirtIO drivers ISO: {}", drivers));
+                    cmd.arg("-drive").arg(format!("file={},media=cdrom,index=1", drivers));
+                } else {
+                    write_log(&format!("WARNING: Drivers ISO not found: {}", drivers));
+                }
+            }
+        }
+
+        // Boot order: CD first (for installation), then disk
+        if has_cdrom {
+            cmd.arg("-boot").arg("order=dc");
         }
 
         write_log(&format!("Launching QEMU: VNC :{} (port {}), KVM: {}", vnc_num, vnc_port, kvm_available));

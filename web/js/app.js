@@ -786,6 +786,21 @@ async function showVmCreate() {
     // Clear extra disks from previous use
     document.getElementById('vm-extra-disks-container').innerHTML = '';
     vmExtraDiskCounter = 0;
+    // Reset bus selector and drivers ISO
+    const busSelect = document.getElementById('new-vm-os-bus');
+    if (busSelect) busSelect.value = 'virtio';
+    const driversInput = document.getElementById('new-vm-drivers-iso');
+    if (driversInput) driversInput.value = '';
+    const busWarning = document.getElementById('vm-bus-warning');
+    if (busWarning) busWarning.style.display = 'none';
+    // Wire up bus warning
+    if (busSelect && !busSelect._listenerAdded) {
+        busSelect.addEventListener('change', () => {
+            const warn = document.getElementById('vm-bus-warning');
+            if (warn) warn.style.display = busSelect.value === 'virtio' ? 'block' : 'none';
+        });
+        busSelect._listenerAdded = true;
+    }
     // Reset to tab 1
     switchVmTab(1);
     document.getElementById('create-vm-modal').classList.add('active');
@@ -846,6 +861,8 @@ async function createVm() {
     const iso = document.getElementById('new-vm-iso').value.trim() || null;
     const wolfnetIp = document.getElementById('new-vm-wolfnet-ip').value.trim() || null;
     const storagePath = document.getElementById('new-vm-storage').value || null;
+    const osDiskBus = document.getElementById('new-vm-os-bus').value || 'virtio';
+    const driversIso = document.getElementById('new-vm-drivers-iso').value.trim() || null;
 
     if (!name) { showToast('Enter VM name', 'error'); return; }
 
@@ -876,6 +893,8 @@ async function createVm() {
                 iso_path: iso,
                 wolfnet_ip: wolfnetIp,
                 storage_path: storagePath,
+                os_disk_bus: osDiskBus,
+                drivers_iso: driversIso,
                 extra_disks: extraDisks
             })
         });

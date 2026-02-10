@@ -61,10 +61,17 @@ struct CreateVmRequest {
     wolfnet_ip: Option<String>,
     /// Storage path for the OS disk
     storage_path: Option<String>,
+    /// Bus type for OS disk (virtio, ide, sata) — use ide for Windows
+    #[serde(default = "default_os_bus")]
+    os_disk_bus: String,
+    /// Optional path to VirtIO drivers ISO (for Windows + virtio disk)
+    drivers_iso: Option<String>,
     /// Extra disks to create with the VM (Proxmox-style)
     #[serde(default)]
     extra_disks: Vec<CreateVmDisk>,
 }
+
+fn default_os_bus() -> String { "virtio".to_string() }
 
 async fn create_vm(req: HttpRequest, state: web::Data<AppState>, body: web::Json<CreateVmRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
@@ -79,6 +86,8 @@ async fn create_vm(req: HttpRequest, state: web::Data<AppState>, body: web::Json
     config.iso_path = body.iso_path.clone();
     config.wolfnet_ip = body.wolfnet_ip.clone();
     config.storage_path = body.storage_path.clone();
+    config.os_disk_bus = body.os_disk_bus.clone();
+    config.drivers_iso = body.drivers_iso.clone();
 
     // Convert extra disks from request to StorageVolume structs
     for disk in &body.extra_disks {

@@ -695,7 +695,7 @@
                                     <span style="font-size:11px; color:var(--text-muted);">Primary boot disk
                                         (virtio)</span>
                                 </div>
-                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                                <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
                                     <div>
                                         <label
                                             style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Storage</label>
@@ -710,6 +710,20 @@
                                         <input type="number" class="form-control" id="new-vm-disk" value="32" min="1"
                                             style="font-size:13px;">
                                     </div>
+                                    <div>
+                                        <label
+                                            style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Bus</label>
+                                        <select id="new-vm-os-bus" class="form-control" style="font-size:13px;">
+                                            <option value="virtio" selected>VirtIO (fastest)</option>
+                                            <option value="ide">IDE (Windows compatible)</option>
+                                            <option value="sata">SATA</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div id="vm-bus-warning"
+                                    style="display:none; margin-top:6px; padding:6px 10px; background:var(--warning-bg, rgba(245,158,11,0.1)); border:1px solid var(--warning, #f59e0b); border-radius:6px; font-size:11px; color:var(--warning, #f59e0b);">
+                                    ⚠️ Windows doesn't include VirtIO drivers. Use <strong>IDE</strong> for Windows, or
+                                    attach VirtIO drivers ISO on the Boot tab.
                                 </div>
                             </div>
 
@@ -725,11 +739,19 @@
                         <!-- ═══ Tab 3: Network & Boot ═══ -->
                         <div class="vm-tab-page" id="vm-tab-3" style="display:none;">
                             <div class="form-group">
-                                <label>ISO Path (Optional)</label>
+                                <label>Installation ISO (Optional)</label>
                                 <input type="text" class="form-control" id="new-vm-iso"
                                     placeholder="/var/lib/wolfstack/isos/ubuntu.iso">
-                                <small style="color:var(--text-muted);">Path to an ISO file on the host for OS
-                                    installation</small>
+                                <small style="color:var(--text-muted);">Path to an OS installer ISO on the host</small>
+                            </div>
+                            <div class="form-group" style="margin-top:12px;">
+                                <label>VirtIO Drivers ISO (Optional)</label>
+                                <input type="text" class="form-control" id="new-vm-drivers-iso"
+                                    placeholder="/var/lib/wolfstack/isos/virtio-win.iso">
+                                <small style="color:var(--text-muted);">Needed for Windows to see VirtIO disks. Download
+                                    from
+                                    <a href="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
+                                        target="_blank" style="color:var(--accent-light);">fedorapeople.org</a></small>
                             </div>
                             <div class="form-group" style="margin-top:12px;">
                                 <label>WolfNet IP (Optional)</label>
