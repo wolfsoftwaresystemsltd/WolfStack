@@ -17,7 +17,7 @@ Then open `http://your-server:8553` and log in with your Linux system credential
 WolfStack is the **central control plane** for your entire infrastructure. Instead of SSH-ing into every server and running commands manually, WolfStack gives you a single dashboard to:
 
 - **Monitor** all your servers' CPU, memory, disk, and network in real time
-- **Manage virtual machines** — create, start, stop, and delete KVM/QEMU VMs with VNC console access
+- **Manage virtual machines** — create, start, stop, and delete KVM/QEMU VMs with in-browser noVNC console, Windows support, and multi-disk management
 - **Manage Docker containers** — list, start, stop, restart, pause, remove, view logs, and see resource usage
 - **Manage LXC containers** — list, start, stop, freeze, destroy, edit configs, and view logs
 - **Control services** — start, stop, restart any systemd service across your fleet
@@ -42,15 +42,28 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - **Install Docker** from the dashboard if not already present
 
 ### 🖥️ Virtual Machine Management (KVM/QEMU)
-- Create VMs with configurable CPU, memory, and disk size
-- Boot from ISO images for OS installation
-- Start and stop VMs from the dashboard
+- **Tabbed creation wizard** — General → Disks → Network & Boot
+- Configurable CPU, memory, and disk size with multiple storage backends
+- **OS disk bus selection** — VirtIO (fastest), IDE (Windows-compatible), SATA
+- **Network adapter selection** — VirtIO (Linux), Intel e1000 (Windows built-in driver), Realtek RTL8139
+- **VirtIO drivers ISO** — attach a secondary CD-ROM for Windows VirtIO driver installation
+- **Multiple storage volumes** — add extra disks with custom size, format (qcow2/raw), bus type, and storage location
+- **Volume management** — add, resize (grow-only), and remove volumes from the tabbed settings dialog
+- Boot from ISO images for OS installation, boot order auto-configured for CD-first
+- **In-browser VNC console** — noVNC-powered console directly in the dashboard (no external VNC client needed)
+- **Tabbed settings dialog** — edit all VM settings (hardware, disks, network) without recreating the VM
 - KVM hardware acceleration for near-native performance
-- VNC console access — connect with any VNC viewer
 - Automatic disk image management (qcow2 format)
-- VNC port displayed in the dashboard for easy connection
-- Delete VMs and their disk images when no longer needed
+- **WolfNet TAP networking** — assign WolfNet IPs to VMs for mesh network access
+- Start, stop, and delete VMs from the dashboard
 - QEMU/KVM installed automatically by setup.sh
+
+#### Installing Windows in a VM
+1. Set **OS Disk Bus** to `IDE` (Windows doesn't include VirtIO drivers)
+2. Set **Network Adapter** to `Intel e1000` (Windows has built-in driver)
+3. Point **ISO Path** to your Windows installer ISO
+4. Optionally attach a **VirtIO Drivers ISO** if you want to switch to VirtIO later for better performance
+5. Start the VM and open the **Console** to complete Windows installation
 
 ### 📦 LXC Container Management
 - Auto-detects LXC installation and version
@@ -228,10 +241,15 @@ All endpoints require authentication (cookie-based session) except `/api/agent/s
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/vms` | List all VMs with status, resources, and VNC port |
-| POST | `/api/vms/create` | Create a new VM (name, cpus, memory, disk, iso) |
+| GET | `/api/vms/storage` | List available storage locations |
+| POST | `/api/vms/create` | Create VM (name, cpus, memory, disk, iso, os_disk_bus, net_model, drivers_iso, extra_disks) |
 | GET | `/api/vms/{name}` | Get details for a specific VM |
+| PUT | `/api/vms/{name}` | Update VM settings (cpus, memory, disk, iso, bus, network adapter, drivers ISO, WolfNet IP) |
 | DELETE | `/api/vms/{name}` | Delete a VM and its disk image |
 | POST | `/api/vms/{name}/action` | Start or stop a VM |
+| POST | `/api/vms/{name}/volumes` | Add a storage volume to a VM |
+| DELETE | `/api/vms/{name}/volumes/{vol}` | Remove a storage volume |
+| POST | `/api/vms/{name}/volumes/{vol}/resize` | Resize a storage volume (grow only) |
 
 ### WolfNet & WebSocket
 
