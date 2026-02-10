@@ -844,41 +844,34 @@ struct LxcDetailInfo {
 }
 
 fn lxc_info(name: &str) -> LxcDetailInfo {
-    let output = Command::new("lxc-info")
-        .args(["-n", name])
+    // Memory usage via lxc-cgroup (works on cgroup v1 and v2)
+    let memory_usage = lxc_cgroup_read(name, "memory.current")
+        .or_else(|| lxc_cgroup_read(name, "memory.usage_in_bytes"))
+        .unwrap_or(0);
+
+    let memory_limit = lxc_cgroup_read(name, "memory.max")
+        .or_else(|| lxc_cgroup_read(name, "memory.limit_in_bytes"))
+        .unwrap_or(0);
+
+    // CPU — use lxc-attach to read /proc/stat quickly
+    let cpu_percent = lxc_cpu_percent(name);
+
+    // PID count
+    let pids = Command::new("lxc-info")
+        .args(["-n", name, "-pH"])
         .output()
-        .ok();
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
 
-    let text = output.map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
-
-    let get_val = |key: &str| -> String {
-        text.lines()
-            .find(|l| l.trim().starts_with(key))
-            .map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string())
-            .unwrap_or_default()
-    };
-
-    // Parse memory from "Memory use: 12345 KiB"
-    let mem_str = get_val("Memory use");
-    let memory_usage = parse_kib_value(&mem_str);
-
-    // Parse memory limit from cgroup
-    let mem_limit = read_cgroup_memory_limit(name);
-
-    // CPU usage — read from /sys/fs/cgroup
-    let cpu_percent = read_cgroup_cpu(name);
-
-    // PIDs
-    let pids: u32 = get_val("PID").parse().unwrap_or(0);
-
-    // Network — try reading from /proc
+    // Network
     let (net_in, net_out) = read_container_net(name);
 
     LxcDetailInfo {
         cpu_percent,
         memory_usage,
-        memory_limit: mem_limit,
+        memory_limit,
         net_input: net_in,
         net_output: net_out,
         pids,
@@ -1728,41 +1721,76 @@ fn parse_size_str(s: &str) -> u64 {
     s.parse().unwrap_or(0)
 }
 
-fn parse_kib_value(s: &str) -> u64 {
-    let s = s.trim();
-    if let Some(num) = s.strip_suffix("KiB").or_else(|| s.strip_suffix(" KiB")) {
-        num.trim().parse::<u64>().unwrap_or(0) * 1024
-    } else if let Some(num) = s.strip_suffix("MiB").or_else(|| s.strip_suffix(" MiB")) {
-        num.trim().parse::<u64>().unwrap_or(0) * 1024 * 1024
-    } else {
-        s.parse::<u64>().unwrap_or(0)
-    }
+
+/// Read a cgroup value via lxc-cgroup command
+fn lxc_cgroup_read(name: &str, key: &str) -> Option<u64> {
+    Command::new("lxc-cgroup")
+        .args(["-n", name, key])
+        .output()
+        .ok()
+        .and_then(|o| {
+            let val = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if val == "max" || val.is_empty() { return None; }
+            val.parse::<u64>().ok()
+        })
 }
 
-fn read_cgroup_memory_limit(name: &str) -> u64 {
-    // Try cgroup v2
-    let v2_path = format!("/sys/fs/cgroup/lxc.payload.{}/memory.max", name);
-    if let Ok(val) = std::fs::read_to_string(&v2_path) {
-        let v = val.trim();
-        if v != "max" {
-            return v.parse().unwrap_or(0);
+/// Get CPU usage percentage for an LXC container
+fn lxc_cpu_percent(name: &str) -> f64 {
+    // Read cpu.stat usage_usec (cgroup v2)
+    let usage = Command::new("lxc-cgroup")
+        .args(["-n", name, "cpu.stat"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            let text = String::from_utf8_lossy(&o.stdout).to_string();
+            text.lines()
+                .find(|l| l.starts_with("usage_usec"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<u64>().ok())
+        });
+
+    if let Some(usec) = usage {
+        // Convert to rough percentage using total system uptime
+        if let Ok(uptime) = std::fs::read_to_string("/proc/uptime") {
+            if let Some(secs) = uptime.split_whitespace().next()
+                .and_then(|s| s.parse::<f64>().ok()) {
+                let total_usec = (secs * 1_000_000.0) as u64;
+                if total_usec > 0 {
+                    return ((usec as f64 / total_usec as f64) * 100.0 * 10.0).round() / 10.0;
+                }
+            }
         }
     }
-    // Try cgroup v1
-    let v1_path = format!("/sys/fs/cgroup/memory/lxc/{}/memory.limit_in_bytes", name);
-    if let Ok(val) = std::fs::read_to_string(&v1_path) {
-        return val.trim().parse().unwrap_or(0);
-    }
-    0
-}
-
-fn read_cgroup_cpu(_name: &str) -> f64 {
-    // CPU percentage requires two samples — return 0 for now
-    // The frontend polls every 2s so delta can be computed client-side if needed
     0.0
 }
 
-fn read_container_net(_name: &str) -> (u64, u64) {
-    // Network stats for LXC — would need PID to read /proc/PID/net/dev
+fn read_container_net(name: &str) -> (u64, u64) {
+    // Read network stats via container's PID
+    let pid = Command::new("lxc-info")
+        .args(["-n", name, "-pH"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok());
+
+    if let Some(pid) = pid {
+        let net_path = format!("/proc/{}/net/dev", pid);
+        if let Ok(content) = std::fs::read_to_string(&net_path) {
+            let mut rx_total: u64 = 0;
+            let mut tx_total: u64 = 0;
+            for line in content.lines().skip(2) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 10 {
+                    let iface = parts[0].trim_end_matches(':');
+                    if iface != "lo" {
+                        rx_total += parts[1].parse::<u64>().unwrap_or(0);
+                        tx_total += parts[9].parse::<u64>().unwrap_or(0);
+                    }
+                }
+            }
+            return (rx_total, tx_total);
+        }
+    }
     (0, 0)
 }
