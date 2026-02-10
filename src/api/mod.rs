@@ -465,6 +465,49 @@ pub async fn docker_action(
     }
 }
 
+#[derive(Deserialize)]
+pub struct CloneRequest {
+    pub new_name: String,
+    pub snapshot: Option<bool>,  // LXC only — use copy-on-write clone
+}
+
+#[derive(Deserialize)]
+pub struct MigrateRequest {
+    pub target_url: String,
+    pub remove_source: Option<bool>,
+}
+
+/// POST /api/containers/docker/{id}/clone — clone a Docker container
+pub async fn docker_clone(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<CloneRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    match containers::docker_clone(&id, &body.new_name) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/containers/docker/{id}/migrate — migrate a Docker container to another node
+pub async fn docker_migrate(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<MigrateRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let remove = body.remove_source.unwrap_or(true);
+    match containers::docker_migrate(&id, &body.target_url, remove) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// GET /api/containers/lxc — list all LXC containers
 pub async fn lxc_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
@@ -537,6 +580,52 @@ pub async fn lxc_action(
     }
 }
 
+/// POST /api/containers/lxc/{name}/clone — clone an LXC container
+pub async fn lxc_clone(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<CloneRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    let result = if body.snapshot.unwrap_or(false) {
+        containers::lxc_clone_snapshot(&name, &body.new_name)
+    } else {
+        containers::lxc_clone(&name, &body.new_name)
+    };
+    match result {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/containers/docker/import — receive a migrated container image
+/// Accepts the tar file as raw body bytes, container name via query param
+pub async fn docker_import(
+    _req: HttpRequest,
+    body: web::Bytes,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    // No auth — this is for inter-node communication during migration
+    let container_name = query.get("name")
+        .cloned()
+        .unwrap_or_else(|| format!("migrated-{}", chrono::Utc::now().timestamp()));
+
+    // Save to temp file
+    let tar_path = format!("/tmp/wolfstack-import-{}.tar", container_name);
+    if let Err(e) = std::fs::write(&tar_path, &body) {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to save import file: {}", e)
+        }));
+    }
+
+    match containers::docker_import_image(&tar_path, &container_name) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct InstallRuntimeRequest {
     pub runtime: String,  // docker or lxc
@@ -593,6 +682,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/docker/images", web::get().to(docker_images))
         .route("/api/containers/docker/{id}/logs", web::get().to(docker_logs))
         .route("/api/containers/docker/{id}/action", web::post().to(docker_action))
+        .route("/api/containers/docker/{id}/clone", web::post().to(docker_clone))
+        .route("/api/containers/docker/{id}/migrate", web::post().to(docker_migrate))
+        .route("/api/containers/docker/import", web::post().to(docker_import))
         // LXC
         .route("/api/containers/lxc", web::get().to(lxc_list))
         .route("/api/containers/lxc/stats", web::get().to(lxc_stats))
@@ -600,6 +692,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/lxc/{name}/config", web::get().to(lxc_config))
         .route("/api/containers/lxc/{name}/config", web::put().to(lxc_save_config))
         .route("/api/containers/lxc/{name}/action", web::post().to(lxc_action))
+        .route("/api/containers/lxc/{name}/clone", web::post().to(lxc_clone))
         // Agent (no auth — used by other WolfStack nodes)
         .route("/api/agent/status", web::get().to(agent_status));
 }

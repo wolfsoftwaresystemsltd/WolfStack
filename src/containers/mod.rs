@@ -535,6 +535,200 @@ fn run_lxc_cmd(args: &[&str]) -> Result<String, String> {
     }
 }
 
+// ─── Clone & Migrate ───
+
+/// Clone a Docker container — commits it as an image, then creates a new container
+pub fn docker_clone(container: &str, new_name: &str) -> Result<String, String> {
+    info!("Cloning Docker container {} as {}", container, new_name);
+
+    // Step 1: Commit the container to a new image
+    let image_name = format!("wolfstack-clone/{}", new_name);
+    let output = Command::new("docker")
+        .args(["commit", container, &image_name])
+        .output()
+        .map_err(|e| format!("Failed to commit container: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to commit container: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Step 2: Create a new container from the committed image
+    let output = Command::new("docker")
+        .args(["create", "--name", new_name, &image_name])
+        .output()
+        .map_err(|e| format!("Failed to create cloned container: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to create cloned container: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let new_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    info!("Docker container cloned: {} -> {} ({})", container, new_name, &new_id[..12]);
+    Ok(format!("Container cloned as '{}' ({})", new_name, &new_id[..12.min(new_id.len())]))
+}
+
+/// Migrate a Docker container to a remote WolfStack node
+/// Exports the container, sends it to the target, imports and optionally starts it
+pub fn docker_migrate(container: &str, target_url: &str, remove_source: bool) -> Result<String, String> {
+    info!("Migrating Docker container {} to {}", container, target_url);
+
+    // Step 1: Stop the container if running
+    let _ = docker_stop(container);
+
+    // Step 2: Commit the container to a temporary image
+    let temp_image = format!("wolfstack-migrate/{}", container);
+    let output = Command::new("docker")
+        .args(["commit", container, &temp_image])
+        .output()
+        .map_err(|e| format!("Failed to commit container for migration: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Step 3: Export the image to a tar file
+    let export_path = format!("/tmp/wolfstack-migrate-{}.tar", container);
+    let output = Command::new("docker")
+        .args(["save", "-o", &export_path, &temp_image])
+        .output()
+        .map_err(|e| format!("Failed to save image: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Save failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Step 4: Send the tar to the remote WolfStack node
+    let import_url = format!("{}/api/containers/docker/import?name={}", target_url.trim_end_matches('/'), container);
+    let output = Command::new("curl")
+        .args([
+            "-s", "-X", "POST",
+            "-H", "Content-Type: application/octet-stream",
+            "--data-binary", &format!("@{}", export_path),
+            &import_url,
+        ])
+        .output()
+        .map_err(|e| format!("Failed to send to remote: {}", e))?;
+
+    // Clean up temp files
+    let _ = std::fs::remove_file(&export_path);
+    let _ = Command::new("docker").args(["rmi", &temp_image]).output();
+
+    if !output.status.success() {
+        return Err(format!(
+            "Transfer failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let response = String::from_utf8_lossy(&output.stdout).to_string();
+    
+    // Step 5: Optionally remove the source container
+    if remove_source {
+        let _ = docker_remove(container);
+        info!("Container {} migrated to {} and removed from source", container, target_url);
+    } else {
+        info!("Container {} copied to {}", container, target_url);
+    }
+
+    Ok(format!("Container migrated to {} successfully. {}", target_url, response))
+}
+
+/// Import a Docker container image from a tar file
+pub fn docker_import_image(tar_path: &str, container_name: &str) -> Result<String, String> {
+    info!("Importing Docker image from {} as {}", tar_path, container_name);
+
+    // Load the image
+    let output = Command::new("docker")
+        .args(["load", "-i", tar_path])
+        .output()
+        .map_err(|e| format!("Failed to load image: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Image load failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let load_output = String::from_utf8_lossy(&output.stdout).to_string();
+    
+    // Extract the loaded image name from output like "Loaded image: wolfstack-migrate/foo:latest"
+    let image_name = load_output.lines()
+        .find(|l| l.contains("Loaded image"))
+        .and_then(|l| l.split(": ").nth(1))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| format!("wolfstack-migrate/{}", container_name));
+
+    // Create a container from the loaded image
+    let output = Command::new("docker")
+        .args(["create", "--name", container_name, &image_name])
+        .output()
+        .map_err(|e| format!("Failed to create container: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Container creation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Clean up temp tar
+    let _ = std::fs::remove_file(tar_path);
+
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(format!("Container '{}' imported ({})", container_name, &id[..12.min(id.len())]))
+}
+
+/// Clone an LXC container using lxc-copy
+pub fn lxc_clone(container: &str, new_name: &str) -> Result<String, String> {
+    info!("Cloning LXC container {} as {}", container, new_name);
+
+    let output = Command::new("lxc-copy")
+        .args(["-n", container, "-N", new_name])
+        .output()
+        .map_err(|e| format!("Failed to clone LXC container: {}", e))?;
+
+    if output.status.success() {
+        Ok(format!("LXC container cloned as '{}'", new_name))
+    } else {
+        Err(format!(
+            "LXC clone failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Clone an LXC container as a snapshot (faster, copy-on-write)
+pub fn lxc_clone_snapshot(container: &str, new_name: &str) -> Result<String, String> {
+    info!("Snapshot-cloning LXC container {} as {}", container, new_name);
+
+    let output = Command::new("lxc-copy")
+        .args(["-n", container, "-N", new_name, "-s"])
+        .output()
+        .map_err(|e| format!("Failed to snapshot-clone LXC container: {}", e))?;
+
+    if output.status.success() {
+        Ok(format!("LXC container snapshot-cloned as '{}'", new_name))
+    } else {
+        Err(format!(
+            "LXC snapshot clone failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
 // ─── Installation ───
 
 /// Install Docker

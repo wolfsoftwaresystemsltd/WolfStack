@@ -30,6 +30,8 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - Auto-detects Docker installation and version
 - Lists all containers with real-time CPU, memory, and PID stats
 - Start, stop, restart, pause, unpause, and remove containers
+- **Clone containers** — create a copy with one click
+- **Migrate containers** to other WolfStack nodes
 - View container logs with timestamps
 - Browse Docker images with size and creation info
 - **Install Docker** from the dashboard if not already present
@@ -38,9 +40,16 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - Auto-detects LXC installation and version
 - Lists all LXC containers with resource stats
 - Start, stop, restart, freeze, unfreeze, and destroy containers
+- **Clone containers** — full copy or snapshot (copy-on-write)
 - View container logs via journalctl
 - Read and edit LXC container configuration files
 - **Install LXC** from the dashboard if not already present
+
+### 🚀 Container Migration
+- Migrate Docker containers between WolfStack nodes with one click
+- Automatically exports, transfers, and imports the container
+- Works across your cluster — pair with WolfDisk for shared storage
+- Option to remove the source container after migration or keep a copy
 
 ### 📊 Real-Time Dashboard
 - Live CPU, memory, disk, and network monitoring with 2-second refresh

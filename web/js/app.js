@@ -842,6 +842,8 @@ function renderDockerContainers(containers) {
                     <button class="btn btn-sm" style="margin:2px;color:#ef4444;" onclick="dockerAction('${c.name}', 'remove')" title="Remove">🗑</button>
                 `}
                 <button class="btn btn-sm" style="margin:2px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs">📜</button>
+                <button class="btn btn-sm" style="margin:2px;" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button>
+                <button class="btn btn-sm" style="margin:2px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>
             </td>
         </tr>`;
     }).join('');
@@ -992,6 +994,7 @@ function renderLxcContainers(containers, stats) {
                     <button class="btn btn-sm" style="margin:2px;color:#ef4444;" onclick="lxcAction('${c.name}', 'destroy')" title="Destroy">🗑</button>
                 `}
                 <button class="btn btn-sm" style="margin:2px;" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs">📜</button>
+                <button class="btn btn-sm" style="margin:2px;" onclick="cloneLxcContainer('${c.name}')" title="Clone">📋</button>
             </td>
         </tr>`;
     }).join('');
@@ -1046,4 +1049,152 @@ async function viewContainerLogs(runtime, container) {
 
 function closeContainerDetail() {
     document.getElementById('container-detail-modal').classList.remove('active');
+}
+
+// ─── Clone & Migrate Functions ───
+
+async function cloneDockerContainer(name) {
+    const newName = prompt(`Clone Docker container '${name}' — enter a name for the clone:`, name + '-clone');
+    if (!newName) return;
+
+    showToast(`Cloning ${name}...`, 'info');
+    try {
+        const resp = await fetch(`/api/containers/docker/${name}/clone`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_name: newName }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || `Cloned as '${newName}'`, 'success');
+            setTimeout(loadDockerContainers, 500);
+        } else {
+            showToast(data.error || 'Clone failed', 'error');
+        }
+    } catch (e) {
+        showToast(`Clone failed: ${e.message}`, 'error');
+    }
+}
+
+async function migrateDockerContainer(name) {
+    // Show a modal with node selection
+    const modal = document.getElementById('container-detail-modal');
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+
+    title.textContent = `Migrate Container: ${name}`;
+    body.innerHTML = '<p style="color:var(--text-muted);">Loading cluster nodes...</p>';
+    modal.classList.add('active');
+
+    try {
+        const resp = await fetch('/api/nodes');
+        const nodes = await resp.json();
+
+        let nodeOpts = '';
+        if (nodes && nodes.length > 0) {
+            nodeOpts = nodes.map(n => `<option value="${n.url || 'http://' + n.address + ':8553'}">${n.name || n.address} (${n.address})</option>`).join('');
+        }
+
+        body.innerHTML = `
+            <div style="padding: 1rem;">
+                <p style="margin-bottom: 1rem; color: var(--text-secondary);">
+                    This will export the container, transfer it to the target WolfStack node, and import it there.
+                    The container will be stopped during migration.
+                </p>
+                <div style="margin-bottom: 1rem;">
+                    <label style="display:block; margin-bottom:4px; font-weight:600;">Target Node</label>
+                    ${nodeOpts ? `<select id="migrate-target" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                        ${nodeOpts}
+                    </select>` : `<input id="migrate-target" type="text" placeholder="http://10.10.10.2:8553" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">`}
+                </div>
+                <div style="margin-bottom: 1rem;">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                        <input type="checkbox" id="migrate-remove" checked>
+                        Remove container from this machine after migration
+                    </label>
+                </div>
+                <div style="display:flex; gap:8px;">
+                    <button class="btn btn-primary" onclick="doMigrate('${name}')">🚀 Migrate</button>
+                    <button class="btn" onclick="closeContainerDetail()">Cancel</button>
+                </div>
+            </div>
+        `;
+    } catch (e) {
+        body.innerHTML = `
+            <div style="padding: 1rem;">
+                <p style="margin-bottom: 1rem; color: var(--text-secondary);">
+                    Enter the URL of the target WolfStack node.
+                </p>
+                <div style="margin-bottom: 1rem;">
+                    <label style="display:block; margin-bottom:4px; font-weight:600;">Target URL</label>
+                    <input id="migrate-target" type="text" placeholder="http://10.10.10.2:8553" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                </div>
+                <div style="margin-bottom: 1rem;">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                        <input type="checkbox" id="migrate-remove" checked>
+                        Remove container from this machine after migration
+                    </label>
+                </div>
+                <div style="display:flex; gap:8px;">
+                    <button class="btn btn-primary" onclick="doMigrate('${name}')">🚀 Migrate</button>
+                    <button class="btn" onclick="closeContainerDetail()">Cancel</button>
+                </div>
+            </div>
+        `;
+    }
+}
+
+async function doMigrate(name) {
+    const targetEl = document.getElementById('migrate-target');
+    const removeEl = document.getElementById('migrate-remove');
+    const targetUrl = targetEl.value.trim();
+    const removeSource = removeEl.checked;
+
+    if (!targetUrl) {
+        showToast('Please enter a target URL', 'error');
+        return;
+    }
+
+    closeContainerDetail();
+    showToast(`Migrating ${name} to ${targetUrl}... This may take a while.`, 'info');
+
+    try {
+        const resp = await fetch(`/api/containers/docker/${name}/migrate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target_url: targetUrl, remove_source: removeSource }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Migration complete', 'success');
+            setTimeout(loadDockerContainers, 500);
+        } else {
+            showToast(data.error || 'Migration failed', 'error');
+        }
+    } catch (e) {
+        showToast(`Migration failed: ${e.message}`, 'error');
+    }
+}
+
+async function cloneLxcContainer(name) {
+    const newName = prompt(`Clone LXC container '${name}' — enter a name for the clone:`, name + '-clone');
+    if (!newName) return;
+
+    showToast(`Cloning ${name}...`, 'info');
+    try {
+        const resp = await fetch(`/api/containers/lxc/${name}/clone`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_name: newName }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || `Cloned as '${newName}'`, 'success');
+            setTimeout(loadLxcContainers, 500);
+        } else {
+            showToast(data.error || 'Clone failed', 'error');
+        }
+    } catch (e) {
+        showToast(`Clone failed: ${e.message}`, 'error');
+    }
 }
