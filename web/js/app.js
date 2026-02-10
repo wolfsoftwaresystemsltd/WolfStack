@@ -1620,7 +1620,7 @@ function selectLxcTemplate(distro, release, arch) {
     document.getElementById('lxc-create-name').focus();
 
     // Fetch WolfNet status and suggest an IP
-    fetch(apiUrl() + '/api/wolfnet/status')
+    fetch(apiUrl('/api/wolfnet/status'))
         .then(r => r.json())
         .then(status => {
             const section = document.getElementById('lxc-wolfnet-section');
@@ -1658,7 +1658,7 @@ async function createLxcContainer() {
     showToast(`Creating LXC container '${name}' (${distribution} ${release})... This may take a minute.`, 'info');
 
     try {
-        const resp = await fetch(apiUrl() + '/api/containers/lxc/create', {
+        const resp = await fetch(apiUrl('/api/containers/lxc/create'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, distribution, release, architecture, wolfnet_ip }),
