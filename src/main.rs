@@ -12,6 +12,7 @@ mod agent;
 mod auth;
 mod monitoring;
 mod installer;
+mod containers;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_files;

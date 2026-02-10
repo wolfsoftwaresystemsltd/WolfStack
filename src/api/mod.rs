@@ -8,6 +8,7 @@ use tracing::info;
 
 use crate::monitoring::SystemMonitor;
 use crate::installer;
+use crate::containers;
 use crate::agent::{ClusterState, AgentMessage};
 use crate::auth::SessionManager;
 
@@ -392,6 +393,174 @@ fn get_unit_info(service: &str) -> serde_json::Value {
     })
 }
 
+// ─── Containers API ───
+
+/// GET /api/containers/status — get Docker and LXC runtime status
+pub async fn container_runtime_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let docker = containers::docker_status();
+    let lxc = containers::lxc_status();
+    HttpResponse::Ok().json(serde_json::json!({
+        "docker": docker,
+        "lxc": lxc,
+    }))
+}
+
+/// GET /api/containers/docker — list all Docker containers
+pub async fn docker_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let containers = containers::docker_list_all();
+    HttpResponse::Ok().json(containers)
+}
+
+/// GET /api/containers/docker/stats — Docker container stats
+pub async fn docker_stats(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let stats = containers::docker_stats();
+    HttpResponse::Ok().json(stats)
+}
+
+/// GET /api/containers/docker/images — list Docker images
+pub async fn docker_images(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let images = containers::docker_images();
+    HttpResponse::Ok().json(images)
+}
+
+/// GET /api/containers/docker/{id}/logs — get Docker container logs
+pub async fn docker_logs(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let logs = containers::docker_logs(&id, 100);
+    HttpResponse::Ok().json(serde_json::json!({ "logs": logs }))
+}
+
+#[derive(Deserialize)]
+pub struct ContainerActionRequest {
+    pub action: String,  // start, stop, restart, remove, pause, unpause
+}
+
+/// POST /api/containers/docker/{id}/action — control Docker container
+pub async fn docker_action(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<ContainerActionRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let result = match body.action.as_str() {
+        "start" => containers::docker_start(&id),
+        "stop" => containers::docker_stop(&id),
+        "restart" => containers::docker_restart(&id),
+        "remove" => containers::docker_remove(&id),
+        "pause" => containers::docker_pause(&id),
+        "unpause" => containers::docker_unpause(&id),
+        _ => Err(format!("Unknown action: {}", body.action)),
+    };
+
+    match result {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/containers/lxc — list all LXC containers
+pub async fn lxc_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let containers = containers::lxc_list_all();
+    HttpResponse::Ok().json(containers)
+}
+
+/// GET /api/containers/lxc/stats — LXC container stats
+pub async fn lxc_stats(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let stats = containers::lxc_stats();
+    HttpResponse::Ok().json(stats)
+}
+
+/// GET /api/containers/lxc/{name}/logs — get LXC container logs
+pub async fn lxc_logs(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    let logs = containers::lxc_logs(&name, 100);
+    HttpResponse::Ok().json(serde_json::json!({ "logs": logs }))
+}
+
+/// GET /api/containers/lxc/{name}/config — get LXC container config
+pub async fn lxc_config(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match containers::lxc_config(&name) {
+        Some(content) => HttpResponse::Ok().json(serde_json::json!({ "config": content })),
+        None => HttpResponse::NotFound().json(serde_json::json!({ "error": "Config not found" })),
+    }
+}
+
+/// PUT /api/containers/lxc/{name}/config — save LXC container config
+pub async fn lxc_save_config(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<SaveConfigRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match containers::lxc_save_config(&name, &body.content) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/containers/lxc/{name}/action — control LXC container
+pub async fn lxc_action(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<ContainerActionRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    let result = match body.action.as_str() {
+        "start" => containers::lxc_start(&name),
+        "stop" => containers::lxc_stop(&name),
+        "restart" => containers::lxc_restart(&name),
+        "freeze" => containers::lxc_freeze(&name),
+        "unfreeze" => containers::lxc_unfreeze(&name),
+        "destroy" => containers::lxc_destroy(&name),
+        _ => Err(format!("Unknown action: {}", body.action)),
+    };
+
+    match result {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct InstallRuntimeRequest {
+    pub runtime: String,  // docker or lxc
+}
+
+/// POST /api/containers/install — install Docker or LXC
+pub async fn install_container_runtime(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<InstallRuntimeRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let result = match body.runtime.as_str() {
+        "docker" => containers::install_docker(),
+        "lxc" => containers::install_lxc(),
+        _ => Err(format!("Unknown runtime: {}", body.runtime)),
+    };
+
+    match result {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -415,6 +584,22 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/services/{name}/action", web::post().to(service_action))
         // Certificates
         .route("/api/certificates", web::post().to(request_certificate))
+        // Containers
+        .route("/api/containers/status", web::get().to(container_runtime_status))
+        .route("/api/containers/install", web::post().to(install_container_runtime))
+        // Docker
+        .route("/api/containers/docker", web::get().to(docker_list))
+        .route("/api/containers/docker/stats", web::get().to(docker_stats))
+        .route("/api/containers/docker/images", web::get().to(docker_images))
+        .route("/api/containers/docker/{id}/logs", web::get().to(docker_logs))
+        .route("/api/containers/docker/{id}/action", web::post().to(docker_action))
+        // LXC
+        .route("/api/containers/lxc", web::get().to(lxc_list))
+        .route("/api/containers/lxc/stats", web::get().to(lxc_stats))
+        .route("/api/containers/lxc/{name}/logs", web::get().to(lxc_logs))
+        .route("/api/containers/lxc/{name}/config", web::get().to(lxc_config))
+        .route("/api/containers/lxc/{name}/config", web::put().to(lxc_save_config))
+        .route("/api/containers/lxc/{name}/action", web::post().to(lxc_action))
         // Agent (no auth — used by other WolfStack nodes)
         .route("/api/agent/status", web::get().to(agent_status));
 }

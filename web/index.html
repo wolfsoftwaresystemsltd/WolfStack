@@ -48,6 +48,17 @@
                     <span class="icon">📈</span> Live Metrics
                 </a>
             </div>
+            <div class="nav-section">
+                <div class="nav-section-title">Containers</div>
+                <a class="nav-item" data-page="containers" href="#containers">
+                    <span class="icon">🐳</span> Docker
+                    <span class="badge" id="docker-count" style="display:none;">0</span>
+                </a>
+                <a class="nav-item" data-page="lxc" href="#lxc">
+                    <span class="icon">📦</span> LXC
+                    <span class="badge" id="lxc-count" style="display:none;">0</span>
+                </a>
+            </div>
         </nav>
         <div class="sidebar-footer">
             <button class="btn btn-sm" onclick="handleLogout()" style="width: 100%; margin-bottom: 12px;">
@@ -437,6 +448,132 @@
                         <table class="data-table" id="sysinfo-table">
                             <tbody></tbody>
                         </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ Docker Containers Page ═══ -->
+            <div id="page-containers" class="page-view" style="display:none;">
+                <!-- Docker Runtime Status -->
+                <div id="docker-runtime-banner" class="card" style="margin-bottom: 20px;">
+                    <div class="card-body" style="display: flex; align-items: center; justify-content: space-between;">
+                        <div>
+                            <span style="font-size: 20px;">🐳</span>
+                            <strong>Docker</strong>
+                            <span id="docker-version" style="color: var(--text-muted); margin-left: 8px;"></span>
+                            <span id="docker-status-badge" class="badge" style="margin-left: 8px;">Checking...</span>
+                        </div>
+                        <button id="docker-install-btn" class="btn btn-primary btn-sm" style="display:none;"
+                            onclick="installRuntime('docker')">
+                            Install Docker
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Docker Container Stats Summary -->
+                <div id="docker-stats-summary" class="stats-grid" style="margin-bottom: 20px;"></div>
+
+                <!-- Docker Containers List -->
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Docker Containers</h3>
+                    </div>
+                    <div class="card-body">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>Image</th>
+                                    <th>Status</th>
+                                    <th>CPU</th>
+                                    <th>Memory</th>
+                                    <th>Ports</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="docker-containers-table"></tbody>
+                        </table>
+                        <p id="docker-empty"
+                            style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
+                            No containers found. Use <code>docker run</code> to create containers.
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Docker Images -->
+                <div class="card" style="margin-top: 20px;">
+                    <div class="card-header">
+                        <h3>Docker Images</h3>
+                    </div>
+                    <div class="card-body">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Repository</th>
+                                    <th>Tag</th>
+                                    <th>ID</th>
+                                    <th>Size</th>
+                                    <th>Created</th>
+                                </tr>
+                            </thead>
+                            <tbody id="docker-images-table"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ LXC Containers Page ═══ -->
+            <div id="page-lxc" class="page-view" style="display:none;">
+                <!-- LXC Runtime Status -->
+                <div id="lxc-runtime-banner" class="card" style="margin-bottom: 20px;">
+                    <div class="card-body" style="display: flex; align-items: center; justify-content: space-between;">
+                        <div>
+                            <span style="font-size: 20px;">📦</span>
+                            <strong>LXC</strong>
+                            <span id="lxc-version" style="color: var(--text-muted); margin-left: 8px;"></span>
+                            <span id="lxc-status-badge" class="badge" style="margin-left: 8px;">Checking...</span>
+                        </div>
+                        <button id="lxc-install-btn" class="btn btn-primary btn-sm" style="display:none;"
+                            onclick="installRuntime('lxc')">
+                            Install LXC
+                        </button>
+                    </div>
+                </div>
+
+                <!-- LXC Containers List -->
+                <div class="card">
+                    <div class="card-header">
+                        <h3>LXC Containers</h3>
+                    </div>
+                    <div class="card-body">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>State</th>
+                                    <th>CPU</th>
+                                    <th>Memory</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="lxc-containers-table"></tbody>
+                        </table>
+                        <p id="lxc-empty"
+                            style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
+                            No LXC containers found. Use <code>lxc-create</code> to create containers.
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ Container Detail Modal ═══ -->
+            <div class="modal-overlay" id="container-detail-modal">
+                <div class="modal" style="max-width: 700px;">
+                    <div class="modal-header">
+                        <h3 id="container-detail-title">Container Detail</h3>
+                        <button class="modal-close" onclick="closeContainerDetail()">&times;</button>
+                    </div>
+                    <div class="modal-body" id="container-detail-body">
                     </div>
                 </div>
             </div>

@@ -30,6 +30,8 @@ function navigateTo(page) {
         services: 'Services',
         certificates: 'Certificates',
         monitoring: 'Live Metrics',
+        containers: 'Docker Containers',
+        lxc: 'LXC Containers',
     };
     document.getElementById('page-title').textContent = titles[page] || page;
 
@@ -37,6 +39,8 @@ function navigateTo(page) {
     if (page === 'components') loadComponents();
     if (page === 'services') loadComponents();
     if (page === 'monitoring') initCharts();
+    if (page === 'containers') loadDockerContainers();
+    if (page === 'lxc') loadLxcContainers();
 }
 
 // Handle hash navigation
@@ -643,5 +647,403 @@ async function saveConfig() {
 // ─── Polling Loop ───
 fetchMetrics();
 fetchNodes();
+fetchContainerStatus();
 setInterval(fetchMetrics, 2000);
 setInterval(fetchNodes, 10000);
+setInterval(fetchContainerStatus, 15000);
+
+// ─── Container Management ───
+
+let dockerStats = {};
+let containerPollTimer = null;
+
+async function fetchContainerStatus() {
+    try {
+        const resp = await fetch('/api/containers/status');
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        // Update Docker sidebar badge
+        const dockerBadge = document.getElementById('docker-count');
+        if (data.docker.installed) {
+            dockerBadge.textContent = data.docker.container_count;
+            dockerBadge.style.display = data.docker.container_count > 0 ? '' : 'none';
+        } else {
+            dockerBadge.style.display = 'none';
+        }
+
+        // Update LXC sidebar badge
+        const lxcBadge = document.getElementById('lxc-count');
+        if (data.lxc.installed) {
+            lxcBadge.textContent = data.lxc.container_count;
+            lxcBadge.style.display = data.lxc.container_count > 0 ? '' : 'none';
+        } else {
+            lxcBadge.style.display = 'none';
+        }
+
+        // Update Docker banner
+        updateRuntimeBanner('docker', data.docker);
+        updateRuntimeBanner('lxc', data.lxc);
+    } catch (e) {
+        // Silently fail
+    }
+}
+
+function updateRuntimeBanner(runtime, status) {
+    const badge = document.getElementById(`${runtime}-status-badge`);
+    const version = document.getElementById(`${runtime}-version`);
+    const installBtn = document.getElementById(`${runtime}-install-btn`);
+
+    if (!badge) return;
+
+    if (status.installed && status.running) {
+        badge.textContent = `Running (${status.running_count}/${status.container_count})`;
+        badge.style.background = 'rgba(16, 185, 129, 0.2)';
+        badge.style.color = '#10b981';
+        version.textContent = `v${status.version}`;
+        installBtn.style.display = 'none';
+    } else if (status.installed) {
+        badge.textContent = 'Installed';
+        badge.style.background = 'rgba(245, 158, 11, 0.2)';
+        badge.style.color = '#f59e0b';
+        version.textContent = `v${status.version}`;
+        installBtn.style.display = 'none';
+    } else {
+        badge.textContent = 'Not Installed';
+        badge.style.background = 'rgba(107, 114, 128, 0.2)';
+        badge.style.color = '#6b7280';
+        version.textContent = '';
+        installBtn.style.display = '';
+    }
+}
+
+async function installRuntime(runtime) {
+    const btn = document.getElementById(`${runtime}-install-btn`);
+    btn.textContent = 'Installing...';
+    btn.disabled = true;
+
+    try {
+        const resp = await fetch('/api/containers/install', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ runtime }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message, 'success');
+            fetchContainerStatus();
+        } else {
+            showToast(data.error || 'Installation failed', 'error');
+        }
+    } catch (e) {
+        showToast('Installation failed: ' + e.message, 'error');
+    } finally {
+        btn.textContent = `Install ${runtime.charAt(0).toUpperCase() + runtime.slice(1)}`;
+        btn.disabled = false;
+    }
+}
+
+// ─── Docker ───
+
+async function loadDockerContainers() {
+    // Fetch runtime status first
+    fetchContainerStatus();
+
+    try {
+        // Fetch containers and stats in parallel
+        const [containersResp, statsResp, imagesResp] = await Promise.all([
+            fetch('/api/containers/docker'),
+            fetch('/api/containers/docker/stats'),
+            fetch('/api/containers/docker/images'),
+        ]);
+
+        const containers = await containersResp.json();
+        const stats = await statsResp.json();
+        const images = await imagesResp.json();
+
+        // Index stats by name
+        dockerStats = {};
+        stats.forEach(s => { dockerStats[s.name] = s; });
+
+        renderDockerContainers(containers);
+        renderDockerStats(stats);
+        renderDockerImages(images);
+    } catch (e) {
+        console.error('Failed to load Docker containers:', e);
+    }
+
+    // Start polling for container stats
+    if (containerPollTimer) clearInterval(containerPollTimer);
+    containerPollTimer = setInterval(refreshDockerStats, 5000);
+}
+
+async function refreshDockerStats() {
+    if (currentPage !== 'containers') {
+        clearInterval(containerPollTimer);
+        containerPollTimer = null;
+        return;
+    }
+    try {
+        const resp = await fetch('/api/containers/docker/stats');
+        const stats = await resp.json();
+        dockerStats = {};
+        stats.forEach(s => { dockerStats[s.name] = s; });
+        renderDockerStats(stats);
+
+        // Update stats in table rows
+        const rows = document.querySelectorAll('#docker-containers-table tr[data-name]');
+        rows.forEach(row => {
+            const name = row.dataset.name;
+            const s = dockerStats[name];
+            if (s) {
+                const cpuCell = row.querySelector('.cpu-cell');
+                const memCell = row.querySelector('.mem-cell');
+                if (cpuCell) cpuCell.textContent = s.cpu_percent.toFixed(1) + '%';
+                if (memCell) memCell.textContent = formatBytes(s.memory_usage);
+            }
+        });
+    } catch (e) { /* silent */ }
+}
+
+function renderDockerContainers(containers) {
+    const table = document.getElementById('docker-containers-table');
+    const empty = document.getElementById('docker-empty');
+
+    if (containers.length === 0) {
+        table.innerHTML = '';
+        empty.style.display = '';
+        return;
+    }
+    empty.style.display = 'none';
+
+    table.innerHTML = containers.map(c => {
+        const s = dockerStats[c.name] || {};
+        const isRunning = c.state === 'running';
+        const isPaused = c.state === 'paused';
+        const stateColor = isRunning ? '#10b981' : (isPaused ? '#f59e0b' : '#6b7280');
+        const ports = c.ports.length > 0 ? c.ports.join('<br>') : '-';
+
+        return `<tr data-name="${c.name}">
+            <td><strong>${c.name}</strong><br><span style="font-size:11px;color:var(--text-muted)">${c.id.substring(0, 12)}</span></td>
+            <td>${c.image}</td>
+            <td><span style="color:${stateColor}">●</span> ${c.status}</td>
+            <td class="cpu-cell">${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
+            <td class="mem-cell">${s.memory_usage ? formatBytes(s.memory_usage) : '-'}</td>
+            <td style="font-size:11px;">${ports}</td>
+            <td>
+                ${isRunning ? `
+                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'stop')" title="Stop">⏹</button>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'restart')" title="Restart">🔄</button>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'pause')" title="Pause">⏸</button>
+                ` : isPaused ? `
+                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'unpause')" title="Unpause">▶</button>
+                ` : `
+                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'start')" title="Start">▶</button>
+                    <button class="btn btn-sm" style="margin:2px;color:#ef4444;" onclick="dockerAction('${c.name}', 'remove')" title="Remove">🗑</button>
+                `}
+                <button class="btn btn-sm" style="margin:2px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs">📜</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function renderDockerStats(stats) {
+    const summary = document.getElementById('docker-stats-summary');
+    if (!stats || stats.length === 0) {
+        summary.innerHTML = '';
+        return;
+    }
+
+    const totalCpu = stats.reduce((sum, s) => sum + s.cpu_percent, 0);
+    const totalMem = stats.reduce((sum, s) => sum + s.memory_usage, 0);
+    const totalPids = stats.reduce((sum, s) => sum + s.pids, 0);
+    const running = stats.length;
+
+    summary.innerHTML = `
+        <div class="stat-card">
+            <div class="stat-icon">🐳</div>
+            <div class="stat-info">
+                <div class="stat-value">${running}</div>
+                <div class="stat-label">Running</div>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon">⚡</div>
+            <div class="stat-info">
+                <div class="stat-value">${totalCpu.toFixed(1)}%</div>
+                <div class="stat-label">Total CPU</div>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon">💾</div>
+            <div class="stat-info">
+                <div class="stat-value">${formatBytes(totalMem)}</div>
+                <div class="stat-label">Total Memory</div>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon">🔧</div>
+            <div class="stat-info">
+                <div class="stat-value">${totalPids}</div>
+                <div class="stat-label">Total PIDs</div>
+            </div>
+        </div>
+    `;
+}
+
+function renderDockerImages(images) {
+    const table = document.getElementById('docker-images-table');
+    if (!images || images.length === 0) {
+        table.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);">No images found</td></tr>';
+        return;
+    }
+    table.innerHTML = images.map(img => `
+        <tr>
+            <td>${img.repository}</td>
+            <td>${img.tag}</td>
+            <td style="font-family:monospace;font-size:12px;">${img.id.substring(0, 12)}</td>
+            <td>${img.size}</td>
+            <td>${img.created}</td>
+        </tr>
+    `).join('');
+}
+
+async function dockerAction(container, action) {
+    if (action === 'remove' && !confirm(`Remove container '${container}'? This cannot be undone.`)) return;
+
+    try {
+        const resp = await fetch(`/api/containers/docker/${container}/action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`${action} ${container}: OK`, 'success');
+            setTimeout(loadDockerContainers, 500);
+        } else {
+            showToast(data.error || `Failed to ${action}`, 'error');
+        }
+    } catch (e) {
+        showToast(`Failed: ${e.message}`, 'error');
+    }
+}
+
+// ─── LXC ───
+
+let lxcPollTimer = null;
+
+async function loadLxcContainers() {
+    fetchContainerStatus();
+
+    try {
+        const [containersResp, statsResp] = await Promise.all([
+            fetch('/api/containers/lxc'),
+            fetch('/api/containers/lxc/stats'),
+        ]);
+
+        const containers = await containersResp.json();
+        const stats = await statsResp.json();
+
+        // Index stats by name
+        const lxcStats = {};
+        stats.forEach(s => { lxcStats[s.name] = s; });
+
+        renderLxcContainers(containers, lxcStats);
+    } catch (e) {
+        console.error('Failed to load LXC containers:', e);
+    }
+
+    if (lxcPollTimer) clearInterval(lxcPollTimer);
+    lxcPollTimer = setInterval(async () => {
+        if (currentPage !== 'lxc') { clearInterval(lxcPollTimer); lxcPollTimer = null; return; }
+        loadLxcContainers();
+    }, 10000);
+}
+
+function renderLxcContainers(containers, stats) {
+    const table = document.getElementById('lxc-containers-table');
+    const empty = document.getElementById('lxc-empty');
+
+    if (containers.length === 0) {
+        table.innerHTML = '';
+        empty.style.display = '';
+        return;
+    }
+    empty.style.display = 'none';
+
+    table.innerHTML = containers.map(c => {
+        const s = stats[c.name] || {};
+        const isRunning = c.state === 'running';
+        const stateColor = isRunning ? '#10b981' : '#6b7280';
+
+        return `<tr>
+            <td><strong>${c.name}</strong></td>
+            <td><span style="color:${stateColor}">●</span> ${c.state}</td>
+            <td>${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
+            <td>${s.memory_usage ? formatBytes(s.memory_usage) + (s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : '') : '-'}</td>
+            <td>
+                ${isRunning ? `
+                    <button class="btn btn-sm" style="margin:2px;" onclick="lxcAction('${c.name}', 'stop')" title="Stop">⏹</button>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="lxcAction('${c.name}', 'restart')" title="Restart">🔄</button>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="lxcAction('${c.name}', 'freeze')" title="Freeze">⏸</button>
+                ` : `
+                    <button class="btn btn-sm" style="margin:2px;" onclick="lxcAction('${c.name}', 'start')" title="Start">▶</button>
+                    <button class="btn btn-sm" style="margin:2px;color:#ef4444;" onclick="lxcAction('${c.name}', 'destroy')" title="Destroy">🗑</button>
+                `}
+                <button class="btn btn-sm" style="margin:2px;" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs">📜</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+async function lxcAction(container, action) {
+    if (action === 'destroy' && !confirm(`Destroy LXC container '${container}'? This cannot be undone.`)) return;
+
+    try {
+        const resp = await fetch(`/api/containers/lxc/${container}/action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`${action} ${container}: OK`, 'success');
+            setTimeout(loadLxcContainers, 500);
+        } else {
+            showToast(data.error || `Failed to ${action}`, 'error');
+        }
+    } catch (e) {
+        showToast(`Failed: ${e.message}`, 'error');
+    }
+}
+
+// ─── Shared Container Functions ───
+
+async function viewContainerLogs(runtime, container) {
+    const modal = document.getElementById('container-detail-modal');
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+
+    title.textContent = `${container} — Logs`;
+    body.innerHTML = '<p style="color:var(--text-muted);">Loading logs...</p>';
+    modal.classList.add('active');
+
+    try {
+        const resp = await fetch(`/api/containers/${runtime}/${container}/logs`);
+        const data = await resp.json();
+        const logs = data.logs || [];
+
+        body.innerHTML = `
+            <pre style="background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+                font-family: 'JetBrains Mono', monospace; font-size: 12px; max-height: 400px; overflow-y: auto;
+                color: var(--text-primary); white-space: pre-wrap; word-break: break-all;">${logs.length > 0 ? logs.join('\n') : 'No logs available'}</pre>
+        `;
+    } catch (e) {
+        body.innerHTML = `<p style="color:#ef4444;">Failed to load logs: ${e.message}</p>`;
+    }
+}
+
+function closeContainerDetail() {
+    document.getElementById('container-detail-modal').classList.remove('active');
+}
