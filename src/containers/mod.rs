@@ -400,18 +400,6 @@ fn lxc_apply_wolfnet(container: &str) {
     }
 }
 
-/// Get IPv4 address from a running LXC container's eth0
-fn get_container_ipv4(container: &str) -> String {
-    Command::new("lxc-attach")
-        .args(["-n", container, "--", "sh", "-c",
-            "ip -4 addr show eth0 | grep -oP 'inet \\K[0-9.]+' | head -1"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
-}
-
 // ─── Common types ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
