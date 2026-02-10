@@ -1057,19 +1057,45 @@ function renderDockerStats(stats) {
 function renderDockerImages(images) {
     const table = document.getElementById('docker-images-table');
     if (!images || images.length === 0) {
-        table.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);">No images found</td></tr>';
+        table.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);">No images found</td></tr>';
         return;
     }
-    table.innerHTML = images.map(img => `
+    table.innerHTML = images.map(img => {
+        const imageRef = img.repository + (img.tag && img.tag !== '<none>' ? ':' + img.tag : '');
+        return `
         <tr>
             <td>${img.repository}</td>
             <td>${img.tag}</td>
             <td style="font-family:monospace;font-size:12px;">${img.id.substring(0, 12)}</td>
             <td>${img.size}</td>
             <td>${img.created}</td>
-        </tr>
-    `).join('');
+            <td>
+                <button class="btn btn-sm btn-primary" style="margin:2px;font-size:11px;" onclick="selectDockerImage('${imageRef.replace(/'/g, "\\'")}')" title="Create container from this image">▶ Use</button>
+                <button class="btn btn-sm" style="margin:2px;font-size:11px;color:#ef4444;" onclick="deleteDockerImage('${img.id}', '${imageRef.replace(/'/g, "\\'")}')" title="Delete image">🗑 Delete</button>
+            </td>
+        </tr>`;
+    }).join('');
 }
+
+async function deleteDockerImage(id, name) {
+    if (!confirm(`Delete Docker image '${name}'?\n\nThis will fail if the image is used by any container.`)) return;
+
+    try {
+        const resp = await fetch(`/api/containers/docker/images/${encodeURIComponent(id)}`, {
+            method: 'DELETE',
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`Image '${name}' deleted`, 'success');
+            setTimeout(loadDockerContainers, 500);
+        } else {
+            showToast(data.error || 'Failed to delete image', 'error');
+        }
+    } catch (e) {
+        showToast(`Failed: ${e.message}`, 'error');
+    }
+}
+
 
 async function dockerAction(container, action) {
     if (action === 'remove' && !confirm(`Remove container '${container}'? This cannot be undone.`)) return;

@@ -92,16 +92,37 @@ pub fn wolfnet_allocate_ip(host_ip: &str, extra_used: &[u8]) -> String {
         used_ips.insert(ip);
     }
 
-    // Check Docker containers connected to wolfnet
+    // Check Docker containers with wolfnet.ip labels
     if let Ok(output) = Command::new("docker")
-        .args(["network", "inspect", "wolfnet", "--format",
-               "{{range .Containers}}{{.IPv4Address}} {{end}}"])
+        .args(["ps", "-a", "--format", "{{.Names}}"])
         .output()
     {
         let text = String::from_utf8_lossy(&output.stdout);
-        for addr in text.split_whitespace() {
-            if let Some(ip) = addr.split('/').next() {
-                let ip_parts: Vec<&str> = ip.split('.').collect();
+        for name in text.lines().filter(|l| !l.is_empty()) {
+            if let Ok(inspect) = Command::new("docker")
+                .args(["inspect", "--format", "{{index .Config.Labels \"wolfnet.ip\"}}", name])
+                .output()
+            {
+                let label = String::from_utf8_lossy(&inspect.stdout).trim().to_string();
+                if !label.is_empty() && label != "<no value>" {
+                    let ip_parts: Vec<&str> = label.split('.').collect();
+                    if ip_parts.len() == 4 {
+                        if let Ok(last) = ip_parts[3].parse::<u8>() {
+                            used_ips.insert(last);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check LXC containers with .wolfnet/ip marker files
+    if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
+        for entry in entries.flatten() {
+            let ip_file = entry.path().join(".wolfnet/ip");
+            if let Ok(ip_str) = std::fs::read_to_string(&ip_file) {
+                let ip_str = ip_str.trim();
+                let ip_parts: Vec<&str> = ip_str.split('.').collect();
                 if ip_parts.len() == 4 {
                     if let Ok(last) = ip_parts[3].parse::<u8>() {
                         used_ips.insert(last);
@@ -111,7 +132,7 @@ pub fn wolfnet_allocate_ip(host_ip: &str, extra_used: &[u8]) -> String {
         }
     }
 
-    // Check LXC containers too
+    // Check ARP table on wolfnet0 for any other IPs in use
     if let Ok(output) = Command::new("ip")
         .args(["neigh", "show", "dev", "wolfnet0"])
         .output()
@@ -951,6 +972,12 @@ pub fn docker_images() -> Vec<ContainerImage> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Remove a Docker image by ID or name
+pub fn docker_remove_image(image: &str) -> Result<String, String> {
+    info!("Removing Docker image: {}", image);
+    run_docker_cmd(&["rmi", image])
 }
 
 fn run_docker_cmd(args: &[&str]) -> Result<String, String> {

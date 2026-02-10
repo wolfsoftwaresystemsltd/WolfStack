@@ -674,6 +674,16 @@ pub async fn docker_images(req: HttpRequest, state: web::Data<AppState>) -> Http
     HttpResponse::Ok().json(images)
 }
 
+/// DELETE /api/containers/docker/images/{id} — remove a Docker image
+pub async fn docker_remove_image(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    match containers::docker_remove_image(&id) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// GET /api/containers/docker/{id}/logs — get Docker container logs
 pub async fn docker_logs(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
@@ -980,6 +990,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/docker/create", web::post().to(docker_create))
         .route("/api/containers/docker/stats", web::get().to(docker_stats))
         .route("/api/containers/docker/images", web::get().to(docker_images))
+        .route("/api/containers/docker/images/{id}", web::delete().to(docker_remove_image))
         .route("/api/containers/docker/{id}/logs", web::get().to(docker_logs))
         .route("/api/containers/docker/{id}/action", web::post().to(docker_action))
         .route("/api/containers/docker/{id}/clone", web::post().to(docker_clone))
