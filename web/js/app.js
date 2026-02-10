@@ -665,7 +665,10 @@ function renderVms(vms) {
         const statusColor = vm.running ? 'var(--success)' : 'var(--danger)';
 
         const vncText = (vm.running && vm.vnc_port)
-            ? `<span class="badge" title="Connect with any VNC viewer to port ${vm.vnc_port}">:${vm.vnc_port}</span>`
+            ? (vm.vnc_ws_port
+                ? `<a href="/vnc.html?name=${encodeURIComponent(vm.name)}&port=${vm.vnc_ws_port}" target="_blank" 
+                    class="badge" style="cursor:pointer; text-decoration:none;" title="Open console in browser">🖥️ :${vm.vnc_port}</a>`
+                : `<span class="badge" title="Connect with VNC client to port ${vm.vnc_port}">:${vm.vnc_port}</span>`)
             : '—';
 
         const wolfnetIp = vm.wolfnet_ip || '—';
@@ -681,7 +684,8 @@ function renderVms(vms) {
                 <td>
                     <button class="btn btn-sm" style="margin:2px;" onclick="showVmLogs('${vm.name}')" title="Logs">📋</button>
                     ${vm.running ?
-                `<button class="btn btn-danger btn-sm" style="margin:2px;" onclick="vmAction('${vm.name}', 'stop')">Stop</button>` :
+                `${vm.vnc_ws_port ? `<button class="btn btn-sm" style="margin:2px;" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port})" title="Console">🖥️</button>` : ''}
+                         <button class="btn btn-danger btn-sm" style="margin:2px;" onclick="vmAction('${vm.name}', 'stop')">Stop</button>` :
                 `<button class="btn btn-sm" style="margin:2px;" onclick="showVmSettings('${vm.name}')" title="Settings">⚙️</button>
                          <button class="btn btn-success btn-sm" style="margin:2px;" onclick="vmAction('${vm.name}', 'start')">Start</button>
                          <button class="btn btn-danger btn-sm" style="margin:2px;" onclick="deleteVm('${vm.name}')">Delete</button>`

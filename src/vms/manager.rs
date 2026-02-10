@@ -14,6 +14,8 @@ pub struct VmConfig {
     pub iso_path: Option<String>,
     pub running: bool,
     pub vnc_port: Option<u16>,
+    #[serde(default)]
+    pub vnc_ws_port: Option<u16>,
     pub mac_address: Option<String>,
     pub auto_start: bool,
     #[serde(default)]
@@ -30,6 +32,7 @@ impl VmConfig {
             iso_path: None,
             running: false,
             vnc_port: None,
+            vnc_ws_port: None,
             mac_address: Some(generate_mac()),
             auto_start: false,
             wolfnet_ip: None,
@@ -66,8 +69,10 @@ impl VmManager {
                              vm.running = self.check_running(&vm.name);
                              if vm.running {
                                  vm.vnc_port = self.read_runtime_vnc_port(&vm.name);
+                                 vm.vnc_ws_port = self.read_runtime_ws_port(&vm.name);
                              } else {
                                  vm.vnc_port = None;
+                                 vm.vnc_ws_port = None;
                              }
                              vms.push(vm);
                          }
@@ -250,9 +255,10 @@ impl VmManager {
         let mut rng = rand::thread_rng();
         let vnc_num: u16 = rng.gen_range(10..99); 
         let vnc_port: u16 = 5900 + vnc_num;
-        let vnc_arg = format!("0.0.0.0:{}", vnc_num);  // Bind to all interfaces
+        let ws_port: u16 = 6080 + vnc_num;  // WebSocket port for noVNC
+        let vnc_arg = format!("0.0.0.0:{},websocket=0.0.0.0:{}", vnc_num, ws_port);
         
-        write_log(&format!("VNC display :{} (port {})", vnc_num, vnc_port));
+        write_log(&format!("VNC display :{} (port {}), WebSocket port {}", vnc_num, vnc_port, ws_port));
 
         // Check if KVM is available
         let kvm_available = std::path::Path::new("/dev/kvm").exists();
@@ -376,18 +382,19 @@ impl VmManager {
             return Err(format!("VM crashed immediately after starting. QEMU log:\n{}", log_content));
         }
 
-        write_log(&format!("VM started successfully. VNC :{} (port {})", vnc_num, vnc_port));
+        write_log(&format!("VM started successfully. VNC :{} (port {}), noVNC WS :{}", vnc_num, vnc_port, ws_port));
 
         // Save runtime port info so frontend can connect
         let runtime = serde_json::json!({
             "vnc_port": vnc_port,
+            "vnc_ws_port": ws_port,
             "vnc_display": vnc_num,
             "kvm": kvm_available,
         });
         let runtime_path = self.base_dir.join(format!("{}.runtime.json", name));
         let _ = fs::write(&runtime_path, runtime.to_string());
         
-        info!("Started VM {} on VNC :{} (port {})", name, vnc_num, vnc_port);
+        info!("Started VM {} on VNC :{} (port {}), noVNC WS :{}", name, vnc_num, vnc_port, ws_port);
         Ok(())
     }
 
@@ -522,6 +529,7 @@ impl VmManager {
         vm.running = self.check_running(name);
         if vm.running {
             vm.vnc_port = self.read_runtime_vnc_port(name);
+            vm.vnc_ws_port = self.read_runtime_ws_port(name);
         }
         Some(vm)
     }
@@ -557,5 +565,13 @@ impl VmManager {
         let content = fs::read_to_string(&runtime_path).ok()?;
         let runtime: serde_json::Value = serde_json::from_str(&content).ok()?;
         runtime.get("vnc_port").and_then(|v| v.as_u64()).map(|v| v as u16)
+    }
+
+    /// Read the WebSocket port from runtime file (for noVNC)
+    fn read_runtime_ws_port(&self, name: &str) -> Option<u16> {
+        let runtime_path = self.base_dir.join(format!("{}.runtime.json", name));
+        let content = fs::read_to_string(&runtime_path).ok()?;
+        let runtime: serde_json::Value = serde_json::from_str(&content).ok()?;
+        runtime.get("vnc_ws_port").and_then(|v| v.as_u64()).map(|v| v as u16)
     }
 }
