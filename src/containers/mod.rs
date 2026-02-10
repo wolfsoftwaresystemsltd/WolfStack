@@ -1086,11 +1086,16 @@ pub fn lxc_config(container: &str) -> Option<String> {
     std::fs::read_to_string(&path).ok()
 }
 
-/// Save LXC container config
+/// Save LXC container config (creates .bak backup first)
 pub fn lxc_save_config(container: &str, content: &str) -> Result<String, String> {
     let path = format!("/var/lib/lxc/{}/config", container);
+    if !std::path::Path::new(&path).exists() {
+        return Err(format!("Container '{}' config not found", container));
+    }
+    let backup = format!("{}.bak", path);
+    let _ = std::fs::copy(&path, &backup);
     std::fs::write(&path, content)
-        .map(|_| "Config saved".to_string())
+        .map(|_| format!("Config saved for '{}'", container))
         .map_err(|e| format!("Failed to save config: {}", e))
 }
 

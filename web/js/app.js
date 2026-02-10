@@ -1141,6 +1141,7 @@ function renderLxcContainers(containers, stats) {
                     <button class="btn btn-sm" style="margin:2px;color:#ef4444;" onclick="lxcAction('${c.name}', 'destroy')" title="Destroy">🗑</button>
                 `}
                 <button class="btn btn-sm" style="margin:2px;" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs">📜</button>
+                <button class="btn btn-sm" style="margin:2px;" onclick="openLxcSettings('${c.name}')" title="Settings">⚙️</button>
                 <button class="btn btn-sm" style="margin:2px;" onclick="cloneLxcContainer('${c.name}')" title="Clone">📋</button>
             </td>
         </tr>`;
@@ -1196,6 +1197,111 @@ async function viewContainerLogs(runtime, container) {
 
 function closeContainerDetail() {
     document.getElementById('container-detail-modal').classList.remove('active');
+}
+
+// ─── LXC Settings Editor ───
+
+async function openLxcSettings(name) {
+    const modal = document.getElementById('container-detail-modal');
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+
+    title.textContent = `${name} — Settings`;
+    body.innerHTML = '<p style="color:var(--text-muted);">Loading config...</p>';
+    modal.classList.add('active');
+
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/lxc/${name}/config`));
+        const data = await resp.json();
+        const config = data.config || '';
+
+        body.innerHTML = `
+            <div style="margin-bottom: 12px;">
+                <div style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
+                    <button class="btn btn-sm" onclick="addMountPoint('${name}')">📁 Add Mount Point</button>
+                    <button class="btn btn-sm" onclick="addWolfDiskMount('${name}')">🐺 Mount WolfDisk</button>
+                    <button class="btn btn-sm" onclick="addMemoryLimit('${name}')">💾 Set Memory Limit</button>
+                    <button class="btn btn-sm" onclick="addCpuLimit('${name}')">⚡ Set CPU Limit</button>
+                </div>
+                <div style="font-size:11px; color:var(--text-muted); margin-bottom:8px;">
+                    Edit the raw LXC config below. Changes take effect after container restart.
+                </div>
+            </div>
+            <textarea id="lxc-config-editor" style="width:100%; height:350px; background:var(--bg-primary); color:var(--text-primary);
+                border:1px solid var(--border); border-radius:8px; padding:12px; font-family:'JetBrains Mono', monospace;
+                font-size:12px; resize:vertical; line-height:1.5;">${escapeHtml(config)}</textarea>
+            <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:12px;">
+                <button class="btn btn-sm" onclick="closeContainerDetail()">Cancel</button>
+                <button class="btn btn-sm btn-primary" onclick="saveLxcSettings('${name}')">💾 Save Config</button>
+            </div>
+        `;
+    } catch (e) {
+        body.innerHTML = `<p style="color:#ef4444;">Failed to load config: ${e.message}</p>`;
+    }
+}
+
+function addMountPoint(name) {
+    const src = prompt('Host path (e.g. /mnt/data):');
+    if (!src) return;
+    const dest = prompt('Container path (e.g. /mnt/data):', src);
+    if (!dest) return;
+    const editor = document.getElementById('lxc-config-editor');
+    editor.value += `\nlxc.mount.entry = ${src} ${dest.replace(/^\//, '')} none bind,create=dir 0 0\n`;
+}
+
+function addWolfDiskMount(name) {
+    const src = prompt('WolfDisk mount path on host (e.g. /mnt/wolfdisk):', '/mnt/wolfdisk');
+    if (!src) return;
+    const dest = prompt('Mount path inside container:', '/mnt/shared');
+    if (!dest) return;
+    const editor = document.getElementById('lxc-config-editor');
+    editor.value += `\n# WolfDisk shared folder\nlxc.mount.entry = ${src} ${dest.replace(/^\//, '')} none bind,create=dir 0 0\n`;
+}
+
+function addMemoryLimit(name) {
+    const mem = prompt('Memory limit (e.g. 512M, 1G, 2G):', '1G');
+    if (!mem) return;
+    const editor = document.getElementById('lxc-config-editor');
+    // Remove existing memory limit if present
+    editor.value = editor.value.replace(/\nlxc\.cgroup.*memory.*\n/g, '\n');
+    editor.value += `\nlxc.cgroup2.memory.max = ${mem}\n`;
+}
+
+function addCpuLimit(name) {
+    const cpus = prompt('CPU cores (e.g. 1, 2, 4):', '2');
+    if (!cpus) return;
+    const editor = document.getElementById('lxc-config-editor');
+    editor.value = editor.value.replace(/\nlxc\.cgroup.*cpu.*\n/g, '\n');
+    // cpuset: 0 = 1 core, 0-1 = 2 cores, etc.
+    const max = parseInt(cpus) - 1;
+    const cpuset = max <= 0 ? '0' : `0-${max}`;
+    editor.value += `\nlxc.cgroup2.cpuset.cpus = ${cpuset}\n`;
+}
+
+async function saveLxcSettings(name) {
+    const content = document.getElementById('lxc-config-editor').value;
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/lxc/${name}/config`), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`Config saved for ${name}. Restart container to apply.`, 'success');
+            closeContainerDetail();
+        } else {
+            showToast(data.error || 'Failed to save config', 'error');
+        }
+    } catch (e) {
+        showToast(`Failed: ${e.message}`, 'error');
+    }
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 // ─── Clone & Migrate Functions ───

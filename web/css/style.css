@@ -66,10 +66,10 @@ body {
 }
 
 .sidebar-logo {
-    padding: 24px 20px;
+    padding: 14px 16px;
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
     border-bottom: 1px solid var(--border);
 }
 
@@ -101,13 +101,13 @@ body {
 }
 
 .sidebar-nav {
-    padding: 16px 12px;
+    padding: 8px 8px;
     flex: 1;
     overflow-y: auto;
 }
 
 .nav-section {
-    margin-bottom: 24px;
+    margin-bottom: 12px;
 }
 
 .nav-section-title {
@@ -116,20 +116,20 @@ body {
     text-transform: uppercase;
     letter-spacing: 1.2px;
     color: var(--text-muted);
-    padding: 0 12px;
-    margin-bottom: 8px;
+    padding: 0 10px;
+    margin-bottom: 4px;
 }
 
 .nav-item {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 10px 12px;
+    gap: 10px;
+    padding: 6px 10px;
     border-radius: var(--radius-sm);
     color: var(--text-secondary);
     cursor: pointer;
     transition: var(--transition);
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 500;
     text-decoration: none;
 }
@@ -169,12 +169,12 @@ body {
 .server-node-header {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
+    gap: 6px;
+    padding: 5px 10px;
     border-radius: var(--radius-sm);
     cursor: pointer;
     transition: var(--transition);
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 600;
     color: var(--text-primary);
     user-select: none;
@@ -254,9 +254,9 @@ body {
 }
 
 .server-node-children .nav-item {
-    padding: 6px 12px;
-    font-size: 12px;
-    gap: 8px;
+    padding: 4px 10px;
+    font-size: 11px;
+    gap: 6px;
     border-radius: 6px;
 }
 

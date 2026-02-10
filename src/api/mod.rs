@@ -400,6 +400,17 @@ pub async fn node_proxy(
     if let Some(ct) = req.headers().get("content-type") {
         builder = builder.header("content-type", ct.to_str().unwrap_or("application/json"));
     }
+    // Forward auth cookie/header so remote node accepts the request
+    if let Some(cookie_header) = req.headers().get("cookie") {
+        if let Ok(v) = cookie_header.to_str() {
+            builder = builder.header("cookie", v);
+        }
+    }
+    if let Some(auth) = req.headers().get("authorization") {
+        if let Ok(v) = auth.to_str() {
+            builder = builder.header("authorization", v);
+        }
+    }
     if !body.is_empty() {
         builder = builder.body(body.to_vec());
     }
