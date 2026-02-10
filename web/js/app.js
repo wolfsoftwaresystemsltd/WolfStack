@@ -1388,6 +1388,45 @@ function showDockerCreate() {
                     <input id="docker-create-env" type="text" placeholder="MYSQL_ROOT_PASSWORD=secret"
                         style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
                 </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:12px;">
+                    <div>
+                        <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">🧠 Memory Limit</label>
+                        <select id="docker-create-memory"
+                            style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                            <option value="">Unlimited</option>
+                            <option value="256m">256 MB</option>
+                            <option value="512m">512 MB</option>
+                            <option value="1g" selected>1 GB</option>
+                            <option value="2g">2 GB</option>
+                            <option value="4g">4 GB</option>
+                            <option value="8g">8 GB</option>
+                            <option value="16g">16 GB</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">⚡ CPU Cores</label>
+                        <select id="docker-create-cpus"
+                            style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                            <option value="">Unlimited</option>
+                            <option value="1" selected>1 core</option>
+                            <option value="2">2 cores</option>
+                            <option value="4">4 cores</option>
+                            <option value="8">8 cores</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">💾 Storage Limit</label>
+                        <select id="docker-create-storage"
+                            style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                            <option value="">Unlimited</option>
+                            <option value="1G">1 GB</option>
+                            <option value="5G">5 GB</option>
+                            <option value="10G" selected>10 GB</option>
+                            <option value="20G">20 GB</option>
+                            <option value="50G">50 GB</option>
+                        </select>
+                    </div>
+                </div>
                 <div id="docker-wolfnet-section" style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
                     <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
                         <span>🐺</span>
@@ -1482,6 +1521,9 @@ async function createDockerContainer() {
     const portsStr = document.getElementById('docker-create-ports').value.trim();
     const envStr = document.getElementById('docker-create-env').value.trim();
     const wolfnet_ip = document.getElementById('docker-wolfnet-ip')?.value?.trim() || '';
+    const memory_limit = document.getElementById('docker-create-memory')?.value || '';
+    const cpu_cores = document.getElementById('docker-create-cpus')?.value || '';
+    const storage_limit = document.getElementById('docker-create-storage')?.value || '';
 
     if (!name || !image) {
         showToast('Please enter a container name and image', 'error');
@@ -1512,7 +1554,7 @@ async function createDockerContainer() {
         const createResp = await fetch(apiUrl('/api/containers/docker/create'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, image, ports, env, wolfnet_ip }),
+            body: JSON.stringify({ name, image, ports, env, wolfnet_ip, memory_limit, cpu_cores, storage_limit }),
         });
         const createData = await createResp.json();
         if (createResp.ok) {
@@ -1623,6 +1665,34 @@ async function loadLxcTemplates() {
                             <span id="lxc-storage-info" style="font-size:12px; color:var(--text-muted); padding-bottom:10px;"></span>
                         </div>
                     </div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                        <div>
+                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">🧠 Memory Limit</label>
+                            <select id="lxc-create-memory"
+                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                                <option value="">Unlimited</option>
+                                <option value="256M">256 MB</option>
+                                <option value="512M">512 MB</option>
+                                <option value="1G" selected>1 GB</option>
+                                <option value="2G">2 GB</option>
+                                <option value="4G">4 GB</option>
+                                <option value="8G">8 GB</option>
+                                <option value="16G">16 GB</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">⚡ CPU Cores</label>
+                            <select id="lxc-create-cpus"
+                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                                <option value="">Unlimited</option>
+                                <option value="1" selected>1 core</option>
+                                <option value="2">2 cores</option>
+                                <option value="4">4 cores</option>
+                                <option value="8">8 cores</option>
+                                <option value="16">16 cores</option>
+                            </select>
+                        </div>
+                    </div>
                     <div id="lxc-wolfnet-section" style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
                         <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
                             <span>🐺</span>
@@ -1682,24 +1752,27 @@ function selectLxcTemplate(distro, release, arch) {
     const node = currentNodeId ? allNodes.find(n => n.id === currentNodeId) : null;
     const storageSelect = document.getElementById('lxc-create-storage');
     const storageInfo = document.getElementById('lxc-storage-info');
-    if (node?.metrics?.disks) {
-        storageSelect.innerHTML = '<option value="/var/lib/lxc">/var/lib/lxc (default)</option>';
+    if (node?.metrics?.disks && node.metrics.disks.length > 0) {
+        storageSelect.innerHTML = '';
+        // Add /var/lib/lxc as default (on root)
+        const rootDisk = node.metrics.disks.find(d => d.mount_point === '/');
+        const rootFree = rootDisk ? ` (${formatBytes(rootDisk.available_bytes)} free)` : '';
+        storageSelect.innerHTML += `<option value="/var/lib/lxc">/var/lib/lxc (default)${rootFree}</option>`;
+        // Add all other mount points with sufficient space
         node.metrics.disks.forEach(d => {
-            if (d.mount_point !== '/' && d.available > 1073741824) { // >1GB free
-                const free = formatBytes(d.available);
+            if (d.mount_point !== '/' && d.available_bytes > 1073741824) {
+                const free = formatBytes(d.available_bytes);
                 const path = d.mount_point + '/lxc';
                 storageSelect.innerHTML += `<option value="${path}">${path} (${free} free)</option>`;
             }
         });
-        // Show info for default
-        const rootDisk = node.metrics.disks.find(d => d.mount_point === '/');
         if (rootDisk) {
-            storageInfo.textContent = `Root: ${formatBytes(rootDisk.available)} free`;
+            storageInfo.textContent = `Root: ${formatBytes(rootDisk.available_bytes)} free`;
         }
         storageSelect.onchange = () => {
             const sel = storageSelect.value;
             const disk = node.metrics.disks.find(d => sel.startsWith(d.mount_point));
-            storageInfo.textContent = disk ? `${formatBytes(disk.available)} free` : '';
+            storageInfo.textContent = disk ? `${formatBytes(disk.available_bytes)} free` : '';
         };
     }
 
@@ -1734,6 +1807,8 @@ async function createLxcContainer() {
     const wolfnet_ip = document.getElementById('lxc-wolfnet-ip')?.value?.trim() || '';
     const storage_path = document.getElementById('lxc-create-storage')?.value || '';
     const root_password = document.getElementById('lxc-create-password')?.value?.trim() || '';
+    const memory_limit = document.getElementById('lxc-create-memory')?.value || '';
+    const cpu_cores = document.getElementById('lxc-create-cpus')?.value || '';
 
     if (!name || !distribution || !release || !architecture) {
         showToast('Please select a template and enter a container name', 'error');
@@ -1752,7 +1827,7 @@ async function createLxcContainer() {
         const resp = await fetch(apiUrl('/api/containers/lxc/create'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, distribution, release, architecture, wolfnet_ip, storage_path, root_password }),
+            body: JSON.stringify({ name, distribution, release, architecture, wolfnet_ip, storage_path, root_password, memory_limit, cpu_cores }),
         });
         const data = await resp.json();
         if (resp.ok) {

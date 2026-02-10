@@ -1109,10 +1109,31 @@ pub fn docker_pull(image: &str) -> Result<String, String> {
 
 /// Create a Docker container from an image
 /// If wolfnet_ip is provided, the container will be connected to the WolfNet overlay network
-pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], wolfnet_ip: Option<&str>) -> Result<String, String> {
+pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], wolfnet_ip: Option<&str>, 
+                     memory: Option<&str>, cpus: Option<&str>, storage: Option<&str>) -> Result<String, String> {
     info!("Creating Docker container {} from image {}", name, image);
 
     let mut args = vec!["create".to_string(), "--name".to_string(), name.to_string()];
+
+    // Add resource limits
+    if let Some(mem) = memory {
+        if !mem.is_empty() {
+            args.push("--memory".to_string());
+            args.push(mem.to_string());
+        }
+    }
+    if let Some(cpu) = cpus {
+        if !cpu.is_empty() {
+            args.push("--cpus".to_string());
+            args.push(cpu.to_string());
+        }
+    }
+    if let Some(store) = storage {
+        if !store.is_empty() {
+            args.push("--storage-opt".to_string());
+            args.push(format!("size={}", store));
+        }
+    }
 
     // Add port mappings
     for port in ports {
@@ -1166,7 +1187,65 @@ pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], 
     }
 }
 
-// ─── Clone & Migrate ───
+/// Set resource limits for an LXC container
+pub fn lxc_set_resource_limits(container: &str, memory: Option<&str>, cpus: Option<&str>) -> Result<Option<String>, String> {
+    let mut messages = Vec::new();
+    
+    // Limits are applied via lxc-cgroup but only work if container is running.
+    // However, we want them persistent. Persistent config is in /var/lib/lxc/NAME/config
+    let config_path = format!("/var/lib/lxc/{}/config", container);
+    if let Ok(mut config) = std::fs::read_to_string(&config_path) {
+        let mut modified = false;
+        
+        if let Some(mem) = memory {
+            if !mem.is_empty() {
+                // Convert e.g. "1G" to bytes if needed, but lxc.cgroup.memory.limit_in_bytes often accepts suffixes
+                let limit_line = format!("\nlxc.cgroup.memory.limit_in_bytes = {}\n", mem);
+                if !config.contains("lxc.cgroup.memory.limit_in_bytes") {
+                   config.push_str(&limit_line);
+                   modified = true;
+                   messages.push(format!("Memory limit set to {}", mem));
+                }
+            }
+        }
+        
+        if let Some(cpu) = cpus {
+            if !cpu.is_empty() {
+                 // Convert core count to cpuset? Actually easier to use cpu.shares or quota for generic limits
+                 // But typically users want "2 cores" -> cpuset.cpus = 0-1
+                 // Implementing simple cpuset based on count is tricky without knowing topology.
+                 // We'll use cgroup.cpu.max or similar if cgroup2, or shares.
+                 // For now, let's just append the raw value if it's a cpuset, or use shares?
+                 // Let's assume the user input (dropdown) maps to cpuset e.g. "0" or "0-1" in a smarter way?
+                 // The frontend sends "2", "4" etc.
+                 // A safe way is cpu.shares = 1024 * cores.
+                 if let Ok(cores) = cpu.parse::<u32>() {
+                     let shares = cores * 1024;
+                     let limit_line = format!("\nlxc.cgroup.cpu.shares = {}\n", shares);
+                     if !config.contains("lxc.cgroup.cpu.shares") {
+                        config.push_str(&limit_line);
+                        modified = true;
+                         messages.push(format!("CPU shares set to {}", shares));
+                     }
+                 }
+            }
+        }
+
+        if modified {
+            if let Err(e) = std::fs::write(&config_path, config) {
+                return Err(format!("Failed to write config: {}", e));
+            }
+        }
+    }
+
+    if messages.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(messages.join(", ")))
+    }
+}
+
+/// Stop an LXC container
 
 /// Clone a Docker container — commits it as an image, then creates a new container
 pub fn docker_clone(container: &str, new_name: &str) -> Result<String, String> {

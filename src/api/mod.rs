@@ -517,6 +517,9 @@ pub struct DockerCreateRequest {
     pub ports: Option<Vec<String>>,
     pub env: Option<Vec<String>>,
     pub wolfnet_ip: Option<String>,
+    pub memory_limit: Option<String>,
+    pub cpu_cores: Option<String>,
+    pub storage_limit: Option<String>,
 }
 
 /// POST /api/containers/docker/create — create a Docker container
@@ -529,7 +532,10 @@ pub async fn docker_create(
     let ports = body.ports.as_deref().unwrap_or(&[]);
     let env = body.env.as_deref().unwrap_or(&[]);
     let wolfnet_ip = body.wolfnet_ip.as_deref();
-    match containers::docker_create(&body.name, &body.image, ports, env, wolfnet_ip) {
+    let memory = body.memory_limit.as_deref();
+    let cpus = body.cpu_cores.as_deref();
+    let storage = body.storage_limit.as_deref();
+    match containers::docker_create(&body.name, &body.image, ports, env, wolfnet_ip, memory, cpus, storage) {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
@@ -551,6 +557,8 @@ pub struct LxcCreateRequest {
     pub wolfnet_ip: Option<String>,
     pub storage_path: Option<String>,
     pub root_password: Option<String>,
+    pub memory_limit: Option<String>,
+    pub cpu_cores: Option<String>,
 }
 
 /// POST /api/containers/lxc/create — create an LXC container from template
@@ -565,7 +573,7 @@ pub async fn lxc_create(
         Ok(msg) => {
             let mut messages = vec![msg];
 
-            // Set root password if provided — start container, set password, stop it
+            // Set root password if provided
             if let Some(ref password) = body.root_password {
                 if !password.is_empty() {
                     match containers::lxc_set_root_password(&body.name, password) {
@@ -573,6 +581,15 @@ pub async fn lxc_create(
                         Err(e) => messages.push(format!("Password warning: {}", e)),
                     }
                 }
+            }
+
+            // Set resource limits if provided
+            let memory = body.memory_limit.as_deref();
+            let cpus = body.cpu_cores.as_deref();
+            match containers::lxc_set_resource_limits(&body.name, memory, cpus) {
+                Ok(Some(rl_msg)) => messages.push(rl_msg),
+                Err(e) => messages.push(format!("Resource limit warning: {}", e)),
+                _ => {}
             }
 
             // Attach WolfNet if requested
