@@ -413,6 +413,90 @@ pub async fn docker_list(req: HttpRequest, state: web::Data<AppState>) -> HttpRe
     HttpResponse::Ok().json(containers)
 }
 
+/// GET /api/containers/docker/search?q=<query> — search Docker Hub
+pub async fn docker_search(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let q = query.get("q").cloned().unwrap_or_default();
+    if q.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing query parameter 'q'" }));
+    }
+    let results = containers::docker_search(&q);
+    HttpResponse::Ok().json(results)
+}
+
+#[derive(Deserialize)]
+pub struct DockerPullRequest {
+    pub image: String,
+}
+
+/// POST /api/containers/docker/pull — pull a Docker image
+pub async fn docker_pull(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<DockerPullRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match containers::docker_pull(&body.image) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DockerCreateRequest {
+    pub name: String,
+    pub image: String,
+    pub ports: Option<Vec<String>>,
+    pub env: Option<Vec<String>>,
+}
+
+/// POST /api/containers/docker/create — create a Docker container
+pub async fn docker_create(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<DockerCreateRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let ports = body.ports.as_deref().unwrap_or(&[]);
+    let env = body.env.as_deref().unwrap_or(&[]);
+    match containers::docker_create(&body.name, &body.image, ports, env) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/containers/lxc/templates — list available LXC templates
+pub async fn lxc_templates(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let templates = containers::lxc_list_templates();
+    HttpResponse::Ok().json(templates)
+}
+
+#[derive(Deserialize)]
+pub struct LxcCreateRequest {
+    pub name: String,
+    pub distribution: String,
+    pub release: String,
+    pub architecture: String,
+}
+
+/// POST /api/containers/lxc/create — create an LXC container from template
+pub async fn lxc_create(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<LxcCreateRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match containers::lxc_create(&body.name, &body.distribution, &body.release, &body.architecture) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// GET /api/containers/docker/stats — Docker container stats
 pub async fn docker_stats(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
@@ -678,6 +762,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/install", web::post().to(install_container_runtime))
         // Docker
         .route("/api/containers/docker", web::get().to(docker_list))
+        .route("/api/containers/docker/search", web::get().to(docker_search))
+        .route("/api/containers/docker/pull", web::post().to(docker_pull))
+        .route("/api/containers/docker/create", web::post().to(docker_create))
         .route("/api/containers/docker/stats", web::get().to(docker_stats))
         .route("/api/containers/docker/images", web::get().to(docker_images))
         .route("/api/containers/docker/{id}/logs", web::get().to(docker_logs))
@@ -687,6 +774,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/docker/import", web::post().to(docker_import))
         // LXC
         .route("/api/containers/lxc", web::get().to(lxc_list))
+        .route("/api/containers/lxc/templates", web::get().to(lxc_templates))
+        .route("/api/containers/lxc/create", web::post().to(lxc_create))
         .route("/api/containers/lxc/stats", web::get().to(lxc_stats))
         .route("/api/containers/lxc/{name}/logs", web::get().to(lxc_logs))
         .route("/api/containers/lxc/{name}/config", web::get().to(lxc_config))

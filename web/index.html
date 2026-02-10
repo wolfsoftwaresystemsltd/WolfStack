@@ -475,8 +475,10 @@
 
                 <!-- Docker Containers List -->
                 <div class="card">
-                    <div class="card-header">
+                    <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
                         <h3>Docker Containers</h3>
+                        <button class="btn btn-sm btn-primary" onclick="showDockerCreate()" style="font-size:12px;">+
+                            Create Container</button>
                     </div>
                     <div class="card-body">
                         <table class="data-table">
@@ -495,7 +497,8 @@
                         </table>
                         <p id="docker-empty"
                             style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
-                            No containers found. Use <code>docker run</code> to create containers.
+                            No containers found. Click <strong>+ Create Container</strong> to search Docker Hub and
+                            deploy.
                         </p>
                     </div>
                 </div>
@@ -542,8 +545,10 @@
 
                 <!-- LXC Containers List -->
                 <div class="card">
-                    <div class="card-header">
+                    <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
                         <h3>LXC Containers</h3>
+                        <button class="btn btn-sm btn-primary" onclick="showLxcCreate()" style="font-size:12px;">+
+                            Create Container</button>
                     </div>
                     <div class="card-body">
                         <table class="data-table">
@@ -560,7 +565,8 @@
                         </table>
                         <p id="lxc-empty"
                             style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
-                            No LXC containers found. Use <code>lxc-create</code> to create containers.
+                            No LXC containers found. Click <strong>+ Create Container</strong> to browse available
+                            templates.
                         </p>
                     </div>
                 </div>

@@ -1198,3 +1198,300 @@ async function cloneLxcContainer(name) {
         showToast(`Clone failed: ${e.message}`, 'error');
     }
 }
+
+// ─── Container Creation ───
+
+function showDockerCreate() {
+    const modal = document.getElementById('container-detail-modal');
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+
+    title.textContent = 'Create Docker Container';
+    body.innerHTML = `
+        <div style="padding: 1rem;">
+            <div style="margin-bottom: 1.5rem;">
+                <h4 style="margin-bottom: 0.5rem;">🔍 Search Docker Hub</h4>
+                <div style="display:flex; gap:8px;">
+                    <input id="docker-search-input" type="text" placeholder="Search for images (e.g. debian, nginx, postgres...)"
+                        style="flex:1; padding:8px 12px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:14px;"
+                        onkeypress="if(event.key==='Enter') searchDockerHub()">
+                    <button class="btn btn-primary" onclick="searchDockerHub()">Search</button>
+                </div>
+            </div>
+            <div id="docker-search-results"></div>
+            <div id="docker-create-form" style="display:none; margin-top:1.5rem; border-top:1px solid var(--border); padding-top:1.5rem;">
+                <h4 style="margin-bottom: 0.5rem;">📦 Create Container</h4>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                    <div>
+                        <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Container Name</label>
+                        <input id="docker-create-name" type="text" placeholder="my-container"
+                            style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                    </div>
+                    <div>
+                        <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Image</label>
+                        <input id="docker-create-image" type="text" placeholder="debian:11"
+                            style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                    </div>
+                </div>
+                <div style="margin-bottom:12px;">
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Port Mappings <span style="font-weight:400; color:var(--text-muted);">(comma-separated, e.g. 8080:80, 443:443)</span></label>
+                    <input id="docker-create-ports" type="text" placeholder="8080:80"
+                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                </div>
+                <div style="margin-bottom:12px;">
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Environment Variables <span style="font-weight:400; color:var(--text-muted);">(comma-separated, e.g. KEY=val)</span></label>
+                    <input id="docker-create-env" type="text" placeholder="MYSQL_ROOT_PASSWORD=secret"
+                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                </div>
+                <div style="display:flex; gap:8px;">
+                    <button class="btn btn-primary" onclick="createDockerContainer()">🐳 Pull & Create</button>
+                    <button class="btn" onclick="closeContainerDetail()">Cancel</button>
+                </div>
+            </div>
+        </div>
+    `;
+    modal.classList.add('active');
+    setTimeout(() => document.getElementById('docker-search-input').focus(), 100);
+}
+
+async function searchDockerHub() {
+    const query = document.getElementById('docker-search-input').value.trim();
+    if (!query) return;
+
+    const results = document.getElementById('docker-search-results');
+    results.innerHTML = '<p style="color:var(--text-muted); text-align:center; padding:12px;">Searching Docker Hub...</p>';
+
+    try {
+        const resp = await fetch(`/api/containers/docker/search?q=${encodeURIComponent(query)}`);
+        const data = await resp.json();
+
+        if (!data.length) {
+            results.innerHTML = '<p style="color:var(--text-muted); text-align:center; padding:12px;">No images found.</p>';
+            return;
+        }
+
+        results.innerHTML = `
+            <div style="max-height:250px; overflow-y:auto; border:1px solid var(--border); border-radius:8px;">
+                <table class="data-table" style="margin:0;">
+                    <thead><tr><th>Image</th><th>Description</th><th>⭐</th><th></th></tr></thead>
+                    <tbody>
+                        ${data.map(r => `<tr>
+                            <td><strong>${r.name}</strong>${r.official ? ' <span style="color:#10b981; font-size:11px;">✓ Official</span>' : ''}</td>
+                            <td style="font-size:12px; max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${r.description}</td>
+                            <td style="text-align:center;">${r.stars}</td>
+                            <td><button class="btn btn-sm btn-primary" onclick="selectDockerImage('${r.name}')" style="font-size:11px;">Select</button></td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    } catch (e) {
+        results.innerHTML = `<p style="color:#ef4444; text-align:center; padding:12px;">Search failed: ${e.message}</p>`;
+    }
+}
+
+function selectDockerImage(imageName) {
+    document.getElementById('docker-create-form').style.display = '';
+    document.getElementById('docker-create-image').value = imageName;
+    document.getElementById('docker-create-name').value = imageName.replace(/[\/:.]/g, '-');
+    document.getElementById('docker-create-name').focus();
+}
+
+async function createDockerContainer() {
+    const name = document.getElementById('docker-create-name').value.trim();
+    const image = document.getElementById('docker-create-image').value.trim();
+    const portsStr = document.getElementById('docker-create-ports').value.trim();
+    const envStr = document.getElementById('docker-create-env').value.trim();
+
+    if (!name || !image) {
+        showToast('Please enter a container name and image', 'error');
+        return;
+    }
+
+    const ports = portsStr ? portsStr.split(',').map(s => s.trim()) : [];
+    const env = envStr ? envStr.split(',').map(s => s.trim()) : [];
+
+    closeContainerDetail();
+    showToast(`Pulling image '${image}' and creating container...`, 'info');
+
+    try {
+        // Pull the image first
+        const pullResp = await fetch('/api/containers/docker/pull', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image }),
+        });
+        const pullData = await pullResp.json();
+        if (!pullResp.ok) {
+            showToast(pullData.error || 'Failed to pull image', 'error');
+            return;
+        }
+        showToast(pullData.message || `Image ${image} pulled`, 'success');
+
+        // Create the container
+        const createResp = await fetch('/api/containers/docker/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, image, ports, env }),
+        });
+        const createData = await createResp.json();
+        if (createResp.ok) {
+            showToast(createData.message || `Container '${name}' created!`, 'success');
+            setTimeout(loadDockerContainers, 500);
+        } else {
+            showToast(createData.error || 'Failed to create container', 'error');
+        }
+    } catch (e) {
+        showToast(`Create failed: ${e.message}`, 'error');
+    }
+}
+
+// ─── LXC Container Creation ───
+
+let lxcTemplatesCache = null;
+
+function showLxcCreate() {
+    const modal = document.getElementById('container-detail-modal');
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+
+    title.textContent = 'Create LXC Container';
+    body.innerHTML = '<p style="color:var(--text-muted); text-align:center; padding:2rem;">Loading available templates...</p>';
+    modal.classList.add('active');
+
+    loadLxcTemplates();
+}
+
+async function loadLxcTemplates() {
+    const body = document.getElementById('container-detail-body');
+
+    try {
+        if (!lxcTemplatesCache) {
+            const resp = await fetch('/api/containers/lxc/templates');
+            lxcTemplatesCache = await resp.json();
+        }
+
+        const templates = lxcTemplatesCache;
+
+        // Get unique distributions sorted
+        const distros = [...new Set(templates.map(t => t.distribution))].sort();
+
+        body.innerHTML = `
+            <div style="padding: 1rem;">
+                <div style="margin-bottom: 1.5rem;">
+                    <h4 style="margin-bottom: 0.5rem;">📦 Browse LXC Templates</h4>
+                    <p style="color:var(--text-muted); font-size:13px; margin-bottom:12px;">
+                        ${templates.length} templates available from the LXC image server
+                    </p>
+                    <div style="display:flex; gap:8px; margin-bottom:12px;">
+                        <input id="lxc-template-filter" type="text" placeholder="Filter templates (e.g. debian, ubuntu, alpine...)"
+                            style="flex:1; padding:8px 12px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:14px;"
+                            oninput="filterLxcTemplates()">
+                    </div>
+                    <div id="lxc-template-list" style="max-height:200px; overflow-y:auto; border:1px solid var(--border); border-radius:8px;">
+                        <table class="data-table" style="margin:0;">
+                            <thead><tr><th>Distribution</th><th>Release</th><th>Arch</th><th></th></tr></thead>
+                            <tbody id="lxc-template-tbody">
+                                ${renderLxcTemplateRows(templates)}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div id="lxc-create-form" style="display:none; border-top:1px solid var(--border); padding-top:1.5rem;">
+                    <h4 style="margin-bottom: 0.5rem;">🚀 Create Container</h4>
+                    <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:12px; margin-bottom:12px;">
+                        <div>
+                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Container Name</label>
+                            <input id="lxc-create-name" type="text" placeholder="my-container"
+                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                        </div>
+                        <div>
+                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Distribution</label>
+                            <input id="lxc-create-distro" type="text" readonly
+                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-tertiary); color:var(--text-primary);">
+                        </div>
+                        <div>
+                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Release</label>
+                            <input id="lxc-create-release" type="text" readonly
+                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-tertiary); color:var(--text-primary);">
+                        </div>
+                        <div>
+                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Architecture</label>
+                            <input id="lxc-create-arch" type="text" readonly
+                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-tertiary); color:var(--text-primary);">
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn btn-primary" onclick="createLxcContainer()">📦 Create</button>
+                        <button class="btn" onclick="closeContainerDetail()">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        setTimeout(() => document.getElementById('lxc-template-filter').focus(), 100);
+    } catch (e) {
+        body.innerHTML = `<p style="color:#ef4444; padding:2rem; text-align:center;">Failed to load templates: ${e.message}</p>`;
+    }
+}
+
+function renderLxcTemplateRows(templates) {
+    return templates.slice(0, 50).map(t =>
+        `<tr>
+            <td><strong>${t.distribution}</strong></td>
+            <td>${t.release}</td>
+            <td>${t.architecture}</td>
+            <td><button class="btn btn-sm btn-primary" onclick="selectLxcTemplate('${t.distribution}','${t.release}','${t.architecture}')" style="font-size:11px;">Select</button></td>
+        </tr>`
+    ).join('');
+}
+
+function filterLxcTemplates() {
+    const query = document.getElementById('lxc-template-filter').value.toLowerCase();
+    const filtered = (lxcTemplatesCache || []).filter(t =>
+        t.distribution.toLowerCase().includes(query) ||
+        t.release.toLowerCase().includes(query) ||
+        t.architecture.toLowerCase().includes(query)
+    );
+    document.getElementById('lxc-template-tbody').innerHTML = renderLxcTemplateRows(filtered);
+}
+
+function selectLxcTemplate(distro, release, arch) {
+    document.getElementById('lxc-create-form').style.display = '';
+    document.getElementById('lxc-create-distro').value = distro;
+    document.getElementById('lxc-create-release').value = release;
+    document.getElementById('lxc-create-arch').value = arch;
+    document.getElementById('lxc-create-name').value = `${distro}-${release}`;
+    document.getElementById('lxc-create-name').focus();
+}
+
+async function createLxcContainer() {
+    const name = document.getElementById('lxc-create-name').value.trim();
+    const distribution = document.getElementById('lxc-create-distro').value.trim();
+    const release = document.getElementById('lxc-create-release').value.trim();
+    const architecture = document.getElementById('lxc-create-arch').value.trim();
+
+    if (!name || !distribution || !release || !architecture) {
+        showToast('Please select a template and enter a container name', 'error');
+        return;
+    }
+
+    closeContainerDetail();
+    showToast(`Creating LXC container '${name}' (${distribution} ${release})... This may take a minute.`, 'info');
+
+    try {
+        const resp = await fetch('/api/containers/lxc/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, distribution, release, architecture }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || `Container '${name}' created!`, 'success');
+            setTimeout(loadLxcContainers, 500);
+        } else {
+            showToast(data.error || 'Failed to create container', 'error');
+        }
+    } catch (e) {
+        showToast(`Create failed: ${e.message}`, 'error');
+    }
+}

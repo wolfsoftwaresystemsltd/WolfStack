@@ -535,6 +535,172 @@ fn run_lxc_cmd(args: &[&str]) -> Result<String, String> {
     }
 }
 
+// ─── Templates & Container Creation ───
+
+/// LXC template entry from the download server
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LxcTemplate {
+    pub distribution: String,
+    pub release: String,
+    pub architecture: String,
+    pub variant: String,
+}
+
+/// List available LXC templates from the download server
+pub fn lxc_list_templates() -> Vec<LxcTemplate> {
+    let output = Command::new("lxc-create")
+        .args(["-t", "download", "--", "--list", "--no-validate"])
+        .output();
+
+    match output {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            text.lines()
+                .skip(3) // Skip header lines
+                .filter(|l| !l.trim().is_empty() && !l.starts_with("---"))
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 3 {
+                        Some(LxcTemplate {
+                            distribution: parts[0].to_string(),
+                            release: parts[1].to_string(),
+                            architecture: parts[2].to_string(),
+                            variant: parts.get(3).unwrap_or(&"default").to_string(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        Err(_) => vec![],
+    }
+}
+
+/// Create an LXC container from a download template
+pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &str) -> Result<String, String> {
+    info!("Creating LXC container {} ({} {} {})", name, distribution, release, architecture);
+
+    let output = Command::new("lxc-create")
+        .args([
+            "-t", "download",
+            "-n", name,
+            "--",
+            "-d", distribution,
+            "-r", release,
+            "-a", architecture,
+            "--no-validate",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to create LXC container: {}", e))?;
+
+    if output.status.success() {
+        info!("LXC container {} created successfully", name);
+        Ok(format!("Container '{}' created ({} {} {})", name, distribution, release, architecture))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("Failed to create container: {}", stderr))
+    }
+}
+
+/// Docker Hub search result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DockerSearchResult {
+    pub name: String,
+    pub description: String,
+    pub stars: u32,
+    pub official: bool,
+}
+
+/// Search Docker Hub for images
+pub fn docker_search(query: &str) -> Vec<DockerSearchResult> {
+    let output = Command::new("docker")
+        .args(["search", "--format", "{{.Name}}\\t{{.Description}}\\t{{.StarCount}}\\t{{.IsOfficial}}", "--limit", "25", query])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    DockerSearchResult {
+                        name: parts.first().unwrap_or(&"").to_string(),
+                        description: parts.get(1).unwrap_or(&"").to_string(),
+                        stars: parts.get(2).unwrap_or(&"0").parse().unwrap_or(0),
+                        official: parts.get(3).unwrap_or(&"") == &"[OK]",
+                    }
+                })
+                .collect()
+        }
+        _ => vec![],
+    }
+}
+
+/// Pull a Docker image
+pub fn docker_pull(image: &str) -> Result<String, String> {
+    info!("Pulling Docker image: {}", image);
+
+    let output = Command::new("docker")
+        .args(["pull", image])
+        .output()
+        .map_err(|e| format!("Failed to pull image: {}", e))?;
+
+    if output.status.success() {
+        let out = String::from_utf8_lossy(&output.stdout);
+        info!("Docker image {} pulled", image);
+        Ok(format!("Image '{}' pulled successfully. {}", image, out.lines().last().unwrap_or("")))
+    } else {
+        Err(format!(
+            "Pull failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Create a Docker container from an image
+pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String]) -> Result<String, String> {
+    info!("Creating Docker container {} from image {}", name, image);
+
+    let mut args = vec!["create".to_string(), "--name".to_string(), name.to_string()];
+
+    // Add port mappings
+    for port in ports {
+        if !port.is_empty() {
+            args.push("-p".to_string());
+            args.push(port.to_string());
+        }
+    }
+
+    // Add environment variables
+    for e in env {
+        if !e.is_empty() {
+            args.push("-e".to_string());
+            args.push(e.to_string());
+        }
+    }
+
+    args.push(image.to_string());
+
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let output = Command::new("docker")
+        .args(&args_ref)
+        .output()
+        .map_err(|e| format!("Failed to create container: {}", e))?;
+
+    if output.status.success() {
+        let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        info!("Docker container {} created ({})", name, &id[..12.min(id.len())]);
+        Ok(format!("Container '{}' created ({})", name, &id[..12.min(id.len())]))
+    } else {
+        Err(format!(
+            "Create failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
 // ─── Clone & Migrate ───
 
 /// Clone a Docker container — commits it as an image, then creates a new container
