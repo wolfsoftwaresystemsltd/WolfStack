@@ -897,6 +897,54 @@ pub async fn install_container_runtime(
     }
 }
 
+#[derive(Deserialize)]
+pub struct InstallComponentInContainerRequest {
+    pub runtime: String,    // docker or lxc
+    pub container: String,  // container name
+    pub component: String,  // wolfnet, wolfproxy, etc.
+}
+
+/// POST /api/containers/install-component — install a Wolf component inside a container
+async fn install_component_in_container(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<InstallComponentInContainerRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let runtime = body.runtime.clone();
+    let container = body.container.clone();
+    let component = body.component.clone();
+
+    // Run in blocking thread since it may take a while
+    let result = web::block(move || {
+        containers::install_component_in_container(&runtime, &container, &component)
+    }).await;
+
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Internal error: {}", e) })),
+    }
+}
+
+/// GET /api/containers/running — list all running containers for component install UI
+async fn list_running_containers(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let containers = containers::list_running_containers();
+    let list: Vec<serde_json::Value> = containers.into_iter().map(|(runtime, name, image)| {
+        serde_json::json!({
+            "runtime": runtime,
+            "name": name,
+            "image": image
+        })
+    }).collect();
+    HttpResponse::Ok().json(list)
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -923,6 +971,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // Containers
         .route("/api/containers/status", web::get().to(container_runtime_status))
         .route("/api/containers/install", web::post().to(install_container_runtime))
+        .route("/api/containers/install-component", web::post().to(install_component_in_container))
+        .route("/api/containers/running", web::get().to(list_running_containers))
         // Docker
         .route("/api/containers/docker", web::get().to(docker_list))
         .route("/api/containers/docker/search", web::get().to(docker_search))

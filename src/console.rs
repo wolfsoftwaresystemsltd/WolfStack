@@ -52,7 +52,7 @@ async fn console_session(
     cmd.arg("-c");
     match ctype.as_str() {
         "docker" => {
-            cmd.arg(format!("docker exec -it {} /bin/bash 2>/dev/null || docker exec -it {} /bin/sh", name, name));
+            cmd.arg(format!("docker exec -i {} /bin/bash 2>/dev/null || docker exec -i {} /bin/sh", name, name));
         }
         "lxc" => {
             cmd.arg(format!("lxc-attach -n {} -- /bin/bash 2>/dev/null || lxc-attach -n {} -- /bin/sh", name, name));

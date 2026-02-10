@@ -46,8 +46,8 @@ pub async fn console_ws(
             c
         } else {
             let mut c = CommandBuilder::new("docker");
-            // Don't use -it since portable-pty provides the TTY
-            c.args(&["exec", &cname, "/bin/sh", "-c",
+            // Use -i to keep stdin open; portable-pty provides the TTY on the local side
+            c.args(&["exec", "-i", &cname, "/bin/sh", "-c",
                 "if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi"]);
             c.env("TERM", "xterm-256color");
             c

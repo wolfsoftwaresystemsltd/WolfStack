@@ -659,21 +659,52 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                 .map(|line| {
                     let parts: Vec<&str> = line.split('\t').collect();
                     let name = parts.get(1).unwrap_or(&"").to_string();
-                    // Get IP from docker inspect for this container
-                    let raw_ip = Command::new("docker")
-                        .args(["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", &name])
+                    let state = parts.get(4).unwrap_or(&"").to_string();
+
+                    // Get WolfNet IP label and network IPs in one inspect call
+                    let inspect_fmt = "{{index .Config.Labels \"wolfnet.ip\"}}|{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}";
+                    let inspect_out = Command::new("docker")
+                        .args(["inspect", "-f", inspect_fmt, &name])
                         .output()
                         .ok()
                         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                         .unwrap_or_default();
-                    // Validate: only keep actual IPs (Docker returns garbage for non-running containers)
-                    let ip = raw_ip.split_whitespace()
+
+                    let inspect_parts: Vec<&str> = inspect_out.splitn(2, '|').collect();
+                    let wolfnet_label = inspect_parts.first().unwrap_or(&"").trim();
+                    let raw_net_ips = inspect_parts.get(1).unwrap_or(&"").trim();
+
+                    // Parse WolfNet IP from label (valid even when container is not running)
+                    let wolfnet_ip = if !wolfnet_label.is_empty() && wolfnet_label != "<no value>" {
+                        let wparts: Vec<&str> = wolfnet_label.split('.').collect();
+                        if wparts.len() == 4 && wparts.iter().all(|p| p.parse::<u8>().is_ok()) {
+                            Some(wolfnet_label.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    // Parse bridge/network IP (only valid when running)
+                    let bridge_ip = raw_net_ips.split_whitespace()
                         .find(|s| {
-                            let parts: Vec<&str> = s.split('.').collect();
-                            parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok())
+                            let iparts: Vec<&str> = s.split('.').collect();
+                            iparts.len() == 4 && iparts.iter().all(|p| p.parse::<u8>().is_ok())
                         })
                         .unwrap_or("")
                         .to_string();
+
+                    // Display logic: WolfNet IP is primary if set
+                    let ip = if let Some(ref wip) = wolfnet_ip {
+                        if state == "running" && !bridge_ip.is_empty() && bridge_ip != *wip {
+                            format!("{} (wolfnet)", wip)
+                        } else {
+                            wip.clone()
+                        }
+                    } else {
+                        bridge_ip
+                    };
                     ContainerInfo {
                         id: parts.first().unwrap_or(&"").to_string(),
                         name,
@@ -2001,4 +2032,124 @@ fn read_container_net(name: &str) -> (u64, u64) {
         }
     }
     (0, 0)
+}
+
+// ─── Install Wolf Components into Containers ───
+
+/// Install a Wolf component into a Docker or LXC container
+pub fn install_component_in_container(
+    runtime: &str,
+    container: &str,
+    component: &str,
+) -> Result<String, String> {
+    info!("Installing component '{}' into {} container '{}'", component, runtime, container);
+
+    // Validate the component name
+    let install_script = match component {
+        "wolfnet" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh",
+        "wolfproxy" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfProxy/main/setup.sh",
+        "wolfserve" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfServe/main/setup.sh",
+        "wolfdisk" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh",
+        "wolfscale" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh",
+        other => return Err(format!("Unknown Wolf component: '{}'. Available: wolfnet, wolfproxy, wolfserve, wolfdisk, wolfscale", other)),
+    };
+
+    // Build the exec command based on runtime
+    let exec_cmd = match runtime {
+        "docker" => {
+            // Verify container is running
+            let check = Command::new("docker")
+                .args(["inspect", "--format", "{{.State.Running}}", container])
+                .output()
+                .map_err(|e| format!("Failed to check container state: {}", e))?;
+            let state = String::from_utf8_lossy(&check.stdout).trim().to_string();
+            if state != "true" {
+                return Err(format!("Container '{}' is not running. Start it first.", container));
+            }
+
+            // First ensure curl is available in the container
+            let _ = Command::new("docker")
+                .args(["exec", container, "sh", "-c",
+                    "apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || yum install -y -q curl 2>/dev/null || apk add --quiet curl 2>/dev/null || true"])
+                .output();
+
+            // Download and run install script
+            Command::new("docker")
+                .args(["exec", container, "sh", "-c",
+                    &format!("curl -fsSL '{}' | bash", install_script)])
+                .output()
+                .map_err(|e| format!("Failed to exec in container: {}", e))?
+        }
+        "lxc" => {
+            // Verify container is running
+            let check = Command::new("lxc-info")
+                .args(["-n", container, "-sH"])
+                .output()
+                .map_err(|e| format!("Failed to check container state: {}", e))?;
+            let state = String::from_utf8_lossy(&check.stdout).trim().to_string();
+            if state != "RUNNING" {
+                return Err(format!("Container '{}' is not running (state: {}). Start it first.", container, state));
+            }
+
+            // First ensure curl is available
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "sh", "-c",
+                    "apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || yum install -y -q curl 2>/dev/null || apk add --quiet curl 2>/dev/null || true"])
+                .output();
+
+            // Download and run install script
+            Command::new("lxc-attach")
+                .args(["-n", container, "--", "sh", "-c",
+                    &format!("curl -fsSL '{}' | bash", install_script)])
+                .output()
+                .map_err(|e| format!("Failed to attach to container: {}", e))?
+        }
+        _ => return Err(format!("Unsupported runtime: '{}'. Use 'docker' or 'lxc'.", runtime)),
+    };
+
+    if exec_cmd.status.success() {
+        let stdout = String::from_utf8_lossy(&exec_cmd.stdout);
+        info!("Successfully installed {} in {} container {}", component, runtime, container);
+        Ok(format!("{} installed in {} container '{}'. {}", 
+            component, runtime, container, 
+            stdout.lines().last().unwrap_or("Done")))
+    } else {
+        let stderr = String::from_utf8_lossy(&exec_cmd.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&exec_cmd.stdout).to_string();
+        error!("Failed to install {} in container {}: {}", component, container, stderr);
+        Err(format!("Installation failed: {}{}", 
+            if stderr.is_empty() { &stdout } else { &stderr },
+            ""))
+    }
+}
+
+/// List running containers (both Docker and LXC) for component installation UI
+pub fn list_running_containers() -> Vec<(String, String, String)> {
+    let mut result = Vec::new();
+
+    // Docker containers
+    if let Ok(output) = Command::new("docker")
+        .args(["ps", "--format", "{{.Names}}\t{{.Image}}"])
+        .output()
+    {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if line.is_empty() { continue; }
+            let parts: Vec<&str> = line.split('\t').collect();
+            let name = parts.first().unwrap_or(&"").to_string();
+            let image = parts.get(1).unwrap_or(&"").to_string();
+            result.push(("docker".to_string(), name, image));
+        }
+    }
+
+    // LXC containers
+    if let Ok(output) = Command::new("lxc-ls")
+        .args(["--running"])
+        .output()
+    {
+        for name in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+            result.push(("lxc".to_string(), name.to_string(), "LXC".to_string()));
+        }
+    }
+
+    result
 }
