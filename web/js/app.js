@@ -498,6 +498,15 @@ const componentIcons = {
     wolfdisk: '💾', wolfscale: '⚖️', mariadb: '🗄️', certbot: '🔒'
 };
 
+const componentDocs = {
+    wolfnet: 'https://wolfstack.org/wolfnet.html',
+    wolfproxy: 'https://wolfstack.org/wolfproxy.html',
+    wolfserve: 'https://wolfstack.org/wolfserve.html',
+    wolfdisk: 'https://wolfstack.org/wolfdisk.html',
+    wolfscale: 'https://wolfstack.org/wolfstack.html',
+    certbot: 'https://wolfstack.org/quickstart.html',
+};
+
 function renderComponents(components) {
     const grid = document.getElementById('components-grid');
     grid.innerHTML = components.map(c => {
@@ -505,6 +514,12 @@ function renderComponents(components) {
         const statusClass = c.running ? 'running' : c.installed ? 'stopped' : 'not-installed';
         const statusText = c.running ? 'Running' : c.installed ? 'Stopped' : 'Not Installed';
         const statusColor = c.running ? 'var(--success)' : c.installed ? 'var(--text-muted)' : 'var(--warning)';
+        const docUrl = componentDocs[c.component];
+        const docLink = docUrl
+            ? `<a href="${docUrl}" target="_blank" rel="noopener" onclick="event.stopPropagation()" 
+                style="font-size: 12px; color: var(--accent-light); text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
+                📖 Docs</a>`
+            : '';
 
         return `
             <div class="component-card" onclick="openComponentDetail('${c.component}')">
@@ -514,6 +529,7 @@ function renderComponents(components) {
                         <div class="component-name">${c.component.charAt(0).toUpperCase() + c.component.slice(1)}</div>
                         <div class="component-desc">${c.version || ''}</div>
                     </div>
+                    ${docLink}
                     <span class="detail-arrow">→</span>
                 </div>
                 <div class="component-status">
