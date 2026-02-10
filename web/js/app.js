@@ -1892,6 +1892,10 @@ let consoleFitAddon = null;
 
 function openConsole(type, name) {
     try {
+        // Close any other open modals first
+        closeContainerDetail();
+        closeModal();
+
         const modal = document.getElementById('console-modal');
         if (!modal) { alert('Console modal element not found!'); return; }
         modal.style.display = 'flex';
@@ -1970,6 +1974,7 @@ function openConsole(type, name) {
         });
 
         window.addEventListener('resize', fitConsole);
+        document.addEventListener('keydown', consoleKeyHandler);
         consoleTerm.focus();
 
     } catch (e) {
@@ -1980,6 +1985,10 @@ function openConsole(type, name) {
 
 function fitConsole() {
     try { if (consoleFitAddon) consoleFitAddon.fit(); } catch (e) { }
+}
+
+function consoleKeyHandler(e) {
+    if (e.key === 'Escape') closeConsole();
 }
 
 function closeConsole() {
@@ -1996,4 +2005,5 @@ function closeConsole() {
         consoleFitAddon = null;
     }
     window.removeEventListener('resize', fitConsole);
+    document.removeEventListener('keydown', consoleKeyHandler);
 }
