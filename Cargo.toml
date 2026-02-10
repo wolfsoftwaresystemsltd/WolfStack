@@ -1,0 +1,52 @@
+[package]
+name = "wolfstack"
+version = "0.1.0"
+edition = "2021"
+authors = ["Wolf Software Systems Ltd"]
+description = "Server management platform for the Wolf software suite"
+license = "MIT"
+repository = "https://github.com/wolfsoftwaresystemsltd/WolfStack"
+
+[dependencies]
+# Web framework
+actix-web = "4"
+actix-files = "0.6"
+actix-rt = "2"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client for agent communication
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# TLS
+rustls = "0.23"
+rustls-pemfile = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# System monitoring
+sysinfo = "0.32"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+hostname = "0.4"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+rand = "0.8"
+
+[[bin]]
+name = "wolfstack"
+path = "src/main.rs"

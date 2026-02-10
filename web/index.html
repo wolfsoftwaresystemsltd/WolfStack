@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WolfStack — Server Management</title>
+    <meta name="description" content="WolfStack server management dashboard for the Wolf software suite">
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+
+<body>
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+        <div class="sidebar-logo">
+            <div class="logo-icon">🐺</div>
+            <div>
+                <h1>WolfStack</h1>
+                <span class="version">v0.1.0</span>
+            </div>
+        </div>
+        <nav class="sidebar-nav">
+            <div class="nav-section">
+                <div class="nav-section-title">Overview</div>
+                <a class="nav-item active" data-page="dashboard" href="#dashboard">
+                    <span class="icon">📊</span> Dashboard
+                </a>
+                <a class="nav-item" data-page="servers" href="#servers">
+                    <span class="icon">🖥️</span> Servers
+                    <span class="badge" id="server-count">0</span>
+                </a>
+            </div>
+            <div class="nav-section">
+                <div class="nav-section-title">Management</div>
+                <a class="nav-item" data-page="components" href="#components">
+                    <span class="icon">📦</span> Components
+                </a>
+                <a class="nav-item" data-page="services" href="#services">
+                    <span class="icon">⚡</span> Services
+                </a>
+                <a class="nav-item" data-page="certificates" href="#certificates">
+                    <span class="icon">🔒</span> Certificates
+                </a>
+            </div>
+            <div class="nav-section">
+                <div class="nav-section-title">Monitoring</div>
+                <a class="nav-item" data-page="monitoring" href="#monitoring">
+                    <span class="icon">📈</span> Live Metrics
+                </a>
+            </div>
+        </nav>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Top Bar -->
+        <header class="top-bar">
+            <h2 id="page-title">Dashboard</h2>
+            <div class="top-bar-actions">
+                <span id="hostname-display" style="color: var(--text-secondary); font-size: 13px;"></span>
+                <button class="btn btn-primary btn-sm" onclick="openAddServerModal()">
+                    + Add Server
+                </button>
+            </div>
+        </header>
+
+        <!-- Page Content -->
+        <div class="page-content">
+            <!-- ═══ Dashboard Page ═══ -->
+            <div id="page-dashboard" class="page-view">
+                <!-- Stats Row -->
+                <div class="stats-grid" id="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">CPU Usage</span>
+                            <div class="stat-icon" style="background: var(--accent-glow); color: var(--accent-light);">⚡
+                            </div>
+                        </div>
+                        <div class="stat-value" id="cpu-value">—</div>
+                        <div class="stat-sub" id="cpu-model"></div>
+                        <div class="progress-bar">
+                            <div class="fill accent" id="cpu-bar" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Memory</span>
+                            <div class="stat-icon" style="background: var(--success-bg); color: var(--success);">🧠
+                            </div>
+                        </div>
+                        <div class="stat-value" id="mem-value">—</div>
+                        <div class="stat-sub" id="mem-detail"></div>
+                        <div class="progress-bar">
+                            <div class="fill success" id="mem-bar" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Disk</span>
+                            <div class="stat-icon" style="background: var(--warning-bg); color: var(--warning);">💾
+                            </div>
+                        </div>
+                        <div class="stat-value" id="disk-value">—</div>
+                        <div class="stat-sub" id="disk-detail"></div>
+                        <div class="progress-bar">
+                            <div class="fill warning" id="disk-bar" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Network</span>
+                            <div class="stat-icon" style="background: var(--info-bg); color: var(--info);">🌐</div>
+                        </div>
+                        <div class="stat-value" id="net-value">—</div>
+                        <div class="stat-sub" id="net-detail"></div>
+                    </div>
+                </div>
+
+                <!-- Gauges & Server List -->
+                <div class="grid-2">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>System Load</h3>
+                        </div>
+                        <div class="card-body" style="display: flex; justify-content: space-around;">
+                            <div class="gauge-container">
+                                <div class="gauge">
+                                    <svg width="120" height="120" viewBox="0 0 120 120">
+                                        <circle cx="60" cy="60" r="52" fill="none" stroke-width="10" class="gauge-bg" />
+                                        <circle cx="60" cy="60" r="52" fill="none" stroke-width="10" class="gauge-fill"
+                                            id="cpu-gauge" stroke="var(--accent)" stroke-linecap="round"
+                                            stroke-dasharray="0 327" />
+                                    </svg>
+                                    <div class="gauge-text">
+                                        <div class="value" id="cpu-gauge-val">0%</div>
+                                        <div class="label">CPU</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="gauge-container">
+                                <div class="gauge">
+                                    <svg width="120" height="120" viewBox="0 0 120 120">
+                                        <circle cx="60" cy="60" r="52" fill="none" stroke-width="10" class="gauge-bg" />
+                                        <circle cx="60" cy="60" r="52" fill="none" stroke-width="10" class="gauge-fill"
+                                            id="mem-gauge" stroke="var(--success)" stroke-linecap="round"
+                                            stroke-dasharray="0 327" />
+                                    </svg>
+                                    <div class="gauge-text">
+                                        <div class="value" id="mem-gauge-val">0%</div>
+                                        <div class="label">Memory</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="gauge-container">
+                                <div class="gauge">
+                                    <svg width="120" height="120" viewBox="0 0 120 120">
+                                        <circle cx="60" cy="60" r="52" fill="none" stroke-width="10" class="gauge-bg" />
+                                        <circle cx="60" cy="60" r="52" fill="none" stroke-width="10" class="gauge-fill"
+                                            id="load-gauge" stroke="var(--warning)" stroke-linecap="round"
+                                            stroke-dasharray="0 327" />
+                                    </svg>
+                                    <div class="gauge-text">
+                                        <div class="value" id="load-gauge-val">0.0</div>
+                                        <div class="label">Load</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Cluster Nodes</h3>
+                            <button class="btn btn-sm" onclick="openAddServerModal()">+ Add</button>
+                        </div>
+                        <div class="card-body">
+                            <div class="server-list" id="server-list">
+                                <div style="text-align: center; color: var(--text-muted); padding: 30px;">
+                                    Loading...
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Disk Table -->
+                <div class="card" style="margin-top: 20px;">
+                    <div class="card-header">
+                        <h3>Storage</h3>
+                    </div>
+                    <div class="card-body">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Mount</th>
+                                    <th>Filesystem</th>
+                                    <th>Total</th>
+                                    <th>Used</th>
+                                    <th>Available</th>
+                                    <th>Usage</th>
+                                </tr>
+                            </thead>
+                            <tbody id="disk-table"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ Servers Page ═══ -->
+            <div id="page-servers" class="page-view" style="display:none;">
+                <div class="stats-grid" style="margin-bottom: 20px;">
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Total Servers</span>
+                            <div class="stat-icon" style="background: var(--accent-glow); color: var(--accent-light);">
+                                🖥️</div>
+                        </div>
+                        <div class="stat-value" id="total-servers-val">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Online</span>
+                            <div class="stat-icon" style="background: var(--success-bg); color: var(--success);">✓</div>
+                        </div>
+                        <div class="stat-value" id="online-servers-val">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Offline</span>
+                            <div class="stat-icon" style="background: var(--danger-bg); color: var(--danger);">✗</div>
+                        </div>
+                        <div class="stat-value" id="offline-servers-val">0</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h3>All Servers</h3>
+                        <button class="btn btn-primary btn-sm" onclick="openAddServerModal()">+ Add Server</button>
+                    </div>
+                    <div class="card-body">
+                        <div class="server-list" id="servers-full-list"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ Components Page ═══ -->
+            <div id="page-components" class="page-view" style="display:none;">
+                <div class="components-grid" id="components-grid"></div>
+            </div>
+
+            <!-- ═══ Services Page ═══ -->
+            <div id="page-services" class="page-view" style="display:none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>System Services</h3>
+                    </div>
+                    <div class="card-body">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Service</th>
+                                    <th>Status</th>
+                                    <th>Enabled</th>
+                                    <th>Version</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="services-table"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ Certificates Page ═══ -->
+            <div id="page-certificates" class="page-view" style="display:none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>SSL Certificates</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="form-group">
+                            <label>Domain Name</label>
+                            <input type="text" class="form-control" id="cert-domain" placeholder="example.com">
+                        </div>
+                        <button class="btn btn-primary" onclick="requestCertificate()">
+                            🔒 Request Certificate (Let's Encrypt)
+                        </button>
+                        <p style="margin-top: 12px; font-size: 13px; color: var(--text-muted);">
+                            Uses Certbot to obtain a free SSL certificate from Let's Encrypt.
+                            Port 80 must be accessible from the internet.
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ Monitoring Page ═══ -->
+            <div id="page-monitoring" class="page-view" style="display:none;">
+                <div class="grid-2">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>CPU History</h3>
+                        </div>
+                        <div class="card-body">
+                            <div class="chart-container">
+                                <canvas id="cpu-chart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Memory History</h3>
+                        </div>
+                        <div class="card-body">
+                            <div class="chart-container">
+                                <canvas id="mem-chart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card" style="margin-top: 20px;">
+                    <div class="card-header">
+                        <h3>Network Interfaces</h3>
+                    </div>
+                    <div class="card-body">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Interface</th>
+                                    <th>RX (Received)</th>
+                                    <th>TX (Sent)</th>
+                                    <th>Packets RX</th>
+                                    <th>Packets TX</th>
+                                </tr>
+                            </thead>
+                            <tbody id="network-table"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="card" style="margin-top: 20px;">
+                    <div class="card-header">
+                        <h3>System Information</h3>
+                    </div>
+                    <div class="card-body">
+                        <table class="data-table" id="sysinfo-table">
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Add Server Modal -->
+    <div class="modal-overlay" id="add-server-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Add Server</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Server Address</label>
+                    <input type="text" class="form-control" id="new-server-address"
+                        placeholder="10.10.10.1 or hostname">
+                </div>
+                <div class="form-group">
+                    <label>Port (default: 8553)</label>
+                    <input type="number" class="form-control" id="new-server-port" value="8553">
+                </div>
+                <p style="font-size: 12px; color: var(--text-muted);">
+                    If using WolfNet, enter the WolfNet IP (e.g. 10.10.10.x).
+                    Otherwise, enter the server's regular IP or hostname.
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="addServer()">Add Server</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="/js/app.js"></script>
+</body>
+
+</html>
