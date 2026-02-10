@@ -30,19 +30,25 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - Auto-detects Docker installation and version
 - Lists all containers with real-time CPU, memory, and PID stats
 - Start, stop, restart, pause, unpause, and remove containers
+- **Search Docker Hub** and pull images from the dashboard
+- **Create containers** with ports, env vars, memory/CPU limits, and WolfNet IPs
 - **Clone containers** — create a copy with one click
 - **Migrate containers** to other WolfStack nodes
 - View container logs with timestamps
 - Browse Docker images with size and creation info
+- **Web terminal** — interactive shell via xterm.js (WebSocket console)
 - **Install Docker** from the dashboard if not already present
 
 ### 📦 LXC Container Management
 - Auto-detects LXC installation and version
 - Lists all LXC containers with resource stats
+- **Browse LXC templates** — Debian, Ubuntu, Alpine, CentOS, Fedora, and more
+- **Create containers** from any template with one click
 - Start, stop, restart, freeze, unfreeze, and destroy containers
 - **Clone containers** — full copy or snapshot (copy-on-write)
 - View container logs via journalctl
 - Read and edit LXC container configuration files
+- **Web terminal** — interactive shell via xterm.js (WebSocket console)
 - **Install LXC** from the dashboard if not already present
 
 ### 🚀 Container Migration
@@ -50,6 +56,13 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - Automatically exports, transfers, and imports the container
 - Works across your cluster — pair with WolfDisk for shared storage
 - Option to remove the source container after migration or keep a copy
+
+### 🌐 WolfNet Container Networking
+- Assign WolfNet IPs (10.10.10.x) to Docker and LXC containers
+- Containers become reachable across your entire WolfNet mesh
+- IPs auto-applied on container start/restart
+- Automatic IP allocation to avoid conflicts
+- WolfNet IPs displayed in the dashboard even when containers are stopped
 
 ### 📊 Real-Time Dashboard
 - Live CPU, memory, disk, and network monitoring with 2-second refresh
@@ -92,11 +105,12 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 wolfstack/
 ├── src/
 │   ├── main.rs              # HTTP server, background tasks
-│   ├── api/mod.rs           # REST API endpoints (40+ routes)
+│   ├── api/mod.rs           # REST API endpoints (50+ routes)
 │   ├── auth/mod.rs          # Linux auth via crypt(), session management
 │   ├── agent/mod.rs         # Multi-server cluster state, polling
 │   ├── monitoring/mod.rs    # System metrics via sysinfo
 │   ├── installer/mod.rs     # Component detection, install, systemd control
+│   ├── console.rs           # WebSocket PTY terminal for containers
 │   └── containers/mod.rs    # Docker & LXC management
 ├── web/
 │   ├── login.html           # Login page
@@ -156,17 +170,50 @@ All endpoints require authentication (cookie-based session) except `/api/agent/s
 |--------|----------|-------------|
 | GET | `/api/containers/status` | Docker & LXC runtime detection (installed, version, counts) |
 | POST | `/api/containers/install` | Install Docker or LXC |
+
+### Docker Containers
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
 | GET | `/api/containers/docker` | List all Docker containers |
 | GET | `/api/containers/docker/stats` | Docker container resource stats (CPU, memory, PIDs) |
 | GET | `/api/containers/docker/images` | List Docker images |
+| GET | `/api/containers/docker/search?q=` | Search Docker Hub for images |
+| POST | `/api/containers/docker/pull` | Pull a Docker image from Docker Hub |
+| POST | `/api/containers/docker/create` | Create a Docker container (name, image, ports, env, WolfNet IP) |
 | GET | `/api/containers/docker/{id}/logs` | Docker container logs |
 | POST | `/api/containers/docker/{id}/action` | Start/stop/restart/pause/unpause/remove container |
+| POST | `/api/containers/docker/{id}/clone` | Clone a Docker container |
+| POST | `/api/containers/docker/{id}/migrate` | Migrate container to another WolfStack node |
+| POST | `/api/containers/docker/import` | Receive a migrated container image (inter-node) |
+
+### LXC Containers
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
 | GET | `/api/containers/lxc` | List all LXC containers |
 | GET | `/api/containers/lxc/stats` | LXC container resource stats |
+| GET | `/api/containers/lxc/templates` | List available LXC templates (distro, release, arch) |
+| POST | `/api/containers/lxc/create` | Create LXC container from template |
 | GET | `/api/containers/lxc/{name}/logs` | LXC container logs |
 | GET | `/api/containers/lxc/{name}/config` | Read LXC container config file |
 | PUT | `/api/containers/lxc/{name}/config` | Save LXC container config file |
 | POST | `/api/containers/lxc/{name}/action` | Start/stop/restart/freeze/unfreeze/destroy container |
+| POST | `/api/containers/lxc/{name}/clone` | Clone container (full copy or snapshot) |
+
+### WolfNet & WebSocket
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/wolfnet/status` | WolfNet network status and peers |
+| GET | `/api/wolfnet/used-ips` | List all used WolfNet IPs |
+| WS | `/ws/console/{type}/{name}` | Interactive web terminal (Docker or LXC) |
+
+### Node Proxy
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| ANY | `/api/nodes/{id}/proxy/{path}` | Proxy any API call to a remote node |
 
 ### Agent (No Auth)
 
