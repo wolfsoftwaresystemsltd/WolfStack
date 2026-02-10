@@ -1943,6 +1943,7 @@ function openConsole(type, name) {
         const wsUrl = `${protocol}//${window.location.host}/ws/console/${type}/${name}`;
 
         consoleWs = new WebSocket(wsUrl);
+        consoleWs.binaryType = 'arraybuffer';
 
         consoleWs.onopen = () => {
             consoleTerm.writeln(`\x1b[32mConnected!\x1b[0m`);
@@ -1952,9 +1953,7 @@ function openConsole(type, name) {
         consoleWs.onmessage = (event) => {
             if (typeof event.data === 'string') {
                 consoleTerm.write(event.data);
-            } else if (event.data instanceof Blob) {
-                event.data.text().then(text => consoleTerm.write(text));
-            } else if (event.data instanceof ArrayBuffer) {
+            } else {
                 consoleTerm.write(new Uint8Array(event.data));
             }
         };

@@ -977,9 +977,56 @@ pub fn lxc_start(container: &str) -> Result<String, String> {
     // Apply WolfNet IP if configured
     if result.is_ok() {
         lxc_apply_wolfnet(container);
+        lxc_post_start_setup(container);
     }
     
     result
+}
+
+/// First-boot setup for LXC containers (runs once)
+fn lxc_post_start_setup(container: &str) {
+    let marker = format!("/var/lib/lxc/{}/.wolfstack_setup_done", container);
+    if std::path::Path::new(&marker).exists() { return; }
+
+    info!("Running first-boot setup for container {}", container);
+
+    // Wait for container init to finish
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    // Install openssh-server
+    let _ = Command::new("lxc-attach")
+        .args(["-n", container, "--", "sh", "-c",
+            "apt-get update -qq && apt-get install -y -qq openssh-server 2>/dev/null || yum install -y openssh-server 2>/dev/null || apk add openssh 2>/dev/null || true"])
+        .output();
+
+    // Enable root SSH login
+    let _ = Command::new("lxc-attach")
+        .args(["-n", container, "--", "sh", "-c",
+            "sed -i 's/#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; \
+             sed -i 's/#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; \
+             mkdir -p /run/sshd; \
+             service ssh restart 2>/dev/null || systemctl restart sshd 2>/dev/null || /usr/sbin/sshd 2>/dev/null || true"])
+        .output();
+
+    // Create WolfStack MOTD
+    let motd = r#"
+ __        __    _  __ ____  _             _    
+ \ \      / /__ | |/ _/ ___|| |_ __ _  ___| | __
+  \ \ /\ / / _ \| | |_\___ \| __/ _` |/ __| |/ /
+   \ V  V / (_) | |  _|___) | || (_| | (__|   < 
+    \_/\_/ \___/|_|_| |____/ \__\__,_|\___|_|\_\
+
+  Managed by WolfStack — wolf.uk.com
+  Container powered by Wolf Software Systems Ltd
+
+"#;
+    let _ = Command::new("lxc-attach")
+        .args(["-n", container, "--", "sh", "-c", &format!("cat > /etc/motd << 'MOTD'\n{}\nMOTD", motd)])
+        .output();
+
+    // Mark setup as done
+    let _ = std::fs::write(&marker, "done");
+    info!("First-boot setup complete for container {}", container);
 }
 
 /// Stop an LXC container
