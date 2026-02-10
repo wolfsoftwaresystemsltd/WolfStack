@@ -235,30 +235,44 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
 
     info!("Container {} bridge IP: {}, MAC: {:?}, WolfNet IP: {}", container, container_bridge_ip, container_mac, ip);
 
-    // 4. Configure Container Side — ALWAYS do this even if MAC lookup fails
-    // Add IP alias /32 (idempotent — ignore EEXIST)
-    let alias_result = Command::new("docker")
-        .args(["exec", container, "ip", "addr", "add", &format!("{}/32", ip), "dev", "eth0"])
-        .output();
-    match &alias_result {
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            if o.status.success() {
-                info!("Added {}/32 to container {} eth0", ip, container);
-            } else if stderr.contains("EEXIST") || stderr.contains("File exists") {
-                info!("{}/32 already on container {} eth0", ip, container);
-            } else {
-                info!("ip addr add warning: {}", stderr.trim());
+    // 4. Configure Container Side — use nsenter to avoid requiring 'ip' inside the container.
+    //    Many images (e.g. official nginx) don't ship iproute2, so `docker exec ip ...` silently fails.
+    //    nsenter enters the container's network namespace using the host's /sbin/ip binary.
+    let container_pid = Command::new("docker")
+        .args(["inspect", "--format", "{{.State.Pid}}", container])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    if container_pid.is_empty() || container_pid == "0" {
+        info!("Cannot get PID for container {} — is it running?", container);
+    } else {
+        info!("Container {} PID: {} — using nsenter for network config", container, container_pid);
+
+        // Add IP alias /32 (idempotent — ignore EEXIST)
+        let alias_result = Command::new("nsenter")
+            .args(["--target", &container_pid, "--net", "ip", "addr", "add", &format!("{}/32", ip), "dev", "eth0"])
+            .output();
+        match &alias_result {
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                if o.status.success() {
+                    info!("Added {}/32 to container {} eth0 (via nsenter)", ip, container);
+                } else if stderr.contains("EEXIST") || stderr.contains("File exists") {
+                    info!("{}/32 already on container {} eth0", ip, container);
+                } else {
+                    info!("ip addr add warning: {}", stderr.trim());
+                }
             }
+            Err(e) => info!("ip addr add (nsenter) failed: {}", e),
         }
-        Err(e) => info!("ip addr add failed: {}", e),
+
+        // Add route to WolfNet subnet via gateway so container can reach other WolfNet hosts
+        let subnet = "10.10.10.0/24";
+        let _ = Command::new("nsenter")
+            .args(["--target", &container_pid, "--net", "ip", "route", "replace", subnet, "via", &gateway])
+            .output();
     }
-    
-    // Add route to WolfNet subnet via gateway so container can reach other WolfNet hosts
-    let subnet = "10.10.10.0/24";
-    let _ = Command::new("docker")
-        .args(["exec", container, "ip", "route", "replace", subnet, "via", &gateway])
-        .output();
 
     // 5. Configure Host Side
     // Enable forwarding
