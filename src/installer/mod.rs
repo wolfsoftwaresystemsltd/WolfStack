@@ -34,7 +34,7 @@ impl Component {
         match self {
             Component::WolfNet => "Mesh VPN with automatic peer discovery",
             Component::WolfProxy => "Reverse proxy with built-in firewall",
-            Component::WolfServe => "Static file server",
+            Component::WolfServe => "Web server",
             Component::WolfDisk => "Distributed filesystem",
             Component::WolfScale => "MariaDB-compatible distributed database",
             Component::MariaDB => "MariaDB relational database server",

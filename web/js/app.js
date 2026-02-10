@@ -72,7 +72,7 @@ function selectServerView(nodeId, view) {
     if (view === 'dashboard') {
         if (node?.metrics) updateDashboard(node.metrics);
     }
-    if (view === 'components') { loadComponents(); loadRunningContainers(); }
+    if (view === 'components') loadComponents();
     if (view === 'services') loadComponents();
     if (view === 'containers') loadDockerContainers();
     if (view === 'lxc') loadLxcContainers();
@@ -2009,82 +2009,30 @@ function fitConsole() { }
 function consoleKeyHandler() { }
 function closeConsole() { }
 
-// ─── Container Component Installation ───
+// ─── Install Script Copy ───
 
-async function loadRunningContainers() {
-    const select = document.getElementById('container-install-target');
-    if (!select) return;
+const installCmds = {
+    wolfnet: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh | sudo bash',
+    wolfproxy: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfProxy/main/setup.sh | sudo bash',
+    wolfserve: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfServe/main/setup.sh | sudo bash',
+    wolfdisk: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | sudo bash',
+    wolfscale: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh | sudo bash',
+};
 
-    try {
-        const resp = await fetch(apiUrl('/api/containers/running'));
-        const containers = await resp.json();
-
-        if (containers.length === 0) {
-            select.innerHTML = '<option value="">No running containers found</option>';
-            return;
-        }
-
-        select.innerHTML = '<option value="">— Select a container —</option>' +
-            containers.map(c => {
-                const icon = c.runtime === 'docker' ? '🐳' : '📦';
-                const detail = c.image ? ` (${c.image})` : '';
-                return `<option value="${c.runtime}|${c.name}">${icon} ${c.name}${detail}</option>`;
-            }).join('');
-    } catch (e) {
-        select.innerHTML = '<option value="">Failed to load containers</option>';
-    }
-}
-
-async function installComponentInContainer() {
-    const targetSelect = document.getElementById('container-install-target');
-    const componentSelect = document.getElementById('container-install-component');
-    const btn = document.getElementById('container-install-btn');
-    const statusEl = document.getElementById('container-install-status');
-
-    const targetVal = targetSelect?.value;
-    const component = componentSelect?.value;
-
-    if (!targetVal) {
-        showToast('Please select a target container', 'error');
-        return;
-    }
-
-    const [runtime, container] = targetVal.split('|');
-    const componentName = componentSelect.options[componentSelect.selectedIndex].text;
-
-    btn.disabled = true;
-    btn.textContent = '⏳ Installing...';
-    statusEl.style.display = 'block';
-    statusEl.innerHTML = `<div style="padding: 10px; border-radius: 8px; background: var(--bg-primary); border: 1px solid var(--border);">
-        <span style="color: var(--text-muted);">Installing ${componentName} into ${container}... This may take a minute.</span>
-    </div>`;
-
-    try {
-        const resp = await fetch(apiUrl('/api/containers/install-component'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ runtime, container, component }),
+function copyInstallCmd(component) {
+    const cmd = installCmds[component];
+    if (cmd) {
+        navigator.clipboard.writeText(cmd).then(() => {
+            showToast('Install command copied to clipboard', 'success');
+        }).catch(() => {
+            // Fallback for non-HTTPS contexts
+            const ta = document.createElement('textarea');
+            ta.value = cmd;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            showToast('Install command copied to clipboard', 'success');
         });
-        const data = await resp.json();
-
-        if (resp.ok) {
-            showToast(data.message || 'Component installed successfully', 'success');
-            statusEl.innerHTML = `<div style="padding: 10px; border-radius: 8px; background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.3); color: #10b981;">
-                ✓ ${data.message || 'Installed successfully'}
-            </div>`;
-        } else {
-            showToast(data.error || 'Installation failed', 'error');
-            statusEl.innerHTML = `<div style="padding: 10px; border-radius: 8px; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: #ef4444;">
-                ✗ ${data.error || 'Installation failed'}
-            </div>`;
-        }
-    } catch (e) {
-        showToast('Install failed: ' + e.message, 'error');
-        statusEl.innerHTML = `<div style="padding: 10px; border-radius: 8px; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: #ef4444;">
-            ✗ ${e.message}
-        </div>`;
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '📦 Install';
     }
 }

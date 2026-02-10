@@ -232,47 +232,72 @@
             <div id="page-components" class="page-view" style="display:none;">
                 <div class="components-grid" id="components-grid"></div>
 
-                <!-- Deploy to Container Section -->
+                <!-- Install Scripts Section -->
                 <div class="card" style="margin-top: 24px;">
                     <div class="card-header">
-                        <h3>🐳 Deploy to Container</h3>
+                        <h3>📥 Install Scripts</h3>
                     </div>
                     <div class="card-body">
                         <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 16px;">
-                            Install Wolf suite components directly into a running Docker or LXC container.
+                            Run these commands on any server or inside a container to install Wolf components.
                         </p>
-                        <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end;">
-                            <div style="flex: 1; min-width: 200px;">
-                                <label
-                                    style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">Target
-                                    Container</label>
-                                <select id="container-install-target"
-                                    style="width: 100%; padding: 8px 12px; border-radius: 8px;
-                                    border: 1px solid var(--border); background: var(--bg-primary); color: var(--text-primary); font-size: 13px;">
-                                    <option value="">Loading containers...</option>
-                                </select>
+                        <div style="display: grid; gap: 10px;">
+                            <div
+                                style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
+                                <span style="font-size: 18px; width: 28px; text-align: center;">🌐</span>
+                                <div style="flex: 1; min-width: 0;">
+                                    <div style="font-weight: 600; font-size: 13px;">WolfNet</div>
+                                    <code
+                                        style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh | sudo bash</code>
+                                </div>
+                                <button class="btn btn-sm" onclick="copyInstallCmd('wolfnet')"
+                                    title="Copy command">📋</button>
                             </div>
-                            <div style="flex: 1; min-width: 200px;">
-                                <label
-                                    style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">Component</label>
-                                <select id="container-install-component"
-                                    style="width: 100%; padding: 8px 12px; border-radius: 8px;
-                                    border: 1px solid var(--border); background: var(--bg-primary); color: var(--text-primary); font-size: 13px;">
-                                    <option value="wolfnet">🌐 WolfNet — Mesh VPN</option>
-                                    <option value="wolfproxy">🛡️ WolfProxy — Reverse Proxy</option>
-                                    <option value="wolfserve">📡 WolfServe — File Server</option>
-                                    <option value="wolfdisk">💾 WolfDisk — Distributed Filesystem</option>
-                                    <option value="wolfscale">⚖️ WolfScale — Load Balancer</option>
-                                </select>
+                            <div
+                                style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
+                                <span style="font-size: 18px; width: 28px; text-align: center;">🛡️</span>
+                                <div style="flex: 1; min-width: 0;">
+                                    <div style="font-weight: 600; font-size: 13px;">WolfProxy</div>
+                                    <code
+                                        style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfProxy/main/setup.sh | sudo bash</code>
+                                </div>
+                                <button class="btn btn-sm" onclick="copyInstallCmd('wolfproxy')"
+                                    title="Copy command">📋</button>
                             </div>
-                            <div>
-                                <button class="btn btn-primary" id="container-install-btn"
-                                    onclick="installComponentInContainer()" style="white-space: nowrap;">
-                                    📦 Install
-                                </button>
+                            <div
+                                style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
+                                <span style="font-size: 18px; width: 28px; text-align: center;">📡</span>
+                                <div style="flex: 1; min-width: 0;">
+                                    <div style="font-weight: 600; font-size: 13px;">WolfServe</div>
+                                    <code
+                                        style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfServe/main/setup.sh | sudo bash</code>
+                                </div>
+                                <button class="btn btn-sm" onclick="copyInstallCmd('wolfserve')"
+                                    title="Copy command">📋</button>
+                            </div>
+                            <div
+                                style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
+                                <span style="font-size: 18px; width: 28px; text-align: center;">💾</span>
+                                <div style="flex: 1; min-width: 0;">
+                                    <div style="font-weight: 600; font-size: 13px;">WolfDisk</div>
+                                    <code
+                                        style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | sudo bash</code>
+                                </div>
+                                <button class="btn btn-sm" onclick="copyInstallCmd('wolfdisk')"
+                                    title="Copy command">📋</button>
+                            </div>
+                            <div
+                                style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
+                                <span style="font-size: 18px; width: 28px; text-align: center;">⚖️</span>
+                                <div style="flex: 1; min-width: 0;">
+                                    <div style="font-weight: 600; font-size: 13px;">WolfScale</div>
+                                    <code
+                                        style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh | sudo bash</code>
+                                </div>
+                                <button class="btn btn-sm" onclick="copyInstallCmd('wolfscale')"
+                                    title="Copy command">📋</button>
                             </div>
                         </div>
-                        <div id="container-install-status" style="margin-top: 12px; display: none;"></div>
                     </div>
                 </div>
             </div>
