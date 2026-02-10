@@ -397,7 +397,9 @@ impl VmManager {
     /// Update VM settings (must be stopped)
     pub fn update_vm(&self, name: &str, cpus: Option<u32>, memory_mb: Option<u32>, 
                      iso_path: Option<String>, wolfnet_ip: Option<String>,
-                     disk_size_gb: Option<u32>) -> Result<(), String> {
+                     disk_size_gb: Option<u32>,
+                     os_disk_bus: Option<String>, net_model: Option<String>,
+                     drivers_iso: Option<String>) -> Result<(), String> {
         if self.check_running(name) {
             return Err("Cannot edit VM while it is running. Stop it first.".to_string());
         }
@@ -430,6 +432,21 @@ impl VmManager {
                     return Err(format!("Invalid WolfNet IP: '{}'", ip));
                 }
                 config.wolfnet_ip = Some(ip.clone());
+            }
+        }
+
+        // Hardware settings
+        if let Some(ref bus) = os_disk_bus {
+            if !bus.is_empty() { config.os_disk_bus = bus.clone(); }
+        }
+        if let Some(ref model) = net_model {
+            if !model.is_empty() { config.net_model = model.clone(); }
+        }
+        if let Some(ref drv) = drivers_iso {
+            if drv.is_empty() {
+                config.drivers_iso = None;
+            } else {
+                config.drivers_iso = Some(drv.clone());
             }
         }
 

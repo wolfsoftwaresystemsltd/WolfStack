@@ -2716,7 +2716,24 @@ async function showVmSettings(name) {
         }
 
         body.innerHTML = `
-            <div style="padding: 1rem;">
+            <!-- Tab Nav -->
+            <div style="display:flex; border-bottom:1px solid var(--border); background:var(--bg-secondary); margin:-24px -24px 16px -24px;">
+                <button class="vms-tab-btn active" data-stab="1" onclick="switchVmSettingsTab(1)"
+                    style="flex:1; padding:10px 16px; border:none; background:none; color:var(--text-primary); font-size:13px; font-weight:600; cursor:pointer; border-bottom:2px solid var(--accent); transition:all .2s;">
+                    ⚙️ General
+                </button>
+                <button class="vms-tab-btn" data-stab="2" onclick="switchVmSettingsTab(2)"
+                    style="flex:1; padding:10px 16px; border:none; background:none; color:var(--text-muted); font-size:13px; font-weight:600; cursor:pointer; border-bottom:2px solid transparent; transition:all .2s;">
+                    💾 Disks
+                </button>
+                <button class="vms-tab-btn" data-stab="3" onclick="switchVmSettingsTab(3)"
+                    style="flex:1; padding:10px 16px; border:none; background:none; color:var(--text-muted); font-size:13px; font-weight:600; cursor:pointer; border-bottom:2px solid transparent; transition:all .2s;">
+                    🌐 Network & Boot
+                </button>
+            </div>
+
+            <!-- ═══ Tab 1: General ═══ -->
+            <div class="vms-tab-page" id="vms-tab-1">
                 <div class="form-group">
                     <label>Name</label>
                     <input type="text" class="form-control" value="${vm.name}" disabled style="opacity:0.6;">
@@ -2735,69 +2752,101 @@ async function showVmSettings(name) {
                     <label>OS Disk Size (GiB) <small style="color:var(--text-muted);">(can only grow)</small></label>
                     <input type="number" class="form-control" id="edit-vm-disk" value="${vm.disk_size_gb}" min="${vm.disk_size_gb}">
                 </div>
+                <div class="form-group" style="margin-top:4px;">
+                    <label style="color:var(--text-muted); font-size:13px;">MAC Address: ${vm.mac_address || 'auto'}</label>
+                </div>
+            </div>
 
-                <!-- Storage Volumes Section -->
-                <div style="margin-top:16px; padding:14px; background:var(--bg-primary); border:1px solid var(--border); border-radius:10px;">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+            <!-- ═══ Tab 2: Disks ═══ -->
+            <div class="vms-tab-page" id="vms-tab-2" style="display:none;">
+                <div style="margin-bottom:10px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
                         <h4 style="margin:0; font-size:14px;">💾 Storage Volumes</h4>
                     </div>
-                    <div id="vm-settings-volumes">${volumesHtml}</div>
-
-                    <!-- Add Volume Form -->
-                    <div style="margin-top:10px; padding:10px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
-                        <div style="font-weight:600; font-size:12px; margin-bottom:8px; color:var(--text-secondary);">Add New Volume</div>
-                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:6px;">
-                            <div>
-                                <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Name</label>
-                                <input type="text" class="form-control" id="add-vol-name" placeholder="data1" style="font-size:13px;">
-                            </div>
-                            <div>
-                                <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Size (GiB)</label>
-                                <input type="number" class="form-control" id="add-vol-size" value="10" min="1" style="font-size:13px;">
-                            </div>
-                        </div>
-                        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-bottom:8px;">
-                            <div>
-                                <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Storage</label>
-                                <select class="form-control" id="add-vol-storage" style="font-size:13px;">${storageOpts}</select>
-                            </div>
-                            <div>
-                                <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Format</label>
-                                <select class="form-control" id="add-vol-format" style="font-size:13px;">
-                                    <option value="qcow2">qcow2</option>
-                                    <option value="raw">raw</option>
-                                </select>
-                            </div>
-                            <div>
-                                <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Bus</label>
-                                <select class="form-control" id="add-vol-bus" style="font-size:13px;">
-                                    <option value="virtio">VirtIO</option>
-                                    <option value="scsi">SCSI</option>
-                                    <option value="ide">IDE</option>
-                                </select>
-                            </div>
-                        </div>
-                        <button class="btn btn-sm btn-primary" onclick="addVmVolume('${name}')" style="font-size:12px;">➕ Add Volume</button>
-                    </div>
+                    <div id="vm-settings-volumes" style="max-height:200px; overflow-y:auto;">${volumesHtml}</div>
                 </div>
 
-                <div class="form-group" style="margin-top:16px;">
+                <!-- Add Volume Form -->
+                <div style="padding:10px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
+                    <div style="font-weight:600; font-size:12px; margin-bottom:8px; color:var(--text-secondary);">Add New Volume</div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:6px;">
+                        <div>
+                            <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Name</label>
+                            <input type="text" class="form-control" id="add-vol-name" placeholder="data1" style="font-size:13px;">
+                        </div>
+                        <div>
+                            <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Size (GiB)</label>
+                            <input type="number" class="form-control" id="add-vol-size" value="10" min="1" style="font-size:13px;">
+                        </div>
+                    </div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-bottom:8px;">
+                        <div>
+                            <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Storage</label>
+                            <select class="form-control" id="add-vol-storage" style="font-size:13px;">${storageOpts}</select>
+                        </div>
+                        <div>
+                            <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Format</label>
+                            <select class="form-control" id="add-vol-format" style="font-size:13px;">
+                                <option value="qcow2">qcow2</option>
+                                <option value="raw">raw</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:2px;">Bus</label>
+                            <select class="form-control" id="add-vol-bus" style="font-size:13px;">
+                                <option value="virtio">VirtIO</option>
+                                <option value="scsi">SCSI</option>
+                                <option value="ide">IDE</option>
+                            </select>
+                        </div>
+                    </div>
+                    <button class="btn btn-sm btn-primary" onclick="addVmVolume('${name}')" style="font-size:12px;">➕ Add Volume</button>
+                </div>
+            </div>
+
+            <!-- ═══ Tab 3: Network & Boot ═══ -->
+            <div class="vms-tab-page" id="vms-tab-3" style="display:none;">
+                <div class="form-group">
                     <label>ISO Path</label>
                     <input type="text" class="form-control" id="edit-vm-iso" value="${vm.iso_path || ''}" 
                         placeholder="Leave empty to detach ISO">
+                    <small style="color:var(--text-muted);">Set to empty to boot from disk on next start</small>
                 </div>
-                <div class="form-group">
+                <div class="form-group" style="margin-top:12px;">
+                    <label>VirtIO Drivers ISO</label>
+                    <input type="text" class="form-control" id="edit-vm-drivers-iso" value="${vm.drivers_iso || ''}" 
+                        placeholder="/var/lib/wolfstack/isos/virtio-win.iso">
+                    <small style="color:var(--text-muted);">Secondary CD-ROM for VirtIO drivers (Windows)</small>
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px;">
+                    <div class="form-group">
+                        <label>OS Disk Bus</label>
+                        <select class="form-control" id="edit-vm-os-bus" style="font-size:13px;">
+                            <option value="virtio"${vm.os_disk_bus === 'virtio' ? ' selected' : ''}>VirtIO (fastest)</option>
+                            <option value="ide"${vm.os_disk_bus === 'ide' ? ' selected' : ''}>IDE (Windows)</option>
+                            <option value="sata"${vm.os_disk_bus === 'sata' ? ' selected' : ''}>SATA</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Network Adapter</label>
+                        <select class="form-control" id="edit-vm-net-model" style="font-size:13px;">
+                            <option value="virtio"${vm.net_model === 'virtio' || !vm.net_model ? ' selected' : ''}>VirtIO (Linux)</option>
+                            <option value="e1000"${vm.net_model === 'e1000' ? ' selected' : ''}>Intel e1000 (Windows)</option>
+                            <option value="rtl8139"${vm.net_model === 'rtl8139' ? ' selected' : ''}>Realtek RTL8139</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group" style="margin-top:12px;">
                     <label>WolfNet IP</label>
                     <input type="text" class="form-control" id="edit-vm-wolfnet-ip" value="${vm.wolfnet_ip || ''}"
                         placeholder="Leave empty for user-mode networking">
                 </div>
-                <div class="form-group" style="margin-top:4px;">
-                    <label style="color:var(--text-muted); font-size:13px;">MAC Address: ${vm.mac_address || 'auto'}</label>
-                </div>
-                <div style="display:flex; gap:8px; margin-top:16px;">
-                    <button class="btn btn-primary" onclick="saveVmSettings('${vm.name}')">💾 Save</button>
-                    <button class="btn" onclick="closeContainerDetail()">Cancel</button>
-                </div>
+            </div>
+
+            <!-- Footer (always visible) -->
+            <div style="display:flex; gap:8px; margin-top:16px; padding-top:12px; border-top:1px solid var(--border);">
+                <button class="btn btn-primary" onclick="saveVmSettings('${vm.name}')">💾 Save</button>
+                <button class="btn" onclick="closeContainerDetail()">Cancel</button>
             </div>
         `;
     } catch (e) {
@@ -2875,12 +2924,30 @@ async function resizeVmVolume(vmName, volName, currentSize) {
     }
 }
 
+function switchVmSettingsTab(tab) {
+    // Hide all tab pages
+    document.querySelectorAll('.vms-tab-page').forEach(p => p.style.display = 'none');
+    // Show selected
+    const page = document.getElementById(`vms-tab-${tab}`);
+    if (page) page.style.display = 'block';
+    // Update tab button styles
+    document.querySelectorAll('.vms-tab-btn').forEach(btn => {
+        const isActive = parseInt(btn.dataset.stab) === tab;
+        btn.style.color = isActive ? 'var(--text-primary)' : 'var(--text-muted)';
+        btn.style.borderBottomColor = isActive ? 'var(--accent)' : 'transparent';
+        btn.classList.toggle('active', isActive);
+    });
+}
+
 async function saveVmSettings(name) {
     const cpus = parseInt(document.getElementById('edit-vm-cpus').value);
     const memory = parseInt(document.getElementById('edit-vm-memory').value);
     const disk = parseInt(document.getElementById('edit-vm-disk').value);
     const iso = document.getElementById('edit-vm-iso').value.trim();
     const wolfnetIp = document.getElementById('edit-vm-wolfnet-ip').value.trim();
+    const osDiskBus = document.getElementById('edit-vm-os-bus')?.value || undefined;
+    const netModel = document.getElementById('edit-vm-net-model')?.value || undefined;
+    const driversIso = document.getElementById('edit-vm-drivers-iso')?.value.trim() ?? undefined;
 
     try {
         const resp = await fetch(apiUrl(`/api/vms/${name}`), {
@@ -2892,6 +2959,9 @@ async function saveVmSettings(name) {
                 disk_size_gb: disk,
                 iso_path: iso,
                 wolfnet_ip: wolfnetIp,
+                os_disk_bus: osDiskBus,
+                net_model: netModel,
+                drivers_iso: driversIso,
             })
         });
         const data = await resp.json();
