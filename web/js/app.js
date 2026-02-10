@@ -1,54 +1,224 @@
 // WolfStack Dashboard — app.js
 
 // ─── State ───
-let currentPage = 'dashboard';
+let currentPage = 'datacenter';
 let currentComponent = null;
+let currentNodeId = null;  // null = datacenter, node ID = specific server
+let allNodes = [];         // cached node list
 let cpuHistory = [];
 let memHistory = [];
 const MAX_HISTORY = 60;
 
-// ─── Page Navigation ───
-document.querySelectorAll('.nav-item[data-page]').forEach(item => {
-    item.addEventListener('click', (e) => {
-        e.preventDefault();
-        navigateTo(item.dataset.page);
-    });
-});
+// ─── API URL helper — route through proxy for remote nodes ───
+function apiUrl(path) {
+    if (!currentNodeId) return path; // datacenter view
+    const node = allNodes.find(n => n.id === currentNodeId);
+    if (!node) return path;
+    if (node.is_self) return path;
+    // Proxy through local server — strip leading /api/ from path
+    const cleanPath = path.replace(/^\/api\//, '');
+    return `/api/nodes/${currentNodeId}/proxy/${cleanPath}`;
+}
 
-function navigateTo(page) {
+// ─── Page Navigation ───
+function selectView(page) {
     currentPage = page;
+    currentNodeId = null;
+
     document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
-    document.getElementById(`page-${page}`).style.display = 'block';
+    const el = document.getElementById(`page-${page}`);
+    if (el) el.style.display = 'block';
+
+    // Highlight active nav item
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = {
+    document.getElementById('page-title').textContent = page === 'datacenter' ? 'Datacenter' : page;
+
+    if (page === 'datacenter') {
+        renderDatacenterOverview();
+    }
+}
+
+function selectServerView(nodeId, view) {
+    currentNodeId = nodeId;
+    currentPage = view;
+
+    const node = allNodes.find(n => n.id === nodeId);
+    const hostname = node ? node.hostname : nodeId;
+
+    document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
+    const el = document.getElementById(`page-${view}`);
+    if (el) el.style.display = 'block';
+
+    // Highlight active tree item
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    const treeItem = document.querySelector(`.server-child-item[data-node="${nodeId}"][data-view="${view}"]`);
+    if (treeItem) treeItem.classList.add('active');
+
+    const viewTitles = {
         dashboard: 'Dashboard',
-        servers: 'Servers',
         components: 'Components',
-        'component-detail': 'Component Detail',
         services: 'Services',
+        containers: 'Docker',
+        lxc: 'LXC',
         certificates: 'Certificates',
         monitoring: 'Live Metrics',
-        containers: 'Docker Containers',
-        lxc: 'LXC Containers',
     };
-    document.getElementById('page-title').textContent = titles[page] || page;
+    document.getElementById('page-title').textContent = `${hostname} — ${viewTitles[view] || view}`;
+    document.getElementById('hostname-display').textContent = `${hostname} (${node?.address}:${node?.port})`;
 
-    // Refresh data for the page
-    if (page === 'components') loadComponents();
-    if (page === 'services') loadComponents();
-    if (page === 'monitoring') initCharts();
-    if (page === 'containers') loadDockerContainers();
-    if (page === 'lxc') loadLxcContainers();
+    // Load data for the view
+    if (view === 'dashboard') {
+        if (node?.metrics) updateDashboard(node.metrics);
+    }
+    if (view === 'components') loadComponents();
+    if (view === 'services') loadComponents();
+    if (view === 'containers') loadDockerContainers();
+    if (view === 'lxc') loadLxcContainers();
+    if (view === 'monitoring') initCharts();
+}
+
+// ─── Server Tree ───
+function buildServerTree(nodes) {
+    allNodes = nodes;
+    const tree = document.getElementById('server-tree');
+    if (!tree) return;
+
+    if (nodes.length === 0) {
+        tree.innerHTML = '<div style="padding: 8px 16px; color: var(--text-muted); font-size: 12px;">No servers yet. Click + Add Server.</div>';
+        return;
+    }
+
+    // Sort: self first, then alphabetically
+    const sorted = [...nodes].sort((a, b) => {
+        if (a.is_self) return -1;
+        if (b.is_self) return 1;
+        return a.hostname.localeCompare(b.hostname);
+    });
+
+    tree.innerHTML = sorted.map(node => `
+        <div class="server-tree-node">
+            <div class="server-node-header" onclick="toggleServerNode('${node.id}')">
+                <span class="tree-toggle ${node.is_self ? 'expanded' : ''}" id="toggle-${node.id}">▶</span>
+                <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
+                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">🖥️ ${node.hostname}</span>
+                ${node.is_self ? '<span class="self-badge">this</span>' : ''}
+            </div>
+            <div class="server-node-children ${node.is_self ? 'expanded' : ''}" id="children-${node.id}">
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="dashboard" onclick="selectServerView('${node.id}', 'dashboard')">
+                    <span class="icon">📊</span> Dashboard
+                </a>
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="components" onclick="selectServerView('${node.id}', 'components')">
+                    <span class="icon">📦</span> Components
+                    <span class="badge" style="font-size:10px; padding:1px 6px;">${node.components.filter(c => c.installed).length}</span>
+                </a>
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="services" onclick="selectServerView('${node.id}', 'services')">
+                    <span class="icon">⚡</span> Services
+                </a>
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="containers" onclick="selectServerView('${node.id}', 'containers')">
+                    <span class="icon">🐳</span> Docker
+                </a>
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="lxc" onclick="selectServerView('${node.id}', 'lxc')">
+                    <span class="icon">📦</span> LXC
+                </a>
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="certificates" onclick="selectServerView('${node.id}', 'certificates')">
+                    <span class="icon">🔒</span> Certificates
+                </a>
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="monitoring" onclick="selectServerView('${node.id}', 'monitoring')">
+                    <span class="icon">📈</span> Metrics
+                </a>
+            </div>
+        </div>
+    `).join('');
+}
+
+function toggleServerNode(nodeId) {
+    const children = document.getElementById(`children-${nodeId}`);
+    const toggle = document.getElementById(`toggle-${nodeId}`);
+    if (children && toggle) {
+        children.classList.toggle('expanded');
+        toggle.classList.toggle('expanded');
+    }
+}
+
+// ─── Datacenter Overview ───
+function renderDatacenterOverview() {
+    const nodes = allNodes;
+    const onlineCount = nodes.filter(n => n.online).length;
+    const totalComponents = nodes.reduce((sum, n) => sum + n.components.filter(c => c.installed).length, 0);
+
+    document.getElementById('dc-total-servers').textContent = nodes.length;
+    document.getElementById('dc-online-servers').textContent = onlineCount;
+    document.getElementById('dc-offline-servers').textContent = nodes.length - onlineCount;
+    document.getElementById('dc-total-components').textContent = totalComponents;
+
+    const container = document.getElementById('datacenter-servers');
+    if (nodes.length === 0) {
+        container.innerHTML = '<div style="text-align:center; color:var(--text-muted); padding:40px; grid-column:1/-1;">No servers added yet. Click <strong>+ Add Server</strong> in the sidebar.</div>';
+        return;
+    }
+
+    container.innerHTML = nodes.map(node => {
+        const m = node.metrics;
+        if (!m) {
+            return `<div class="card">
+                <div class="card-header"><h3>🖥️ ${node.hostname}${node.is_self ? ' <span style="color:var(--accent-light); font-size:12px;">(this)</span>' : ''}</h3></div>
+                <div class="card-body" style="text-align:center; color:var(--text-muted); padding:30px;">
+                    <span style="color:var(--danger);">● Offline</span>
+                </div>
+            </div>`;
+        }
+
+        const cpuPct = m.cpu_usage_percent.toFixed(1);
+        const memPct = m.memory_percent.toFixed(1);
+        const root = m.disks?.find(d => d.mount_point === '/') || m.disks?.[0];
+        const diskPct = root ? root.usage_percent.toFixed(1) : '—';
+
+        return `<div class="card" style="cursor:pointer;" onclick="selectServerView('${node.id}', 'dashboard')">
+            <div class="card-header">
+                <h3>
+                    <span class="server-dot online" style="display:inline-block; vertical-align:middle; margin-right:8px;"></span>
+                    🖥️ ${node.hostname}${node.is_self ? ' <span style="color:var(--accent-light); font-size:12px;">(this)</span>' : ''}
+                </h3>
+                <span style="color:var(--text-muted); font-size:12px;">${node.address}:${node.port}</span>
+            </div>
+            <div class="card-body">
+                <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; text-align:center;">
+                    <div>
+                        <div style="font-size:24px; font-weight:700; color:var(--accent-light);">${cpuPct}%</div>
+                        <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">CPU</div>
+                        <div class="progress-bar" style="margin-top:6px;"><div class="fill ${progressClass(m.cpu_usage_percent)}" style="width:${cpuPct}%"></div></div>
+                    </div>
+                    <div>
+                        <div style="font-size:24px; font-weight:700; color:var(--success);">${memPct}%</div>
+                        <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">Memory</div>
+                        <div class="progress-bar" style="margin-top:6px;"><div class="fill ${progressClass(m.memory_percent)}" style="width:${memPct}%"></div></div>
+                    </div>
+                    <div>
+                        <div style="font-size:24px; font-weight:700; color:var(--warning);">${diskPct}%</div>
+                        <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">Disk</div>
+                        <div class="progress-bar" style="margin-top:6px;"><div class="fill ${progressClass(parseFloat(diskPct) || 0)}" style="width:${diskPct}%"></div></div>
+                    </div>
+                </div>
+                <div style="margin-top:12px; display:flex; gap:6px; flex-wrap:wrap;">
+                    ${node.components.filter(c => c.installed).map(c =>
+            `<span style="font-size:11px; padding:2px 8px; border-radius:4px; background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'}; color:${c.running ? 'var(--success)' : 'var(--danger)'};">
+                            ${c.component}
+                        </span>`
+        ).join('')}
+                </div>
+            </div>
+        </div>`;
+    }).join('');
 }
 
 // Handle hash navigation
 window.addEventListener('hashchange', () => {
-    const page = location.hash.replace('#', '') || 'dashboard';
-    navigateTo(page);
+    const page = location.hash.replace('#', '') || 'datacenter';
+    selectView(page);
 });
-if (location.hash) navigateTo(location.hash.replace('#', ''));
+if (location.hash) selectView(location.hash.replace('#', ''));
 
 // ─── Formatting Helpers ───
 function formatBytes(bytes) {
@@ -94,10 +264,13 @@ function handleAuthError(resp) {
 // ─── Metrics Polling ───
 async function fetchMetrics() {
     try {
-        const resp = await fetch('/api/metrics');
+        const resp = await fetch(apiUrl('/api/metrics'));
         if (handleAuthError(resp)) return;
         const m = await resp.json();
-        updateDashboard(m);
+        // Only update dashboard if we're viewing a server's dashboard
+        if (currentPage === 'dashboard' && currentNodeId) {
+            updateDashboard(m);
+        }
     } catch (e) {
         console.error('Failed to fetch metrics:', e);
     }
@@ -263,72 +436,37 @@ async function fetchNodes() {
     try {
         const resp = await fetch('/api/nodes');
         const nodes = await resp.json();
-        updateNodesList(nodes);
+        allNodes = nodes;
+        buildServerTree(nodes);
+
+        // Refresh datacenter overview if we're viewing it
+        if (currentPage === 'datacenter') {
+            renderDatacenterOverview();
+        }
+
+        // Update current node metrics if viewing a server dashboard
+        if (currentPage === 'dashboard' && currentNodeId) {
+            const node = nodes.find(n => n.id === currentNodeId);
+            if (node?.metrics) updateDashboard(node.metrics);
+        }
     } catch (e) {
         console.error('Failed to fetch nodes:', e);
     }
 }
 
-function updateNodesList(nodes) {
-    document.getElementById('server-count').textContent = nodes.length;
-    document.getElementById('total-servers-val').textContent = nodes.length;
-    document.getElementById('online-servers-val').textContent = nodes.filter(n => n.online).length;
-    document.getElementById('offline-servers-val').textContent = nodes.filter(n => !n.online).length;
-
-    // Dashboard server list
-    const list = document.getElementById('server-list');
-    if (nodes.length === 0) {
-        list.innerHTML = `<div style="text-align: center; color: var(--text-muted); padding: 30px;">
-            No servers added yet. Click "+ Add Server" to get started.
-        </div>`;
-    } else {
-        list.innerHTML = nodes.map(n => renderServerRow(n)).join('');
-    }
-
-    // Full server list
-    const fullList = document.getElementById('servers-full-list');
-    if (fullList) {
-        if (nodes.length === 0) {
-            fullList.innerHTML = `<div style="text-align: center; color: var(--text-muted); padding: 30px;">
-                No servers added yet.
-            </div>`;
-        } else {
-            fullList.innerHTML = nodes.map(n => renderServerRow(n, true)).join('');
-        }
-    }
-}
-
-function renderServerRow(node, showActions = false) {
-    const cpuPct = node.metrics ? node.metrics.cpu_usage_percent.toFixed(0) + '%' : '—';
-    const memPct = node.metrics ? node.metrics.memory_percent.toFixed(0) + '%' : '—';
-    const selfBadge = node.is_self ? ' <span style="color: var(--accent-light); font-size: 11px;">(this)</span>' : '';
-    const actions = showActions && !node.is_self ?
-        `<button class="btn btn-danger btn-sm" onclick="removeServer('${node.id}')">Remove</button>` : '';
-
-    return `
-        <div class="server-row">
-            <div class="server-status ${node.online ? 'online' : 'offline'}"></div>
-            <div class="server-info">
-                <h4>${node.hostname}${selfBadge}</h4>
-                <div class="address">${node.address}:${node.port}</div>
-            </div>
-            <div class="server-metric">
-                <div class="value">${cpuPct}</div>
-                <div class="label">CPU</div>
-            </div>
-            <div class="server-metric">
-                <div class="value">${memPct}</div>
-                <div class="label">Memory</div>
-            </div>
-            <div>${actions}</div>
-        </div>
-    `;
-}
-
 // ─── Components ───
 async function loadComponents() {
     try {
-        const resp = await fetch('/api/components');
+        // If we have a node selected and it has components cached, use those for initial render
+        if (currentNodeId) {
+            const node = allNodes.find(n => n.id === currentNodeId);
+            if (node?.components) {
+                renderComponents(node.components);
+                renderServices(node.components);
+            }
+        }
+        // Also fetch live data
+        const resp = await fetch(apiUrl('/api/components'));
         const components = await resp.json();
         renderComponents(components);
         renderServices(components);
@@ -522,16 +660,19 @@ function showToast(message, type = 'info') {
 // ─── Component Detail ───
 async function openComponentDetail(name) {
     currentComponent = name;
-    navigateTo('component-detail');
-    const pageTitle = document.getElementById('page-title');
+    // Show the component-detail page directly
+    document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
+    const el = document.getElementById('page-component-detail');
+    if (el) el.style.display = 'block';
+    currentPage = 'component-detail';
     const cName = name.charAt(0).toUpperCase() + name.slice(1);
-    pageTitle.textContent = cName;
+    document.getElementById('page-title').textContent = cName;
     await refreshComponentDetail(name);
 }
 
 async function refreshComponentDetail(name) {
     try {
-        const resp = await fetch(`/api/components/${name}/detail`);
+        const resp = await fetch(apiUrl(`/api/components/${name}/detail`));
         if (handleAuthError(resp)) return;
         const d = await resp.json();
 
@@ -606,7 +747,7 @@ async function detailServiceAction(action) {
     if (!currentComponent) return;
     showToast(`${action}ing ${currentComponent}...`, 'info');
     try {
-        const resp = await fetch(`/api/services/${currentComponent}/action`, {
+        const resp = await fetch(apiUrl(`/api/services/${currentComponent}/action`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action })
@@ -628,7 +769,7 @@ async function saveConfig() {
     const content = document.getElementById('detail-config-editor').value;
     showToast('Saving config...', 'info');
     try {
-        const resp = await fetch(`/api/components/${currentComponent}/config`, {
+        const resp = await fetch(apiUrl(`/api/components/${currentComponent}/config`), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ content })
@@ -645,12 +786,8 @@ async function saveConfig() {
 }
 
 // ─── Polling Loop ───
-fetchMetrics();
-fetchNodes();
-fetchContainerStatus();
-setInterval(fetchMetrics, 2000);
-setInterval(fetchNodes, 10000);
-setInterval(fetchContainerStatus, 15000);
+fetchNodes();  // This builds the server tree and populates allNodes
+setInterval(fetchNodes, 10000);  // Refresh tree + metrics every 10s
 
 // ─── Container Management ───
 
@@ -659,27 +796,9 @@ let containerPollTimer = null;
 
 async function fetchContainerStatus() {
     try {
-        const resp = await fetch('/api/containers/status');
+        const resp = await fetch(apiUrl('/api/containers/status'));
         if (!resp.ok) return;
         const data = await resp.json();
-
-        // Update Docker sidebar badge
-        const dockerBadge = document.getElementById('docker-count');
-        if (data.docker.installed) {
-            dockerBadge.textContent = data.docker.container_count;
-            dockerBadge.style.display = data.docker.container_count > 0 ? '' : 'none';
-        } else {
-            dockerBadge.style.display = 'none';
-        }
-
-        // Update LXC sidebar badge
-        const lxcBadge = document.getElementById('lxc-count');
-        if (data.lxc.installed) {
-            lxcBadge.textContent = data.lxc.container_count;
-            lxcBadge.style.display = data.lxc.container_count > 0 ? '' : 'none';
-        } else {
-            lxcBadge.style.display = 'none';
-        }
 
         // Update Docker banner
         updateRuntimeBanner('docker', data.docker);
@@ -752,9 +871,9 @@ async function loadDockerContainers() {
     try {
         // Fetch containers and stats in parallel
         const [containersResp, statsResp, imagesResp] = await Promise.all([
-            fetch('/api/containers/docker'),
-            fetch('/api/containers/docker/stats'),
-            fetch('/api/containers/docker/images'),
+            fetch(apiUrl('/api/containers/docker')),
+            fetch(apiUrl('/api/containers/docker/stats')),
+            fetch(apiUrl('/api/containers/docker/images')),
         ]);
 
         const containers = await containersResp.json();
@@ -784,7 +903,7 @@ async function refreshDockerStats() {
         return;
     }
     try {
-        const resp = await fetch('/api/containers/docker/stats');
+        const resp = await fetch(apiUrl('/api/containers/docker/stats'));
         const stats = await resp.json();
         dockerStats = {};
         stats.forEach(s => { dockerStats[s.name] = s; });
@@ -940,8 +1059,8 @@ async function loadLxcContainers() {
 
     try {
         const [containersResp, statsResp] = await Promise.all([
-            fetch('/api/containers/lxc'),
-            fetch('/api/containers/lxc/stats'),
+            fetch(apiUrl('/api/containers/lxc')),
+            fetch(apiUrl('/api/containers/lxc/stats')),
         ]);
 
         const containers = await containersResp.json();

@@ -352,6 +352,70 @@ pub async fn agent_status(state: web::Data<AppState>) -> HttpResponse {
     HttpResponse::Ok().json(msg)
 }
 
+/// GET/POST /api/nodes/{id}/proxy/{path:.*} — proxy API calls to a remote node
+pub async fn node_proxy(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+    body: web::Bytes,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let (node_id, api_path) = path.into_inner();
+
+    // Find the node
+    let node = match state.cluster.get_node(&node_id) {
+        Some(n) => n,
+        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "Node not found"})),
+    };
+
+    // If it's the local node, tell frontend to use local API
+    if node.is_self {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "Use local API for self node"}));
+    }
+
+    // Forward to remote node
+    let url = format!("http://{}:{}/api/{}", node.address, node.port, api_path);
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("HTTP client error: {}", e)})),
+    };
+
+    let method = req.method().clone();
+    let mut builder = match method {
+        actix_web::http::Method::GET => client.get(&url),
+        actix_web::http::Method::POST => client.post(&url),
+        actix_web::http::Method::PUT => client.put(&url),
+        actix_web::http::Method::DELETE => client.delete(&url),
+        _ => client.get(&url),
+    };
+
+    // Forward content-type and body
+    if let Some(ct) = req.headers().get("content-type") {
+        builder = builder.header("content-type", ct.to_str().unwrap_or("application/json"));
+    }
+    if !body.is_empty() {
+        builder = builder.body(body.to_vec());
+    }
+
+    match builder.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            match resp.bytes().await {
+                Ok(bytes) => HttpResponse::build(actix_web::http::StatusCode::from_u16(status).unwrap_or(actix_web::http::StatusCode::OK))
+                    .content_type("application/json")
+                    .body(bytes.to_vec()),
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Read error: {}", e)})),
+            }
+        }
+        Err(e) => HttpResponse::BadGateway().json(serde_json::json!({"error": format!("Proxy error: {}. Is WolfStack running on {}:{}?", e, node.address, node.port)})),
+    }
+}
+
 // ─── Helpers ───
 
 /// Get recent journal logs for a service
@@ -783,5 +847,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/lxc/{name}/action", web::post().to(lxc_action))
         .route("/api/containers/lxc/{name}/clone", web::post().to(lxc_clone))
         // Agent (no auth — used by other WolfStack nodes)
-        .route("/api/agent/status", web::get().to(agent_status));
+        .route("/api/agent/status", web::get().to(agent_status))
+        // Node proxy — forward API calls to remote nodes (must be last — wildcard path)
+        .route("/api/nodes/{id}/proxy/{path:.*}", web::get().to(node_proxy))
+        .route("/api/nodes/{id}/proxy/{path:.*}", web::post().to(node_proxy))
+        .route("/api/nodes/{id}/proxy/{path:.*}", web::put().to(node_proxy))
+        .route("/api/nodes/{id}/proxy/{path:.*}", web::delete().to(node_proxy));
 }

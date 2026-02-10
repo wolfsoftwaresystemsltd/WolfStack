@@ -6,6 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WolfStack — Server Management</title>
     <meta name="description" content="WolfStack server management dashboard for the Wolf software suite">
+    <link rel="icon" type="image/svg+xml" href="https://wolf.uk.com/wp-content/uploads/2026/01/Group-9.svg">
     <link rel="stylesheet" href="/css/style.css">
 </head>
 
@@ -21,46 +22,21 @@
         </div>
         <nav class="sidebar-nav">
             <div class="nav-section">
-                <div class="nav-section-title">Overview</div>
-                <a class="nav-item active" data-page="dashboard" href="#dashboard">
-                    <span class="icon">📊</span> Dashboard
-                </a>
-                <a class="nav-item" data-page="servers" href="#servers">
-                    <span class="icon">🖥️</span> Servers
-                    <span class="badge" id="server-count">0</span>
+                <a class="nav-item active" data-page="datacenter" onclick="selectView('datacenter')">
+                    <span class="icon">🏢</span> Datacenter
                 </a>
             </div>
             <div class="nav-section">
-                <div class="nav-section-title">Management</div>
-                <a class="nav-item" data-page="components" href="#components">
-                    <span class="icon">📦</span> Components
-                </a>
-                <a class="nav-item" data-page="services" href="#services">
-                    <span class="icon">⚡</span> Services
-                </a>
-                <a class="nav-item" data-page="certificates" href="#certificates">
-                    <span class="icon">🔒</span> Certificates
-                </a>
-            </div>
-            <div class="nav-section">
-                <div class="nav-section-title">Monitoring</div>
-                <a class="nav-item" data-page="monitoring" href="#monitoring">
-                    <span class="icon">📈</span> Live Metrics
-                </a>
-            </div>
-            <div class="nav-section">
-                <div class="nav-section-title">Containers</div>
-                <a class="nav-item" data-page="containers" href="#containers">
-                    <span class="icon">🐳</span> Docker
-                    <span class="badge" id="docker-count" style="display:none;">0</span>
-                </a>
-                <a class="nav-item" data-page="lxc" href="#lxc">
-                    <span class="icon">📦</span> LXC
-                    <span class="badge" id="lxc-count" style="display:none;">0</span>
-                </a>
+                <div class="nav-section-title">Servers</div>
+                <div id="server-tree">
+                    <div style="padding: 8px 16px; color: var(--text-muted); font-size: 12px;">Loading...</div>
+                </div>
             </div>
         </nav>
         <div class="sidebar-footer">
+            <button class="btn btn-sm" onclick="openAddServerModal()" style="width: 100%; margin-bottom: 8px;">
+                + Add Server
+            </button>
             <button class="btn btn-sm" onclick="handleLogout()" style="width: 100%; margin-bottom: 12px;">
                 🚪 Sign Out
             </button>
@@ -77,16 +53,51 @@
             <h2 id="page-title">Dashboard</h2>
             <div class="top-bar-actions">
                 <span id="hostname-display" style="color: var(--text-secondary); font-size: 13px;"></span>
-                <button class="btn btn-primary btn-sm" onclick="openAddServerModal()">
-                    + Add Server
-                </button>
             </div>
         </header>
 
         <!-- Page Content -->
         <div class="page-content">
-            <!-- ═══ Dashboard Page ═══ -->
-            <div id="page-dashboard" class="page-view">
+            <!-- ═══ Datacenter Overview ═══ -->
+            <div id="page-datacenter" class="page-view">
+                <div class="stats-grid" style="margin-bottom: 20px;">
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Total Servers</span>
+                            <div class="stat-icon" style="background: var(--accent-glow); color: var(--accent-light);">
+                                🖥️</div>
+                        </div>
+                        <div class="stat-value" id="dc-total-servers">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Online</span>
+                            <div class="stat-icon" style="background: var(--success-bg); color: var(--success);">✓</div>
+                        </div>
+                        <div class="stat-value" id="dc-online-servers">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Offline</span>
+                            <div class="stat-icon" style="background: var(--danger-bg); color: var(--danger);">✗</div>
+                        </div>
+                        <div class="stat-value" id="dc-offline-servers">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Components</span>
+                            <div class="stat-icon" style="background: var(--info-bg); color: var(--info);">📦</div>
+                        </div>
+                        <div class="stat-value" id="dc-total-components">0</div>
+                    </div>
+                </div>
+
+                <!-- Server cards grid -->
+                <div id="datacenter-servers" class="grid-2" style="gap: 20px;"></div>
+            </div>
+
+            <!-- ═══ Dashboard Page (per-server) ═══ -->
+            <div id="page-dashboard" class="page-view" style="display:none;">
                 <!-- Stats Row -->
                 <div class="stats-grid" id="stats-grid">
                     <div class="stat-card">
@@ -225,42 +236,8 @@
                 </div>
             </div>
 
-            <!-- ═══ Servers Page ═══ -->
-            <div id="page-servers" class="page-view" style="display:none;">
-                <div class="stats-grid" style="margin-bottom: 20px;">
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Total Servers</span>
-                            <div class="stat-icon" style="background: var(--accent-glow); color: var(--accent-light);">
-                                🖥️</div>
-                        </div>
-                        <div class="stat-value" id="total-servers-val">0</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Online</span>
-                            <div class="stat-icon" style="background: var(--success-bg); color: var(--success);">✓</div>
-                        </div>
-                        <div class="stat-value" id="online-servers-val">0</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Offline</span>
-                            <div class="stat-icon" style="background: var(--danger-bg); color: var(--danger);">✗</div>
-                        </div>
-                        <div class="stat-value" id="offline-servers-val">0</div>
-                    </div>
-                </div>
-                <div class="card">
-                    <div class="card-header">
-                        <h3>All Servers</h3>
-                        <button class="btn btn-primary btn-sm" onclick="openAddServerModal()">+ Add Server</button>
-                    </div>
-                    <div class="card-body">
-                        <div class="server-list" id="servers-full-list"></div>
-                    </div>
-                </div>
-            </div>
+
+
 
             <!-- ═══ Components Page ═══ -->
             <div id="page-components" class="page-view" style="display:none;">

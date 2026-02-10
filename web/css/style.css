@@ -161,6 +161,97 @@ body {
     font-weight: 600;
 }
 
+/* ─── Server Tree (Proxmox-style) ─── */
+.server-tree-node {
+    margin-bottom: 2px;
+}
+
+.server-node-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: var(--transition);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    user-select: none;
+}
+
+.server-node-header:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.server-node-header .tree-toggle {
+    font-size: 10px;
+    transition: transform 0.2s ease;
+    color: var(--text-muted);
+    width: 14px;
+    text-align: center;
+}
+
+.server-node-header .tree-toggle.expanded {
+    transform: rotate(90deg);
+}
+
+.server-node-header .server-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.server-dot.online {
+    background: var(--success);
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
+}
+
+.server-dot.offline {
+    background: var(--danger);
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.3);
+}
+
+.server-node-header .self-badge {
+    font-size: 9px;
+    background: var(--accent-glow);
+    color: var(--accent-light);
+    padding: 1px 5px;
+    border-radius: 4px;
+    margin-left: auto;
+    font-weight: 500;
+}
+
+.server-node-children {
+    display: none;
+    padding-left: 14px;
+    margin-left: 18px;
+    border-left: 1px solid var(--border);
+}
+
+.server-node-children.expanded {
+    display: block;
+}
+
+.server-node-children .nav-item {
+    padding: 6px 12px;
+    font-size: 12px;
+    gap: 8px;
+    border-radius: 6px;
+}
+
+.server-node-children .nav-item .icon {
+    font-size: 14px;
+    width: 18px;
+}
+
+.server-node-children .nav-item.active {
+    background: var(--accent-glow);
+    color: var(--accent-light);
+    box-shadow: none;
+}
+
 /* ─── Main Content ─── */
 .main-content {
     margin-left: 260px;
