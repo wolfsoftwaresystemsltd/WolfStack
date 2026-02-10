@@ -216,28 +216,27 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
     let gateway = if gateway.is_empty() { "172.17.0.1".to_string() } else { gateway };
 
     // 2. Configure Container Side
-    // Add IP alias /32
-    let exec_ip = Command::new("docker")
+    // Add IP alias /32 (idempotent — ignore EEXIST)
+    let _ = Command::new("docker")
         .args(["exec", container, "ip", "addr", "add", &format!("{}/32", ip), "dev", "eth0"])
         .output();
     
     // Add route to WolfNet subnet via gateway
-    // Assuming WolfNet is 10.10.10.0/24 — really should get this from config but defaulting for now
     let subnet = "10.10.10.0/24";
     let _ = Command::new("docker")
-        .args(["exec", container, "ip", "route", "add", subnet, "via", &gateway])
+        .args(["exec", container, "ip", "route", "replace", subnet, "via", &gateway])
         .output();
 
-    if let Err(e) = exec_ip {
-        return Err(format!("Failed to configure container: {}", e));
+    // 3. Configure Host Side (idempotent — check before adding)
+    let check = Command::new("iptables")
+        .args(["-C", "FORWARD", "-i", "wolfnet0", "-o", "docker0", "-j", "ACCEPT"]).output();
+    if check.map(|o| !o.status.success()).unwrap_or(true) {
+        let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "wolfnet0", "-o", "docker0", "-j", "ACCEPT"]).output();
+        let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "docker0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
     }
 
-    // 3. Configure Host Side
-    // Enable forwarding for WolfNet <-> Docker
-    let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "wolfnet0", "-o", "docker0", "-j", "ACCEPT"]).output();
-    let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "docker0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
-
     // Route traffic for this container IP to docker0
+    let _ = Command::new("ip").args(["route", "del", &format!("{}/32", ip)]).output();
     let _ = Command::new("ip")
         .args(["route", "add", &format!("{}/32", ip), "dev", "docker0"])
         .output();
@@ -659,7 +658,25 @@ pub fn docker_logs(container: &str, lines: u32) -> Vec<String> {
 
 /// Start a Docker container
 pub fn docker_start(container: &str) -> Result<String, String> {
-    run_docker_cmd(&["start", container])
+    let result = run_docker_cmd(&["start", container])?;
+
+    // Re-apply WolfNet IP if configured
+    // Check if container has a wolfnet label
+    if let Ok(output) = Command::new("docker")
+        .args(["inspect", "--format", "{{index .Config.Labels \"wolfnet.ip\"}}", container])
+        .output()
+    {
+        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !ip.is_empty() && ip != "<no value>" {
+            info!("Re-applying WolfNet IP {} to Docker container {}", ip, container);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if let Err(e) = docker_connect_wolfnet(container, &ip) {
+                info!("WolfNet re-apply warning: {}", e);
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 /// Stop a Docker container
@@ -1306,6 +1323,14 @@ pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], 
         if !store.is_empty() {
             args.push("--storage-opt".to_string());
             args.push(format!("size={}", store));
+        }
+    }
+
+    // Label with WolfNet IP so it can be re-applied on start/restart
+    if let Some(ip) = wolfnet_ip {
+        if !ip.is_empty() {
+            args.push("--label".to_string());
+            args.push(format!("wolfnet.ip={}", ip));
         }
     }
 
