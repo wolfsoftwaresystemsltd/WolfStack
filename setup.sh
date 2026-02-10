@@ -59,6 +59,21 @@ fi
 
 echo "✓ System dependencies installed"
 
+# ─── Install Docker if missing ──────────────────────────────────────────────
+if ! command -v docker &> /dev/null; then
+    echo ""
+    echo "Installing Docker..."
+    if curl -fsSL https://get.docker.com | sh; then
+        systemctl enable docker 2>/dev/null || true
+        systemctl start docker 2>/dev/null || true
+        echo "✓ Docker installed"
+    else
+        echo "⚠ Failed to install Docker automatically. Please install manually."
+    fi
+else
+    echo "✓ Docker already installed"
+fi
+
 # ─── Install WolfNet (cluster network layer) ────────────────────────────────
 echo ""
 echo "Checking WolfNet (cluster networking)..."

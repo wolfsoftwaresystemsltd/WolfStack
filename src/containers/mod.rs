@@ -245,25 +245,56 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
     Ok(format!("Container '{}' routed to WolfNet at {}", container, ip))
 }
 
-/// Ensure lxcbr0 bridge exists for default LXC container networking
+/// Ensure lxcbr0 bridge exists for default LXC container networking (with DHCP/NAT)
 pub fn ensure_lxc_bridge() {
-    // Check if lxcbr0 already exists
-    if let Ok(output) = Command::new("ip").args(["link", "show", "lxcbr0"]).output() {
-        if output.status.success() { return; }
+    // 1. Try standard systemd service first
+    let _ = Command::new("systemctl").args(["enable", "--now", "lxc-net"]).output();
+    
+    // Wait briefly for service to start
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Check if lxcbr0 exists and has an IP
+    if let Ok(output) = Command::new("ip").args(["addr", "show", "lxcbr0"]).output() {
+        if output.status.success() { 
+            // Check if dnsmasq is running on it (port 53/67)
+            // ps aux | grep dnsmasq | grep lxcbr0
+            let ps = Command::new("pgrep").args(["-f", "dnsmasq.*lxcbr0"]).output();
+            if let Ok(p) = ps {
+                if p.status.success() { return; }
+            }
+        }
     }
 
-    info!("Creating lxcbr0 bridge for LXC container networking");
+    info!("Manually configuring lxcbr0 bridge and DHCP");
 
-    // Create bridge
+    // Create bridge (idempotent)
     let _ = Command::new("ip").args(["link", "add", "lxcbr0", "type", "bridge"]).output();
     let _ = Command::new("ip").args(["addr", "add", "10.0.3.1/24", "dev", "lxcbr0"]).output();
     let _ = Command::new("ip").args(["link", "set", "lxcbr0", "up"]).output();
 
-    // Enable NAT for container internet access
+    // Enable NAT
     let _ = Command::new("sh").args(["-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"]).output();
     let _ = Command::new("iptables").args(["-t", "nat", "-A", "POSTROUTING", "-s", "10.0.3.0/24", "!", "-d", "10.0.3.0/24", "-j", "MASQUERADE"]).output();
     let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "lxcbr0", "-j", "ACCEPT"]).output();
     let _ = Command::new("iptables").args(["-A", "FORWARD", "-o", "lxcbr0", "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"]).output();
+
+    // Start dnsmasq for DHCP
+    // dnsmasq --strict-order --bind-interfaces --pid-file=/run/lxc/dnsmasq.pid --listen-address 10.0.3.1 --dhcp-range 10.0.3.2,10.0.3.254 --dhcp-lease-max=253 --dhcp-no-override --except-interface=lo --interface=lxcbr0
+    let _ = std::fs::create_dir_all("/run/lxc");
+    let _ = Command::new("dnsmasq")
+        .args([
+            "--strict-order",
+            "--bind-interfaces",
+            "--pid-file=/run/lxc/dnsmasq.pid",
+            "--listen-address", "10.0.3.1",
+            "--dhcp-range", "10.0.3.2,10.0.3.254",
+            "--dhcp-lease-max=253",
+            "--dhcp-no-override",
+            "--except-interface=lo",
+            "--interface=lxcbr0",
+            "--conf-file=" // avoid reading /etc/dnsmasq.conf
+        ])
+        .spawn(); // Run in background
 }
 
 /// Configure an LXC container's network to use WolfNet
