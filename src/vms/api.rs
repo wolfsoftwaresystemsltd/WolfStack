@@ -9,6 +9,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
             .route("", web::get().to(list_vms))
             .route("/create", web::post().to(create_vm))
             .route("/{name}/action", web::post().to(vm_action))
+            .route("/{name}/logs", web::get().to(vm_logs))
             .route("/{name}", web::put().to(update_vm))
             .route("/{name}", web::delete().to(delete_vm))
             .route("/{name}", web::get().to(get_vm))
@@ -114,4 +115,16 @@ async fn vm_action(req: HttpRequest, state: web::Data<AppState>, path: web::Path
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "success": true })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
+}
+
+async fn vm_logs(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    let manager = state.vms.lock().unwrap();
+    
+    let log_path = manager.base_dir.join(format!("{}.log", name));
+    let log_content = std::fs::read_to_string(&log_path)
+        .unwrap_or_else(|_| "No logs available for this VM.".to_string());
+    
+    HttpResponse::Ok().json(serde_json::json!({ "name": name, "logs": log_content }))
 }

@@ -686,6 +686,7 @@ function renderVms(vms) {
                 <td>${wolfnetIp !== '—' ? `<span class="badge" style="background:var(--accent-bg); color:var(--accent);">${wolfnetIp}</span>` : '—'}</td>
                 <td>${vncText}</td>
                 <td>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="showVmLogs('${vm.name}')" title="Logs">📋</button>
                     ${vm.running ?
                 `<button class="btn btn-sm" style="margin:2px;" onclick="openVmConsole('${vm.name}')" title="Serial Terminal">💻</button>
                          ${vm.vnc_ws_port ? `<button class="btn btn-sm" style="margin:2px;" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port})" title="VNC Console">🖥️</button>` : ''}
@@ -2221,6 +2222,38 @@ function openVmVnc(name, wsPort) {
     const host = window.location.hostname;
     window.open(`/vnc.html?name=${encodeURIComponent(name)}&port=${wsPort}&host=${host}`,
         'vnc_' + name, 'width=1024,height=768,menubar=no,toolbar=no');
+}
+
+async function showVmLogs(name) {
+    const modal = document.getElementById('container-detail-modal');
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+
+    title.textContent = `VM Logs: ${name}`;
+    body.innerHTML = '<p style="color:var(--text-muted);">Loading...</p>';
+    modal.classList.add('active');
+
+    try {
+        const resp = await fetch(apiUrl(`/api/vms/${name}/logs`));
+        const data = await resp.json();
+
+        body.innerHTML = `
+            <div style="padding: 1rem;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                    <label style="color:var(--text-muted); font-size:13px;">QEMU output log</label>
+                    <button class="btn btn-sm" onclick="showVmLogs('${name}')">🔄 Refresh</button>
+                </div>
+                <pre style="background:#0d1117; color:#c9d1d9; padding:16px; border-radius:8px; 
+                            max-height:400px; overflow:auto; font-size:13px; line-height:1.5;
+                            border:1px solid #21262d; white-space:pre-wrap; word-break:break-all;">${data.logs ? data.logs.replace(/</g, '&lt;').replace(/>/g, '&gt;') : 'No logs available.'}</pre>
+                <div style="margin-top:12px;">
+                    <button class="btn" onclick="closeContainerDetail()">Close</button>
+                </div>
+            </div>
+        `;
+    } catch (e) {
+        body.innerHTML = `<p style="color:var(--danger); padding:1rem;">Failed to load logs: ${e.message}</p>`;
+    }
 }
 
 async function showVmSettings(name) {

@@ -46,7 +46,7 @@ fn generate_mac() -> String {
 }
 
 pub struct VmManager {
-    base_dir: PathBuf,
+    pub base_dir: PathBuf,
 }
 
 impl VmManager {
@@ -313,19 +313,43 @@ impl VmManager {
         info!("Starting VM {}: qemu-system-x86_64 (KVM: {}, VNC :{}, WS :{})", 
               name, kvm_available, vnc_num, ws_port);
 
+        // Log QEMU stderr so we can diagnose startup failures
+        let log_path = self.base_dir.join(format!("{}.log", name));
+        let log_file = std::fs::File::create(&log_path).ok();
+
+        // Configure stderr redirect
+        if let Some(log) = log_file {
+            cmd.stderr(std::process::Stdio::from(log));
+        }
+
         let output = cmd.output().map_err(|e| format!("Failed to execute QEMU: {}", e))?;
         
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            error!("QEMU failed for VM {}: stderr={} stdout={}", name, stderr, stdout);
+            let log_content = fs::read_to_string(&log_path).unwrap_or_default();
+            let err_msg = if !stderr.is_empty() { stderr } else { log_content };
+            error!("QEMU failed for VM {}: {}", name, err_msg);
             
-            // Clean up TAP on failure
             if config.wolfnet_ip.is_some() {
                 let tap = Self::tap_name(name);
                 let _ = self.cleanup_tap(&tap);
             }
-            return Err(format!("QEMU failed to start: {}", stderr));
+            return Err(format!("QEMU failed to start: {}", err_msg));
+        }
+
+        // -daemonize makes QEMU fork, so output.status may be 0 even if the child crashes.
+        // Wait a moment and verify the process is actually running.
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        
+        if !self.check_running(name) {
+            let log_content = fs::read_to_string(&log_path).unwrap_or_else(|_| "no log available".to_string());
+            error!("VM {} exited immediately after daemonize. Log: {}", name, log_content);
+            
+            if config.wolfnet_ip.is_some() {
+                let tap = Self::tap_name(name);
+                let _ = self.cleanup_tap(&tap);
+            }
+            return Err(format!("VM crashed immediately after starting. QEMU log:\n{}", log_content));
         }
 
         // Save runtime port info so frontend can connect
