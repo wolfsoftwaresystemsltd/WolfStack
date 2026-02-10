@@ -2,6 +2,8 @@
 
 A beautiful, Proxmox-like management dashboard for the Wolf Software suite. Monitor your servers, manage components, control services, and edit configurations — all from one place.
 
+![WolfStack Dashboard](screenshot.png)
+
 ## Quick Install
 
 ```bash
