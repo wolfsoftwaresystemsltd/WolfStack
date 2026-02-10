@@ -1445,7 +1445,13 @@ pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], 
 
     // Label with WolfNet IP so it can be re-applied on start/restart
     if let Some(ip) = wolfnet_ip {
+        let ip = ip.trim();
         if !ip.is_empty() {
+            // Validate IP format
+            let parts: Vec<&str> = ip.split('.').collect();
+            if parts.len() != 4 || parts.iter().any(|p| p.parse::<u8>().is_err()) {
+                return Err(format!("Invalid WolfNet IP: '{}' — must be like 10.10.10.100", ip));
+            }
             args.push("--label".to_string());
             args.push(format!("wolfnet.ip={}", ip));
         }
@@ -1480,27 +1486,19 @@ pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], 
         let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
         info!("Docker container {} created ({})", name, &id[..12.min(id.len())]);
 
-        // Connect to WolfNet if requested
-        if let Some(ip) = wolfnet_ip {
-            if !ip.is_empty() {
-                match docker_connect_wolfnet(name, ip) {
-                    Ok(msg) => info!("{}", msg),
-                    Err(e) => info!("WolfNet connect warning: {} (container still created)", e),
-                }
-            }
-        }
+        // WolfNet is applied on docker_start (reads wolfnet.ip label) — not here,
+        // because the container isn't running yet and docker exec would fail.
 
         let wolfnet_msg = wolfnet_ip
             .filter(|ip| !ip.is_empty())
-            .map(|ip| format!(" [WolfNet: {}]", ip))
+            .map(|ip| format!(" [WolfNet: {} — applied on start]", ip))
             .unwrap_or_default();
 
         Ok(format!("Container '{}' created ({}){}", name, &id[..12.min(id.len())], wolfnet_msg))
     } else {
-        Err(format!(
-            "Create failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        error!("Docker create failed: {}", stderr);
+        Err(format!("Create failed: {}", stderr))
     }
 }
 
