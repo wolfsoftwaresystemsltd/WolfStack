@@ -976,16 +976,19 @@ function renderDockerContainers(containers) {
             <td style="font-size:11px;">${ports}</td>
             <td>
                 ${isRunning ? `
-                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.id}', 'stop')" title="Stop">⏹</button>
-                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.id}', 'restart')" title="Restart">🔄</button>
-                    <button class="btn btn-sm" style="margin:2px;" onclick="openConsole('docker', '${c.id}')" title="Console">💻</button>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'stop')" title="Stop">⏹</button>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'restart')" title="Restart">🔄</button>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'pause')" title="Pause">⏸</button>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="openConsole('docker', '${c.name}')" title="Console">💻</button>
+                ` : isPaused ? `
+                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'unpause')" title="Unpause">▶</button>
                 ` : `
-                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.id}', 'start')" title="Start">▶</button>
-                    <button class="btn btn-sm" style="margin:2px;color:#ef4444;" onclick="dockerAction('${c.id}', 'remove')" title="Remove">🗑</button>
+                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'start')" title="Start">▶</button>
+                    <button class="btn btn-sm" style="margin:2px;color:#ef4444;" onclick="dockerAction('${c.name}', 'remove')" title="Remove">🗑</button>
                 `}
-                <button class="btn btn-sm" style="margin:2px;" onclick="dockerLogs('${c.id}')" title="Logs">📜</button>
-                <button class="btn btn-sm" style="margin:2px;" onclick="cloneDockerContainer('${c.id}')" title="Clone">📋</button>
-                <button class="btn btn-sm" style="margin:2px;" onclick="moveDockerContainer('${c.id}')" title="Migrate">🚀</button>
+                <button class="btn btn-sm" style="margin:2px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs">📜</button>
+                <button class="btn btn-sm" style="margin:2px;" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button>
+                <button class="btn btn-sm" style="margin:2px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>
             </td>
         </tr>`;
     }).join('');
@@ -1350,98 +1353,27 @@ function showDockerCreate() {
     const title = document.getElementById('container-detail-title');
     const body = document.getElementById('container-detail-body');
 
-    title.textContent = 'Create Docker Container';
+    title.textContent = 'Create Docker Container — Step 1: Select Image';
     body.innerHTML = `
         <div style="padding: 1rem;">
-            <div style="margin-bottom: 1.5rem;">
-                <h4 style="margin-bottom: 0.5rem;">🔍 Search Docker Hub</h4>
-                <div style="display:flex; gap:8px;">
+            <div style="margin-bottom: 1rem;">
+                <p style="color:var(--text-muted); font-size:13px; margin-bottom:12px;">
+                    Search Docker Hub for an image, or type a custom image name below.
+                </p>
+                <div style="display:flex; gap:8px; margin-bottom:12px;">
                     <input id="docker-search-input" type="text" placeholder="Search for images (e.g. debian, nginx, postgres...)"
                         style="flex:1; padding:8px 12px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:14px;"
                         onkeypress="if(event.key==='Enter') searchDockerHub()">
                     <button class="btn btn-primary" onclick="searchDockerHub()">Search</button>
                 </div>
-            </div>
-            <div id="docker-search-results"></div>
-            <div id="docker-create-form" style="display:none; margin-top:1.5rem; border-top:1px solid var(--border); padding-top:1.5rem;">
-                <h4 style="margin-bottom: 0.5rem;">📦 Create Container</h4>
-                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
-                    <div>
-                        <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Container Name</label>
-                        <input id="docker-create-name" type="text" placeholder="my-container"
-                            style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                <div id="docker-search-results"></div>
+                <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
+                    <p style="font-size:13px; color:var(--text-muted); margin-bottom:8px;">Or enter a custom image name:</p>
+                    <div style="display:flex; gap:8px;">
+                        <input id="docker-custom-image" type="text" placeholder="e.g. myregistry/myimage:latest"
+                            style="flex:1; padding:8px 12px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:14px;">
+                        <button class="btn btn-primary" onclick="selectDockerImage(document.getElementById('docker-custom-image').value.trim())" style="font-size:12px;">Use This →</button>
                     </div>
-                    <div>
-                        <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Image</label>
-                        <input id="docker-create-image" type="text" placeholder="debian:11"
-                            style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
-                    </div>
-                </div>
-                <div style="margin-bottom:12px;">
-                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Port Mappings <span style="font-weight:400; color:var(--text-muted);">(comma-separated, e.g. 8080:80, 443:443)</span></label>
-                    <input id="docker-create-ports" type="text" placeholder="8080:80"
-                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
-                </div>
-                <div style="margin-bottom:12px;">
-                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Environment Variables <span style="font-weight:400; color:var(--text-muted);">(comma-separated, e.g. KEY=val)</span></label>
-                    <input id="docker-create-env" type="text" placeholder="MYSQL_ROOT_PASSWORD=secret"
-                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
-                </div>
-                <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:12px;">
-                    <div>
-                        <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">🧠 Memory Limit</label>
-                        <select id="docker-create-memory"
-                            style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
-                            <option value="">Unlimited</option>
-                            <option value="256m">256 MB</option>
-                            <option value="512m">512 MB</option>
-                            <option value="1g" selected>1 GB</option>
-                            <option value="2g">2 GB</option>
-                            <option value="4g">4 GB</option>
-                            <option value="8g">8 GB</option>
-                            <option value="16g">16 GB</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">⚡ CPU Cores</label>
-                        <select id="docker-create-cpus"
-                            style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
-                            <option value="">Unlimited</option>
-                            <option value="1" selected>1 core</option>
-                            <option value="2">2 cores</option>
-                            <option value="4">4 cores</option>
-                            <option value="8">8 cores</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">💾 Storage Limit</label>
-                        <select id="docker-create-storage"
-                            style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
-                            <option value="">Unlimited</option>
-                            <option value="1G">1 GB</option>
-                            <option value="5G">5 GB</option>
-                            <option value="10G" selected>10 GB</option>
-                            <option value="20G">20 GB</option>
-                            <option value="50G">50 GB</option>
-                        </select>
-                    </div>
-                </div>
-                <div id="docker-wolfnet-section" style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
-                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
-                        <span>🐺</span>
-                        <strong style="font-size:13px;">WolfNet Networking</strong>
-                        <span id="docker-wolfnet-status" style="font-size:12px; color:var(--text-muted);">Checking...</span>
-                    </div>
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <label style="font-size:13px; white-space:nowrap;">Assign IP:</label>
-                        <input id="docker-wolfnet-ip" type="text" placeholder="auto"
-                            style="flex:1; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
-                        <span style="font-size:12px; color:var(--text-muted);">Leave empty for no WolfNet</span>
-                    </div>
-                </div>
-                <div style="display:flex; gap:8px;">
-                    <button class="btn btn-primary" onclick="createDockerContainer()">🐳 Pull & Create</button>
-                    <button class="btn" onclick="closeContainerDetail()">Cancel</button>
                 </div>
             </div>
         </div>
@@ -1475,7 +1407,7 @@ async function searchDockerHub() {
                             <td><strong>${r.name}</strong>${r.official ? ' <span style="color:#10b981; font-size:11px;">✓ Official</span>' : ''}</td>
                             <td style="font-size:12px; max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${r.description}</td>
                             <td style="text-align:center;">${r.stars}</td>
-                            <td><button class="btn btn-sm btn-primary" onclick="selectDockerImage('${r.name}')" style="font-size:11px;">Select</button></td>
+                            <td><button class="btn btn-sm btn-primary" onclick="selectDockerImage('${r.name}')" style="font-size:11px;">Select →</button></td>
                         </tr>`).join('')}
                     </tbody>
                 </table>
@@ -1487,9 +1419,111 @@ async function searchDockerHub() {
 }
 
 function selectDockerImage(imageName) {
-    document.getElementById('docker-create-form').style.display = '';
-    document.getElementById('docker-create-image').value = imageName;
-    document.getElementById('docker-create-name').value = imageName.replace(/[\/:.]/g, '-');
+    if (!imageName) { showToast('Please enter an image name', 'error'); return; }
+
+    // Move to Step 2: Configuration
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+
+    title.textContent = 'Create Docker Container — Step 2: Configure';
+
+    const safeName = imageName.replace(/[\/:.]/g, '-');
+
+    body.innerHTML = `
+        <div style="padding: 1rem;">
+            <div style="margin-bottom:16px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <span style="font-size:24px;">🐳</span>
+                    <div style="flex:1;">
+                        <strong style="font-size:15px;">${imageName}</strong>
+                        <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">Docker Hub image</div>
+                    </div>
+                    <button class="btn btn-sm" onclick="showDockerCreate()" style="font-size:11px;">← Change</button>
+                </div>
+            </div>
+            <input type="hidden" id="docker-create-image" value="${imageName}">
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                <div>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Container Name</label>
+                    <input id="docker-create-name" type="text" value="${safeName}" placeholder="my-container"
+                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                </div>
+                <div>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Image Tag</label>
+                    <input id="docker-create-tag" type="text" value="latest" placeholder="latest"
+                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                </div>
+            </div>
+            <div style="margin-bottom:12px;">
+                <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Port Mappings <span style="font-weight:400; color:var(--text-muted);">(comma-separated, e.g. 8080:80, 443:443)</span></label>
+                <input id="docker-create-ports" type="text" placeholder="8080:80"
+                    style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+            </div>
+            <div style="margin-bottom:12px;">
+                <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Environment Variables <span style="font-weight:400; color:var(--text-muted);">(comma-separated, e.g. KEY=val)</span></label>
+                <input id="docker-create-env" type="text" placeholder="MYSQL_ROOT_PASSWORD=secret"
+                    style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:12px;">
+                <div>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">🧠 Memory Limit</label>
+                    <select id="docker-create-memory"
+                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                        <option value="">Unlimited</option>
+                        <option value="256m">256 MB</option>
+                        <option value="512m">512 MB</option>
+                        <option value="1g" selected>1 GB</option>
+                        <option value="2g">2 GB</option>
+                        <option value="4g">4 GB</option>
+                        <option value="8g">8 GB</option>
+                        <option value="16g">16 GB</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">⚡ CPU Cores</label>
+                    <select id="docker-create-cpus"
+                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                        <option value="">Unlimited</option>
+                        <option value="1" selected>1 core</option>
+                        <option value="2">2 cores</option>
+                        <option value="4">4 cores</option>
+                        <option value="8">8 cores</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">💾 Storage Limit</label>
+                    <select id="docker-create-storage"
+                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                        <option value="">Unlimited</option>
+                        <option value="1G">1 GB</option>
+                        <option value="5G">5 GB</option>
+                        <option value="10G" selected>10 GB</option>
+                        <option value="20G">20 GB</option>
+                        <option value="50G">50 GB</option>
+                    </select>
+                </div>
+            </div>
+            <div id="docker-wolfnet-section" style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                    <span>🐺</span>
+                    <strong style="font-size:13px;">WolfNet Networking</strong>
+                    <span id="docker-wolfnet-status" style="font-size:12px; color:var(--text-muted);">Checking...</span>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <label style="font-size:13px; white-space:nowrap;">Assign IP:</label>
+                    <input id="docker-wolfnet-ip" type="text" placeholder="auto"
+                        style="flex:1; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                    <span style="font-size:12px; color:var(--text-muted);">Leave empty for no WolfNet</span>
+                </div>
+            </div>
+            <div style="display:flex; gap:8px;">
+                <button class="btn btn-primary" onclick="createDockerContainer()">🐳 Pull & Create</button>
+                <button class="btn" onclick="showDockerCreate()">← Back</button>
+                <button class="btn" onclick="closeContainerDetail()">Cancel</button>
+            </div>
+        </div>
+    `;
+
     document.getElementById('docker-create-name').focus();
 
     // Fetch WolfNet status
@@ -1576,7 +1610,7 @@ function showLxcCreate() {
     const title = document.getElementById('container-detail-title');
     const body = document.getElementById('container-detail-body');
 
-    title.textContent = 'Create LXC Container';
+    title.textContent = 'Create LXC Container — Step 1: Select Template';
     body.innerHTML = '<p style="color:var(--text-muted); text-align:center; padding:2rem;">Loading available templates...</p>';
     modal.classList.add('active');
 
@@ -1594,120 +1628,25 @@ async function loadLxcTemplates() {
 
         const templates = lxcTemplatesCache;
 
-        // Get unique distributions sorted
-        const distros = [...new Set(templates.map(t => t.distribution))].sort();
-
         body.innerHTML = `
             <div style="padding: 1rem;">
-                <div style="margin-bottom: 1.5rem;">
-                    <h4 style="margin-bottom: 0.5rem;">📦 Browse LXC Templates</h4>
+                <div style="margin-bottom: 1rem;">
                     <p style="color:var(--text-muted); font-size:13px; margin-bottom:12px;">
-                        ${templates.length} templates available from the LXC image server
+                        ${templates.length} templates available from the LXC image server.
+                        <strong>Variant</strong> indicates the image type: <span style="color:#10b981;">server</span> (default/minimal), <span style="color:#3b82f6;">cloud</span> (cloud-init), or <span style="color:#f59e0b;">desktop</span> (GUI — not recommended for containers).
                     </p>
                     <div style="display:flex; gap:8px; margin-bottom:12px;">
-                        <input id="lxc-template-filter" type="text" placeholder="Filter templates (e.g. debian, ubuntu, alpine...)"
+                        <input id="lxc-template-filter" type="text" placeholder="Filter templates (e.g. debian, ubuntu, alpine, default, cloud...)"
                             style="flex:1; padding:8px 12px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:14px;"
                             oninput="filterLxcTemplates()">
                     </div>
-                    <div id="lxc-template-list" style="max-height:200px; overflow-y:auto; border:1px solid var(--border); border-radius:8px;">
+                    <div id="lxc-template-list" style="max-height:350px; overflow-y:auto; border:1px solid var(--border); border-radius:8px;">
                         <table class="data-table" style="margin:0;">
-                            <thead><tr><th>Distribution</th><th>Release</th><th>Arch</th><th></th></tr></thead>
+                            <thead><tr><th>Distribution</th><th>Release</th><th>Variant</th><th>Arch</th><th>Image Path</th><th></th></tr></thead>
                             <tbody id="lxc-template-tbody">
                                 ${renderLxcTemplateRows(templates)}
                             </tbody>
                         </table>
-                    </div>
-                </div>
-                <div id="lxc-create-form" style="display:none; border-top:1px solid var(--border); padding-top:1.5rem;">
-                    <h4 style="margin-bottom: 0.5rem;">🚀 Create Container</h4>
-                    <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:12px; margin-bottom:12px;">
-                        <div>
-                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Container Name</label>
-                            <input id="lxc-create-name" type="text" placeholder="my-container"
-                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
-                        </div>
-                        <div>
-                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Distribution</label>
-                            <input id="lxc-create-distro" type="text" readonly
-                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-tertiary); color:var(--text-primary);">
-                        </div>
-                        <div>
-                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Release</label>
-                            <input id="lxc-create-release" type="text" readonly
-                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-tertiary); color:var(--text-primary);">
-                        </div>
-                        <div>
-                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Architecture</label>
-                            <input id="lxc-create-arch" type="text" readonly
-                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-tertiary); color:var(--text-primary);">
-                        </div>
-                    </div>
-                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
-                        <div>
-                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">🔑 Root Password</label>
-                            <input id="lxc-create-password" type="password" placeholder="Set root password"
-                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
-                        </div>
-                        <div style="display:flex; align-items:end;">
-                            <span style="font-size:12px; color:var(--text-muted); padding-bottom:10px;">Required to log in to the container</span>
-                        </div>
-                    </div>
-                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
-                        <div>
-                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">💾 Storage Location</label>
-                            <select id="lxc-create-storage"
-                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
-                                <option value="/var/lib/lxc">/var/lib/lxc (default)</option>
-                            </select>
-                        </div>
-                        <div style="display:flex; align-items:end;">
-                            <span id="lxc-storage-info" style="font-size:12px; color:var(--text-muted); padding-bottom:10px;"></span>
-                        </div>
-                    </div>
-                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
-                        <div>
-                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">🧠 Memory Limit</label>
-                            <select id="lxc-create-memory"
-                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
-                                <option value="">Unlimited</option>
-                                <option value="256M">256 MB</option>
-                                <option value="512M">512 MB</option>
-                                <option value="1G" selected>1 GB</option>
-                                <option value="2G">2 GB</option>
-                                <option value="4G">4 GB</option>
-                                <option value="8G">8 GB</option>
-                                <option value="16G">16 GB</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">⚡ CPU Cores</label>
-                            <select id="lxc-create-cpus"
-                                style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
-                                <option value="">Unlimited</option>
-                                <option value="1" selected>1 core</option>
-                                <option value="2">2 cores</option>
-                                <option value="4">4 cores</option>
-                                <option value="8">8 cores</option>
-                                <option value="16">16 cores</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div id="lxc-wolfnet-section" style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
-                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
-                            <span>🐺</span>
-                            <strong style="font-size:13px;">WolfNet Networking</strong>
-                            <span id="lxc-wolfnet-status" style="font-size:12px; color:var(--text-muted);">Checking...</span>
-                        </div>
-                        <div id="lxc-wolfnet-ip-row" style="display:flex; align-items:center; gap:8px;">
-                            <label style="font-size:13px; white-space:nowrap;">Assign IP:</label>
-                            <input id="lxc-wolfnet-ip" type="text" placeholder="auto"
-                                style="flex:1; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
-                            <span style="font-size:12px; color:var(--text-muted);">Leave empty for no WolfNet</span>
-                        </div>
-                    </div>
-                    <div style="display:flex; gap:8px;">
-                        <button class="btn btn-primary" onclick="createLxcContainer()">📦 Create</button>
-                        <button class="btn" onclick="closeContainerDetail()">Cancel</button>
                     </div>
                 </div>
             </div>
@@ -1718,15 +1657,32 @@ async function loadLxcTemplates() {
     }
 }
 
+function variantBadge(variant) {
+    const v = (variant || 'default').toLowerCase();
+    if (v === 'cloud') return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#3b82f620;color:#3b82f6;">☁ cloud</span>';
+    if (v === 'desktop' || v === 'gui') return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#f59e0b20;color:#f59e0b;">🖥 desktop</span>';
+    return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#10b98120;color:#10b981;">⚙ server</span>';
+}
+
+function variantDescription(variant) {
+    const v = (variant || 'default').toLowerCase();
+    if (v === 'cloud') return 'Cloud-init enabled image for automated provisioning';
+    if (v === 'desktop' || v === 'gui') return '⚠️ Full desktop environment — heavy, not recommended for containers';
+    return 'Minimal server image — recommended for containers';
+}
+
 function renderLxcTemplateRows(templates) {
-    return templates.slice(0, 50).map(t =>
-        `<tr>
+    return templates.slice(0, 100).map(t => {
+        const imagePath = `${t.distribution}/${t.release}/${t.architecture}/${t.variant || 'default'}`;
+        return `<tr>
             <td><strong>${t.distribution}</strong></td>
             <td>${t.release}</td>
+            <td>${variantBadge(t.variant)}</td>
             <td>${t.architecture}</td>
-            <td><button class="btn btn-sm btn-primary" onclick="selectLxcTemplate('${t.distribution}','${t.release}','${t.architecture}')" style="font-size:11px;">Select</button></td>
-        </tr>`
-    ).join('');
+            <td style="font-size:11px; font-family:monospace; color:var(--text-muted);">${imagePath}</td>
+            <td><button class="btn btn-sm btn-primary" onclick="selectLxcTemplate('${t.distribution}','${t.release}','${t.architecture}','${t.variant || 'default'}')" style="font-size:11px;">Select →</button></td>
+        </tr>`;
+    }).join('');
 }
 
 function filterLxcTemplates() {
@@ -1734,17 +1690,109 @@ function filterLxcTemplates() {
     const filtered = (lxcTemplatesCache || []).filter(t =>
         t.distribution.toLowerCase().includes(query) ||
         t.release.toLowerCase().includes(query) ||
-        t.architecture.toLowerCase().includes(query)
+        t.architecture.toLowerCase().includes(query) ||
+        (t.variant || 'default').toLowerCase().includes(query)
     );
     document.getElementById('lxc-template-tbody').innerHTML = renderLxcTemplateRows(filtered);
 }
 
-function selectLxcTemplate(distro, release, arch) {
-    document.getElementById('lxc-create-form').style.display = '';
-    document.getElementById('lxc-create-distro').value = distro;
-    document.getElementById('lxc-create-release').value = release;
-    document.getElementById('lxc-create-arch').value = arch;
-    document.getElementById('lxc-create-name').value = `${distro}-${release}`;
+function selectLxcTemplate(distro, release, arch, variant) {
+    // Move to Step 2: Configuration
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+
+    title.textContent = 'Create LXC Container — Step 2: Configure';
+
+    body.innerHTML = `
+        <div style="padding: 1rem;">
+            <div style="margin-bottom:16px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
+                <div style="display:flex; align-items:center; gap:12px; margin-bottom:8px;">
+                    <span style="font-size:24px;">📦</span>
+                    <div style="flex:1;">
+                        <strong style="font-size:15px;">${distro} ${release}</strong>
+                        <span style="margin-left:8px;">${variantBadge(variant)}</span>
+                        <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">${variantDescription(variant)}</div>
+                        <div style="font-size:11px; font-family:monospace; color:var(--text-muted); margin-top:2px;">Image: ${distro}/${release}/${arch}/${variant}</div>
+                    </div>
+                    <button class="btn btn-sm" onclick="showLxcCreate()" style="font-size:11px;">← Change</button>
+                </div>
+            </div>
+            <input type="hidden" id="lxc-create-distro" value="${distro}">
+            <input type="hidden" id="lxc-create-release" value="${release}">
+            <input type="hidden" id="lxc-create-arch" value="${arch}">
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                <div>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Container Name</label>
+                    <input id="lxc-create-name" type="text" value="${distro}-${release}" placeholder="my-container"
+                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                </div>
+                <div>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">🔑 Root Password</label>
+                    <input id="lxc-create-password" type="password" placeholder="Set root password"
+                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                </div>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                <div>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">💾 Storage Location</label>
+                    <select id="lxc-create-storage"
+                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                        <option value="/var/lib/lxc">/var/lib/lxc (default)</option>
+                    </select>
+                </div>
+                <div style="display:flex; align-items:end;">
+                    <span id="lxc-storage-info" style="font-size:12px; color:var(--text-muted); padding-bottom:10px;"></span>
+                </div>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                <div>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">🧠 Memory Limit</label>
+                    <select id="lxc-create-memory"
+                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                        <option value="">Unlimited</option>
+                        <option value="256M">256 MB</option>
+                        <option value="512M">512 MB</option>
+                        <option value="1G" selected>1 GB</option>
+                        <option value="2G">2 GB</option>
+                        <option value="4G">4 GB</option>
+                        <option value="8G">8 GB</option>
+                        <option value="16G">16 GB</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">⚡ CPU Cores</label>
+                    <select id="lxc-create-cpus"
+                        style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                        <option value="">Unlimited</option>
+                        <option value="1" selected>1 core</option>
+                        <option value="2">2 cores</option>
+                        <option value="4">4 cores</option>
+                        <option value="8">8 cores</option>
+                        <option value="16">16 cores</option>
+                    </select>
+                </div>
+            </div>
+            <div id="lxc-wolfnet-section" style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                    <span>🐺</span>
+                    <strong style="font-size:13px;">WolfNet Networking</strong>
+                    <span id="lxc-wolfnet-status" style="font-size:12px; color:var(--text-muted);">Checking...</span>
+                </div>
+                <div id="lxc-wolfnet-ip-row" style="display:flex; align-items:center; gap:8px;">
+                    <label style="font-size:13px; white-space:nowrap;">Assign IP:</label>
+                    <input id="lxc-wolfnet-ip" type="text" placeholder="auto"
+                        style="flex:1; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                    <span style="font-size:12px; color:var(--text-muted);">Leave empty for no WolfNet</span>
+                </div>
+            </div>
+            <div style="display:flex; gap:8px;">
+                <button class="btn btn-primary" onclick="createLxcContainer()">📦 Create Container</button>
+                <button class="btn" onclick="showLxcCreate()">← Back</button>
+                <button class="btn" onclick="closeContainerDetail()">Cancel</button>
+            </div>
+        </div>
+    `;
+
     document.getElementById('lxc-create-name').focus();
 
     // Populate storage dropdown from disk metrics
@@ -1753,11 +1801,9 @@ function selectLxcTemplate(distro, release, arch) {
     const storageInfo = document.getElementById('lxc-storage-info');
     if (node?.metrics?.disks && node.metrics.disks.length > 0) {
         storageSelect.innerHTML = '';
-        // Add /var/lib/lxc as default (on root)
         const rootDisk = node.metrics.disks.find(d => d.mount_point === '/');
         const rootFree = rootDisk ? ` (${formatBytes(rootDisk.available_bytes)} free)` : '';
         storageSelect.innerHTML += `<option value="/var/lib/lxc">/var/lib/lxc (default)${rootFree}</option>`;
-        // Add all other mount points with sufficient space
         node.metrics.disks.forEach(d => {
             if (d.mount_point !== '/' && d.available_bytes > 1073741824) {
                 const free = formatBytes(d.available_bytes);
@@ -1779,7 +1825,6 @@ function selectLxcTemplate(distro, release, arch) {
     fetch(apiUrl('/api/wolfnet/status'))
         .then(r => r.json())
         .then(status => {
-            const section = document.getElementById('lxc-wolfnet-section');
             const statusEl = document.getElementById('lxc-wolfnet-status');
             const ipInput = document.getElementById('lxc-wolfnet-ip');
             if (status.available) {

@@ -1012,10 +1012,10 @@ pub fn lxc_list_templates() -> Vec<LxcTemplate> {
             let arch = parts[2].trim();
             let variant = parts[3].trim();
 
-            // Only include amd64 default variant to keep list manageable
+            // Include all variants so user can see what type of image it is
             let variant_str = if variant.is_empty() { "default" } else { variant };
-            if arch == "amd64" && variant_str == "default" && !dist.is_empty() && !rel.is_empty() {
-                let key = format!("{}-{}-{}", dist, rel, arch);
+            if arch == "amd64" && !dist.is_empty() && !rel.is_empty() {
+                let key = format!("{}-{}-{}-{}", dist, rel, arch, variant_str);
                 if seen.insert(key) {
                     templates.push(LxcTemplate {
                         distribution: dist.to_string(),
