@@ -13,6 +13,7 @@ mod auth;
 mod monitoring;
 mod installer;
 mod containers;
+mod console;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_files;
@@ -155,6 +156,7 @@ async fn main() -> std::io::Result<()> {
             App::new()
                 .app_data(app_state.clone())
                 .configure(api::configure)
+                .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
                 .route("/", web::get().to(index_handler))
                 .service(actix_files::Files::new("/", &web_dir).index_file("login.html"))
         })
