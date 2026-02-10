@@ -330,64 +330,50 @@ fn lxc_apply_wolfnet(container: &str) {
         if ip.is_empty() { return; }
         info!("Applying WolfNet IP {} to container {}", ip, container);
 
-        // Wait for container networking to be ready
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        // Wait for container to be ready
+        std::thread::sleep(std::time::Duration::from_secs(2));
 
-        // Step 1: Ensure container has a bridge IPv4 (10.0.3.x) on eth0
-        let mut bridge_ip = get_container_ipv4(container);
+        // Derive bridge IP from WolfNet IP last octet (e.g. 10.10.10.100 → 10.0.3.200)
+        let last: u8 = ip.split('.').last()
+            .and_then(|s| s.parse::<u8>().ok())
+            .unwrap_or(50)
+            .wrapping_add(100);
+        let bridge_ip = format!("10.0.3.{}", last);
+        info!("Container {} → bridge={}, wolfnet={}", container, bridge_ip, ip);
 
-        if bridge_ip.is_empty() {
-            // Check if container uses systemd-networkd — fix its config for DHCPv4
-            let has_networkd = Command::new("lxc-attach")
-                .args(["-n", container, "--", "test", "-d", "/etc/systemd/network"])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-
-            if has_networkd {
-                info!("Container uses systemd-networkd, enabling DHCPv4...");
-                let networkd_conf = "[Match]\nName=eth0\n\n[Network]\nDHCP=ipv4\n\n[DHCPv4]\nUseDNS=yes\nUseRoutes=yes\n";
-                let _ = Command::new("lxc-attach")
-                    .args(["-n", container, "--", "sh", "-c",
-                        &format!("printf '{}' > /etc/systemd/network/eth0.network && systemctl restart systemd-networkd", networkd_conf)])
-                    .output();
-                // Wait for DHCP lease
-                std::thread::sleep(std::time::Duration::from_secs(3));
-                bridge_ip = get_container_ipv4(container);
-            } else {
-                // Try dhclient for non-systemd distros
-                info!("Trying dhclient...");
-                let _ = Command::new("lxc-attach")
-                    .args(["-n", container, "--", "dhclient", "-4", "eth0"])
-                    .output();
-                std::thread::sleep(std::time::Duration::from_secs(3));
-                bridge_ip = get_container_ipv4(container);
-            }
+        // Write static networkd config directly to rootfs
+        let networkd_conf = format!(
+            "[Match]\nName=eth0\n\n[Network]\nAddress={}/24\nGateway=10.0.3.1\nDNS=10.0.3.1\nDNS=8.8.8.8\n",
+            bridge_ip
+        );
+        let network_dir = format!("/var/lib/lxc/{}/rootfs/etc/systemd/network", container);
+        if std::path::Path::new(&network_dir).exists() {
+            let _ = std::fs::write(format!("{}/eth0.network", network_dir), &networkd_conf);
         }
 
-        if bridge_ip.is_empty() {
-            // Static fallback: derive 10.0.3.x from last octet of WolfNet IP
-            let last: u8 = ip.split('.').last()
-                .and_then(|s| s.parse::<u8>().ok())
-                .unwrap_or(50)
-                .wrapping_add(100);
-            bridge_ip = format!("10.0.3.{}", last);
-            info!("DHCP failed, assigning static bridge IP: {}", bridge_ip);
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", bridge_ip), "dev", "eth0"])
-                .output();
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "route", "add", "default", "via", "10.0.3.1"])
-                .output();
-        }
-        info!("Container {} bridge IP: {}", container, bridge_ip);
+        // Write resolv.conf directly (fallback for containers without systemd-resolved)
+        let resolv_path = format!("/var/lib/lxc/{}/rootfs/etc/resolv.conf", container);
+        let _ = std::fs::remove_file(&resolv_path); // might be a symlink to systemd
+        let _ = std::fs::write(&resolv_path, "nameserver 10.0.3.1\nnameserver 8.8.8.8\n");
 
-        // Step 2: Add WolfNet IP as secondary /32 on eth0
+        // Apply IPs via lxc-attach (immediate effect)
+        let _ = Command::new("lxc-attach")
+            .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", bridge_ip), "dev", "eth0"])
+            .output();
+        let _ = Command::new("lxc-attach")
+            .args(["-n", container, "--", "ip", "route", "replace", "default", "via", "10.0.3.1"])
+            .output();
+        // Restart networkd to pick up config (for persistence across container restarts)
+        let _ = Command::new("lxc-attach")
+            .args(["-n", container, "--", "systemctl", "restart", "systemd-networkd"])
+            .output();
+
+        // Add WolfNet IP as secondary /32 on eth0
         let _ = Command::new("lxc-attach")
             .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "eth0"])
             .output();
 
-        // Step 3: Host route — via bridge IP so ARP resolves on lxcbr0
+        // Host route — via bridge IP so ARP resolves on lxcbr0
         let _ = Command::new("ip").args(["route", "del", &format!("{}/32", ip)]).output();
         let out = Command::new("ip")
             .args(["route", "add", &format!("{}/32", ip), "via", &bridge_ip, "dev", "lxcbr0"])
@@ -400,7 +386,7 @@ fn lxc_apply_wolfnet(container: &str) {
             }
         }
 
-        // Step 4: Forwarding + iptables
+        // Forwarding + iptables
         let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.all.forwarding=1"]).output();
         let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.proxy_arp=1"]).output();
         let check = Command::new("iptables")
@@ -410,7 +396,7 @@ fn lxc_apply_wolfnet(container: &str) {
             let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "lxcbr0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
         }
 
-        info!("WolfNet ready: {} -> wolfnet={}, bridge={}", container, ip, bridge_ip);
+        info!("WolfNet ready: {} → wolfnet={}, bridge={}", container, ip, bridge_ip);
     }
 }
 
