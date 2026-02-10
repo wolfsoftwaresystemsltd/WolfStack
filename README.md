@@ -1,76 +1,141 @@
-# WolfStack
+# 🐺 WolfStack — Server Management Platform
 
-**Server management platform for the Wolf software suite.**
+A beautiful, Proxmox-like management dashboard for the Wolf Software suite. Monitor your servers, manage components, control services, and edit configurations — all from one place.
 
-WolfStack is a Proxmox-like management dashboard that lets you monitor, install, and manage all Wolf suite components across multiple servers from a single web interface.
+## Quick Install
+
+```bash
+curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash
+```
+
+Then open `http://your-server:8553` and log in with your Linux system credentials.
 
 ## Features
 
-- **Dashboard** — Real-time CPU, memory, disk, and network monitoring with animated gauges and charts
-- **Component Management** — Install and manage WolfNet, WolfProxy, WolfServe, WolfDisk, WolfScale, and MariaDB
-- **Multi-Server Clustering** — Add servers and monitor them all from one dashboard (communicates over WolfNet or direct IP)
-- **Service Control** — Start, stop, and restart systemd services
-- **SSL Certificates** — Request Let's Encrypt certificates via Certbot
-- **Cross-Platform** — Supports Debian/Ubuntu and RedHat/Fedora
+### 🔒 Linux Authentication
+- Authenticates against your server's Linux user accounts
+- Session-based with 8-hour token lifetime
+- All API routes protected
 
-## Quick Start
+### 📊 Real-Time Dashboard
+- Live CPU, memory, disk, and network monitoring with 2-second refresh
+- Animated SVG gauges for CPU, memory, and load average
+- Smooth bezier-curve history charts
+- Storage breakdown table showing all mounted filesystems
 
-```bash
-# Build
-cargo build --release
+### 📦 Component Management
+- Auto-detects installed Wolf suite components (WolfNet, WolfDisk, WolfScale, WolfProxy, WolfServe)
+- Detects MariaDB and Certbot
+- **Drill-down detail view** for each component:
+  - Service status, memory usage, PID, restart count
+  - Start / Stop / Restart controls
+  - **Config file editor** with Save button
+  - **Live journal logs** from systemd
 
-# Run (default port 8553)
-./target/release/wolfstack
+### 🖥️ Multi-Server Clustering
+- Add remote servers and monitor them from one dashboard
+- Works over WolfNet mesh VPN or direct IP
+- Polls remote WolfStack instances for metrics and component status
 
-# Or specify port/bind
-./target/release/wolfstack --port 8553 --bind 0.0.0.0
-```
+### ⚡ Service Control
+- Start, stop, restart any systemd service
+- Enable/disable services
+- View service status across your fleet
 
-Then open **http://localhost:8553** in your browser.
+### 🔒 SSL Certificates
+- Request Let's Encrypt certificates via Certbot
+- One-click certificate provisioning
+
+## Screenshots
+
+| Login | Dashboard | Component Detail |
+|-------|-----------|------------------|
+| Glassmorphism login with Linux auth | Real-time gauges, charts, storage table | Config editor, logs, service controls |
 
 ## Architecture
 
 ```
 wolfstack/
 ├── src/
-│   ├── main.rs            # Entry point, HTTP server
-│   ├── api/mod.rs         # REST API endpoints
-│   ├── agent/mod.rs       # Server-to-server communication
-│   ├── monitoring/mod.rs  # System metrics collection
-│   └── installer/mod.rs   # Component installation & service control
-└── web/
-    ├── index.html         # Dashboard UI
-    ├── css/style.css      # Premium dark theme
-    └── js/app.js          # Dashboard logic
+│   ├── main.rs           # HTTP server, background tasks
+│   ├── api/mod.rs        # REST API endpoints
+│   ├── auth/mod.rs       # Linux auth via crypt(), session management
+│   ├── agent/mod.rs      # Multi-server cluster state, polling
+│   ├── monitoring/mod.rs # System metrics via sysinfo
+│   └── installer/mod.rs  # Component detection, install, systemd control
+├── web/
+│   ├── login.html        # Login page
+│   ├── index.html        # Dashboard SPA
+│   ├── css/style.css     # Dark theme design system
+│   └── js/app.js         # Dashboard logic, charts, polling
+├── setup.sh              # One-line installer
+├── Cargo.toml
+└── README.md
 ```
 
-## API Endpoints
+## API
+
+All endpoints require authentication (cookie-based session) except `/api/agent/status`.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| POST | `/api/auth/login` | Login with Linux credentials |
+| POST | `/api/auth/logout` | Destroy session |
+| GET | `/api/auth/check` | Check if session is valid |
 | GET | `/api/metrics` | Current system metrics |
-| GET | `/api/nodes` | All cluster nodes |
-| POST | `/api/nodes` | Add a server |
+| GET | `/api/nodes` | List all cluster nodes |
+| POST | `/api/nodes` | Add a server to cluster |
 | DELETE | `/api/nodes/{id}` | Remove a server |
-| GET | `/api/components` | Component status |
+| GET | `/api/components` | Status of all components |
+| GET | `/api/components/{name}/detail` | Component detail (config, logs, stats) |
+| PUT | `/api/components/{name}/config` | Save component config file |
 | POST | `/api/components/{name}/install` | Install a component |
-| POST | `/api/services/{name}/action` | Start/stop/restart service |
-| POST | `/api/certificates` | Request SSL certificate |
-| GET | `/api/agent/status` | Agent status (for node polling) |
-
-## Multi-Server Setup
-
-1. Install WolfStack on every server
-2. Open the dashboard on any server
-3. Click **"+ Add Server"** and enter the IP/hostname of other servers
-4. If using WolfNet, use the WolfNet IP (e.g. `10.10.10.x`) for automatic secure communication
+| POST | `/api/services/{name}/action` | Start/stop/restart a service |
+| POST | `/api/certificates` | Request Let's Encrypt certificate |
+| GET | `/api/agent/status` | Node status (for remote polling, no auth) |
 
 ## Requirements
 
-- Linux (Debian/Ubuntu or RedHat/Fedora)
-- Rust 1.70+ (for building)
-- Root/sudo access (for service management and installation)
+- **Linux** (Debian/Ubuntu or RedHat/Fedora)
+- **Rust 1.70+** (installed automatically by setup.sh)
+- **Root access** (required for reading `/etc/shadow` and managing systemd services)
+- **libcrypt** (installed automatically by setup.sh)
+- **Port 8553** (default, configurable)
+
+## Manual Build
+
+```bash
+cargo build --release
+sudo ./target/release/wolfstack --port 8553
+```
+
+## Configuration
+
+Config file: `/etc/wolfstack/config.toml`
+
+```toml
+[server]
+port = 8553
+bind = "0.0.0.0"
+web_dir = "/opt/wolfstack/web"
+```
+
+## Managing the Service
+
+```bash
+# Status
+sudo systemctl status wolfstack
+
+# Logs
+sudo journalctl -u wolfstack -f
+
+# Restart
+sudo systemctl restart wolfstack
+
+# Stop
+sudo systemctl stop wolfstack
+```
 
 ## License
 
-MIT — Wolf Software Systems Ltd
+MIT — © 2026 [Wolf Software Systems Ltd](https://wolf.uk.com/)

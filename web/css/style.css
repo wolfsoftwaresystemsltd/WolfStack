@@ -12,9 +12,9 @@
     --text-primary: #e8ecf4;
     --text-secondary: #8892a8;
     --text-muted: #5a6378;
-    --accent: #6366f1;
-    --accent-light: #818cf8;
-    --accent-glow: rgba(99, 102, 241, 0.15);
+    --accent: #dc2626;
+    --accent-light: #f87171;
+    --accent-glow: rgba(220, 38, 38, 0.15);
     --success: #10b981;
     --success-bg: rgba(16, 185, 129, 0.1);
     --warning: #f59e0b;
@@ -23,13 +23,13 @@
     --danger-bg: rgba(239, 68, 68, 0.1);
     --info: #3b82f6;
     --info-bg: rgba(59, 130, 246, 0.1);
-    --gradient-main: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a78bfa 100%);
+    --gradient-main: linear-gradient(135deg, #dc2626 0%, #ef4444 50%, #f87171 100%);
     --gradient-success: linear-gradient(135deg, #10b981 0%, #34d399 100%);
     --gradient-danger: linear-gradient(135deg, #ef4444 0%, #f87171 100%);
     --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
     --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.4);
     --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.5);
-    --shadow-glow: 0 0 30px rgba(99, 102, 241, 0.15);
+    --shadow-glow: 0 0 30px rgba(220, 38, 38, 0.15);
     --radius: 12px;
     --radius-sm: 8px;
     --radius-lg: 16px;
