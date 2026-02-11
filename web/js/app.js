@@ -6164,7 +6164,10 @@ async function restorePbsSnapshot(snapshot, backupType) {
             }),
         });
         const data = await res.json();
-        if (data.error) showToast('PBS restore failed: ' + data.error, 'error');
+        if (data.error) {
+            console.error('PBS restore error detail:', data.error);
+            showToast('PBS restore failed: ' + data.error, 'error');
+        }
         else {
             showToast('✅ PBS restore complete: ' + data.message, 'success');
             // Refresh relevant lists so restored items appear

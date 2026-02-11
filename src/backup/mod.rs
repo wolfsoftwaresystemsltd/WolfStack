@@ -1431,7 +1431,7 @@ pub fn restore_from_pbs(
 
     // Try to auto-detect the archive name by listing snapshot contents
     let actual_archive = if archive.is_empty() || archive == "root.pxar" {
-        detect_pbs_archive(storage, &snapshot_fixed).unwrap_or_else(|| archive.to_string())
+        detect_pbs_archive(storage, &snapshot_fixed).unwrap_or_else(|| "root.pxar".to_string())
     } else {
         archive.to_string()
     };
