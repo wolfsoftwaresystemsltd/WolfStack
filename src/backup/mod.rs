@@ -1487,7 +1487,6 @@ where
 
     // Pipe stderr to capture progress
     use std::process::Stdio;
-    use std::io::BufRead;
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -1495,20 +1494,31 @@ where
         .map_err(|e| format!("Failed to start proxmox-backup-client: {}", e))?;
 
     // Read stderr in real-time for progress updates
+    // proxmox-backup-client uses \r (carriage return) for in-place progress,
+    // so we read byte-by-byte and split on both \r and \n
     if let Some(stderr) = child.stderr.take() {
-        let reader = std::io::BufReader::new(stderr);
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                let trimmed = line.trim().to_string();
-                if trimmed.is_empty() { continue; }
+        use std::io::Read;
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut buf = [0u8; 1];
+        let mut line_buf = Vec::new();
 
-                let pct = extract_percentage(&trimmed);
-                let display = if let Some(p) = pct {
-                    format!("Downloading: {:.1}%", p)
-                } else {
-                    trimmed.clone()
-                };
-                on_progress(display, pct);
+        while reader.read(&mut buf).unwrap_or(0) == 1 {
+            if buf[0] == b'\r' || buf[0] == b'\n' {
+                if !line_buf.is_empty() {
+                    let text = String::from_utf8_lossy(&line_buf).trim().to_string();
+                    line_buf.clear();
+                    if text.is_empty() { continue; }
+
+                    let pct = extract_percentage(&text);
+                    let display = if let Some(p) = pct {
+                        format!("Downloading: {:.1}%", p)
+                    } else {
+                        text
+                    };
+                    on_progress(display, pct);
+                }
+            } else {
+                line_buf.push(buf[0]);
             }
         }
     }
