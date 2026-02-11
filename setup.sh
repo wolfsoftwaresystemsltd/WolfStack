@@ -106,152 +106,146 @@ fi
 echo ""
 echo "Checking WolfNet (cluster networking)..."
 
-WOLFNET_INSTALLED=false
-WOLFNET_RUNNING=false
+if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev/null; then
+    # Already installed and running — nothing to do
+    echo "✓ WolfNet already installed and running"
+    WOLFNET_IP=$(ip -4 addr show wolfnet0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]}' || echo "")
+    if [ -n "$WOLFNET_IP" ]; then
+        echo "  WolfNet IP: $WOLFNET_IP"
+    fi
 
-if command -v wolfnet &> /dev/null; then
-    WOLFNET_INSTALLED=true
-    if systemctl is-active --quiet wolfnet 2>/dev/null; then
-        WOLFNET_RUNNING=true
+elif command -v wolfnet &> /dev/null; then
+    # Installed but not running — just start it
+    echo "✓ WolfNet installed (not running)"
+    echo "  Starting WolfNet..."
+    systemctl start wolfnet 2>/dev/null || true
+    sleep 2
+    if systemctl is-active --quiet wolfnet; then
         WOLFNET_IP=$(ip -4 addr show wolfnet0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]}' || echo "")
-        echo "✓ WolfNet already installed and running"
-        if [ -n "$WOLFNET_IP" ]; then
-            echo "  WolfNet IP: $WOLFNET_IP"
-        fi
+        echo "  ✓ WolfNet started. IP: ${WOLFNET_IP:-unknown}"
     else
-        echo "✓ WolfNet installed (not running)"
+        echo "  ⚠ WolfNet failed to start. Check: journalctl -u wolfnet -n 20"
     fi
-fi
 
-# WolfNet needs /dev/net/tun
-SKIP_WOLFNET=false
-if [ ! -e /dev/net/tun ]; then
+else
+    # WolfNet NOT installed — must install it
+    echo "  WolfNet not found — installing for cluster networking..."
     echo ""
-    echo "  ⚠  /dev/net/tun is NOT available!"
-    echo "  ─────────────────────────────────────"
-    echo ""
-    echo "  This is almost certainly a Proxmox LXC container."
-    echo "  WolfNet needs TUN/TAP to create its network overlay."
-    echo ""
-    echo "  To fix this, run the following on the Proxmox HOST (not inside the container):"
-    echo ""
-    echo "  1. Edit the container config:"
-    echo "     nano /etc/pve/lxc/<CTID>.conf"
-    echo ""
-    echo "  2. Add these lines:"
-    echo "     lxc.cgroup2.devices.allow: c 10:200 rwm"
-    echo "     lxc.mount.entry: /dev/net dev/net none bind,create=dir"
-    echo ""
-    echo "  3. Restart the container:"
-    echo "     pct restart <CTID>"
-    echo ""
-    echo "  4. Inside the container, create the device if needed:"
-    echo "     mkdir -p /dev/net"
-    echo "     mknod /dev/net/tun c 10 200"
-    echo "     chmod 666 /dev/net/tun"
-    echo ""
-    echo "  Then re-run this installer."
-    echo ""
-    if [ "$WOLFNET_INSTALLED" = "true" ]; then
-        echo "  WolfNet binary found but /dev/net/tun missing — skipping rebuild."
-    else
+
+    # WolfNet needs /dev/net/tun
+    SKIP_WOLFNET=false
+    if [ ! -e /dev/net/tun ]; then
+        echo ""
+        echo "  ⚠  /dev/net/tun is NOT available!"
+        echo "  ─────────────────────────────────────"
+        echo ""
+        echo "  This is almost certainly a Proxmox LXC container."
+        echo "  WolfNet needs TUN/TAP to create its network overlay."
+        echo ""
+        echo "  To fix this, run the following on the Proxmox HOST (not inside the container):"
+        echo ""
+        echo "  1. Edit the container config:"
+        echo "     nano /etc/pve/lxc/<CTID>.conf"
+        echo ""
+        echo "  2. Add these lines:"
+        echo "     lxc.cgroup2.devices.allow: c 10:200 rwm"
+        echo "     lxc.mount.entry: /dev/net dev/net none bind,create=dir"
+        echo ""
+        echo "  3. Restart the container:"
+        echo "     pct restart <CTID>"
+        echo ""
+        echo "  4. Inside the container, create the device if needed:"
+        echo "     mkdir -p /dev/net"
+        echo "     mknod /dev/net/tun c 10 200"
+        echo "     chmod 666 /dev/net/tun"
+        echo ""
+        echo "  Then re-run this installer."
+        echo ""
         echo "  Skipping WolfNet install (fix /dev/net/tun first, then re-run)."
-    fi
-    SKIP_WOLFNET=true
-fi
-
-if [ "$SKIP_WOLFNET" != "true" ]; then
-    # Always build/upgrade WolfNet from latest source
-    WOLFSCALE_DIR="/opt/wolfscale-src"
-    if [ -d "$WOLFSCALE_DIR" ]; then
-        cd "$WOLFSCALE_DIR" && git fetch origin && git reset --hard origin/main
-    else
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFSCALE_DIR"
-        cd "$WOLFSCALE_DIR"
+        SKIP_WOLFNET=true
     fi
 
-    # Ensure Rust is available for building WolfNet
-    export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
-
-    if ! command -v cargo &> /dev/null; then
-        echo "  Installing Rust first..."
-        if [ "$REAL_USER" = "root" ]; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    if [ "$SKIP_WOLFNET" != "true" ]; then
+        # Clone WolfScale repo (contains WolfNet source)
+        WOLFSCALE_DIR="/opt/wolfscale-src"
+        if [ -d "$WOLFSCALE_DIR" ]; then
+            cd "$WOLFSCALE_DIR" && git fetch origin && git reset --hard origin/main
         else
-            su - "$REAL_USER" -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-        fi
-        export PATH="$REAL_HOME/.cargo/bin:$PATH"
-    fi
-
-    # Build WolfNet
-    if [ "$WOLFNET_INSTALLED" = "true" ]; then
-        echo "  Upgrading WolfNet..."
-    else
-        echo "  Building WolfNet..."
-    fi
-    cd "$WOLFSCALE_DIR/wolfnet"
-    if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
-        chown -R "$REAL_USER:$REAL_USER" "$WOLFSCALE_DIR"
-        su - "$REAL_USER" -c "cd $WOLFSCALE_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
-    else
-        cargo build --release
-    fi
-
-    # Stop service before replacing binary (if running)
-    if [ "$WOLFNET_RUNNING" = "true" ]; then
-        echo "  Stopping WolfNet for upgrade..."
-        systemctl stop wolfnet 2>/dev/null || true
-        sleep 1
-    fi
-
-    # Install binaries
-    cp "$WOLFSCALE_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
-    chmod +x /usr/local/bin/wolfnet
-    if [ -f "$WOLFSCALE_DIR/wolfnet/target/release/wolfnetctl" ]; then
-        cp "$WOLFSCALE_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
-        chmod +x /usr/local/bin/wolfnetctl
-    fi
-    echo "  ✓ WolfNet binary installed"
-
-    # Auto-configure WolfNet for cluster use (only on fresh install)
-    mkdir -p /etc/wolfnet /var/run/wolfnet
-
-    if [ ! -f "/etc/wolfnet/config.toml" ]; then
-        # Auto-assign a cluster IP based on the last octet of the host IP
-        HOST_IP=$(hostname -I | awk '{print $1}')
-        LAST_OCTET=$(echo "$HOST_IP" | awk -F. '{print $4}')
-        # Ensure last octet is valid (1-254); default to 1 if detection fails
-        if [ -z "$LAST_OCTET" ] || [ "$LAST_OCTET" -lt 1 ] 2>/dev/null || [ "$LAST_OCTET" -gt 254 ] 2>/dev/null; then
-            LAST_OCTET=1
+            git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFSCALE_DIR"
+            cd "$WOLFSCALE_DIR"
         fi
 
-        # Find a /24 subnet that doesn't conflict with existing networks
-        # Preferred: 10.10.10.0/24, fallback: 10.10.20.0/24, 10.10.30.0/24, etc.
-        WOLFNET_SUBNET=""
-        for THIRD_OCTET in 10 20 30 40 50 60 70 80 90; do
-            CANDIDATE="10.10.${THIRD_OCTET}.0/24"
-            # Check if this subnet is already routed or has addresses assigned
-            if ! ip route show 2>/dev/null | grep -q "10.10.${THIRD_OCTET}\." && \
-               ! ip addr show 2>/dev/null | grep -q "10.10.${THIRD_OCTET}\."; then
-                WOLFNET_SUBNET="10.10.${THIRD_OCTET}"
-                break
+        # Ensure Rust is available for building WolfNet
+        export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
+
+        if ! command -v cargo &> /dev/null; then
+            echo "  Installing Rust first..."
+            if [ "$REAL_USER" = "root" ]; then
+                curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            else
+                su - "$REAL_USER" -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
             fi
-            echo "  ⚠ Subnet $CANDIDATE already in use, trying next..."
-        done
-
-        if [ -z "$WOLFNET_SUBNET" ]; then
-            echo "  ✗ Could not find a free 10.10.x.0/24 subnet!"
-            echo "  Please configure WolfNet manually: /etc/wolfnet/config.toml"
-            WOLFNET_SUBNET="10.10.10"  # fallback anyway
+            export PATH="$REAL_HOME/.cargo/bin:$PATH"
         fi
 
-        WOLFNET_IP="${WOLFNET_SUBNET}.${LAST_OCTET}"
+        # Build WolfNet
+        echo "  Building WolfNet..."
+        cd "$WOLFSCALE_DIR/wolfnet"
+        if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
+            chown -R "$REAL_USER:$REAL_USER" "$WOLFSCALE_DIR"
+            su - "$REAL_USER" -c "cd $WOLFSCALE_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
+        else
+            cargo build --release
+        fi
 
-        # Generate keys
-        KEY_FILE="/etc/wolfnet/private.key"
-        /usr/local/bin/wolfnet genkey --output "$KEY_FILE" 2>/dev/null || true
+        # Install binaries
+        cp "$WOLFSCALE_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
+        chmod +x /usr/local/bin/wolfnet
+        if [ -f "$WOLFSCALE_DIR/wolfnet/target/release/wolfnetctl" ]; then
+            cp "$WOLFSCALE_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+            chmod +x /usr/local/bin/wolfnetctl
+        fi
+        echo "  ✓ WolfNet binary installed"
 
-        cat <<EOF > /etc/wolfnet/config.toml
+        # Configure WolfNet for cluster use
+        mkdir -p /etc/wolfnet /var/run/wolfnet
+
+        if [ ! -f "/etc/wolfnet/config.toml" ]; then
+            # Auto-assign a cluster IP based on the last octet of the host IP
+            HOST_IP=$(hostname -I | awk '{print $1}')
+            LAST_OCTET=$(echo "$HOST_IP" | awk -F. '{print $4}')
+            # Ensure last octet is valid (1-254); default to 1 if detection fails
+            if [ -z "$LAST_OCTET" ] || [ "$LAST_OCTET" -lt 1 ] 2>/dev/null || [ "$LAST_OCTET" -gt 254 ] 2>/dev/null; then
+                LAST_OCTET=1
+            fi
+
+            # Find a /24 subnet that doesn't conflict with existing networks
+            # Preferred: 10.10.10.0/24, fallback: 10.10.20.0/24, 10.10.30.0/24, etc.
+            WOLFNET_SUBNET=""
+            for THIRD_OCTET in 10 20 30 40 50 60 70 80 90; do
+                CANDIDATE="10.10.${THIRD_OCTET}.0/24"
+                # Check if this subnet is already routed or has addresses assigned
+                if ! ip route show 2>/dev/null | grep -q "10.10.${THIRD_OCTET}\." && \
+                   ! ip addr show 2>/dev/null | grep -q "10.10.${THIRD_OCTET}\."; then
+                    WOLFNET_SUBNET="10.10.${THIRD_OCTET}"
+                    break
+                fi
+                echo "  ⚠ Subnet $CANDIDATE already in use, trying next..."
+            done
+
+            if [ -z "$WOLFNET_SUBNET" ]; then
+                echo "  ✗ Could not find a free 10.10.x.0/24 subnet!"
+                echo "  Please configure WolfNet manually: /etc/wolfnet/config.toml"
+                WOLFNET_SUBNET="10.10.10"  # fallback anyway
+            fi
+
+            WOLFNET_IP="${WOLFNET_SUBNET}.${LAST_OCTET}"
+
+            # Generate keys
+            KEY_FILE="/etc/wolfnet/private.key"
+            /usr/local/bin/wolfnet genkey --output "$KEY_FILE" 2>/dev/null || true
+
+            cat <<EOF > /etc/wolfnet/config.toml
 # WolfNet Configuration
 # Auto-generated by WolfStack installer
 # Provides cluster overlay network
@@ -270,14 +264,12 @@ private_key_file = "$KEY_FILE"
 
 # Peers will be added automatically when you add servers to WolfStack
 EOF
-        echo "  ✓ WolfNet configured: $WOLFNET_IP/24 (subnet: ${WOLFNET_SUBNET}.0/24)"
-    else
-        echo "  ✓ Using existing config at /etc/wolfnet/config.toml"
-    fi
+            echo "  ✓ WolfNet configured: $WOLFNET_IP/24 (subnet: ${WOLFNET_SUBNET}.0/24)"
+        fi
 
-    # Create systemd service if it doesn't exist
-    if [ ! -f "/etc/systemd/system/wolfnet.service" ]; then
-        cat > /etc/systemd/system/wolfnet.service <<EOF
+        # Create systemd service
+        if [ ! -f "/etc/systemd/system/wolfnet.service" ]; then
+            cat > /etc/systemd/system/wolfnet.service <<EOF
 [Unit]
 Description=WolfNet - Secure Private Mesh Networking
 Before=wolfstack.service
@@ -297,26 +289,21 @@ RuntimeDirectoryMode=0755
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-    fi
-
-    # Always ensure WolfNet is enabled and started
-    systemctl enable wolfnet 2>/dev/null || true
-    systemctl start wolfnet 2>/dev/null || true
-    sleep 2
-
-    if systemctl is-active --quiet wolfnet; then
-        WOLFNET_IP=$(ip -4 addr show wolfnet0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]}' || echo "${WOLFNET_IP:-unknown}")
-        if [ "$WOLFNET_INSTALLED" = "true" ]; then
-            echo "  ✓ WolfNet upgraded and running! Cluster IP: $WOLFNET_IP"
-        else
-            echo "  ✓ WolfNet running! Cluster IP: $WOLFNET_IP"
+            systemctl daemon-reload
         fi
-    else
-        echo "  ⚠ WolfNet may not have started. Check: journalctl -u wolfnet -n 20"
+
+        systemctl enable wolfnet 2>/dev/null || true
+        systemctl start wolfnet 2>/dev/null || true
+        sleep 2
+
+        if systemctl is-active --quiet wolfnet; then
+            WOLFNET_IP=$(ip -4 addr show wolfnet0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]}' || echo "${WOLFNET_IP:-unknown}")
+            echo "  ✓ WolfNet running! Cluster IP: $WOLFNET_IP"
+        else
+            echo "  ⚠ WolfNet may not have started. Check: journalctl -u wolfnet -n 20"
+        fi
     fi
 fi
-
 
 
 # ─── Install Rust if not present ────────────────────────────────────────────
