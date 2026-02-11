@@ -2065,10 +2065,11 @@ let wolfnetData = null;
 
 async function loadWolfNet() {
     try {
-        const [statusResp, configResp, localInfoResp] = await Promise.all([
+        const [statusResp, configResp, localInfoResp, fullStatusResp] = await Promise.all([
             fetch(apiUrl('/api/networking/wolfnet')),
             fetch(apiUrl('/api/networking/wolfnet/config')),
             fetch(apiUrl('/api/networking/wolfnet/local-info')),
+            fetch(apiUrl('/api/networking/wolfnet/status-full')),
         ]);
         const status = await statusResp.json();
         let config = '';
@@ -2081,9 +2082,13 @@ async function loadWolfNet() {
             localInfo = await localInfoResp.json();
             if (localInfo.error) localInfo = null;
         }
+        let fullStatus = null;
+        if (fullStatusResp.ok) {
+            fullStatus = await fullStatusResp.json();
+        }
         wolfnetData = status;
         wolfnetLocalInfo = localInfo;
-        renderWolfNetPage(status, config, localInfo);
+        renderWolfNetPage(status, config, localInfo, fullStatus);
     } catch (e) {
         console.error('Failed to load WolfNet:', e);
     }
@@ -2091,7 +2096,23 @@ async function loadWolfNet() {
 
 let wolfnetLocalInfo = null;
 
-function renderWolfNetPage(wn, config, localInfo) {
+function formatDuration(secs) {
+    if (secs === undefined || secs === null || secs >= 18446744073709551615) return 'never';
+    if (secs < 60) return `${secs}s ago`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m ago`;
+    return `${Math.floor(secs / 86400)}d ago`;
+}
+
+function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function renderWolfNetPage(wn, config, localInfo, fullStatus) {
     // Status cards
     const statusEl = document.getElementById('wn-status-val');
     const statusIcon = document.getElementById('wn-status-icon');
@@ -2121,35 +2142,95 @@ function renderWolfNetPage(wn, config, localInfo) {
     if (ifaceEl) ifaceEl.textContent = wn.interface || '—';
     if (ipEl) ipEl.textContent = wn.ip || '';
 
-    const connectedCount = wn.peers.filter(p => p.connected).length;
+    // Merge config peers with live data
+    const livePeers = (fullStatus && fullStatus.live_peers) || [];
+    const configPeers = wn.peers || [];
+
+    // Build merged peer list: start from config, enrich with live data
+    const mergedPeers = configPeers.map(cp => {
+        // Find matching live peer by IP address
+        const live = livePeers.find(lp =>
+            lp.address === cp.ip || lp.address === cp.ip.split('/')[0]
+        );
+        return {
+            name: cp.name || (live ? live.hostname : '—'),
+            ip: cp.ip,
+            endpoint: (live ? live.endpoint : cp.endpoint) || '',
+            connected: live ? live.connected : cp.connected,
+            last_seen_secs: live ? live.last_seen_secs : null,
+            rx_bytes: live ? live.rx_bytes : 0,
+            tx_bytes: live ? live.tx_bytes : 0,
+            relay_via: live ? live.relay_via : null,
+            is_gateway: live ? live.is_gateway : false,
+            hostname: live ? live.hostname : '',
+        };
+    });
+
+    // Also add any live peers not in config (discovered via PEX)
+    for (const lp of livePeers) {
+        if (!mergedPeers.find(mp => mp.ip === lp.address)) {
+            mergedPeers.push({
+                name: lp.hostname || 'discovered',
+                ip: lp.address,
+                endpoint: lp.endpoint || '',
+                connected: lp.connected,
+                last_seen_secs: lp.last_seen_secs,
+                rx_bytes: lp.rx_bytes || 0,
+                tx_bytes: lp.tx_bytes || 0,
+                relay_via: lp.relay_via,
+                is_gateway: lp.is_gateway,
+                hostname: lp.hostname || '',
+            });
+        }
+    }
+
+    const connectedCount = mergedPeers.filter(p => p.connected).length;
     if (connectedEl) connectedEl.textContent = connectedCount;
-    if (totalPeersEl) totalPeersEl.textContent = `of ${wn.peers.length} total`;
+    if (totalPeersEl) totalPeersEl.textContent = `of ${mergedPeers.length} total`;
 
     // Peers table
     const table = document.getElementById('wolfnet-peers-table');
     const empty = document.getElementById('wolfnet-peers-empty');
     if (table) {
-        if (wn.peers.length === 0) {
+        if (mergedPeers.length === 0) {
             table.innerHTML = '';
             if (empty) empty.style.display = 'block';
         } else {
             if (empty) empty.style.display = 'none';
-            table.innerHTML = wn.peers.map(p => `
+            table.innerHTML = mergedPeers.map(p => {
+                const statusBadge = p.connected
+                    ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e;">● Connected</span>'
+                    : p.relay_via
+                        ? `<span class="badge" style="background:rgba(168,85,247,0.15); color:#a855f7;">◉ Relay via ${escapeHtml(p.relay_via)}</span>`
+                        : '<span class="badge" style="background:rgba(239,68,68,0.15); color:#ef4444;">○ Offline</span>';
+
+                const lastSeen = p.last_seen_secs !== null && p.last_seen_secs !== undefined
+                    ? `<span style="font-size:11px; color:var(--text-muted);">${formatDuration(p.last_seen_secs)}</span>`
+                    : '';
+
+                const traffic = (p.rx_bytes || p.tx_bytes)
+                    ? `<span style="font-size:11px; color:var(--text-muted);">↓${formatBytes(p.rx_bytes)} ↑${formatBytes(p.tx_bytes)}</span>`
+                    : '';
+
+                const role = p.is_gateway
+                    ? '<span class="badge" style="background:rgba(59,130,246,0.15); color:#3b82f6; font-size:10px; margin-left:4px;">GW</span>'
+                    : '';
+
+                return `
                 <tr>
-                    <td style="font-weight:600;">${escapeHtml(p.name)}</td>
+                    <td style="font-weight:600;">${escapeHtml(p.name)}${role}</td>
                     <td style="font-family:var(--font-mono); font-size:12px;">${escapeHtml(p.ip) || '—'}</td>
                     <td style="font-family:var(--font-mono); font-size:12px;">${escapeHtml(p.endpoint) || '<span style="color:var(--text-muted);">auto-discovery</span>'}</td>
-                    <td>${p.connected
-                    ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e;">Connected</span>'
-                    : '<span class="badge" style="background:rgba(239,68,68,0.15); color:#ef4444;">Unreachable</span>'
-                }</td>
+                    <td>${statusBadge}<br>${lastSeen}</td>
+                    <td>${traffic}</td>
                     <td>
                         <div style="display:flex; gap:4px;">
                             <button class="btn btn-sm btn-danger" onclick="removeWolfNetPeer('${escapeHtml(p.name)}')" style="font-size:11px; padding:3px 8px;" title="Remove peer">🗑️</button>
                         </div>
                     </td>
                 </tr>
-            `).join('');
+            `;
+            }).join('');
         }
     }
 
@@ -2186,15 +2267,80 @@ function renderWolfNetPage(wn, config, localInfo) {
     }
 }
 
+// ─── Peer Mode Switching ───
+
+let currentPeerMode = 'lan';
+
+function setPeerMode(mode) {
+    currentPeerMode = mode;
+    const lanTab = document.getElementById('peer-tab-lan');
+    const netTab = document.getElementById('peer-tab-internet');
+    const lanMode = document.getElementById('peer-mode-lan');
+    const netMode = document.getElementById('peer-mode-internet');
+    const lanFooter = document.getElementById('peer-modal-footer-lan');
+    const netFooter = document.getElementById('peer-modal-footer-internet');
+
+    if (mode === 'lan') {
+        lanTab.style.background = 'var(--accent-primary)'; lanTab.style.color = 'white';
+        netTab.style.background = 'var(--bg-tertiary)'; netTab.style.color = 'var(--text-secondary)';
+        lanMode.style.display = '';
+        netMode.style.display = 'none';
+        lanFooter.style.display = '';
+        netFooter.style.display = 'none';
+    } else {
+        netTab.style.background = 'var(--accent-primary)'; netTab.style.color = 'white';
+        lanTab.style.background = 'var(--bg-tertiary)'; lanTab.style.color = 'var(--text-secondary)';
+        lanMode.style.display = 'none';
+        netMode.style.display = '';
+        lanFooter.style.display = 'none';
+        netFooter.style.display = '';
+        // Generate invite token
+        generateInviteToken();
+    }
+}
+
 function showAddPeerModal() {
     document.getElementById('peer-name').value = '';
     document.getElementById('peer-ip').value = '';
     document.getElementById('peer-endpoint').value = '';
     document.getElementById('peer-public-key').value = '';
+    setPeerMode('lan');
     document.getElementById('add-peer-modal').classList.add('active');
 }
 function closeAddPeerModal() {
     document.getElementById('add-peer-modal').classList.remove('active');
+}
+
+async function generateInviteToken() {
+    const loading = document.getElementById('invite-loading');
+    const result = document.getElementById('invite-result');
+    const errorEl = document.getElementById('invite-error');
+    loading.style.display = '';
+    result.style.display = 'none';
+    errorEl.style.display = 'none';
+    try {
+        const resp = await fetch(apiUrl('/api/networking/wolfnet/invite'));
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to generate invite');
+        loading.style.display = 'none';
+        result.style.display = '';
+        document.getElementById('invite-command').textContent = data.join_command;
+        document.getElementById('invite-public-ip').textContent = data.public_ip || 'Could not detect';
+        document.getElementById('invite-endpoint').textContent = data.endpoint || '—';
+    } catch (e) {
+        loading.style.display = 'none';
+        errorEl.style.display = '';
+        document.getElementById('invite-error-msg').textContent = e.message;
+    }
+}
+
+function copyInviteCommand() {
+    const el = document.getElementById('invite-command');
+    if (el) {
+        navigator.clipboard.writeText(el.textContent).then(() => {
+            showToast('Join command copied to clipboard', 'success');
+        });
+    }
 }
 
 async function addWolfNetPeer() {
@@ -2204,6 +2350,7 @@ async function addWolfNetPeer() {
     const public_key = document.getElementById('peer-public-key').value.trim();
 
     if (!name) { alert('Please enter a peer name'); return; }
+    if (!ip) { alert('Please enter the peer\'s WolfNet IP address'); return; }
 
     try {
         const resp = await fetch(apiUrl('/api/networking/wolfnet/peers'), {

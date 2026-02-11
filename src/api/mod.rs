@@ -1192,6 +1192,21 @@ pub async fn net_wolfnet_action(req: HttpRequest, state: web::Data<AppState>, bo
     }
 }
 
+/// GET /api/networking/wolfnet/invite — generate a WolfNet invite token
+pub async fn net_wolfnet_invite(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match networking::generate_wolfnet_invite() {
+        Ok(invite) => HttpResponse::Ok().json(invite),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+    }
+}
+
+/// GET /api/networking/wolfnet/status-full — get full status including live peers
+pub async fn net_wolfnet_status_full(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(networking::get_wolfnet_status_full())
+}
+
 #[derive(Deserialize)]
 pub struct IpAction {
     pub address: String,
@@ -1673,6 +1688,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/networking/wolfnet/peers", web::delete().to(net_remove_wolfnet_peer))
         .route("/api/networking/wolfnet/local-info", web::get().to(net_get_wolfnet_local_info))
         .route("/api/networking/wolfnet/action", web::post().to(net_wolfnet_action))
+        .route("/api/networking/wolfnet/invite", web::get().to(net_wolfnet_invite))
+        .route("/api/networking/wolfnet/status-full", web::get().to(net_wolfnet_status_full))
         .route("/api/networking/interfaces/{name}/ip", web::post().to(net_add_ip))
         .route("/api/networking/interfaces/{name}/ip", web::delete().to(net_remove_ip))
         .route("/api/networking/interfaces/{name}/state", web::post().to(net_set_state))

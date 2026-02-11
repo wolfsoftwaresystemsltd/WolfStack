@@ -868,6 +868,119 @@ pub fn wolfnet_service_action(action: &str) -> Result<String, String> {
     }
 }
 
+/// Generate an invite token for a new peer to join this WolfNet network.
+/// Replicates `wolfnet invite` CLI command logic.
+pub fn generate_wolfnet_invite() -> Result<serde_json::Value, String> {
+    let config_path = "/etc/wolfnet/config.toml";
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read WolfNet config: {}", e))?;
+    
+    // Parse config to get network settings
+    let get_val = |key: &str| -> String {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with(key) {
+                if let Some(eq_pos) = trimmed.find('=') {
+                    return trimmed[eq_pos+1..].trim().trim_matches('"').trim_matches('\'').to_string();
+                }
+            }
+        }
+        String::new()
+    };
+    
+    let address = get_val("address");
+    let subnet: u8 = get_val("subnet").parse().unwrap_or(24);
+    let listen_port: u16 = get_val("listen_port").parse().unwrap_or(9600);
+    
+    if address.is_empty() {
+        return Err("WolfNet address not configured".to_string());
+    }
+    
+    
+    // Read the public key via wolfnet CLI
+    let pubkey_output = Command::new("wolfnet")
+        .args(["--config", config_path, "pubkey"])
+        .output()
+        .map_err(|e| format!("Failed to get WolfNet public key: {}", e))?;
+    
+    if !pubkey_output.status.success() {
+        return Err("Failed to read WolfNet public key — is wolfnet installed?".to_string());
+    }
+    let public_key = String::from_utf8_lossy(&pubkey_output.stdout).trim().to_string();
+    
+    // Auto-detect public IP 
+    let public_ip = detect_public_ip();
+    let endpoint = match &public_ip {
+        Some(ip) => format!("{}:{}", ip, listen_port),
+        None => format!("{}:{}", address, listen_port),
+    };
+    
+    // Build invite token as JSON → base64
+    let invite = serde_json::json!({
+        "pk": public_key,
+        "ep": endpoint,
+        "ip": address,
+        "sn": subnet,
+        "pt": listen_port,
+    });
+    
+    use base64::Engine;
+    let token = base64::engine::general_purpose::STANDARD.encode(invite.to_string().as_bytes());
+    
+    Ok(serde_json::json!({
+        "token": token,
+        "public_key": public_key,
+        "endpoint": endpoint,
+        "address": address,
+        "subnet": subnet,
+        "listen_port": listen_port,
+        "public_ip": public_ip,
+        "join_command": format!("sudo wolfnet --config /etc/wolfnet/config.toml join {}", token),
+    }))
+}
+
+/// Detect public IP address (used for invite tokens)
+fn detect_public_ip() -> Option<String> {
+    // Try curl to ipify  
+    let output = Command::new("curl")
+        .args(["-s", "--connect-timeout", "5", "https://api.ipify.org"])
+        .output()
+        .ok()?;
+    
+    if output.status.success() {
+        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if ip.parse::<std::net::Ipv4Addr>().is_ok() {
+            return Some(ip);
+        }
+    }
+    None
+}
+
+/// Get full WolfNet status including live peer data from status.json
+pub fn get_wolfnet_status_full() -> serde_json::Value {
+    let status = get_wolfnet_status();
+    
+    // Also read live peer data from status.json (richer info than config)
+    let live_peers = match std::fs::read_to_string("/var/run/wolfnet/status.json") {
+        Ok(content) => {
+            match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(v) => v.get("peers").cloned().unwrap_or(serde_json::json!([])),
+                Err(_) => serde_json::json!([]),
+            }
+        }
+        Err(_) => serde_json::json!([]),
+    };
+    
+    serde_json::json!({
+        "installed": status.installed,
+        "running": status.running,
+        "interface": status.interface,
+        "ip": status.ip,
+        "peers": status.peers,
+        "live_peers": live_peers,
+    })
+}
+
 /// Add an IP address to an interface
 pub fn add_ip(interface: &str, address: &str, prefix: u32) -> Result<String, String> {
     let cidr = format!("{}/{}", address, prefix);

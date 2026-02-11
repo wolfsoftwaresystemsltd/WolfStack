@@ -691,6 +691,7 @@
                                     <th>WolfNet IP</th>
                                     <th>Endpoint</th>
                                     <th>Status</th>
+                                    <th>Traffic</th>
                                     <th>Actions</th>
                                 </tr>
                             </thead>
@@ -783,45 +784,123 @@
 
             <!-- Add WolfNet Peer Modal -->
             <div class="modal-overlay" id="add-peer-modal">
-                <div class="modal" style="max-width: 520px; width: 95%;">
+                <div class="modal" style="max-width: 580px; width: 95%;">
                     <div class="modal-header">
                         <h3>🔗 Add WolfNet Peer</h3>
                         <button class="modal-close" onclick="closeAddPeerModal()">&times;</button>
                     </div>
                     <div class="modal-body">
-                        <div class="form-group">
-                            <label>Peer Name <span style="color:var(--danger)">*</span></label>
-                            <input type="text" id="peer-name" class="form-control" placeholder="e.g. office-server">
+                        <!-- Mode tabs -->
+                        <div
+                            style="display:flex; gap:0; margin-bottom:20px; border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+                            <button id="peer-tab-lan" class="btn" onclick="setPeerMode('lan')"
+                                style="flex:1; border:none; border-radius:0; font-size:13px; padding:10px; background:var(--accent-primary); color:white;">
+                                🏠 LAN Peer
+                            </button>
+                            <button id="peer-tab-internet" class="btn" onclick="setPeerMode('internet')"
+                                style="flex:1; border:none; border-radius:0; font-size:13px; padding:10px; background:var(--bg-tertiary); color:var(--text-secondary);">
+                                🌍 Internet Peer
+                            </button>
                         </div>
-                        <div class="form-group">
-                            <label>WolfNet IP</label>
-                            <input type="text" id="peer-ip" class="form-control" placeholder="e.g. 10.10.10.2">
-                            <small style="color:var(--text-muted);">The peer's IP address on the WolfNet overlay
-                                network</small>
+
+                        <!-- LAN Peer mode -->
+                        <div id="peer-mode-lan">
+                            <p style="font-size:13px; color:var(--text-secondary); margin-bottom:16px;">
+                                Add a peer on your <strong>local network</strong>. Both machines must be able to reach
+                                each other directly.
+                                The peer will be auto-discovered if discovery is enabled.
+                            </p>
+                            <div class="form-group">
+                                <label>Peer Name <span style="color:var(--danger)">*</span></label>
+                                <input type="text" id="peer-name" class="form-control" placeholder="e.g. office-server">
+                            </div>
+                            <div class="form-group">
+                                <label>WolfNet IP <span style="color:var(--danger)">*</span></label>
+                                <input type="text" id="peer-ip" class="form-control" placeholder="e.g. 10.10.10.3">
+                                <small style="color:var(--text-muted);">The peer's IP on the WolfNet overlay (e.g.
+                                    10.10.10.2, 10.10.10.3, etc.)</small>
+                            </div>
+                            <div class="form-group">
+                                <label>Endpoint <small style="color:var(--text-muted);">(optional)</small></label>
+                                <input type="text" id="peer-endpoint" class="form-control"
+                                    placeholder="e.g. 192.168.1.50:9600">
+                                <small style="color:var(--text-muted);">Local IP:port — leave empty for auto-discovery
+                                    on LAN</small>
+                            </div>
+                            <div class="form-group">
+                                <label>Public Key <small style="color:var(--text-muted);">(optional)</small></label>
+                                <input type="text" id="peer-public-key" class="form-control"
+                                    placeholder="base64 public key">
+                                <small style="color:var(--text-muted);">If known, paste the peer's WolfNet public
+                                    key</small>
+                            </div>
                         </div>
-                        <div class="form-group">
-                            <label>Endpoint</label>
-                            <input type="text" id="peer-endpoint" class="form-control"
-                                placeholder="e.g. office.example.com:9600 or 203.0.113.5:9600">
-                            <small style="color:var(--text-muted);">Public IP/hostname:port for direct connection (leave
-                                empty for auto-discovery)</small>
-                        </div>
-                        <div class="form-group">
-                            <label>Public Key</label>
-                            <input type="text" id="peer-public-key" class="form-control"
-                                placeholder="(optional) base64 public key">
-                            <small style="color:var(--text-muted);">The peer's WolfNet public key for
-                                authentication</small>
+
+                        <!-- Internet Peer mode -->
+                        <div id="peer-mode-internet" style="display:none;">
+                            <p style="font-size:13px; color:var(--text-secondary); margin-bottom:16px;">
+                                Connect a peer <strong>over the internet</strong>. Generate an invite token, then run
+                                the join command on the remote machine.
+                            </p>
+                            <div id="invite-loading" style="text-align:center; padding:20px;">
+                                <span style="font-size:24px;">⏳</span>
+                                <p style="color:var(--text-muted); margin-top:8px;">Generating invite token...</p>
+                            </div>
+                            <div id="invite-result" style="display:none;">
+                                <div
+                                    style="background:var(--bg-primary); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:16px;">
+                                    <div
+                                        style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                                        <span style="font-size:12px; font-weight:600; color:var(--text-secondary);">📋
+                                            Run this on the remote machine:</span>
+                                        <button class="btn btn-sm" onclick="copyInviteCommand()"
+                                            style="font-size:11px;">📋 Copy</button>
+                                    </div>
+                                    <pre id="invite-command"
+                                        style="font-family:var(--font-mono); font-size:11px; white-space:pre-wrap; word-break:break-all; margin:0; color:var(--accent-primary); background:var(--bg-secondary); padding:10px; border-radius:6px;"></pre>
+                                </div>
+                                <div
+                                    style="background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.2); border-radius:8px; padding:12px; margin-bottom:12px;">
+                                    <h4 style="font-size:12px; color:#3b82f6; margin-bottom:8px;">ℹ️ How it works</h4>
+                                    <ol
+                                        style="font-size:12px; color:var(--text-secondary); margin:0; padding-left:16px; line-height:1.8;">
+                                        <li>Copy the command above and run it on the remote machine</li>
+                                        <li>It will output a <strong>reverse token</strong> — copy that</li>
+                                        <li>Run the reverse token command on <strong>this</strong> machine</li>
+                                        <li>Restart WolfNet on both machines</li>
+                                    </ol>
+                                </div>
+                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:12px;">
+                                    <div style="padding:8px; background:var(--bg-tertiary); border-radius:6px;">
+                                        <span style="color:var(--text-muted);">Your Public IP:</span><br>
+                                        <strong id="invite-public-ip">—</strong>
+                                    </div>
+                                    <div style="padding:8px; background:var(--bg-tertiary); border-radius:6px;">
+                                        <span style="color:var(--text-muted);">Your Endpoint:</span><br>
+                                        <strong id="invite-endpoint">—</strong>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="invite-error" style="display:none;">
+                                <div
+                                    style="background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.2); border-radius:8px; padding:16px; text-align:center;">
+                                    <span style="font-size:24px;">❌</span>
+                                    <p id="invite-error-msg" style="color:#ef4444; margin-top:8px;"></p>
+                                </div>
+                            </div>
                         </div>
                     </div>
-                    <div class="modal-footer">
+                    <div class="modal-footer" id="peer-modal-footer-lan">
                         <button class="btn" onclick="closeAddPeerModal()">Cancel</button>
                         <button class="btn btn-primary" onclick="addWolfNetPeer()">Add Peer</button>
+                    </div>
+                    <div class="modal-footer" id="peer-modal-footer-internet" style="display:none;">
+                        <button class="btn btn-primary" onclick="closeAddPeerModal()">Done</button>
                     </div>
                 </div>
             </div>
 
-            <!-- WolfNet Join Command Modal -->
+            <!-- WolfNet Join Command Modal (shown after adding LAN peer) -->
             <div class="modal-overlay" id="wolfnet-join-modal">
                 <div class="modal" style="max-width: 640px; width: 95%;">
                     <div class="modal-header">
