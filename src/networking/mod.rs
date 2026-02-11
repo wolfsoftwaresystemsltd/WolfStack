@@ -106,10 +106,12 @@ pub fn get_dns() -> DnsConfig {
     let mut nameservers = Vec::new();
     let mut search_domains = Vec::new();
 
-    // Always read effective DNS from /etc/resolv.conf (or resolvectl for systemd-resolved)
+    // Read effective DNS — resolvectl for systemd-resolved/netplan, resolv.conf for others
     match method {
-        DnsMethod::SystemdResolved => {
-            // Use resolvectl for authoritative info
+        DnsMethod::SystemdResolved | DnsMethod::Netplan => {
+            // Netplan on Ubuntu typically uses systemd-resolved as its backend,
+            // so /etc/resolv.conf shows 127.0.0.53 (the stub listener) — not useful.
+            // Use resolvectl to get the actual configured nameservers.
             if let Ok(out) = Command::new("resolvectl").arg("status").output() {
                 let text = String::from_utf8_lossy(&out.stdout);
                 for line in text.lines() {
@@ -132,12 +134,77 @@ pub fn get_dns() -> DnsConfig {
                     }
                 }
             }
-            // Fallback to resolv.conf if resolvectl gave nothing
+
+            // If resolvectl gave nothing, try reading the WolfStack override file
+            if nameservers.is_empty() && method == DnsMethod::Netplan {
+                let override_path = "/etc/netplan/99-wolfstack-dns.yaml";
+                if let Ok(content) = std::fs::read_to_string(override_path) {
+                    // Simple YAML parsing: extract addresses: [...] and search: [...]
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("addresses:") {
+                            let bracket_part = trimmed.trim_start_matches("addresses:").trim();
+                            let inner = bracket_part.trim_start_matches('[').trim_end_matches(']');
+                            for addr in inner.split(',') {
+                                let addr = addr.trim().trim_matches('"').trim();
+                                if !addr.is_empty() && !nameservers.contains(&addr.to_string()) {
+                                    nameservers.push(addr.to_string());
+                                }
+                            }
+                        }
+                        if trimmed.starts_with("search:") {
+                            let bracket_part = trimmed.trim_start_matches("search:").trim();
+                            let inner = bracket_part.trim_start_matches('[').trim_end_matches(']');
+                            for domain in inner.split(',') {
+                                let domain = domain.trim().trim_matches('"').trim();
+                                if !domain.is_empty() && !search_domains.contains(&domain.to_string()) {
+                                    search_domains.push(domain.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Final fallback: resolv.conf (filter out 127.0.0.53 stub)
+            if nameservers.is_empty() {
+                read_resolv_conf(&mut nameservers, &mut search_domains);
+                nameservers.retain(|ns| ns != "127.0.0.53");
+            }
+        }
+        DnsMethod::NetworkManager => {
+            // On RHEL/Fedora/IBM Power, read DNS from active NM connection
+            if let Ok(out) = Command::new("nmcli")
+                .args(["-t", "-f", "IP4.DNS,IP4.DOMAIN", "device", "show"])
+                .output()
+            {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    let line = line.trim();
+                    if line.starts_with("IP4.DNS") {
+                        if let Some(dns) = line.splitn(2, ':').nth(1) {
+                            let dns = dns.trim();
+                            if !dns.is_empty() && !nameservers.contains(&dns.to_string()) {
+                                nameservers.push(dns.to_string());
+                            }
+                        }
+                    }
+                    if line.starts_with("IP4.DOMAIN") {
+                        if let Some(domain) = line.splitn(2, ':').nth(1) {
+                            let domain = domain.trim();
+                            if !domain.is_empty() && !search_domains.contains(&domain.to_string()) {
+                                search_domains.push(domain.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            // Fallback to resolv.conf if nmcli gave nothing
             if nameservers.is_empty() {
                 read_resolv_conf(&mut nameservers, &mut search_domains);
             }
         }
-        _ => {
+        DnsMethod::ResolvConf => {
             read_resolv_conf(&mut nameservers, &mut search_domains);
         }
     }

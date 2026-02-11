@@ -1267,15 +1267,20 @@ pub async fn storage_create_mount(
         created_at: String::new(),
     };
     
-    match storage::create_mount(mount, body.do_mount) {
-        Ok(created) => {
+    let do_mount = body.do_mount;
+    // Run on blocking threadpool — mount_s3_via_rust_s3 creates a nested tokio runtime
+    // which panics if called directly from an async context
+    let result = web::block(move || storage::create_mount(mount, do_mount)).await;
+    match result {
+        Ok(Ok(created)) => {
             // If global, sync to cluster nodes
             if created.global {
                 let _ = sync_mount_to_cluster(&state, &created).await;
             }
             HttpResponse::Ok().json(created)
         }
-        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Internal error: {}", e) })),
     }
 }
 
@@ -1330,9 +1335,13 @@ pub async fn storage_do_mount(
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
     let id = path.into_inner();
-    match storage::mount_storage(&id) {
-        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    // Run on blocking threadpool — mount_s3_via_rust_s3 creates a nested tokio runtime
+    // which panics if called directly from an async context
+    let result = web::block(move || storage::mount_storage(&id)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Internal error: {}", e) })),
     }
 }
 
@@ -1344,9 +1353,11 @@ pub async fn storage_do_unmount(
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
     let id = path.into_inner();
-    match storage::unmount_storage(&id) {
-        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    let result = web::block(move || storage::unmount_storage(&id)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Internal error: {}", e) })),
     }
 }
 

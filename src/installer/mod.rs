@@ -94,6 +94,7 @@ pub struct ComponentStatus {
 pub enum DistroFamily {
     Debian,  // Debian, Ubuntu, etc.
     RedHat,  // RHEL, Fedora, CentOS, etc.
+    Suse,    // SLES, openSUSE (IBM Power SLES)
     Unknown,
 }
 
@@ -105,7 +106,22 @@ pub fn detect_distro() -> DistroFamily {
         || std::path::Path::new("/etc/fedora-release").exists()
     {
         DistroFamily::RedHat
+    } else if std::path::Path::new("/etc/SuSE-release").exists()
+        || std::path::Path::new("/etc/SUSE-brand").exists()
+        || std::path::Path::new("/usr/bin/zypper").exists()
+    {
+        DistroFamily::Suse
     } else {
+        // Try os-release as final fallback
+        if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
+            let lower = content.to_lowercase();
+            if lower.contains("suse") || lower.contains("sles") {
+                return DistroFamily::Suse;
+            }
+            if lower.contains("rhel") || lower.contains("centos") || lower.contains("fedora") || lower.contains("red hat") {
+                return DistroFamily::RedHat;
+            }
+        }
         DistroFamily::Unknown
     }
 }
@@ -115,6 +131,7 @@ fn pkg_install_cmd(distro: DistroFamily) -> (&'static str, &'static str) {
     match distro {
         DistroFamily::Debian => ("apt-get", "install -y"),
         DistroFamily::RedHat => ("dnf", "install -y"),
+        DistroFamily::Suse => ("zypper", "install -y"),
         DistroFamily::Unknown => ("apt-get", "install -y"),
     }
 }
@@ -210,6 +227,7 @@ fn install_mariadb(distro: DistroFamily) -> Result<String, String> {
     let pkg_name = match distro {
         DistroFamily::Debian => "mariadb-server",
         DistroFamily::RedHat => "mariadb-server",
+        DistroFamily::Suse => "mariadb",
         DistroFamily::Unknown => "mariadb-server",
     };
 

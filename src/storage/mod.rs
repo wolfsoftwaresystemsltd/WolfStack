@@ -604,14 +604,21 @@ fn mount_s3_via_rust_s3(mount: &StorageMount, s3: &S3Config) -> Result<String, S
 fn mount_nfs(mount: &StorageMount) -> Result<String, String> {
     // Ensure nfs-common is installed
     if !Path::new("/sbin/mount.nfs").exists() && !Path::new("/usr/sbin/mount.nfs").exists() {
-        info!("Installing nfs-common...");
-        let install = Command::new("apt-get")
-            .args(["install", "-y", "nfs-common"])
+        info!("Installing NFS client packages...");
+        let distro = crate::installer::detect_distro();
+        let (pkg_mgr, pkg_name) = match distro {
+            crate::installer::DistroFamily::Debian => ("apt-get", "nfs-common"),
+            crate::installer::DistroFamily::RedHat => ("dnf", "nfs-utils"),
+            crate::installer::DistroFamily::Suse => ("zypper", "nfs-client"),
+            crate::installer::DistroFamily::Unknown => ("apt-get", "nfs-common"),
+        };
+        let install = Command::new(pkg_mgr)
+            .args(["install", "-y", pkg_name])
             .output()
-            .map_err(|e| format!("Failed to install nfs-common: {}", e))?;
+            .map_err(|e| format!("Failed to install {}: {}", pkg_name, e))?;
         if !install.status.success() {
-            return Err(format!("Failed to install nfs-common: {}", 
-                String::from_utf8_lossy(&install.stderr)));
+            return Err(format!("Failed to install {}: {}",
+                pkg_name, String::from_utf8_lossy(&install.stderr)));
         }
     }
     
@@ -675,16 +682,27 @@ fn has_s3fs() -> bool {
 
 fn install_s3fs() -> Result<(), String> {
     info!("Installing s3fs-fuse...");
-    let output = Command::new("apt-get")
-        .args(["install", "-y", "s3fs"])
+    let distro = crate::installer::detect_distro();
+    let (pkg_mgr, pkg_name) = match distro {
+        crate::installer::DistroFamily::Debian => ("apt-get", "s3fs"),
+        crate::installer::DistroFamily::RedHat => ("dnf", "s3fs-fuse"),
+        crate::installer::DistroFamily::Suse => ("zypper", "s3fs"),
+        crate::installer::DistroFamily::Unknown => ("apt-get", "s3fs"),
+    };
+    // RHEL/CentOS may need EPEL for s3fs-fuse
+    if distro == crate::installer::DistroFamily::RedHat {
+        let _ = Command::new("dnf").args(["install", "-y", "epel-release"]).output();
+    }
+    let output = Command::new(pkg_mgr)
+        .args(["install", "-y", pkg_name])
         .output()
-        .map_err(|e| format!("Failed to install s3fs: {}", e))?;
-    
+        .map_err(|e| format!("Failed to install {}: {}", pkg_name, e))?;
+
     if output.status.success() {
         Ok(())
     } else {
-        Err(format!("s3fs installation failed: {}",
-            String::from_utf8_lossy(&output.stderr)))
+        Err(format!("{} installation failed: {}",
+            pkg_name, String::from_utf8_lossy(&output.stderr)))
     }
 }
 

@@ -1,7 +1,8 @@
 #!/bin/bash
 #
 # WolfStack Quick Install Script
-# Installs WolfStack server management dashboard on Ubuntu/Debian or Fedora/RHEL
+# Installs WolfStack server management dashboard
+# Supported: Ubuntu/Debian, Fedora/RHEL/CentOS, SLES/openSUSE, IBM Power (ppc64le)
 #
 # Usage: curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash
 #
@@ -38,8 +39,11 @@ elif command -v dnf &> /dev/null; then
 elif command -v yum &> /dev/null; then
     PKG_MANAGER="yum"
     echo "✓ Detected RHEL/CentOS (yum)"
+elif command -v zypper &> /dev/null; then
+    PKG_MANAGER="zypper"
+    echo "✓ Detected SLES/openSUSE (zypper)"
 else
-    echo "✗ Could not detect package manager (apt/dnf/yum)"
+    echo "✗ Could not detect package manager (apt/dnf/yum/zypper)"
     echo "  Please install dependencies manually."
     exit 1
 fi
@@ -50,11 +54,22 @@ echo "Installing system dependencies..."
 
 if [ "$PKG_MANAGER" = "apt" ]; then
     apt update -qq
-    apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils qemu-system-x86 qemu-utils socat s3fs nfs-common fuse3
+    # Select architecture-appropriate QEMU package
+    ARCH=$(uname -m)
+    if [ "$ARCH" = "ppc64le" ] || [ "$ARCH" = "ppc64" ]; then
+        QEMU_PKG="qemu-system-ppc"
+    elif [ "$ARCH" = "aarch64" ]; then
+        QEMU_PKG="qemu-system-arm"
+    else
+        QEMU_PKG="qemu-system-x86"
+    fi
+    apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils $QEMU_PKG qemu-utils socat s3fs nfs-common fuse3
 elif [ "$PKG_MANAGER" = "dnf" ]; then
     dnf install -y git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat s3fs-fuse nfs-utils fuse3
 elif [ "$PKG_MANAGER" = "yum" ]; then
     yum install -y git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat s3fs-fuse nfs-utils fuse
+elif [ "$PKG_MANAGER" = "zypper" ]; then
+    zypper install -y git curl gcc gcc-c++ make libopenssl-devel pkg-config lxc dnsmasq bridge-utils qemu-kvm qemu-tools socat s3fs nfs-client fuse3
 fi
 
 echo "✓ System dependencies installed"
@@ -93,7 +108,7 @@ echo "Checking WolfNet (cluster networking)..."
 
 if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev/null; then
     echo "✓ WolfNet already installed and running"
-    WOLFNET_IP=$(ip -4 addr show wolfnet0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' || echo "")
+    WOLFNET_IP=$(ip -4 addr show wolfnet0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]}' || echo "")
     if [ -n "$WOLFNET_IP" ]; then
         echo "  WolfNet IP: $WOLFNET_IP"
     fi
@@ -222,7 +237,7 @@ EOF
         sleep 2
 
         if systemctl is-active --quiet wolfnet; then
-            WOLFNET_IP=$(ip -4 addr show wolfnet0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' || echo "$WOLFNET_IP")
+                WOLFNET_IP=$(ip -4 addr show wolfnet0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]}' || echo "$WOLFNET_IP")
             echo "  ✓ WolfNet running! Cluster IP: $WOLFNET_IP"
         else
             echo "  ⚠ WolfNet may not have started. Check: journalctl -u wolfnet -n 20"
