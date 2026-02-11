@@ -10,6 +10,7 @@ use crate::monitoring::SystemMonitor;
 use crate::installer;
 use crate::containers;
 use crate::storage;
+use crate::networking;
 use crate::agent::{ClusterState, AgentMessage};
 use crate::auth::SessionManager;
 
@@ -1061,6 +1062,126 @@ async fn list_running_containers(
     HttpResponse::Ok().json(list)
 }
 
+// ─── Networking API ───
+
+/// GET /api/networking/interfaces — list all network interfaces
+pub async fn net_list_interfaces(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(networking::list_interfaces())
+}
+
+/// GET /api/networking/dns — get DNS configuration
+pub async fn net_get_dns(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(networking::get_dns())
+}
+
+/// GET /api/networking/wolfnet — get WolfNet overlay status
+pub async fn net_get_wolfnet(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(networking::get_wolfnet_status())
+}
+
+#[derive(Deserialize)]
+pub struct IpAction {
+    pub address: String,
+    pub prefix: u32,
+}
+
+/// POST /api/networking/interfaces/{name}/ip — add an IP address
+pub async fn net_add_ip(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>, body: web::Json<IpAction>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let iface = path.into_inner();
+    match networking::add_ip(&iface, &body.address, body.prefix) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/networking/interfaces/{name}/ip — remove an IP address
+pub async fn net_remove_ip(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>, body: web::Json<IpAction>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let iface = path.into_inner();
+    match networking::remove_ip(&iface, &body.address, body.prefix) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct InterfaceStateAction {
+    pub up: bool,
+}
+
+/// POST /api/networking/interfaces/{name}/state — bring interface up/down
+pub async fn net_set_state(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>, body: web::Json<InterfaceStateAction>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let iface = path.into_inner();
+    match networking::set_interface_state(&iface, body.up) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MtuAction {
+    pub mtu: u32,
+}
+
+/// POST /api/networking/interfaces/{name}/mtu — set interface MTU
+pub async fn net_set_mtu(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>, body: web::Json<MtuAction>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let iface = path.into_inner();
+    match networking::set_mtu(&iface, body.mtu) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreateVlanRequest {
+    pub parent: String,
+    pub vlan_id: u32,
+    pub name: Option<String>,
+}
+
+/// POST /api/networking/vlans — create a VLAN
+pub async fn net_create_vlan(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<CreateVlanRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match networking::create_vlan(&body.parent, body.vlan_id, body.name.as_deref()) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/networking/vlans/{name} — delete a VLAN
+pub async fn net_delete_vlan(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    match networking::delete_vlan(&name) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
 // ─── Storage Manager API ───
 
 /// GET /api/storage/mounts — list all storage mounts with live status
@@ -1420,6 +1541,16 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/storage/mounts/{id}/unmount", web::post().to(storage_do_unmount))
         .route("/api/storage/mounts/{id}/sync", web::post().to(storage_sync_mount))
         .route("/api/storage/mounts/{id}/sync-s3", web::post().to(storage_sync_s3))
+        // Networking
+        .route("/api/networking/interfaces", web::get().to(net_list_interfaces))
+        .route("/api/networking/dns", web::get().to(net_get_dns))
+        .route("/api/networking/wolfnet", web::get().to(net_get_wolfnet))
+        .route("/api/networking/interfaces/{name}/ip", web::post().to(net_add_ip))
+        .route("/api/networking/interfaces/{name}/ip", web::delete().to(net_remove_ip))
+        .route("/api/networking/interfaces/{name}/state", web::post().to(net_set_state))
+        .route("/api/networking/interfaces/{name}/mtu", web::post().to(net_set_mtu))
+        .route("/api/networking/vlans", web::post().to(net_create_vlan))
+        .route("/api/networking/vlans/{name}", web::delete().to(net_delete_vlan))
         // Console WebSocket
         .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
         // Agent (cluster-secret auth — inter-node communication)

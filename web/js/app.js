@@ -63,6 +63,7 @@ function selectServerView(nodeId, view) {
         containers: 'Docker',
         lxc: 'LXC',
         storage: 'Storage',
+        networking: 'Networking',
         certificates: 'Certificates',
         monitoring: 'Live Metrics',
     };
@@ -84,6 +85,7 @@ function selectServerView(nodeId, view) {
     }
     if (view === 'vms') loadVms();
     if (view === 'storage') loadStorageMounts();
+    if (view === 'networking') loadNetworking();
 }
 
 // ─── Server Tree ───
@@ -148,6 +150,9 @@ function buildServerTree(nodes) {
                 </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="storage" onclick="selectServerView('${node.id}', 'storage')">
                     <span class="icon">💾</span> Storage
+                </a>
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="networking" onclick="selectServerView('${node.id}', 'networking')">
+                    <span class="icon">🌐</span> Networking
                 </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="certificates" onclick="selectServerView('${node.id}', 'certificates')">
                     <span class="icon">🔒</span> Certificates
@@ -1617,6 +1622,312 @@ async function installRuntime(runtime) {
     } finally {
         btn.textContent = `Install ${runtime.charAt(0).toUpperCase() + runtime.slice(1)}`;
         btn.disabled = false;
+    }
+}
+
+// ─── Networking ───
+
+let cachedInterfaces = [];
+
+async function loadNetworking() {
+    try {
+        const [ifResp, dnsResp, wnResp] = await Promise.all([
+            fetch(apiUrl('/api/networking/interfaces')),
+            fetch(apiUrl('/api/networking/dns')),
+            fetch(apiUrl('/api/networking/wolfnet')),
+        ]);
+        const interfaces = await ifResp.json();
+        const dns = await dnsResp.json();
+        const wolfnet = await wnResp.json();
+
+        cachedInterfaces = interfaces;
+        renderNetInterfaces(interfaces);
+        renderDnsConfig(dns);
+        renderWolfNetStatus(wolfnet);
+    } catch (e) {
+        console.error('Failed to load networking:', e);
+    }
+}
+
+function renderNetInterfaces(interfaces) {
+    const tbody = document.getElementById('net-interfaces-table');
+    if (!tbody) return;
+
+    if (interfaces.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:var(--text-muted); padding:20px;">No interfaces found</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = interfaces.map(iface => {
+        const stateColor = iface.state === 'up' ? 'var(--success)' : iface.state === 'down' ? 'var(--danger)' : 'var(--text-muted)';
+        const stateBadge = `<span class="badge" style="background:${stateColor}20; color:${stateColor}; font-size:11px;">${iface.state.toUpperCase()}</span>`;
+
+        // Addresses
+        const addrs = iface.addresses
+            .filter(a => a.scope !== 'link' || a.family === 'inet')
+            .map(a => {
+                const isV6 = a.family === 'inet6';
+                const label = `${a.address}/${a.prefix}`;
+                const removeBtn = `<span style="cursor:pointer; color:var(--danger); margin-left:4px; font-size:10px;" onclick="removeIpAddress('${iface.name}', '${a.address}', ${a.prefix})" title="Remove">✕</span>`;
+                return `<div style="font-size:12px; font-family:var(--font-mono); ${isV6 ? 'color:var(--text-muted); font-size:11px;' : ''}">
+                    ${label}${removeBtn}
+                </div>`;
+            }).join('');
+        const addrCell = addrs || '<span style="color:var(--text-muted); font-size:12px;">—</span>';
+
+        // Name styling
+        let nameLabel = `<strong>${iface.name}</strong>`;
+        if (iface.is_vlan) {
+            nameLabel += ` <span class="badge" style="background:rgba(168,85,247,0.15); color:#a855f7; font-size:9px; margin-left:4px;">VLAN ${iface.vlan_id || ''}</span>`;
+        }
+        if (iface.name.startsWith('docker') || iface.name.startsWith('br-') || iface.name.startsWith('veth')) {
+            nameLabel += ` <span class="badge" style="background:rgba(59,130,246,0.15); color:#60a5fa; font-size:9px; margin-left:4px;">Docker</span>`;
+        }
+        if (iface.name.startsWith('wn') || iface.name.startsWith('wolfnet')) {
+            nameLabel += ` <span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e; font-size:9px; margin-left:4px;">WolfNet</span>`;
+        }
+
+        const speed = iface.speed || '—';
+        const mtu = iface.mtu || '—';
+        const driver = iface.driver || '—';
+        const mac = iface.mac ? `<span style="font-family:var(--font-mono); font-size:11px;">${iface.mac}</span>` : '—';
+
+        // Actions
+        const toggleBtn = iface.state === 'up'
+            ? `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--danger); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="toggleInterface('${iface.name}', false)" title="Bring down">⏸️</button>`
+            : `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--success); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="toggleInterface('${iface.name}', true)" title="Bring up">▶️</button>`;
+
+        const addIpBtn = `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="showAddIpModal('${iface.name}')" title="Add IP">➕</button>`;
+
+        const vlanDeleteBtn = iface.is_vlan
+            ? `<button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;" onclick="deleteVlan('${iface.name}')" title="Delete VLAN">🗑️</button>`
+            : '';
+
+        return `<tr>
+            <td>${nameLabel}</td>
+            <td>${stateBadge}</td>
+            <td>${addrCell}</td>
+            <td>${mac}</td>
+            <td style="font-size:12px;">${speed}</td>
+            <td style="font-size:12px;">${mtu}</td>
+            <td style="font-size:12px;">${driver}</td>
+            <td style="white-space:nowrap;">
+                ${toggleBtn} ${addIpBtn} ${vlanDeleteBtn}
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function renderWolfNetStatus(wn) {
+    const body = document.getElementById('wolfnet-status-body');
+    const actions = document.getElementById('wolfnet-actions');
+    if (!body) return;
+
+    if (!wn.installed) {
+        body.innerHTML = '<p style="color:var(--text-muted);">WolfNet is not installed. Install it from the Components page.</p>';
+        if (actions) actions.innerHTML = '';
+        return;
+    }
+
+    const statusBadge = wn.running
+        ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e;">RUNNING</span>'
+        : '<span class="badge" style="background:rgba(239,68,68,0.15); color:#ef4444;">STOPPED</span>';
+
+    let peersHtml = '';
+    if (wn.peers.length > 0) {
+        peersHtml = `
+            <table class="data-table" style="margin-top:12px;">
+                <thead><tr><th>Peer</th><th>IP</th><th>Endpoint</th><th>Status</th></tr></thead>
+                <tbody>
+                    ${wn.peers.map(p => `<tr>
+                        <td style="font-weight:600;">${p.name}</td>
+                        <td style="font-family:var(--font-mono); font-size:12px;">${p.ip || '—'}</td>
+                        <td style="font-family:var(--font-mono); font-size:12px;">${p.endpoint || '—'}</td>
+                        <td>${p.connected
+                ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e;">Connected</span>'
+                : '<span class="badge" style="background:rgba(239,68,68,0.15); color:#ef4444;">Unreachable</span>'
+            }</td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>`;
+    } else {
+        peersHtml = '<p style="color:var(--text-muted); margin-top:8px; font-size:13px;">No peers configured.</p>';
+    }
+
+    body.innerHTML = `
+        <div style="display:flex; gap:24px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+            <div>Status: ${statusBadge}</div>
+            ${wn.interface ? `<div>Interface: <code>${wn.interface}</code></div>` : ''}
+            ${wn.ip ? `<div>IP: <code>${wn.ip}</code></div>` : ''}
+        </div>
+        ${peersHtml}`;
+
+    if (actions) {
+        actions.innerHTML = wn.running
+            ? '<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;" onclick="wolfnetAction(\'restart\')">🔄 Restart</button>'
+            : '<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--success); border:1px solid var(--border); font-size:11px;" onclick="wolfnetAction(\'start\')">▶️ Start</button>';
+    }
+}
+
+function renderDnsConfig(dns) {
+    const body = document.getElementById('dns-config-body');
+    if (!body) return;
+
+    const servers = dns.nameservers.length > 0
+        ? dns.nameservers.map(s => `<div style="font-family:var(--font-mono); font-size:13px; padding:4px 0;">🔹 ${s}</div>`).join('')
+        : '<span style="color:var(--text-muted);">No nameservers configured</span>';
+
+    const domains = dns.search_domains.length > 0
+        ? dns.search_domains.map(d => `<span class="badge" style="background:var(--bg-tertiary); color:var(--text-primary); font-size:11px; margin-right:4px;">${d}</span>`).join('')
+        : '<span style="color:var(--text-muted);">None</span>';
+
+    body.innerHTML = `
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+            <div>
+                <h4 style="margin-bottom:8px; font-size:13px; color:var(--text-secondary);">Nameservers</h4>
+                ${servers}
+            </div>
+            <div>
+                <h4 style="margin-bottom:8px; font-size:13px; color:var(--text-secondary);">Search Domains</h4>
+                <div style="display:flex; flex-wrap:wrap; gap:4px;">${domains}</div>
+            </div>
+        </div>
+        <p style="margin-top:12px; font-size:11px; color:var(--text-muted);">
+            Read from <code>/etc/resolv.conf</code>. Edit DNS via your system's network manager (netplan, NetworkManager, systemd-resolved).
+        </p>`;
+}
+
+async function toggleInterface(name, up) {
+    if (!confirm(`${up ? 'Bring up' : 'Bring down'} interface ${name}?`)) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/networking/interfaces/${name}/state`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ up }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(data.message, 'success');
+        loadNetworking();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+function showAddIpModal(ifaceName) {
+    document.getElementById('add-ip-interface').value = ifaceName;
+    document.getElementById('add-ip-iface-name').textContent = ifaceName;
+    document.getElementById('add-ip-address').value = '';
+    document.getElementById('add-ip-prefix').value = '24';
+    document.getElementById('add-ip-modal').classList.add('active');
+}
+function closeAddIpModal() {
+    document.getElementById('add-ip-modal').classList.remove('active');
+}
+
+async function addIpAddress() {
+    const iface = document.getElementById('add-ip-interface').value;
+    const address = document.getElementById('add-ip-address').value.trim();
+    const prefix = parseInt(document.getElementById('add-ip-prefix').value);
+    if (!address) { alert('Please enter an IP address'); return; }
+
+    try {
+        const resp = await fetch(apiUrl(`/api/networking/interfaces/${iface}/ip`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ address, prefix }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        closeAddIpModal();
+        showToast(data.message, 'success');
+        loadNetworking();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function removeIpAddress(iface, address, prefix) {
+    if (!confirm(`Remove ${address}/${prefix} from ${iface}?`)) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/networking/interfaces/${iface}/ip`), {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ address, prefix }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(data.message, 'success');
+        loadNetworking();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+function showCreateVlanModal() {
+    const select = document.getElementById('vlan-parent');
+    // Populate with physical interfaces (non-VLAN, non-docker, non-virtual)
+    const physicalIfaces = cachedInterfaces.filter(i =>
+        !i.is_vlan && !i.name.startsWith('docker') && !i.name.startsWith('br-')
+        && !i.name.startsWith('veth') && !i.name.startsWith('wn') && !i.name.startsWith('virbr')
+    );
+    select.innerHTML = physicalIfaces.map(i => `<option value="${i.name}">${i.name}</option>`).join('');
+    document.getElementById('vlan-id').value = '';
+    document.getElementById('vlan-name').value = '';
+    document.getElementById('create-vlan-modal').classList.add('active');
+}
+function closeCreateVlanModal() {
+    document.getElementById('create-vlan-modal').classList.remove('active');
+}
+
+async function createVlan() {
+    const parent = document.getElementById('vlan-parent').value;
+    const vlan_id = parseInt(document.getElementById('vlan-id').value);
+    const name = document.getElementById('vlan-name').value.trim() || null;
+    if (!parent || !vlan_id || vlan_id < 1 || vlan_id > 4094) { alert('Please select a parent and enter a valid VLAN ID (1-4094)'); return; }
+
+    try {
+        const resp = await fetch(apiUrl('/api/networking/vlans'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ parent, vlan_id, name }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        closeCreateVlanModal();
+        showToast(data.message, 'success');
+        loadNetworking();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function deleteVlan(name) {
+    if (!confirm(`Delete VLAN interface ${name}? This will remove the interface immediately.`)) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/networking/vlans/${name}`), { method: 'DELETE' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(data.message, 'success');
+        loadNetworking();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function wolfnetAction(action) {
+    try {
+        const resp = await fetch(apiUrl(`/api/services/wolfnet`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(`WolfNet ${action}: ${data.message}`, 'success');
+        setTimeout(loadNetworking, 2000);
+    } catch (e) {
+        alert('WolfNet error: ' + e.message);
     }
 }
 

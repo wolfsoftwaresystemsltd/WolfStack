@@ -15,6 +15,7 @@ mod installer;
 mod containers;
 mod console;
 mod storage;
+mod networking;
 mod vms;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};

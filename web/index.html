@@ -21,7 +21,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v5.9.4</span>
+                <span class="version">v5.10.0</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -675,6 +675,114 @@
                             No storage mounts configured. Click <strong>+ Add Mount</strong> to add S3, NFS, directory,
                             or WolfDisk storage.
                         </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ Networking ═══ -->
+            <div id="page-networking" class="page-view" style="display:none;">
+                <!-- WolfNet Card -->
+                <div class="card" style="margin-bottom:16px;">
+                    <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>🔗 WolfNet Overlay</h3>
+                        <div id="wolfnet-actions"></div>
+                    </div>
+                    <div class="card-body" id="wolfnet-status-body">
+                        <p style="color:var(--text-muted);">Loading WolfNet status...</p>
+                    </div>
+                </div>
+
+                <!-- Network Interfaces Card -->
+                <div class="card" style="margin-bottom:16px;">
+                    <div class="card-header"
+                        style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                        <h3>🌐 Network Interfaces</h3>
+                        <button class="btn btn-sm btn-primary" onclick="showCreateVlanModal()">+ Add VLAN</button>
+                    </div>
+                    <div class="card-body">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Interface</th>
+                                    <th>State</th>
+                                    <th>Addresses</th>
+                                    <th>MAC</th>
+                                    <th>Speed</th>
+                                    <th>MTU</th>
+                                    <th>Driver</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="net-interfaces-table"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- DNS Card -->
+                <div class="card">
+                    <div class="card-header">
+                        <h3>🔤 DNS Configuration</h3>
+                    </div>
+                    <div class="card-body" id="dns-config-body">
+                        <p style="color:var(--text-muted);">Loading DNS configuration...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Create VLAN Modal -->
+            <div class="modal-overlay" id="create-vlan-modal">
+                <div class="modal" style="max-width: 480px; width: 95%;">
+                    <div class="modal-header">
+                        <h3>🏷️ Create VLAN</h3>
+                        <button class="modal-close" onclick="closeCreateVlanModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-group">
+                            <label>Parent Interface</label>
+                            <select id="vlan-parent" class="form-control"></select>
+                        </div>
+                        <div class="form-group">
+                            <label>VLAN ID</label>
+                            <input type="number" id="vlan-id" class="form-control" min="1" max="4094"
+                                placeholder="e.g. 100">
+                        </div>
+                        <div class="form-group">
+                            <label>Name (optional — defaults to parent.vlanid)</label>
+                            <input type="text" id="vlan-name" class="form-control" placeholder="e.g. mgmt-vlan">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" onclick="closeCreateVlanModal()">Cancel</button>
+                        <button class="btn btn-primary" onclick="createVlan()">Create VLAN</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Add IP Modal -->
+            <div class="modal-overlay" id="add-ip-modal">
+                <div class="modal" style="max-width: 480px; width: 95%;">
+                    <div class="modal-header">
+                        <h3>➕ Add IP Address</h3>
+                        <button class="modal-close" onclick="closeAddIpModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <input type="hidden" id="add-ip-interface">
+                        <div class="form-group">
+                            <label>Interface: <strong id="add-ip-iface-name"></strong></label>
+                        </div>
+                        <div class="form-group">
+                            <label>IP Address</label>
+                            <input type="text" id="add-ip-address" class="form-control"
+                                placeholder="e.g. 192.168.1.100">
+                        </div>
+                        <div class="form-group">
+                            <label>Prefix Length (CIDR)</label>
+                            <input type="number" id="add-ip-prefix" class="form-control" value="24" min="1" max="128">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" onclick="closeAddIpModal()">Cancel</button>
+                        <button class="btn btn-primary" onclick="addIpAddress()">Add IP</button>
                     </div>
                 </div>
             </div>
