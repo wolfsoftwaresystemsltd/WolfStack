@@ -179,7 +179,32 @@ else
             # Auto-assign a cluster IP based on the last octet of the host IP
             HOST_IP=$(hostname -I | awk '{print $1}')
             LAST_OCTET=$(echo "$HOST_IP" | awk -F. '{print $4}')
-            WOLFNET_IP="10.10.10.${LAST_OCTET}"
+            # Ensure last octet is valid (1-254); default to 1 if detection fails
+            if [ -z "$LAST_OCTET" ] || [ "$LAST_OCTET" -lt 1 ] 2>/dev/null || [ "$LAST_OCTET" -gt 254 ] 2>/dev/null; then
+                LAST_OCTET=1
+            fi
+
+            # Find a /24 subnet that doesn't conflict with existing networks
+            # Preferred: 10.10.10.0/24, fallback: 10.10.20.0/24, 10.10.30.0/24, etc.
+            WOLFNET_SUBNET=""
+            for THIRD_OCTET in 10 20 30 40 50 60 70 80 90; do
+                CANDIDATE="10.10.${THIRD_OCTET}.0/24"
+                # Check if this subnet is already routed or has addresses assigned
+                if ! ip route show 2>/dev/null | grep -q "10.10.${THIRD_OCTET}\." && \
+                   ! ip addr show 2>/dev/null | grep -q "10.10.${THIRD_OCTET}\."; then
+                    WOLFNET_SUBNET="10.10.${THIRD_OCTET}"
+                    break
+                fi
+                echo "  ⚠ Subnet $CANDIDATE already in use, trying next..."
+            done
+
+            if [ -z "$WOLFNET_SUBNET" ]; then
+                echo "  ✗ Could not find a free 10.10.x.0/24 subnet!"
+                echo "  Please configure WolfNet manually: /etc/wolfnet/config.toml"
+                WOLFNET_SUBNET="10.10.10"  # fallback anyway
+            fi
+
+            WOLFNET_IP="${WOLFNET_SUBNET}.${LAST_OCTET}"
 
             # Generate keys
             KEY_FILE="/etc/wolfnet/private.key"
@@ -204,7 +229,7 @@ private_key_file = "$KEY_FILE"
 
 # Peers will be added automatically when you add servers to WolfStack
 EOF
-            echo "  ✓ WolfNet configured: $WOLFNET_IP/24"
+            echo "  ✓ WolfNet configured: $WOLFNET_IP/24 (subnet: ${WOLFNET_SUBNET}.0/24)"
         fi
 
         # Create and start service
