@@ -14,6 +14,7 @@ mod monitoring;
 mod installer;
 mod containers;
 mod console;
+mod storage;
 mod vms;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
@@ -98,6 +99,9 @@ async fn main() -> std::io::Result<()> {
         cli.bind.clone(),
         cli.port,
     ));
+
+    // Auto-mount storage entries
+    storage::auto_mount_all();
 
     // Initialize VM manager
     let vms_manager = vms::manager::VmManager::new();

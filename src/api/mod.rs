@@ -9,6 +9,7 @@ use tracing::info;
 use crate::monitoring::SystemMonitor;
 use crate::installer;
 use crate::containers;
+use crate::storage;
 use crate::agent::{ClusterState, AgentMessage};
 use crate::auth::SessionManager;
 
@@ -1032,6 +1033,256 @@ async fn list_running_containers(
     HttpResponse::Ok().json(list)
 }
 
+// ─── Storage Manager API ───
+
+/// GET /api/storage/mounts — list all storage mounts with live status
+pub async fn storage_list_mounts(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(storage::list_mounts())
+}
+
+/// GET /api/storage/available — list mounted storage suitable for container attachment
+pub async fn storage_available_mounts(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(storage::available_mounts())
+}
+
+#[derive(Deserialize)]
+pub struct CreateMountRequest {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub mount_type: storage::MountType,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub mount_point: String,
+    #[serde(default)]
+    pub global: bool,
+    #[serde(default)]
+    pub auto_mount: bool,
+    #[serde(default)]
+    pub s3_config: Option<storage::S3Config>,
+    #[serde(default)]
+    pub nfs_options: Option<String>,
+    #[serde(default = "default_do_mount")]
+    pub do_mount: bool,
+}
+
+fn default_do_mount() -> bool { true }
+
+/// POST /api/storage/mounts — create a new storage mount
+pub async fn storage_create_mount(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<CreateMountRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    
+    let mount = storage::StorageMount {
+        id: String::new(),
+        name: body.name.clone(),
+        mount_type: body.mount_type.clone(),
+        source: body.source.clone(),
+        mount_point: body.mount_point.clone(),
+        enabled: true,
+        global: body.global,
+        auto_mount: body.auto_mount,
+        s3_config: body.s3_config.clone(),
+        nfs_options: body.nfs_options.clone(),
+        status: "unmounted".to_string(),
+        error_message: None,
+        created_at: String::new(),
+    };
+    
+    match storage::create_mount(mount, body.do_mount) {
+        Ok(created) => {
+            // If global, sync to cluster nodes
+            if created.global {
+                let _ = sync_mount_to_cluster(&state, &created).await;
+            }
+            HttpResponse::Ok().json(created)
+        }
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// PUT /api/storage/mounts/{id} — update a mount
+pub async fn storage_update_mount(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = path.into_inner();
+    match storage::update_mount(&id, body.into_inner()) {
+        Ok(updated) => HttpResponse::Ok().json(updated),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/storage/mounts/{id} — remove a mount
+pub async fn storage_remove_mount(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = path.into_inner();
+    match storage::remove_mount(&id) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/storage/mounts/{id}/mount — mount a storage entry
+pub async fn storage_do_mount(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = path.into_inner();
+    match storage::mount_storage(&id) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/storage/mounts/{id}/unmount — unmount a storage entry
+pub async fn storage_do_unmount(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = path.into_inner();
+    match storage::unmount_storage(&id) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ImportRcloneRequest {
+    pub config: String,
+}
+
+/// POST /api/storage/import-rclone — import S3 remotes from rclone.conf content
+pub async fn storage_import_rclone(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<ImportRcloneRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    
+    match storage::import_rclone_config(&body.config) {
+        Ok(mounts) => {
+            let mut created = Vec::new();
+            for mount in mounts {
+                match storage::create_mount(mount, false) {
+                    Ok(m) => created.push(m),
+                    Err(e) => {
+                        return HttpResponse::BadRequest().json(serde_json::json!({
+                            "error": e,
+                            "created": created
+                        }));
+                    }
+                }
+            }
+            HttpResponse::Ok().json(serde_json::json!({
+                "message": format!("Imported {} S3 remotes", created.len()),
+                "mounts": created
+            }))
+        }
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/storage/mounts/{id}/sync — sync a global mount to all cluster nodes
+pub async fn storage_sync_mount(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = path.into_inner();
+    
+    let config = storage::load_config();
+    let mount = match config.mounts.iter().find(|m| m.id == id) {
+        Some(m) => m.clone(),
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Mount not found" })),
+    };
+    
+    match sync_mount_to_cluster(&state, &mount).await {
+        Ok(results) => HttpResponse::Ok().json(serde_json::json!({
+            "message": "Sync complete",
+            "results": results
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/agent/storage/apply — receive and apply a mount config from another node (no auth)
+pub async fn agent_storage_apply(
+    body: web::Json<storage::StorageMount>,
+) -> HttpResponse {
+    let mount = body.into_inner();
+    match storage::create_mount(mount, true) {
+        Ok(m) => HttpResponse::Ok().json(serde_json::json!({
+            "message": "Mount applied",
+            "mount": m
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// Helper: push a mount config to all remote cluster nodes
+async fn sync_mount_to_cluster(
+    state: &web::Data<AppState>,
+    mount: &storage::StorageMount,
+) -> Result<Vec<serde_json::Value>, String> {
+    let nodes = state.cluster.get_all_nodes();
+    let mut results = Vec::new();
+    
+    for node in &nodes {
+        if node.is_self { continue; }
+        let url = format!("http://{}:{}/api/agent/storage/apply", node.address, node.port);
+        let client = reqwest::Client::new();
+        match client.post(&url)
+            .json(mount)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let body = resp.text().await.unwrap_or_default();
+                results.push(serde_json::json!({
+                    "node": node.hostname,
+                    "status": status,
+                    "response": body
+                }));
+            }
+            Err(e) => {
+                results.push(serde_json::json!({
+                    "node": node.hostname,
+                    "status": "error",
+                    "response": e.to_string()
+                }));
+            }
+        }
+    }
+    
+    Ok(results)
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -1090,10 +1341,21 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/lxc/{name}/mounts", web::delete().to(lxc_remove_mount))
         // WolfNet
         .route("/api/wolfnet/status", web::get().to(wolfnet_network_status))
+        // Storage Manager
+        .route("/api/storage/mounts", web::get().to(storage_list_mounts))
+        .route("/api/storage/mounts", web::post().to(storage_create_mount))
+        .route("/api/storage/available", web::get().to(storage_available_mounts))
+        .route("/api/storage/import-rclone", web::post().to(storage_import_rclone))
+        .route("/api/storage/mounts/{id}", web::put().to(storage_update_mount))
+        .route("/api/storage/mounts/{id}", web::delete().to(storage_remove_mount))
+        .route("/api/storage/mounts/{id}/mount", web::post().to(storage_do_mount))
+        .route("/api/storage/mounts/{id}/unmount", web::post().to(storage_do_unmount))
+        .route("/api/storage/mounts/{id}/sync", web::post().to(storage_sync_mount))
         // Console WebSocket
         .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
         // Agent (no auth — used by other WolfStack nodes)
         .route("/api/agent/status", web::get().to(agent_status))
+        .route("/api/agent/storage/apply", web::post().to(agent_storage_apply))
         .route("/api/wolfnet/used-ips", web::get().to(wolfnet_used_ips_endpoint))
         // Node proxy — forward API calls to remote nodes (must be last — wildcard path)
         .route("/api/nodes/{id}/proxy/{path:.*}", web::get().to(node_proxy))

@@ -62,6 +62,7 @@ function selectServerView(nodeId, view) {
         services: 'Services',
         containers: 'Docker',
         lxc: 'LXC',
+        storage: 'Storage',
         certificates: 'Certificates',
         monitoring: 'Live Metrics',
     };
@@ -82,6 +83,7 @@ function selectServerView(nodeId, view) {
         openConsole('host', hostname);
     }
     if (view === 'vms') loadVms();
+    if (view === 'storage') loadStorageMounts();
 }
 
 // ─── Server Tree ───
@@ -143,6 +145,9 @@ function buildServerTree(nodes) {
                 </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="vms" onclick="selectServerView('${node.id}', 'vms')">
                     <span class="icon">🖥️</span> Virtual Machines
+                </a>
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="storage" onclick="selectServerView('${node.id}', 'storage')">
+                    <span class="icon">💾</span> Storage
                 </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="certificates" onclick="selectServerView('${node.id}', 'certificates')">
                     <span class="icon">🔒</span> Certificates
@@ -694,6 +699,245 @@ function renderVms(vms) {
             </tr>
         `;
     }).join('');
+}
+
+// ─── Storage Manager ───
+
+const MOUNT_TYPE_ICONS = { s3: '☁️', nfs: '🗄️', directory: '📁', wolfdisk: '🐺' };
+const MOUNT_TYPE_LABELS = { s3: 'S3', nfs: 'NFS', directory: 'Directory', wolfdisk: 'WolfDisk' };
+
+async function loadStorageMounts() {
+    try {
+        const resp = await fetch(apiUrl('/api/storage/mounts'));
+        if (!resp.ok) throw new Error('Failed to fetch mounts');
+        const mounts = await resp.json();
+        renderStorageMounts(mounts);
+    } catch (e) {
+        console.error('Failed to load storage mounts:', e);
+        document.getElementById('storage-mounts-table').innerHTML = '';
+        document.getElementById('storage-empty').style.display = 'block';
+    }
+}
+
+function renderStorageMounts(mounts) {
+    const tbody = document.getElementById('storage-mounts-table');
+    const empty = document.getElementById('storage-empty');
+    if (!tbody) return;
+
+    if (mounts.length === 0) {
+        tbody.innerHTML = '';
+        empty.style.display = 'block';
+        return;
+    }
+    empty.style.display = 'none';
+
+    tbody.innerHTML = mounts.map(m => {
+        const icon = MOUNT_TYPE_ICONS[m.type] || '📦';
+        const typeLabel = MOUNT_TYPE_LABELS[m.type] || m.type;
+        const isMounted = m.status === 'mounted';
+        const isError = m.status === 'error';
+
+        const statusBadge = isMounted
+            ? '<span class="badge" style="background:var(--success); color:#fff; font-size:11px;">● Mounted</span>'
+            : isError
+                ? `<span class="badge" style="background:#ef4444; color:#fff; font-size:11px;" title="${m.error_message || ''}">✗ Error</span>`
+                : '<span class="badge" style="background:var(--bg-tertiary); color:var(--text-muted); font-size:11px;">○ Unmounted</span>';
+
+        const globalBadge = m.global
+            ? '<span class="badge" style="background:rgba(59,130,246,0.15); color:#60a5fa; font-size:10px; margin-left:4px;">🌐 Global</span>'
+            : '';
+        const autoBadge = m.auto_mount
+            ? '<span class="badge" style="background:rgba(234,179,8,0.15); color:#fbbf24; font-size:10px; margin-left:4px;">⚡ Auto</span>'
+            : '';
+
+        const mountBtn = isMounted
+            ? `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="unmountStorage('${m.id}')">⏏ Unmount</button>`
+            : `<button class="btn btn-sm btn-success" style="font-size:11px; padding:2px 8px;" onclick="mountStorage('${m.id}')">▶ Mount</button>`;
+
+        const syncBtn = m.global
+            ? `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="syncStorageMount('${m.id}')" title="Sync to all cluster nodes">🔄 Sync</button>`
+            : '';
+
+        return `<tr>
+            <td style="font-weight:600;">${icon} ${m.name}</td>
+            <td>${typeLabel}</td>
+            <td style="font-family:var(--font-mono); font-size:12px; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${m.source}">${m.source}</td>
+            <td style="font-family:var(--font-mono); font-size:12px; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${m.mount_point}">${m.mount_point}</td>
+            <td>${statusBadge}</td>
+            <td>${globalBadge}${autoBadge}</td>
+            <td style="white-space:nowrap;">
+                ${mountBtn}
+                ${syncBtn}
+                <button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;" onclick="deleteStorageMount('${m.id}', '${m.name}')">🗑️</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+// ─── Modal Control ───
+
+function showCreateMountModal() {
+    document.getElementById('create-mount-modal').classList.add('active');
+    onMountTypeChange();
+}
+
+function closeMountModal() {
+    document.getElementById('create-mount-modal').classList.remove('active');
+    // Reset form
+    document.getElementById('mount-name').value = '';
+    document.getElementById('mount-point').value = '';
+    document.getElementById('mount-type').value = 's3';
+    document.getElementById('s3-bucket').value = '';
+    document.getElementById('s3-access-key').value = '';
+    document.getElementById('s3-secret-key').value = '';
+    document.getElementById('s3-region').value = '';
+    document.getElementById('s3-endpoint').value = '';
+    document.getElementById('mount-global').checked = false;
+    document.getElementById('mount-auto').checked = true;
+    onMountTypeChange();
+}
+
+function showImportRcloneModal() {
+    document.getElementById('import-rclone-modal').classList.add('active');
+}
+
+function closeImportRcloneModal() {
+    document.getElementById('import-rclone-modal').classList.remove('active');
+    document.getElementById('rclone-config-paste').value = '';
+}
+
+function onMountTypeChange() {
+    const type = document.getElementById('mount-type').value;
+    document.getElementById('s3-fields').style.display = type === 's3' ? 'block' : 'none';
+    document.getElementById('nfs-fields').style.display = type === 'nfs' ? 'block' : 'none';
+    document.getElementById('dir-fields').style.display = type === 'directory' ? 'block' : 'none';
+    document.getElementById('wolfdisk-fields').style.display = type === 'wolfdisk' ? 'block' : 'none';
+}
+
+// ─── CRUD Operations ───
+
+async function createStorageMount() {
+    const name = document.getElementById('mount-name').value.trim();
+    const type = document.getElementById('mount-type').value;
+    const mount_point = document.getElementById('mount-point').value.trim();
+    const global = document.getElementById('mount-global').checked;
+    const auto_mount = document.getElementById('mount-auto').checked;
+
+    if (!name) return alert('Name is required');
+
+    let source = '';
+    let s3_config = null;
+    let nfs_options = null;
+
+    if (type === 's3') {
+        const bucket = document.getElementById('s3-bucket').value.trim();
+        const access_key_id = document.getElementById('s3-access-key').value.trim();
+        const secret_access_key = document.getElementById('s3-secret-key').value.trim();
+        if (!access_key_id || !secret_access_key) return alert('S3 Access Key and Secret Key are required');
+        s3_config = {
+            access_key_id,
+            secret_access_key,
+            region: document.getElementById('s3-region').value.trim(),
+            endpoint: document.getElementById('s3-endpoint').value.trim(),
+            provider: document.getElementById('s3-provider').value,
+            bucket
+        };
+        source = bucket ? `s3:${bucket}` : 's3:';
+    } else if (type === 'nfs') {
+        source = document.getElementById('nfs-source').value.trim();
+        nfs_options = document.getElementById('nfs-options').value.trim() || null;
+        if (!source) return alert('NFS source is required (e.g. 192.168.1.100:/data)');
+    } else if (type === 'directory') {
+        source = document.getElementById('dir-source').value.trim();
+        if (!source) return alert('Source directory is required');
+    } else if (type === 'wolfdisk') {
+        source = document.getElementById('wolfdisk-source').value.trim();
+        if (!source) return alert('WolfDisk path is required');
+    }
+
+    const payload = { name, type, source, mount_point, global, auto_mount, s3_config, nfs_options, do_mount: true };
+
+    try {
+        const resp = await fetch(apiUrl('/api/storage/mounts'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to create mount');
+        closeMountModal();
+        loadStorageMounts();
+    } catch (e) {
+        alert('Error creating mount: ' + e.message);
+    }
+}
+
+async function mountStorage(id) {
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/mounts/${id}/mount`), { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Mount failed');
+        loadStorageMounts();
+    } catch (e) {
+        alert('Mount error: ' + e.message);
+    }
+}
+
+async function unmountStorage(id) {
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/mounts/${id}/unmount`), { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Unmount failed');
+        loadStorageMounts();
+    } catch (e) {
+        alert('Unmount error: ' + e.message);
+    }
+}
+
+async function deleteStorageMount(id, name) {
+    if (!confirm(`Delete storage mount "${name}"? This will unmount and remove the configuration.`)) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/mounts/${id}`), { method: 'DELETE' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Delete failed');
+        loadStorageMounts();
+    } catch (e) {
+        alert('Delete error: ' + e.message);
+    }
+}
+
+async function syncStorageMount(id) {
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/mounts/${id}/sync`), { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Sync failed');
+        const results = data.results || [];
+        const summary = results.map(r => `${r.node}: ${r.status}`).join('\n');
+        alert(`Sync complete:\n${summary || 'No remote nodes'}`);
+        loadStorageMounts();
+    } catch (e) {
+        alert('Sync error: ' + e.message);
+    }
+}
+
+async function importRcloneConfig() {
+    const config = document.getElementById('rclone-config-paste').value.trim();
+    if (!config) return alert('Please paste your rclone.conf contents');
+
+    try {
+        const resp = await fetch(apiUrl('/api/storage/import-rclone'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Import failed');
+        closeImportRcloneModal();
+        alert(data.message || 'Import complete');
+        loadStorageMounts();
+    } catch (e) {
+        alert('Import error: ' + e.message);
+    }
 }
 
 // ─── VM Storage Management ───
@@ -2236,15 +2480,52 @@ async function createDockerContainer() {
 }
 // ─── Docker / LXC Volume Mount Helpers ───
 
-function addDockerVolumeRow() {
+let cachedAvailableMounts = null;
+
+async function fetchAvailableMounts() {
+    try {
+        const resp = await fetch(apiUrl('/api/storage/available'));
+        if (resp.ok) cachedAvailableMounts = await resp.json();
+    } catch (e) {
+        cachedAvailableMounts = [];
+    }
+    return cachedAvailableMounts || [];
+}
+
+function buildMountPickerOptions() {
+    if (!cachedAvailableMounts || cachedAvailableMounts.length === 0) return '';
+    return cachedAvailableMounts.map(m => {
+        const icon = MOUNT_TYPE_ICONS[m.type] || '📦';
+        return `<option value="${m.mount_point}">${icon} ${m.name} (${m.mount_point})</option>`;
+    }).join('');
+}
+
+async function addDockerVolumeRow() {
     const list = document.getElementById('docker-volumes-list');
     if (!list) return;
+
+    // Fetch available mounts if not cached
+    if (cachedAvailableMounts === null) await fetchAvailableMounts();
+
     const row = document.createElement('div');
     row.className = 'docker-volume-row';
-    row.style.cssText = 'display:flex; gap:6px; align-items:center;';
+    row.style.cssText = 'display:flex; gap:6px; align-items:center; flex-wrap:wrap;';
+
+    const mountOptions = buildMountPickerOptions();
+    const pickerHtml = mountOptions
+        ? `<select class="docker-vol-picker" onchange="fillVolFromPicker(this)"
+            style="width:100%; margin-bottom:4px; padding:4px 6px; border-radius:4px; border:1px solid var(--border); background:var(--bg-secondary); color:var(--text-secondary); font-size:11px;">
+            <option value="">📂 Or pick from Storage Manager...</option>
+            ${mountOptions}
+          </select>`
+        : '';
+
     row.innerHTML = `
-        <input class="docker-vol-host" type="text" placeholder="/host/path or volume-name"
-            style="flex:2; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:12px;">
+        <div style="flex:2; min-width:120px;">
+            ${pickerHtml}
+            <input class="docker-vol-host" type="text" placeholder="/host/path or volume-name"
+                style="width:100%; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:12px;">
+        </div>
         <span style="color:var(--text-muted); font-weight:600;">→</span>
         <input class="docker-vol-container" type="text" placeholder="/container/path"
             style="flex:2; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:12px;">
@@ -2256,19 +2537,45 @@ function addDockerVolumeRow() {
     list.appendChild(row);
 }
 
+function fillVolFromPicker(select) {
+    const row = select.closest('.docker-volume-row') || select.closest('.lxc-mount-row');
+    if (!row) return;
+    const hostInput = row.querySelector('.docker-vol-host') || row.querySelector('.lxc-mount-host');
+    if (hostInput && select.value) {
+        hostInput.value = select.value;
+    }
+}
+
 function removeDockerVolumeRow(btn) {
     btn.closest('.docker-volume-row')?.remove();
 }
 
-function addLxcMountRow() {
+async function addLxcMountRow() {
     const list = document.getElementById('lxc-mounts-list');
     if (!list) return;
+
+    // Fetch available mounts if not cached
+    if (cachedAvailableMounts === null) await fetchAvailableMounts();
+
     const row = document.createElement('div');
     row.className = 'lxc-mount-row';
-    row.style.cssText = 'display:flex; gap:6px; align-items:center;';
+    row.style.cssText = 'display:flex; gap:6px; align-items:center; flex-wrap:wrap;';
+
+    const mountOptions = buildMountPickerOptions();
+    const pickerHtml = mountOptions
+        ? `<select class="lxc-vol-picker" onchange="fillVolFromPicker(this)"
+            style="width:100%; margin-bottom:4px; padding:4px 6px; border-radius:4px; border:1px solid var(--border); background:var(--bg-secondary); color:var(--text-secondary); font-size:11px;">
+            <option value="">📂 Or pick from Storage Manager...</option>
+            ${mountOptions}
+          </select>`
+        : '';
+
     row.innerHTML = `
-        <input class="lxc-mount-host" type="text" placeholder="/host/path"
-            style="flex:2; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:12px;">
+        <div style="flex:2; min-width:120px;">
+            ${pickerHtml}
+            <input class="lxc-mount-host" type="text" placeholder="/host/path"
+                style="width:100%; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:12px;">
+        </div>
         <span style="color:var(--text-muted); font-weight:600;">→</span>
         <input class="lxc-mount-container" type="text" placeholder="/container/path"
             style="flex:2; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:12px;">

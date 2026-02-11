@@ -642,7 +642,203 @@
                 </div>
             </div>
 
-            <!-- Create VM Modal -->
+            <!-- ═══ Storage Manager ═══ -->
+            <div id="page-storage" class="page-view" style="display:none;">
+                <div class="card">
+                    <div class="card-header"
+                        style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                        <h3>💾 Storage Manager</h3>
+                        <div style="display:flex; gap:8px;">
+                            <button class="btn btn-sm"
+                                style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"
+                                onclick="showImportRcloneModal()">📥 Import rclone.conf</button>
+                            <button class="btn btn-sm btn-primary" onclick="showCreateMountModal()">+ Add Mount</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>Type</th>
+                                    <th>Source</th>
+                                    <th>Mount Point</th>
+                                    <th>Status</th>
+                                    <th>Options</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="storage-mounts-table"></tbody>
+                        </table>
+                        <p id="storage-empty"
+                            style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
+                            No storage mounts configured. Click <strong>+ Add Mount</strong> to add S3, NFS, directory,
+                            or WolfDisk storage.
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Create Storage Mount Modal -->
+            <div class="modal-overlay" id="create-mount-modal">
+                <div class="modal" style="max-width: 640px; width: 95%;">
+                    <div class="modal-header">
+                        <h3>Add Storage Mount</h3>
+                        <button class="modal-close" onclick="closeMountModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                            <div class="form-group" style="grid-column: 1 / -1;">
+                                <label>Name</label>
+                                <input type="text" class="form-control" id="mount-name" placeholder="My S3 backup">
+                            </div>
+                            <div class="form-group">
+                                <label>Type</label>
+                                <select class="form-control" id="mount-type" onchange="onMountTypeChange()">
+                                    <option value="s3">☁️ S3 / Object Storage</option>
+                                    <option value="nfs">🗄️ NFS Share</option>
+                                    <option value="directory">📁 Directory (bind mount)</option>
+                                    <option value="wolfdisk">🐺 WolfDisk</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Mount Point</label>
+                                <input type="text" class="form-control" id="mount-point"
+                                    placeholder="/mnt/wolfstack/my-mount">
+                                <small style="color:var(--text-muted); font-size:11px;">Leave blank for auto</small>
+                            </div>
+
+                            <!-- S3 Fields -->
+                            <div id="s3-fields" style="grid-column: 1 / -1;">
+                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                                    <div class="form-group">
+                                        <label>Provider</label>
+                                        <select class="form-control" id="s3-provider">
+                                            <option value="AWS">Amazon S3</option>
+                                            <option value="Cloudflare">Cloudflare R2</option>
+                                            <option value="DigitalOcean">DigitalOcean Spaces</option>
+                                            <option value="Wasabi">Wasabi</option>
+                                            <option value="Backblaze">Backblaze B2</option>
+                                            <option value="Minio">MinIO</option>
+                                            <option value="Other">Other S3-compatible</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Bucket</label>
+                                        <input type="text" class="form-control" id="s3-bucket" placeholder="my-bucket">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Access Key ID</label>
+                                        <input type="text" class="form-control" id="s3-access-key"
+                                            placeholder="AKIA...">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Secret Access Key</label>
+                                        <input type="password" class="form-control" id="s3-secret-key"
+                                            placeholder="secret">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Region</label>
+                                        <input type="text" class="form-control" id="s3-region" placeholder="us-east-1">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Endpoint (optional)</label>
+                                        <input type="text" class="form-control" id="s3-endpoint"
+                                            placeholder="https://s3.example.com">
+                                        <small style="color:var(--text-muted); font-size:11px;">For non-AWS
+                                            providers</small>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- NFS Fields -->
+                            <div id="nfs-fields" style="grid-column: 1 / -1; display:none;">
+                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                                    <div class="form-group" style="grid-column: 1 / -1;">
+                                        <label>NFS Source</label>
+                                        <input type="text" class="form-control" id="nfs-source"
+                                            placeholder="192.168.1.100:/data/share">
+                                        <small style="color:var(--text-muted); font-size:11px;">Format:
+                                            server:/export/path</small>
+                                    </div>
+                                    <div class="form-group" style="grid-column: 1 / -1;">
+                                        <label>NFS Options</label>
+                                        <input type="text" class="form-control" id="nfs-options"
+                                            value="rw,soft,timeo=50" placeholder="rw,soft,timeo=50">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Directory Fields -->
+                            <div id="dir-fields" style="grid-column: 1 / -1; display:none;">
+                                <div class="form-group">
+                                    <label>Source Directory</label>
+                                    <input type="text" class="form-control" id="dir-source" placeholder="/data/shared">
+                                </div>
+                            </div>
+
+                            <!-- WolfDisk Fields -->
+                            <div id="wolfdisk-fields" style="grid-column: 1 / -1; display:none;">
+                                <div class="form-group">
+                                    <label>WolfDisk Path</label>
+                                    <input type="text" class="form-control" id="wolfdisk-source"
+                                        placeholder="/wolfdisk/data">
+                                    <small style="color:var(--text-muted); font-size:11px;">Path on the WolfDisk
+                                        filesystem</small>
+                                </div>
+                            </div>
+
+                            <!-- Global / Auto Mount options -->
+                            <div class="form-group"
+                                style="grid-column: 1 / -1; display:flex; gap:20px; padding-top:8px; border-top:1px solid var(--border);">
+                                <label
+                                    style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px;">
+                                    <input type="checkbox" id="mount-global"> 🌐 Global Mount
+                                    <small style="color:var(--text-muted); font-size:11px;">(replicate to all cluster
+                                        nodes)</small>
+                                </label>
+                                <label
+                                    style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px;">
+                                    <input type="checkbox" id="mount-auto" checked> ⚡ Auto-mount on boot
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" onclick="closeMountModal()">Cancel</button>
+                        <button class="btn btn-primary" onclick="createStorageMount()">Create & Mount</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Import rclone.conf Modal -->
+            <div class="modal-overlay" id="import-rclone-modal">
+                <div class="modal" style="max-width: 600px; width: 95%;">
+                    <div class="modal-header">
+                        <h3>📥 Import rclone.conf</h3>
+                        <button class="modal-close" onclick="closeImportRcloneModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <p style="font-size:13px; color:var(--text-secondary); margin-bottom:12px;">
+                            Paste your <code>rclone.conf</code> contents below. All S3-compatible remotes will be
+                            imported as storage mounts.
+                        </p>
+                        <textarea id="rclone-config-paste" class="form-control" rows="12"
+                            style="font-family: var(--font-mono); font-size:12px; resize:vertical;" placeholder="[myremote]
+type = s3
+provider = AWS
+access_key_id = AKIA...
+secret_access_key = ...
+region = us-east-1"></textarea>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" onclick="closeImportRcloneModal()">Cancel</button>
+                        <button class="btn btn-primary" onclick="importRcloneConfig()">Import</button>
+                    </div>
+                </div>
+            </div>
+
+
             <div class="modal-overlay" id="create-vm-modal">
                 <div class="modal" style="max-width: 720px; width: 95%;">
                     <div class="modal-header">

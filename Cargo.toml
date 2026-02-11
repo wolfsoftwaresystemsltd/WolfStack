@@ -1,10 +1,10 @@
 [package]
 name = "wolfstack"
-version = "5.7.0"
+version = "5.8.0"
 edition = "2021"
 authors = ["Wolf Software Systems Ltd"]
 description = "Server management platform for the Wolf software suite"
-license = "MIT"
+license = "FSL-1.1-Apache-2.0"
 repository = "https://github.com/wolfsoftwaresystemsltd/WolfStack"
 
 [dependencies]
