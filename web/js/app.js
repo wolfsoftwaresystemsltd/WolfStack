@@ -5871,6 +5871,12 @@ async function savePbsConfig() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
+        if (!res.ok) {
+            const text = await res.text();
+            console.error('PBS config save failed:', res.status, text);
+            showToast('PBS save failed: ' + text, 'error');
+            return;
+        }
         const data = await res.json();
         if (data.error) showToast('PBS save failed: ' + data.error, 'error');
         else {
