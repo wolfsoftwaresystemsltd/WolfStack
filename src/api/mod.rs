@@ -382,6 +382,7 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
     let hostname = metrics.hostname.clone();
     let docker_count = containers::docker_list_all().len() as u32;
     let lxc_count = containers::lxc_list_all().len() as u32;
+    let vm_count = state.vms.lock().unwrap().list_vms().len() as u32;
     let msg = AgentMessage::StatusReport {
         node_id: state.cluster.self_id.clone(),
         hostname,
@@ -389,6 +390,7 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
         components,
         docker_count,
         lxc_count,
+        vm_count,
     };
     HttpResponse::Ok().json(msg)
 }

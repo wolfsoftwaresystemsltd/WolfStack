@@ -117,7 +117,8 @@ async fn main() -> std::io::Result<()> {
         let components = installer::get_all_status();
         let docker_count = containers::docker_list_all().len() as u32;
         let lxc_count = containers::lxc_list_all().len() as u32;
-        cluster.update_self(metrics, components, docker_count, lxc_count);
+        let vm_count = vms_manager.list_vms().len() as u32;
+        cluster.update_self(metrics, components, docker_count, lxc_count, vm_count);
 
         // Create app state
         let app_state = web::Data::new(api::AppState {
@@ -142,7 +143,8 @@ async fn main() -> std::io::Result<()> {
                 };
                 let docker_count = containers::docker_list_all().len() as u32;
                 let lxc_count = containers::lxc_list_all().len() as u32;
-                cluster_clone.update_self(metrics, components, docker_count, lxc_count);
+                let vm_count = state_clone.vms.lock().unwrap().list_vms().len() as u32;
+                cluster_clone.update_self(metrics, components, docker_count, lxc_count, vm_count);
             }
         });
 

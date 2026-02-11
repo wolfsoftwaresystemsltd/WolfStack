@@ -149,6 +149,7 @@ function buildServerTree(nodes) {
                 </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="vms" onclick="selectServerView('${node.id}', 'vms')">
                     <span class="icon">🖥️</span> Virtual Machines
+                    ${node.vm_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.vm_count}</span>` : ''}
                 </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="storage" onclick="selectServerView('${node.id}', 'storage')">
                     <span class="icon">💾</span> Storage
