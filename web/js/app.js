@@ -698,11 +698,11 @@ function drawChart(canvasId, data, strokeColor, fillColor) {
 
     if (!data || data.length < 2) return;
 
-    const padding = { top: 20, right: 0, bottom: 20, left: 0 };
+    const padding = { top: 20, right: 10, bottom: 30, left: 40 };
     const w = rect.width - padding.left - padding.right;
     const h = rect.height - padding.top - padding.bottom;
 
-    // Draw grid
+    // Draw grid + Y-axis labels
     ctx.strokeStyle = 'rgba(255,255,255,0.05)';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -712,6 +712,30 @@ function drawChart(canvasId, data, strokeColor, fillColor) {
         ctx.lineTo(padding.left + w, y);
     }
     ctx.stroke();
+
+    // Y-axis labels (100%, 75%, 50%, 25%, 0%)
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.font = '10px Inter, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i <= 4; i++) {
+        const y = padding.top + (h / 4) * i;
+        const label = (100 - i * 25) + '%';
+        ctx.fillText(label, padding.left - 6, y);
+    }
+
+    // X-axis time labels
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    const totalSecs = data.length * 2; // ~2s per sample
+    const xLabelCount = 5;
+    for (let i = 0; i <= xLabelCount; i++) {
+        const frac = i / xLabelCount;
+        const x = padding.left + frac * w;
+        const secsAgo = Math.round(totalSecs * (1 - frac));
+        const label = secsAgo >= 60 ? `-${Math.round(secsAgo / 60)}m` : `-${secsAgo}s`;
+        ctx.fillText(label, x, padding.top + h + 6);
+    }
 
     // Draw path
     ctx.beginPath();
@@ -770,12 +794,12 @@ function drawMultiLineChart(canvasId, legendId, historyMap) {
 
     ctx.clearRect(0, 0, rect.width, rect.height);
 
-    const padding = { top: 20, right: 0, bottom: 20, left: 0 };
+    const padding = { top: 20, right: 10, bottom: 30, left: 40 };
     const w = rect.width - padding.left - padding.right;
     const h = rect.height - padding.top - padding.bottom;
     const step = w / (MAX_HISTORY - 1);
 
-    // Grid
+    // Grid + Y-axis labels
     ctx.strokeStyle = 'rgba(255,255,255,0.05)';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -785,6 +809,33 @@ function drawMultiLineChart(canvasId, legendId, historyMap) {
         ctx.lineTo(padding.left + w, y);
     }
     ctx.stroke();
+
+    // Y-axis labels
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.font = '10px Inter, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i <= 4; i++) {
+        const y = padding.top + (h / 4) * i;
+        const label = (100 - i * 25) + '%';
+        ctx.fillText(label, padding.left - 6, y);
+    }
+
+    // X-axis time labels
+    const firstData = Object.values(historyMap).find(d => d && d.length >= 2);
+    if (firstData) {
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        const totalSecs = firstData.length * 2;
+        const xLabelCount = 5;
+        for (let j = 0; j <= xLabelCount; j++) {
+            const frac = j / xLabelCount;
+            const x = padding.left + frac * w;
+            const secsAgo = Math.round(totalSecs * (1 - frac));
+            const label = secsAgo >= 60 ? `-${Math.round(secsAgo / 60)}m` : `-${secsAgo}s`;
+            ctx.fillText(label, x, padding.top + h + 6);
+        }
+    }
 
     // Colors for disks
     const colors = [
