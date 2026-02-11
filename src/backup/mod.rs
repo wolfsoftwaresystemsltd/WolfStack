@@ -1424,12 +1424,35 @@ where
 {
     let repo = pbs_repo_string(storage);
 
-    fs::create_dir_all(target_dir)
+    // Parse snapshot "type/id/timestamp" to determine backup kind and ID
+    let parts: Vec<&str> = snapshot.split('/').collect();
+    let snap_type = parts.first().copied().unwrap_or("");
+    let snap_id = parts.get(1).copied().unwrap_or("");
+
+    // Compute the effective target directory based on backup type:
+    // - ct: /var/lib/lxc/pbs-{id}/rootfs/  (LXC container structure)
+    // - vm: /var/lib/wolfstack/vms/pbs-{id}/  (VM disk image)
+    // - host/other: use target_dir as-is
+    let (effective_target, container_name) = if snap_type == "ct" && !snap_id.is_empty() {
+        let name = format!("pbs-{}", snap_id);
+        let rootfs = format!("/var/lib/lxc/{}/rootfs", name);
+        on_progress(format!("Setting up container {}...", name), Some(0.5));
+        (rootfs, Some(name))
+    } else if snap_type == "vm" && !snap_id.is_empty() {
+        let name = format!("pbs-{}", snap_id);
+        let vm_dir = format!("/var/lib/wolfstack/vms/{}", name);
+        on_progress(format!("Setting up VM directory {}...", name), Some(0.5));
+        (vm_dir, None)
+    } else {
+        (target_dir.to_string(), None)
+    };
+
+    fs::create_dir_all(&effective_target)
         .map_err(|e| format!("Failed to create target dir: {}", e))?;
 
     let snapshot_fixed = fix_pbs_snapshot_timestamp(snapshot);
     info!("PBS restore (with progress): snapshot='{}' (fixed='{}'), archive='{}', target='{}'",
-          snapshot, snapshot_fixed, archive, target_dir);
+          snapshot, snapshot_fixed, archive, &effective_target);
 
     on_progress("Detecting archive...".to_string(), Some(1.0));
 
@@ -1441,11 +1464,14 @@ where
     info!("Using archive: {}", actual_archive);
     on_progress(format!("Downloading {}...", actual_archive), Some(2.0));
 
+    let pbs_pw = if !storage.pbs_token_secret.is_empty() { &storage.pbs_token_secret }
+                 else { &storage.pbs_password };
+
     let mut cmd = Command::new("proxmox-backup-client");
     cmd.arg("restore")
        .arg(&snapshot_fixed)
        .arg(&actual_archive)
-       .arg(target_dir)
+       .arg(&effective_target)
        .arg("--repository").arg(&repo)
        .arg("--ignore-ownership").arg("true");
 
@@ -1455,8 +1481,6 @@ where
     if !storage.pbs_namespace.is_empty() {
         cmd.arg("--ns").arg(&storage.pbs_namespace);
     }
-    let pbs_pw = if !storage.pbs_token_secret.is_empty() { &storage.pbs_token_secret }
-                 else { &storage.pbs_password };
     if !pbs_pw.is_empty() {
         cmd.env("PBS_PASSWORD", pbs_pw);
     }
@@ -1478,9 +1502,6 @@ where
                 let trimmed = line.trim().to_string();
                 if trimmed.is_empty() { continue; }
 
-                // Try to extract percentage from lines like:
-                // "  4.13% (1.02 GiB of 24.49 GiB)"
-                // or progress bar output
                 let pct = extract_percentage(&trimmed);
                 let display = if let Some(p) = pct {
                     format!("Downloading: {:.1}%", p)
@@ -1500,8 +1521,50 @@ where
         return Err("PBS restore failed — check server logs".to_string());
     }
 
-    info!("Restored PBS snapshot {} archive {} to {}", snapshot_fixed, actual_archive, target_dir);
-    Ok(format!("Restored {} to {}", actual_archive, target_dir))
+    // Post-restore: create LXC config for container restores
+    if let Some(ref cname) = container_name {
+        let container_dir = format!("/var/lib/lxc/{}", cname);
+        let config_path = format!("{}/config", container_dir);
+
+        on_progress("Creating LXC configuration...".to_string(), Some(98.0));
+
+        // Try to extract pct.conf.blob from PBS for reference
+        let pct_path = format!("{}/pct.conf.blob", container_dir);
+        let mut pct_cmd = Command::new("proxmox-backup-client");
+        pct_cmd.arg("restore").arg(&snapshot_fixed).arg("pct.conf.blob").arg(&pct_path)
+            .arg("--repository").arg(&repo);
+        if !pbs_pw.is_empty() { pct_cmd.env("PBS_PASSWORD", pbs_pw); }
+        if !storage.pbs_fingerprint.is_empty() { pct_cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint); }
+        let _ = pct_cmd.output(); // Best-effort
+
+        // Create a basic LXC config so `lxc-ls` discovers the container
+        if !Path::new(&config_path).exists() {
+            let lxc_config = format!(
+                "# LXC container restored from PBS\n\
+                 # Original Proxmox VMID: {}\n\
+                 # Snapshot: {}\n\
+                 lxc.uts.name = {}\n\
+                 lxc.rootfs.path = dir:{}/rootfs\n\
+                 lxc.include = /usr/share/lxc/config/common.conf\n\
+                 lxc.arch = amd64\n\
+                 \n\
+                 # Network — configure as needed\n\
+                 lxc.net.0.type = veth\n\
+                 lxc.net.0.link = lxcbr0\n\
+                 lxc.net.0.flags = up\n\
+                 lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx\n",
+                snap_id, snapshot, cname, container_dir,
+            );
+            let _ = fs::write(&config_path, lxc_config);
+            info!("Created LXC config at {}", config_path);
+        }
+
+        info!("Restored PBS container {} to {}", snap_id, container_dir);
+        return Ok(format!("Container {} restored to {}", cname, container_dir));
+    }
+
+    info!("Restored PBS snapshot {} archive {} to {}", snapshot_fixed, actual_archive, effective_target);
+    Ok(format!("Restored {} to {}", actual_archive, effective_target))
 }
 
 /// Extract percentage from proxmox-backup-client progress output
