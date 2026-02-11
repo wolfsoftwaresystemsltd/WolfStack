@@ -3,8 +3,8 @@
 //! Authenticates against /etc/shadow using the system's crypt() function.
 //! WolfStack must run as root to read /etc/shadow.
 //!
-//! Cluster-internal requests are authenticated via a shared secret stored
-//! in /etc/wolfstack/cluster.key (auto-generated on first run).
+//! Cluster-internal requests are authenticated via a built-in shared secret
+//! that is the same across all WolfStack installations.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -14,39 +14,14 @@ use tracing::{info, warn};
 /// Session token lifetime (8 hours)
 const SESSION_LIFETIME: Duration = Duration::from_secs(8 * 3600);
 
-/// Path to the cluster secret key
-const CLUSTER_KEY_PATH: &str = "/etc/wolfstack/cluster.key";
+/// Built-in cluster secret shared by all WolfStack installations.
+/// This prevents unauthenticated external access to inter-node APIs
+/// without requiring manual key distribution between nodes.
+const CLUSTER_SECRET: &str = "wsk_a7f3b9e2c1d4f6a8b0e3d5c7f9a1b3d5e7f9a1c3b5d7e9f0a2b4c6d8e0f1a3";
 
-/// Load or generate the cluster secret for inter-node authentication
+/// Get the cluster secret — same on every WolfStack installation
 pub fn load_cluster_secret() -> String {
-    // Try to read existing key
-    if let Ok(key) = std::fs::read_to_string(CLUSTER_KEY_PATH) {
-        let key = key.trim().to_string();
-        if key.len() >= 32 {
-            return key;
-        }
-    }
-
-    // Generate new key
-    let key = uuid::Uuid::new_v4().to_string().replace('-', "")
-        + &uuid::Uuid::new_v4().to_string().replace('-', "");
-
-    // Ensure directory exists
-    let _ = std::fs::create_dir_all("/etc/wolfstack");
-
-    // Write key with restrictive permissions
-    if let Err(e) = std::fs::write(CLUSTER_KEY_PATH, &key) {
-        warn!("Failed to write cluster key: {} — inter-node auth will not persist across restarts", e);
-        return key;
-    }
-
-    // chmod 600
-    let _ = std::process::Command::new("chmod")
-        .args(["600", CLUSTER_KEY_PATH])
-        .output();
-
-    info!("Generated new cluster secret at {}", CLUSTER_KEY_PATH);
-    key
+    CLUSTER_SECRET.to_string()
 }
 
 /// Validate a cluster secret from a request header

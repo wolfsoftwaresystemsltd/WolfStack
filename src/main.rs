@@ -86,9 +86,8 @@ async fn main() -> std::io::Result<()> {
     info!("  Hostname:   {}", hostname);
     info!("  Dashboard:  http://{}:{}", cli.bind, cli.port);
 
-    // Load or generate cluster secret for inter-node authentication
+    // Load built-in cluster secret for inter-node authentication
     let cluster_secret = auth::load_cluster_secret();
-    info!("  Cluster key: {}", "/etc/wolfstack/cluster.key");
     info!("");
 
     // Initialize monitoring
