@@ -518,6 +518,45 @@ async function fetchMetrics() {
 }
 
 function updateDashboard(m) {
+    // ─── Neofetch Card ───
+    const neoOs = document.getElementById('neo-os');
+    if (neoOs) {
+        neoOs.textContent = (m.os_name || 'Linux') + ' ' + (m.os_version || '');
+        const neoHost = document.getElementById('neo-host');
+        if (neoHost) neoHost.textContent = m.hostname;
+        const neoKernel = document.getElementById('neo-kernel');
+        if (neoKernel) neoKernel.textContent = m.kernel_version || 'unknown';
+
+        // Format Uptime
+        const up = m.uptime_secs;
+        const days = Math.floor(up / 86400);
+        const hours = Math.floor((up % 86400) / 3600);
+        const mins = Math.floor((up % 3600) / 60);
+        let uptimeStr = '';
+        if (days > 0) uptimeStr += `${days}d `;
+        if (hours > 0) uptimeStr += `${hours}h `;
+        uptimeStr += `${mins}m`;
+        const neoUptime = document.getElementById('neo-uptime');
+        if (neoUptime) neoUptime.textContent = uptimeStr;
+
+        const neoCpu = document.getElementById('neo-cpu');
+        if (neoCpu) {
+            neoCpu.textContent = m.cpu_model || 'Unknown CPU';
+            neoCpu.title = m.cpu_model || '';
+        }
+
+        const neoMem = document.getElementById('neo-memory');
+        if (neoMem) neoMem.textContent = `${formatBytes(m.memory_used_bytes)} / ${formatBytes(m.memory_total_bytes)}`;
+
+        // Public IP (Need to access currentNode public ip)
+        const neoIp = document.getElementById('neo-ip');
+        if (neoIp) {
+            // Find current node in global nodes list
+            const currentNode = nodes.find(n => n.id === currentNodeId);
+            neoIp.textContent = currentNode?.public_ip || '— (private)';
+        }
+    }
+
     // Header Uptime
     const headerUptime = document.getElementById('server-header-uptime');
     if (headerUptime) headerUptime.textContent = 'Up: ' + formatUptime(m.uptime_secs);

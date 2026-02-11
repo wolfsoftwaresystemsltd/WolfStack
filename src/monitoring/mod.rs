@@ -22,6 +22,9 @@ pub struct SystemMetrics {
     pub network: Vec<NetworkMetrics>,
     pub load_avg: LoadAverage,
     pub processes: usize,
+    pub os_name: Option<String>,
+    pub os_version: Option<String>,
+    pub kernel_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +147,9 @@ impl SystemMonitor {
                 fifteen: load.fifteen,
             },
             processes: self.sys.processes().len(),
+            os_name: System::name(),
+            os_version: System::os_version(),
+            kernel_version: System::kernel_version(),
         }
     }
 }
