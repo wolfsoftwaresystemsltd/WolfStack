@@ -760,15 +760,25 @@ function renderStorageMounts(mounts) {
             ? `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="syncStorageMount('${m.id}')" title="Sync to all cluster nodes">🔄 Sync</button>`
             : '';
 
+        // Source display — show bucket prominently for S3
+        let sourceDisplay = m.source;
+        if (m.type === 's3' && m.s3_config) {
+            const bucket = m.s3_config.bucket || '(no bucket)';
+            const provider = m.s3_config.provider || 'S3';
+            const endpoint = m.s3_config.endpoint ? `<br><small style="color:var(--text-muted); font-size:10px;">${m.s3_config.endpoint}</small>` : '';
+            sourceDisplay = `<span class="badge" style="background:rgba(59,130,246,0.15); color:#60a5fa; font-size:10px; margin-right:4px;">${provider}</span><strong>${bucket}</strong>${endpoint}`;
+        }
+
         return `<tr>
             <td style="font-weight:600;">${icon} ${m.name}</td>
             <td>${typeLabel}</td>
-            <td style="font-family:var(--font-mono); font-size:12px; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${m.source}">${m.source}</td>
+            <td style="font-size:12px; max-width:240px; overflow:hidden; text-overflow:ellipsis;" title="${m.source}">${sourceDisplay}</td>
             <td style="font-family:var(--font-mono); font-size:12px; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${m.mount_point}">${m.mount_point}</td>
             <td>${statusBadge}</td>
             <td>${globalBadge}${autoBadge}</td>
             <td style="white-space:nowrap;">
                 <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="openEditMount('${m.id}')" title="Settings">⚙️</button>
+                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="duplicateStorageMount('${m.id}')" title="Duplicate">📋</button>
                 ${mountBtn}
                 ${syncBtn}
                 <button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;" onclick="deleteStorageMount('${m.id}', '${m.name}')">🗑️</button>
@@ -920,6 +930,20 @@ async function syncStorageMount(id) {
         loadStorageMounts();
     } catch (e) {
         alert('Sync error: ' + e.message);
+    }
+}
+
+async function duplicateStorageMount(id) {
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/mounts/${id}/duplicate`), { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Duplicate failed');
+        showToast('Mount duplicated — edit the copy to change bucket/settings', 'success');
+        await loadStorageMounts();
+        // Open the edit modal for the newly created duplicate
+        openEditMount(data.id);
+    } catch (e) {
+        alert('Duplicate error: ' + e.message);
     }
 }
 

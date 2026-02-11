@@ -1141,6 +1141,20 @@ pub async fn storage_remove_mount(
     }
 }
 
+/// POST /api/storage/mounts/{id}/duplicate — clone a mount entry
+pub async fn storage_duplicate_mount(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = path.into_inner();
+    match storage::duplicate_mount(&id) {
+        Ok(dup) => HttpResponse::Ok().json(dup),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// POST /api/storage/mounts/{id}/mount — mount a storage entry
 pub async fn storage_do_mount(
     req: HttpRequest,
@@ -1369,6 +1383,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/storage/import-rclone", web::post().to(storage_import_rclone))
         .route("/api/storage/mounts/{id}", web::put().to(storage_update_mount))
         .route("/api/storage/mounts/{id}", web::delete().to(storage_remove_mount))
+        .route("/api/storage/mounts/{id}/duplicate", web::post().to(storage_duplicate_mount))
         .route("/api/storage/mounts/{id}/mount", web::post().to(storage_do_mount))
         .route("/api/storage/mounts/{id}/unmount", web::post().to(storage_do_unmount))
         .route("/api/storage/mounts/{id}/sync", web::post().to(storage_sync_mount))

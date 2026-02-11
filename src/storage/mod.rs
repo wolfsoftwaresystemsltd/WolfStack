@@ -305,6 +305,27 @@ pub fn remove_mount(id: &str) -> Result<String, String> {
     Ok("Mount removed".to_string())
 }
 
+/// Duplicate a mount entry — clone with new ID and "(copy)" name
+pub fn duplicate_mount(id: &str) -> Result<StorageMount, String> {
+    let mut config = load_config();
+    let original = config.mounts.iter().find(|m| m.id == id)
+        .ok_or_else(|| format!("Mount '{}' not found", id))?
+        .clone();
+    
+    let new_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+    let mut dup = original.clone();
+    dup.id = new_id.clone();
+    dup.name = format!("{} (copy)", original.name);
+    dup.mount_point = format!("{}/{}", MOUNT_BASE, new_id);
+    dup.status = "unmounted".to_string();
+    dup.error_message = None;
+    dup.created_at = Utc::now().to_rfc3339();
+    
+    config.mounts.push(dup.clone());
+    save_config(&config)?;
+    Ok(dup)
+}
+
 /// Update a mount entry
 pub fn update_mount(id: &str, updates: serde_json::Value) -> Result<StorageMount, String> {
     let mut config = load_config();
