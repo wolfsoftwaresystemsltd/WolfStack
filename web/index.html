@@ -965,6 +965,25 @@
                 </div>
             </div>
 
+            <!-- Mount Progress Modal -->
+            <div class="modal-overlay" id="mount-progress-modal">
+                <div class="modal" style="max-width: 420px; width: 90%;">
+                    <div class="modal-header">
+                        <h3 id="mount-progress-title">💾 Mounting Storage</h3>
+                    </div>
+                    <div class="modal-body" style="text-align: center; padding: 32px 24px;">
+                        <div id="mount-progress-spinner" style="font-size: 48px; margin-bottom: 16px;">⏳</div>
+                        <div id="mount-progress-status" style="font-size: 16px; font-weight: 600; margin-bottom: 8px;">
+                            Connecting...</div>
+                        <div id="mount-progress-detail"
+                            style="font-size: 13px; color: var(--text-muted); word-break: break-word;"></div>
+                    </div>
+                    <div class="modal-footer" id="mount-progress-footer" style="display: none;">
+                        <button class="btn btn-primary" onclick="closeMountProgress()">OK</button>
+                    </div>
+                </div>
+            </div>
+
             <!-- Create Storage Mount Modal -->
             <div class="modal-overlay" id="create-mount-modal">
                 <div class="modal" style="max-width: 640px; width: 95%;">

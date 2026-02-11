@@ -902,29 +902,50 @@ async function createStorageMount() {
 }
 
 async function mountStorage(id) {
-    // Find and update the mount button for immediate feedback
-    const btn = document.querySelector(`button[onclick="mountStorage('${id}')"]`);
-    const origText = btn ? btn.innerHTML : '';
-    if (btn) {
-        btn.innerHTML = '⏳ Connecting...';
-        btn.disabled = true;
-        btn.style.opacity = '0.7';
-    }
+    // Find mount name for the title
+    const mount = allStorageMounts.find(m => m.id === id);
+    const name = mount ? mount.name : id;
+
+    // Show progress modal
+    const modal = document.getElementById('mount-progress-modal');
+    document.getElementById('mount-progress-title').textContent = `💾 Mounting: ${name}`;
+    document.getElementById('mount-progress-spinner').textContent = '⏳';
+    document.getElementById('mount-progress-status').textContent = 'Connecting...';
+    document.getElementById('mount-progress-status').style.color = '';
+    document.getElementById('mount-progress-detail').textContent = mount?.type === 's3'
+        ? `Connecting to S3 endpoint and syncing bucket...`
+        : 'Mounting storage...';
+    document.getElementById('mount-progress-footer').style.display = 'none';
+    modal.classList.add('active');
+
+    // Brief delay so user sees "Connecting..."
+    await new Promise(r => setTimeout(r, 300));
+    document.getElementById('mount-progress-status').textContent = 'Waiting for response...';
+
     try {
         const resp = await fetch(apiUrl(`/api/storage/mounts/${id}/mount`), { method: 'POST' });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Mount failed');
-        showToast(data.message || 'Mounted successfully', 'success');
-        loadStorageMounts();
+
+        // Success
+        document.getElementById('mount-progress-spinner').textContent = '✅';
+        document.getElementById('mount-progress-status').textContent = 'Mounted successfully!';
+        document.getElementById('mount-progress-status').style.color = 'var(--success)';
+        document.getElementById('mount-progress-detail').textContent = data.message || '';
     } catch (e) {
-        showToast('Mount error: ' + e.message, 'error');
-        // Restore button on error
-        if (btn) {
-            btn.innerHTML = origText;
-            btn.disabled = false;
-            btn.style.opacity = '';
-        }
+        // Error
+        document.getElementById('mount-progress-spinner').textContent = '❌';
+        document.getElementById('mount-progress-status').textContent = 'Mount Failed';
+        document.getElementById('mount-progress-status').style.color = '#ef4444';
+        document.getElementById('mount-progress-detail').textContent = e.message;
     }
+    // Show OK button
+    document.getElementById('mount-progress-footer').style.display = '';
+}
+
+function closeMountProgress() {
+    document.getElementById('mount-progress-modal').classList.remove('active');
+    loadStorageMounts();
 }
 
 async function unmountStorage(id) {
