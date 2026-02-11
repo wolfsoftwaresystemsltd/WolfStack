@@ -1461,6 +1461,7 @@ pub fn save_pbs_config(storage: &BackupStorage) -> Result<(), String> {
 
 /// Parse a Proxmox VE VM .conf file into a WolfStack-compatible JSON config
 /// Proxmox format: key: value (one per line), with comments starting with #
+#[allow(dead_code)]
 pub fn proxmox_conf_to_vm_config(conf: &str, vm_name: &str) -> serde_json::Value {
     let mut cpus: u32 = 1;
     let mut memory_mb: u32 = 1024;
@@ -1544,6 +1545,7 @@ pub fn proxmox_conf_to_vm_config(conf: &str, vm_name: &str) -> serde_json::Value
 }
 
 /// Parse a Proxmox LXC .conf into key info for recreation
+#[allow(dead_code)]
 pub fn proxmox_lxc_conf_to_config(conf: &str) -> serde_json::Value {
     let mut hostname = String::new();
     let mut memory_mb: u32 = 512;
