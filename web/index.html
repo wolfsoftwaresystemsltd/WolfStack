@@ -692,11 +692,11 @@
         </div>
 
         <!-- Create Backup Modal -->
-        <div id="create-backup-modal" class="modal-overlay" style="display:none;">
+        <div id="create-backup-modal" class="modal-overlay">
             <div class="modal" style="max-width:520px;">
                 <div class="modal-header">
                     <h3>⚡ Create Backup</h3>
-                    <button class="modal-close" onclick="closeModal('create-backup-modal')">&times;</button>
+                    <button class="modal-close" onclick="closeModal()">&times;</button>
                 </div>
                 <div class="modal-body">
                     <div class="form-group">
@@ -743,7 +743,7 @@
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button class="btn" onclick="closeModal('create-backup-modal')"
+                    <button class="btn" onclick="closeModal()"
                         style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);">Cancel</button>
                     <button class="btn btn-primary" onclick="createBackup()">🛡️ Start Backup</button>
                 </div>
@@ -751,11 +751,11 @@
         </div>
 
         <!-- Create Schedule Modal -->
-        <div id="create-schedule-modal" class="modal-overlay" style="display:none;">
+        <div id="create-schedule-modal" class="modal-overlay">
             <div class="modal" style="max-width:520px;">
                 <div class="modal-header">
                     <h3>📅 Create Backup Schedule</h3>
-                    <button class="modal-close" onclick="closeModal('create-schedule-modal')">&times;</button>
+                    <button class="modal-close" onclick="closeModal()">&times;</button>
                 </div>
                 <div class="modal-body">
                     <div class="form-group">
@@ -819,7 +819,7 @@
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button class="btn" onclick="closeModal('create-schedule-modal')"
+                    <button class="btn" onclick="closeModal()"
                         style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);">Cancel</button>
                     <button class="btn btn-primary" onclick="createSchedule()">📅 Create Schedule</button>
                 </div>

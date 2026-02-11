@@ -5541,7 +5541,7 @@ async function showCreateBackupModal() {
     } catch (e) {
         console.error('Failed to load backup targets:', e);
     }
-    document.getElementById('create-backup-modal').style.display = 'flex';
+    document.getElementById('create-backup-modal').classList.add('active');
 }
 
 function onBackupTargetChange() {
@@ -5589,7 +5589,7 @@ async function createBackup() {
         try { body.target = JSON.parse(targetVal); } catch (e) { }
     }
 
-    closeModal('create-backup-modal');
+    closeModal();
 
     // Show progress indicator
     const tbody = document.getElementById('backups-table');
@@ -5669,7 +5669,7 @@ async function showCreateScheduleModal() {
     } catch (e) {
         console.error('Failed to load targets:', e);
     }
-    document.getElementById('create-schedule-modal').style.display = 'flex';
+    document.getElementById('create-schedule-modal').classList.add('active');
 }
 
 function onScheduleStorageTypeChange() {
@@ -5704,7 +5704,7 @@ async function createSchedule() {
         try { body.targets = [JSON.parse(targetVal)]; body.backup_all = false; } catch (e) { }
     }
 
-    closeModal('create-schedule-modal');
+    closeModal();
     try {
         const res = await fetch('/api/backups/schedules', {
             method: 'POST',
