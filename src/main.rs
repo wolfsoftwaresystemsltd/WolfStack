@@ -127,6 +127,7 @@ async fn main() -> std::io::Result<()> {
         // Create app state
         let app_state = web::Data::new(api::AppState {
             monitor: Mutex::new(mon),
+            metrics_history: Mutex::new(monitoring::MetricsHistory::new()),
             cluster: cluster.clone(),
             sessions: sessions.clone(),
             vms: Mutex::new(vms_manager),
@@ -145,6 +146,11 @@ async fn main() -> std::io::Result<()> {
                     let c = installer::get_all_status();
                     (m, c)
                 };
+                // Record historical snapshot
+                {
+                    let mut history = state_clone.metrics_history.lock().unwrap();
+                    history.push(&metrics);
+                }
                 let docker_count = containers::docker_list_all().len() as u32;
                 let lxc_count = containers::lxc_list_all().len() as u32;
                 let vm_count = state_clone.vms.lock().unwrap().list_vms().len() as u32;

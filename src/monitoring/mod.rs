@@ -1,6 +1,7 @@
 //! System monitoring — collects CPU, RAM, disk, and network stats
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use sysinfo::{System, Disks, Networks};
 use std::time::Instant;
 
@@ -144,5 +145,75 @@ impl SystemMonitor {
             },
             processes: self.sys.processes().len(),
         }
+    }
+}
+
+// ─── Historical Metrics ───
+
+/// Maximum number of historical snapshots to keep (300 × 2s = ~10 min)
+pub const HISTORY_MAX_SNAPSHOTS: usize = 300;
+
+/// A single disk's usage at a point in time
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskSnapshot {
+    pub mount_point: String,
+    pub usage_percent: f32,
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+}
+
+/// A point-in-time snapshot of key metrics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsSnapshot {
+    pub timestamp: u64,
+    pub cpu_percent: f32,
+    pub memory_percent: f32,
+    pub memory_used_bytes: u64,
+    pub memory_total_bytes: u64,
+    pub disks: Vec<DiskSnapshot>,
+}
+
+/// Ring buffer of historical metric snapshots
+pub struct MetricsHistory {
+    snapshots: VecDeque<MetricsSnapshot>,
+    max_size: usize,
+}
+
+impl MetricsHistory {
+    pub fn new() -> Self {
+        Self {
+            snapshots: VecDeque::with_capacity(HISTORY_MAX_SNAPSHOTS),
+            max_size: HISTORY_MAX_SNAPSHOTS,
+        }
+    }
+
+    /// Record a snapshot from current SystemMetrics
+    pub fn push(&mut self, metrics: &SystemMetrics) {
+        let snap = MetricsSnapshot {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            cpu_percent: metrics.cpu_usage_percent,
+            memory_percent: metrics.memory_percent,
+            memory_used_bytes: metrics.memory_used_bytes,
+            memory_total_bytes: metrics.memory_total_bytes,
+            disks: metrics.disks.iter().map(|d| DiskSnapshot {
+                mount_point: d.mount_point.clone(),
+                usage_percent: d.usage_percent,
+                used_bytes: d.used_bytes,
+                total_bytes: d.total_bytes,
+            }).collect(),
+        };
+
+        if self.snapshots.len() >= self.max_size {
+            self.snapshots.pop_front();
+        }
+        self.snapshots.push_back(snap);
+    }
+
+    /// Get all snapshots
+    pub fn get_all(&self) -> Vec<MetricsSnapshot> {
+        self.snapshots.iter().cloned().collect()
     }
 }

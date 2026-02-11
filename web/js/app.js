@@ -7,7 +7,8 @@ let currentNodeId = null;  // null = datacenter, node ID = specific server
 let allNodes = [];         // cached node list
 let cpuHistory = [];
 let memHistory = [];
-const MAX_HISTORY = 60;
+let diskHistory = {}; // mount_point -> array of {timestamp, usage_percent}
+const MAX_HISTORY = 300; // 10 minutes at 2s intervals
 
 // ─── API URL helper — route through proxy for remote nodes ───
 function apiUrl(path) {
@@ -323,6 +324,9 @@ async function fetchMetrics() {
         // Only update dashboard if we're viewing a server's dashboard
         if (currentPage === 'dashboard' && currentNodeId) {
             updateDashboard(m);
+        } else if (currentPage === 'dashboard' && !currentNodeId) {
+            // If viewing local dashboard
+            updateDashboard(m);
         }
     } catch (e) {
         console.error('Failed to fetch metrics:', e);
@@ -420,68 +424,225 @@ function updateDashboard(m) {
     }
 
     // Chart history
-    cpuHistory.push(m.cpu_usage_percent);
-    memHistory.push(m.memory_percent);
+    const now = Math.floor(Date.now() / 1000);
+
+    // CPU & Memory
+    cpuHistory.push({ timestamp: now, value: m.cpu_usage_percent });
+    memHistory.push({ timestamp: now, value: m.memory_percent });
     if (cpuHistory.length > MAX_HISTORY) cpuHistory.shift();
     if (memHistory.length > MAX_HISTORY) memHistory.shift();
-    drawChart('cpu-chart', cpuHistory, 'rgba(99, 102, 241, 0.8)', 'rgba(99, 102, 241, 0.1)');
-    drawChart('mem-chart', memHistory, 'rgba(16, 185, 129, 0.8)', 'rgba(16, 185, 129, 0.1)');
+
+    // Disk history
+    m.disks.forEach(d => {
+        if (!diskHistory[d.mount_point]) diskHistory[d.mount_point] = [];
+        diskHistory[d.mount_point].push({ timestamp: now, value: d.usage_percent });
+        if (diskHistory[d.mount_point].length > MAX_HISTORY) diskHistory[d.mount_point].shift();
+    });
+
+    drawChart('cpu-chart-canvas', cpuHistory, 'rgba(99, 102, 241, 1)', 'rgba(99, 102, 241, 0.2)');
+    drawChart('mem-chart-canvas', memHistory, 'rgba(16, 185, 129, 1)', 'rgba(16, 185, 129, 0.2)');
+    drawMultiLineChart('disk-chart-canvas', 'disk-chart-legend', diskHistory);
+}
+
+async function fetchMetricsHistory() {
+    try {
+        const resp = await fetch(apiUrl('/api/metrics/history'));
+        if (!resp.ok) return;
+        const history = await resp.json();
+
+        // Clear existing
+        cpuHistory = [];
+        memHistory = [];
+        diskHistory = {};
+
+        // Populate
+        history.forEach(snap => {
+            cpuHistory.push({ timestamp: snap.timestamp, value: snap.cpu_percent });
+            memHistory.push({ timestamp: snap.timestamp, value: snap.memory_percent });
+
+            snap.disks.forEach(d => {
+                if (!diskHistory[d.mount_point]) diskHistory[d.mount_point] = [];
+                diskHistory[d.mount_point].push({ timestamp: snap.timestamp, value: d.usage_percent });
+            });
+        });
+
+        // Initial draw
+        drawChart('cpu-chart-canvas', cpuHistory, 'rgba(99, 102, 241, 1)', 'rgba(99, 102, 241, 0.2)');
+        drawChart('mem-chart-canvas', memHistory, 'rgba(16, 185, 129, 1)', 'rgba(16, 185, 129, 0.2)');
+        drawMultiLineChart('disk-chart-canvas', 'disk-chart-legend', diskHistory);
+    } catch (e) {
+        console.error('Failed to fetch history:', e);
+    }
 }
 
 // ─── Simple Canvas Charts ───
+// ─── Enhanced Canvas Charts ───
+
 function drawChart(canvasId, data, strokeColor, fillColor) {
     const canvas = document.getElementById(canvasId);
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
+
+    // Handle DPI scaling
     const rect = canvas.parentElement.getBoundingClientRect();
-    canvas.width = rect.width;
-    canvas.height = rect.height;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+    canvas.style.width = `${rect.width}px`;
+    canvas.style.height = `${rect.height}px`;
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.clearRect(0, 0, rect.width, rect.height);
 
-    if (data.length < 2) return;
+    if (!data || data.length < 2) return;
 
-    const padding = 10;
-    const w = canvas.width - padding * 2;
-    const h = canvas.height - padding * 2;
+    const padding = { top: 20, right: 0, bottom: 20, left: 0 };
+    const w = rect.width - padding.left - padding.right;
+    const h = rect.height - padding.top - padding.bottom;
+
+    // Draw grid
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i <= 4; i++) {
+        const y = padding.top + (h / 4) * i;
+        ctx.moveTo(padding.left, y);
+        ctx.lineTo(padding.left + w, y);
+    }
+    ctx.stroke();
+
+    // Draw path
+    ctx.beginPath();
     const step = w / (MAX_HISTORY - 1);
 
-    ctx.beginPath();
-    ctx.moveTo(padding, padding + h - (data[0] / 100) * h);
+    // Move to first point
+    const firstY = padding.top + h - (data[0].value / 100) * h;
+    ctx.moveTo(padding.left, firstY);
+
     for (let i = 1; i < data.length; i++) {
-        const x = padding + i * step;
-        const y = padding + h - (data[i] / 100) * h;
-        const prevX = padding + (i - 1) * step;
-        const prevY = padding + h - (data[i - 1] / 100) * h;
+        const x = padding.left + i * step;
+        const val = Math.max(0, Math.min(100, data[i].value));
+        const y = padding.top + h - (val / 100) * h;
+
+        // Simple smoothing
+        const prevX = padding.left + (i - 1) * step;
+        const prevVal = Math.max(0, Math.min(100, data[i - 1].value));
+        const prevY = padding.top + h - (prevVal / 100) * h;
+
         const cpX = (prevX + x) / 2;
         ctx.bezierCurveTo(cpX, prevY, cpX, y, x, y);
     }
+
+    // Stroke
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
     ctx.strokeStyle = strokeColor;
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    // Fill
-    ctx.lineTo(padding + (data.length - 1) * step, padding + h);
-    ctx.lineTo(padding, padding + h);
+    // Fill gradient
+    ctx.lineTo(padding.left + (data.length - 1) * step, padding.top + h);
+    ctx.lineTo(padding.left, padding.top + h);
     ctx.closePath();
-    ctx.fillStyle = fillColor;
-    ctx.fill();
 
-    // Grid lines
+    const gradient = ctx.createLinearGradient(0, padding.top, 0, padding.top + h);
+    gradient.addColorStop(0, fillColor);
+    gradient.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = gradient;
+    ctx.fill();
+}
+
+function drawMultiLineChart(canvasId, legendId, historyMap) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+
+    // Handle DPI scaling
+    const rect = canvas.parentElement.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+    canvas.style.width = `${rect.width}px`;
+    canvas.style.height = `${rect.height}px`;
+
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    const padding = { top: 20, right: 0, bottom: 20, left: 0 };
+    const w = rect.width - padding.left - padding.right;
+    const h = rect.height - padding.top - padding.bottom;
+    const step = w / (MAX_HISTORY - 1);
+
+    // Grid
     ctx.strokeStyle = 'rgba(255,255,255,0.05)';
     ctx.lineWidth = 1;
+    ctx.beginPath();
     for (let i = 0; i <= 4; i++) {
-        const y = padding + (h / 4) * i;
+        const y = padding.top + (h / 4) * i;
+        ctx.moveTo(padding.left, y);
+        ctx.lineTo(padding.left + w, y);
+    }
+    ctx.stroke();
+
+    // Colors for disks
+    const colors = [
+        '#f59e0b', // amber
+        '#3b82f6', // blue
+        '#ef4444', // red
+        '#10b981', // emerald
+        '#8b5cf6', // violet
+        '#ec4899', // pink
+    ];
+
+    const legend = document.getElementById(legendId);
+    if (legend) legend.innerHTML = '';
+
+    let colorIdx = 0;
+    for (const [mount, data] of Object.entries(historyMap)) {
+        if (!data || data.length < 2) continue;
+
+        const color = colors[colorIdx % colors.length];
+
+        // Add legend item
+        if (legend) {
+            legend.innerHTML += `
+                <div class="chart-legend-item">
+                    <div class="chart-legend-dot" style="background: ${color}"></div>
+                    <span style="color: var(--text-muted);">${mount}</span>
+                </div>
+            `;
+        }
+
         ctx.beginPath();
-        ctx.moveTo(padding, y);
-        ctx.lineTo(padding + w, y);
+        const firstY = padding.top + h - (data[0].value / 100) * h;
+        ctx.moveTo(padding.left, firstY);
+
+        for (let i = 1; i < data.length; i++) {
+            const x = padding.left + i * step;
+            const val = Math.max(0, Math.min(100, data[i].value));
+            const y = padding.top + h - (val / 100) * h;
+
+            const prevX = padding.left + (i - 1) * step;
+            const prevVal = Math.max(0, Math.min(100, data[i - 1].value));
+            const prevY = padding.top + h - (prevVal / 100) * h;
+
+            const cpX = (prevX + x) / 2;
+            ctx.bezierCurveTo(cpX, prevY, cpX, y, x, y);
+        }
+
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
         ctx.stroke();
+
+        colorIdx++;
     }
 }
 
+
 function initCharts() {
-    drawChart('cpu-chart', cpuHistory, 'rgba(99, 102, 241, 0.8)', 'rgba(99, 102, 241, 0.1)');
-    drawChart('mem-chart', memHistory, 'rgba(16, 185, 129, 0.8)', 'rgba(16, 185, 129, 0.1)');
+    drawChart('cpu-chart-canvas', cpuHistory, 'rgba(99, 102, 241, 1)', 'rgba(99, 102, 241, 0.2)');
+    drawChart('mem-chart-canvas', memHistory, 'rgba(16, 185, 129, 1)', 'rgba(16, 185, 129, 0.2)');
+    drawMultiLineChart('disk-chart-canvas', 'disk-chart-legend', diskHistory);
 }
 
 // ─── Nodes / Servers ───
@@ -1600,7 +1761,8 @@ async function saveConfig() {
 }
 
 // ─── Polling Loop ───
-fetchNodes();  // This builds the server tree and populates allNodes
+fetchNodes();
+fetchMetricsHistory(); // Initial history load
 setInterval(fetchNodes, 10000);  // Refresh tree + metrics every 10s
 
 // ─── Container Management ───

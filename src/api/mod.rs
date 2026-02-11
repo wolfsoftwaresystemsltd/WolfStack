@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::process::Command;
 use tracing::info;
 
-use crate::monitoring::SystemMonitor;
+use crate::monitoring::{SystemMonitor, MetricsHistory};
 use crate::installer;
 use crate::containers;
 use crate::storage;
@@ -19,6 +19,7 @@ mod console;
 /// Shared application state
 pub struct AppState {
     pub monitor: std::sync::Mutex<SystemMonitor>,
+    pub metrics_history: std::sync::Mutex<MetricsHistory>,
     pub cluster: Arc<ClusterState>,
     pub sessions: Arc<SessionManager>,
     pub vms: std::sync::Mutex<crate::vms::manager::VmManager>,
@@ -147,6 +148,13 @@ pub async fn get_metrics(req: HttpRequest, state: web::Data<AppState>) -> HttpRe
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let metrics = state.monitor.lock().unwrap().collect();
     HttpResponse::Ok().json(metrics)
+}
+
+/// GET /api/metrics/history — historical CPU, RAM, disk metrics
+pub async fn get_metrics_history(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let history = state.metrics_history.lock().unwrap();
+    HttpResponse::Ok().json(history.get_all())
 }
 
 /// GET /api/nodes — all cluster nodes
@@ -1694,6 +1702,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/auth/check", web::get().to(auth_check))
         // Dashboard
         .route("/api/metrics", web::get().to(get_metrics))
+        .route("/api/metrics/history", web::get().to(get_metrics_history))
         // Cluster
         .route("/api/nodes", web::get().to(get_nodes))
         .route("/api/nodes", web::post().to(add_node))

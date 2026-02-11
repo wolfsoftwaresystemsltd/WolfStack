@@ -227,1312 +227,1345 @@
             </div>
 
 
-
-            <!-- ═══ Components Page ═══ -->
-            <div id="page-components" class="page-view" style="display:none;">
-                <div class="components-grid" id="components-grid"></div>
-
-                <!-- Install Scripts Section -->
-                <div class="card" style="margin-top: 24px;">
-                    <div class="card-header">
-                        <h3>📥 Install Scripts</h3>
+            <!-- ═══ Performance History ═══ -->
+            <h3
+                style="margin: 24px 0 16px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary);">
+                Performance History (10 min)</h3>
+            <div class="history-charts-grid"
+                style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 24px;">
+                <!-- CPU Chart -->
+                <div class="card chart-card">
+                    <div class="card-header" style="border-bottom: none; padding-bottom: 0;">
+                        <h3>CPU Usage</h3>
                     </div>
-                    <div class="card-body">
-                        <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 16px;">
-                            Run these commands on any server or inside a container to install Wolf components.
-                        </p>
-                        <div style="display: grid; gap: 10px;">
-                            <div
-                                style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
-                                <span style="font-size: 18px; width: 28px; text-align: center;">🌐</span>
-                                <div style="flex: 1; min-width: 0;">
-                                    <div style="font-weight: 600; font-size: 13px;">WolfNet</div>
-                                    <code
-                                        style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh | sudo bash</code>
-                                </div>
-                                <button class="btn btn-sm" onclick="copyInstallCmd('wolfnet')"
-                                    title="Copy command">📋</button>
-                            </div>
-                            <div
-                                style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
-                                <span style="font-size: 18px; width: 28px; text-align: center;">🛡️</span>
-                                <div style="flex: 1; min-width: 0;">
-                                    <div style="font-weight: 600; font-size: 13px;">WolfProxy</div>
-                                    <code
-                                        style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfProxy/main/setup.sh | sudo bash</code>
-                                </div>
-                                <button class="btn btn-sm" onclick="copyInstallCmd('wolfproxy')"
-                                    title="Copy command">📋</button>
-                            </div>
-                            <div
-                                style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
-                                <span style="font-size: 18px; width: 28px; text-align: center;">📡</span>
-                                <div style="flex: 1; min-width: 0;">
-                                    <div style="font-weight: 600; font-size: 13px;">WolfServe</div>
-                                    <code
-                                        style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfServe/main/setup.sh | sudo bash</code>
-                                </div>
-                                <button class="btn btn-sm" onclick="copyInstallCmd('wolfserve')"
-                                    title="Copy command">📋</button>
-                            </div>
-                            <div
-                                style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
-                                <span style="font-size: 18px; width: 28px; text-align: center;">💾</span>
-                                <div style="flex: 1; min-width: 0;">
-                                    <div style="font-weight: 600; font-size: 13px;">WolfDisk</div>
-                                    <code
-                                        style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | sudo bash</code>
-                                </div>
-                                <button class="btn btn-sm" onclick="copyInstallCmd('wolfdisk')"
-                                    title="Copy command">📋</button>
-                            </div>
-                            <div
-                                style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
-                                <span style="font-size: 18px; width: 28px; text-align: center;">⚖️</span>
-                                <div style="flex: 1; min-width: 0;">
-                                    <div style="font-weight: 600; font-size: 13px;">WolfScale</div>
-                                    <code
-                                        style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh | sudo bash</code>
-                                </div>
-                                <button class="btn btn-sm" onclick="copyInstallCmd('wolfscale')"
-                                    title="Copy command">📋</button>
-                            </div>
+                    <div class="card-body" style="padding: 0 16px 16px 16px;">
+                        <div class="chart-canvas-wrap" style="position: relative; height: 180px; width: 100%;">
+                            <canvas id="cpu-chart-canvas"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Memory Chart -->
+                <div class="card chart-card">
+                    <div class="card-header" style="border-bottom: none; padding-bottom: 0;">
+                        <h3>Memory Usage</h3>
+                    </div>
+                    <div class="card-body" style="padding: 0 16px 16px 16px;">
+                        <div class="chart-canvas-wrap" style="position: relative; height: 180px; width: 100%;">
+                            <canvas id="mem-chart-canvas"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Disk Chart -->
+                <div class="card chart-card">
+                    <div class="card-header"
+                        style="border-bottom: none; padding-bottom: 0; display: flex; justify-content: space-between; align-items: center;">
+                        <h3>Disk Usage</h3>
+                        <div id="disk-chart-legend" style="display: flex; gap: 8px; font-size: 10px;"></div>
+                    </div>
+                    <div class="card-body" style="padding: 0 16px 16px 16px;">
+                        <div class="chart-canvas-wrap" style="position: relative; height: 180px; width: 100%;">
+                            <canvas id="disk-chart-canvas"></canvas>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <!-- ═══ Component Detail Page ═══ -->
-            <div id="page-component-detail" class="page-view" style="display:none;">
-                <div style="margin-bottom: 16px;">
-                    <button class="btn btn-sm" onclick="navigateTo('components')" id="back-to-components">
-                        ← Back to Components
+
+        </div>
+
+        <!-- ═══ Components Page ═══ -->
+        <div id="page-components" class="page-view" style="display:none;">
+            <div class="components-grid" id="components-grid"></div>
+
+            <!-- Install Scripts Section -->
+            <div class="card" style="margin-top: 24px;">
+                <div class="card-header">
+                    <h3>📥 Install Scripts</h3>
+                </div>
+                <div class="card-body">
+                    <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 16px;">
+                        Run these commands on any server or inside a container to install Wolf components.
+                    </p>
+                    <div style="display: grid; gap: 10px;">
+                        <div
+                            style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
+                            <span style="font-size: 18px; width: 28px; text-align: center;">🌐</span>
+                            <div style="flex: 1; min-width: 0;">
+                                <div style="font-weight: 600; font-size: 13px;">WolfNet</div>
+                                <code
+                                    style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh | sudo bash</code>
+                            </div>
+                            <button class="btn btn-sm" onclick="copyInstallCmd('wolfnet')"
+                                title="Copy command">📋</button>
+                        </div>
+                        <div
+                            style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
+                            <span style="font-size: 18px; width: 28px; text-align: center;">🛡️</span>
+                            <div style="flex: 1; min-width: 0;">
+                                <div style="font-weight: 600; font-size: 13px;">WolfProxy</div>
+                                <code
+                                    style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfProxy/main/setup.sh | sudo bash</code>
+                            </div>
+                            <button class="btn btn-sm" onclick="copyInstallCmd('wolfproxy')"
+                                title="Copy command">📋</button>
+                        </div>
+                        <div
+                            style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
+                            <span style="font-size: 18px; width: 28px; text-align: center;">📡</span>
+                            <div style="flex: 1; min-width: 0;">
+                                <div style="font-weight: 600; font-size: 13px;">WolfServe</div>
+                                <code
+                                    style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfServe/main/setup.sh | sudo bash</code>
+                            </div>
+                            <button class="btn btn-sm" onclick="copyInstallCmd('wolfserve')"
+                                title="Copy command">📋</button>
+                        </div>
+                        <div
+                            style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
+                            <span style="font-size: 18px; width: 28px; text-align: center;">💾</span>
+                            <div style="flex: 1; min-width: 0;">
+                                <div style="font-weight: 600; font-size: 13px;">WolfDisk</div>
+                                <code
+                                    style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | sudo bash</code>
+                            </div>
+                            <button class="btn btn-sm" onclick="copyInstallCmd('wolfdisk')"
+                                title="Copy command">📋</button>
+                        </div>
+                        <div
+                            style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;">
+                            <span style="font-size: 18px; width: 28px; text-align: center;">⚖️</span>
+                            <div style="flex: 1; min-width: 0;">
+                                <div style="font-weight: 600; font-size: 13px;">WolfScale</div>
+                                <code
+                                    style="font-size: 11px; color: var(--text-muted); word-break: break-all;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh | sudo bash</code>
+                            </div>
+                            <button class="btn btn-sm" onclick="copyInstallCmd('wolfscale')"
+                                title="Copy command">📋</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Component Detail Page ═══ -->
+        <div id="page-component-detail" class="page-view" style="display:none;">
+            <div style="margin-bottom: 16px;">
+                <button class="btn btn-sm" onclick="navigateTo('components')" id="back-to-components">
+                    ← Back to Components
+                </button>
+            </div>
+
+            <div class="stats-grid" style="margin-bottom: 20px;">
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Status</span>
+                        <div class="stat-icon" id="detail-status-icon"
+                            style="background: var(--success-bg); color: var(--success);">●</div>
+                    </div>
+                    <div class="stat-value" id="detail-status">—</div>
+                    <div class="stat-sub" id="detail-active-since"></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Memory</span>
+                    </div>
+                    <div class="stat-value" id="detail-memory">—</div>
+                    <div class="stat-sub">current usage</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">PID</span>
+                    </div>
+                    <div class="stat-value" id="detail-pid">—</div>
+                    <div class="stat-sub">main process ID</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Restarts</span>
+                    </div>
+                    <div class="stat-value" id="detail-restarts">—</div>
+                    <div class="stat-sub">since last enable</div>
+                </div>
+            </div>
+
+            <!-- Actions bar -->
+            <div class="card" style="margin-bottom: 20px;">
+                <div class="card-body" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                    <span id="detail-component-icon" style="font-size: 24px;"></span>
+                    <div style="flex: 1;">
+                        <h3 id="detail-component-name" style="margin: 0;"></h3>
+                        <div id="detail-component-desc" style="color: var(--text-muted); font-size: 13px;">
+                        </div>
+                    </div>
+                    <button class="btn btn-success btn-sm" id="detail-btn-start"
+                        onclick="detailServiceAction('start')">Start</button>
+                    <button class="btn btn-sm" id="detail-btn-restart"
+                        onclick="detailServiceAction('restart')">Restart</button>
+                    <button class="btn btn-danger btn-sm" id="detail-btn-stop"
+                        onclick="detailServiceAction('stop')">Stop</button>
+                </div>
+            </div>
+
+            <!-- Config Editor -->
+            <div class="card" style="margin-bottom: 20px;" id="detail-config-section">
+                <div class="card-header">
+                    <h3>Configuration</h3>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <span id="detail-config-path"
+                            style="font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;"></span>
+                        <button class="btn btn-primary btn-sm" onclick="saveConfig()">💾 Save</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <textarea id="detail-config-editor" class="config-editor" spellcheck="false"></textarea>
+                </div>
+            </div>
+
+            <!-- Logs -->
+            <div class="card">
+                <div class="card-header">
+                    <h3>Journal Logs</h3>
+                    <button class="btn btn-sm" onclick="refreshComponentDetail(currentComponent)">↻
+                        Refresh</button>
+                </div>
+                <div class="card-body">
+                    <div id="detail-logs" class="log-viewer"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Services Page ═══ -->
+        <div id="page-services" class="page-view" style="display:none;">
+            <div class="card">
+                <div class="card-header">
+                    <h3>System Services</h3>
+                </div>
+                <div class="card-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Service</th>
+                                <th>Status</th>
+                                <th>Enabled</th>
+                                <th>Version</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="services-table"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Certificates Page ═══ -->
+        <div id="page-certificates" class="page-view" style="display:none;">
+            <div class="card">
+                <div class="card-header">
+                    <h3>SSL Certificates</h3>
+                </div>
+                <div class="card-body">
+                    <div class="form-group">
+                        <label>Domain Name</label>
+                        <input type="text" class="form-control" id="cert-domain" placeholder="example.com">
+                    </div>
+                    <button class="btn btn-primary" onclick="requestCertificate()">
+                        🔒 Request Certificate (Let's Encrypt)
+                    </button>
+                    <p style="margin-top: 12px; font-size: 13px; color: var(--text-muted);">
+                        Uses Certbot to obtain a free SSL certificate from Let's Encrypt.
+                        Port 80 must be accessible from the internet.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+
+
+        <!-- ═══ Docker Containers Page ═══ -->
+        <div id="page-containers" class="page-view" style="display:none;">
+            <!-- Docker Runtime Status -->
+            <div id="docker-runtime-banner" class="card" style="margin-bottom: 20px;">
+                <div class="card-body" style="display: flex; align-items: center; justify-content: space-between;">
+                    <div>
+                        <span style="font-size: 20px;">🐳</span>
+                        <strong>Docker</strong>
+                        <span id="docker-version" style="color: var(--text-muted); margin-left: 8px;"></span>
+                        <span id="docker-status-badge" class="badge" style="margin-left: 8px;">Checking...</span>
+                    </div>
+                    <button id="docker-install-btn" class="btn btn-primary btn-sm" style="display:none;"
+                        onclick="installRuntime('docker')">
+                        Install Docker
                     </button>
                 </div>
+            </div>
 
-                <div class="stats-grid" style="margin-bottom: 20px;">
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Status</span>
-                            <div class="stat-icon" id="detail-status-icon"
-                                style="background: var(--success-bg); color: var(--success);">●</div>
-                        </div>
-                        <div class="stat-value" id="detail-status">—</div>
-                        <div class="stat-sub" id="detail-active-since"></div>
+            <!-- Docker Container Stats Summary -->
+            <div id="docker-stats-summary" class="stats-grid" style="margin-bottom: 20px;"></div>
+
+            <!-- Docker Containers List -->
+            <div class="card">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>Docker Containers</h3>
+                    <button class="btn btn-sm btn-primary" onclick="showDockerCreate()" style="font-size:12px;">+
+                        Create Container</button>
+                </div>
+                <div class="card-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Image</th>
+                                <th>Status</th>
+                                <th>IP Address</th>
+                                <th>CPU</th>
+                                <th>Memory</th>
+                                <th>Ports</th>
+                                <th>Autostart</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="docker-containers-table"></tbody>
+                    </table>
+                    <p id="docker-empty"
+                        style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
+                        No containers found. Click <strong>+ Create Container</strong> to search Docker Hub and
+                        deploy.
+                    </p>
+                </div>
+            </div>
+
+            <!-- Docker Images -->
+            <div class="card" style="margin-top: 20px;">
+                <div class="card-header">
+                    <h3>Docker Images</h3>
+                </div>
+                <div class="card-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Repository</th>
+                                <th>Tag</th>
+                                <th>ID</th>
+                                <th>Size</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="docker-images-table"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ LXC Containers Page ═══ -->
+        <div id="page-lxc" class="page-view" style="display:none;">
+            <!-- LXC Runtime Status -->
+            <div id="lxc-runtime-banner" class="card" style="margin-bottom: 20px;">
+                <div class="card-body" style="display: flex; align-items: center; justify-content: space-between;">
+                    <div>
+                        <span style="font-size: 20px;">📦</span>
+                        <strong>LXC</strong>
+                        <span id="lxc-version" style="color: var(--text-muted); margin-left: 8px;"></span>
+                        <span id="lxc-status-badge" class="badge" style="margin-left: 8px;">Checking...</span>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Memory</span>
-                        </div>
-                        <div class="stat-value" id="detail-memory">—</div>
-                        <div class="stat-sub">current usage</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">PID</span>
-                        </div>
-                        <div class="stat-value" id="detail-pid">—</div>
-                        <div class="stat-sub">main process ID</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Restarts</span>
-                        </div>
-                        <div class="stat-value" id="detail-restarts">—</div>
-                        <div class="stat-sub">since last enable</div>
+                    <button id="lxc-install-btn" class="btn btn-primary btn-sm" style="display:none;"
+                        onclick="installRuntime('lxc')">
+                        Install LXC
+                    </button>
+                </div>
+            </div>
+
+            <!-- LXC Containers List -->
+            <div class="card">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>LXC Containers</h3>
+                    <button class="btn btn-sm btn-primary" onclick="showLxcCreate()" style="font-size:12px;">+
+                        Create Container</button>
+                </div>
+                <div class="card-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>State</th>
+                                <th>IP Address</th>
+                                <th>CPU</th>
+                                <th>Memory</th>
+                                <th>Autostart</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="lxc-containers-table"></tbody>
+                    </table>
+                    <p id="lxc-empty" style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
+                        No LXC containers found. Click <strong>+ Create Container</strong> to browse available
+                        templates.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Virtual Machines Page ═══ -->
+        <div id="page-vms" class="page-view" style="display:none;">
+            <div class="card">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>Virtual Machines (KVM/QEMU)</h3>
+                    <button class="btn btn-sm btn-primary" onclick="showVmCreate()">+ Create VM</button>
+                </div>
+                <div class="card-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Status</th>
+                                <th>CPU/RAM</th>
+                                <th>Disk</th>
+                                <th>WolfNet IP</th>
+                                <th>VNC</th>
+                                <th>Autostart</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="vms-table"></tbody>
+                    </table>
+                    <p id="vms-empty" style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
+                        No virtual machines found. Click <strong>+ Create VM</strong> to start one.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Storage Manager ═══ -->
+        <div id="page-storage" class="page-view" style="display:none;">
+            <div class="card">
+                <div class="card-header"
+                    style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                    <h3>💾 Storage Manager</h3>
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn btn-sm"
+                            style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"
+                            onclick="showImportRcloneModal()">📥 Import rclone.conf</button>
+                        <button class="btn btn-sm btn-primary" onclick="showCreateMountModal()">+ Add Mount</button>
                     </div>
                 </div>
+                <div class="card-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                                <th>Source</th>
+                                <th>Mount Point</th>
+                                <th>Status</th>
+                                <th>Options</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="storage-mounts-table"></tbody>
+                    </table>
+                    <p id="storage-empty"
+                        style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
+                        No storage mounts configured. Click <strong>+ Add Mount</strong> to add S3, NFS, directory,
+                        or WolfDisk storage.
+                    </p>
+                </div>
+            </div>
+        </div>
 
-                <!-- Actions bar -->
-                <div class="card" style="margin-bottom: 20px;">
-                    <div class="card-body" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                        <span id="detail-component-icon" style="font-size: 24px;"></span>
-                        <div style="flex: 1;">
-                            <h3 id="detail-component-name" style="margin: 0;"></h3>
-                            <div id="detail-component-desc" style="color: var(--text-muted); font-size: 13px;">
-                            </div>
+        <!-- ═══ WolfNet Management ═══ -->
+        <div id="page-wolfnet" class="page-view" style="display:none;">
+            <!-- WolfNet Status Banner -->
+            <div class="stats-grid" style="margin-bottom:20px;" id="wolfnet-stats-grid">
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Status</span>
+                        <div class="stat-icon" id="wn-status-icon"
+                            style="background:var(--success-bg); color:var(--success);">●</div>
+                    </div>
+                    <div class="stat-value" id="wn-status-val">—</div>
+                    <div class="stat-sub" id="wn-enabled-val"></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Interface</span>
+                    </div>
+                    <div class="stat-value" id="wn-interface-val" style="font-size:18px;">—</div>
+                    <div class="stat-sub" id="wn-ip-val"></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Connected Peers</span>
+                    </div>
+                    <div class="stat-value" id="wn-connected-val">0</div>
+                    <div class="stat-sub" id="wn-total-peers-val"></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Actions</span>
+                    </div>
+                    <div class="stat-value" style="font-size:13px;">
+                        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                            <button class="btn btn-sm btn-success" onclick="wolfnetServiceAction('start')"
+                                id="wn-btn-start">▶ Start</button>
+                            <button class="btn btn-sm" onclick="wolfnetServiceAction('restart')" id="wn-btn-restart"
+                                style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary);">🔄
+                                Restart</button>
+                            <button class="btn btn-sm btn-danger" onclick="wolfnetServiceAction('stop')"
+                                id="wn-btn-stop">⏹ Stop</button>
                         </div>
-                        <button class="btn btn-success btn-sm" id="detail-btn-start"
-                            onclick="detailServiceAction('start')">Start</button>
-                        <button class="btn btn-sm" id="detail-btn-restart"
-                            onclick="detailServiceAction('restart')">Restart</button>
-                        <button class="btn btn-danger btn-sm" id="detail-btn-stop"
-                            onclick="detailServiceAction('stop')">Stop</button>
                     </div>
                 </div>
+            </div>
 
-                <!-- Config Editor -->
-                <div class="card" style="margin-bottom: 20px;" id="detail-config-section">
-                    <div class="card-header">
-                        <h3>Configuration</h3>
-                        <div style="display: flex; gap: 8px; align-items: center;">
-                            <span id="detail-config-path"
-                                style="font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;"></span>
-                            <button class="btn btn-primary btn-sm" onclick="saveConfig()">💾 Save</button>
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <textarea id="detail-config-editor" class="config-editor" spellcheck="false"></textarea>
-                    </div>
-                </div>
-
-                <!-- Logs -->
-                <div class="card">
-                    <div class="card-header">
-                        <h3>Journal Logs</h3>
-                        <button class="btn btn-sm" onclick="refreshComponentDetail(currentComponent)">↻
+            <!-- Peers Table -->
+            <div class="card" style="margin-bottom:20px;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>🌐 Peers</h3>
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn btn-sm" onclick="loadWolfNet()"
+                            style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); font-size:11px;">↻
                             Refresh</button>
+                        <button class="btn btn-sm btn-primary" onclick="showAddPeerModal()" style="font-size:12px;">+
+                            Add Peer</button>
                     </div>
-                    <div class="card-body">
-                        <div id="detail-logs" class="log-viewer"></div>
-                    </div>
+                </div>
+                <div class="card-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>WolfNet IP</th>
+                                <th>Endpoint</th>
+                                <th>Status</th>
+                                <th>Traffic</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="wolfnet-peers-table"></tbody>
+                    </table>
+                    <p id="wolfnet-peers-empty"
+                        style="display:none; text-align:center; padding:20px; color:var(--text-muted);">
+                        No peers configured. Click <strong>+ Add Peer</strong> to connect to another WolfNet node.
+                    </p>
                 </div>
             </div>
 
-            <!-- ═══ Services Page ═══ -->
-            <div id="page-services" class="page-view" style="display:none;">
-                <div class="card">
-                    <div class="card-header">
-                        <h3>System Services</h3>
-                    </div>
-                    <div class="card-body">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Service</th>
-                                    <th>Status</th>
-                                    <th>Enabled</th>
-                                    <th>Version</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="services-table"></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
 
-            <!-- ═══ Certificates Page ═══ -->
-            <div id="page-certificates" class="page-view" style="display:none;">
-                <div class="card">
-                    <div class="card-header">
-                        <h3>SSL Certificates</h3>
-                    </div>
-                    <div class="card-body">
+            <!-- Settings Cards -->
+            <div class="card" style="margin-bottom:20px;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>⚙️ Network Settings</h3>
+                    <button class="btn btn-primary btn-sm" onclick="saveWolfNetSettings()">💾 Save &amp;
+                        Restart</button>
+                </div>
+                <div class="card-body">
+                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:16px;">
                         <div class="form-group">
-                            <label>Domain Name</label>
-                            <input type="text" class="form-control" id="cert-domain" placeholder="example.com">
+                            <label
+                                style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Interface</label>
+                            <input type="text" id="wn-cfg-interface" class="form-control" placeholder="wolfnet0"
+                                style="font-family:var(--font-mono); font-size:13px;">
                         </div>
-                        <button class="btn btn-primary" onclick="requestCertificate()">
-                            🔒 Request Certificate (Let's Encrypt)
-                        </button>
-                        <p style="margin-top: 12px; font-size: 13px; color: var(--text-muted);">
-                            Uses Certbot to obtain a free SSL certificate from Let's Encrypt.
-                            Port 80 must be accessible from the internet.
-                        </p>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">WolfNet
+                                IP Address</label>
+                            <input type="text" id="wn-cfg-address" class="form-control" placeholder="10.10.10.1"
+                                style="font-family:var(--font-mono); font-size:13px;">
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Subnet
+                                Mask</label>
+                            <input type="number" id="wn-cfg-subnet" class="form-control" value="24" min="8" max="30"
+                                style="font-family:var(--font-mono); font-size:13px;">
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Listen
+                                Port</label>
+                            <input type="number" id="wn-cfg-port" class="form-control" value="9600"
+                                style="font-family:var(--font-mono); font-size:13px;">
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">MTU</label>
+                            <input type="number" id="wn-cfg-mtu" class="form-control" value="1400"
+                                style="font-family:var(--font-mono); font-size:13px;">
+                        </div>
+                        <div class="form-group">
+                            <label
+                                style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Options</label>
+                            <div style="display:flex; gap:12px; padding-top:6px;">
+                                <label
+                                    style="display:flex; align-items:center; gap:4px; font-size:12px; cursor:pointer;">
+                                    <input type="checkbox" id="wn-cfg-gateway"> Gateway
+                                </label>
+                                <label
+                                    style="display:flex; align-items:center; gap:4px; font-size:12px; cursor:pointer;">
+                                    <input type="checkbox" id="wn-cfg-discovery" checked> Discovery
+                                </label>
+                            </div>
+                        </div>
                     </div>
+                    <div id="wn-node-identity"
+                        style="margin-top:16px; padding:12px; background:var(--bg-primary); border:1px solid var(--border); border-radius:8px; display:none;">
+                        <h4 style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">🔑 This Node's
+                            Identity</h4>
+                        <div style="display:grid; grid-template-columns: auto 1fr; gap:4px 12px; font-size:12px;">
+                            <span style="color:var(--text-muted);">Hostname:</span>
+                            <span id="wn-local-hostname" style="font-family:var(--font-mono);"></span>
+                            <span style="color:var(--text-muted);">Public Key:</span>
+                            <span id="wn-local-pubkey"
+                                style="font-family:var(--font-mono); word-break:break-all;"></span>
+                        </div>
+                    </div>
+                    <details style="margin-top:16px;">
+                        <summary style="cursor:pointer; font-size:12px; color:var(--text-muted); user-select:none;">
+                            📄 Raw Configuration (/etc/wolfnet/config.toml)</summary>
+                        <textarea id="wolfnet-config-editor" class="config-editor" spellcheck="false"
+                            style="min-height:200px; margin-top:8px;"></textarea>
+                    </details>
                 </div>
             </div>
+        </div>
 
-
-
-            <!-- ═══ Docker Containers Page ═══ -->
-            <div id="page-containers" class="page-view" style="display:none;">
-                <!-- Docker Runtime Status -->
-                <div id="docker-runtime-banner" class="card" style="margin-bottom: 20px;">
-                    <div class="card-body" style="display: flex; align-items: center; justify-content: space-between;">
-                        <div>
-                            <span style="font-size: 20px;">🐳</span>
-                            <strong>Docker</strong>
-                            <span id="docker-version" style="color: var(--text-muted); margin-left: 8px;"></span>
-                            <span id="docker-status-badge" class="badge" style="margin-left: 8px;">Checking...</span>
-                        </div>
-                        <button id="docker-install-btn" class="btn btn-primary btn-sm" style="display:none;"
-                            onclick="installRuntime('docker')">
-                            Install Docker
+        <!-- Add WolfNet Peer Modal -->
+        <div class="modal-overlay" id="add-peer-modal">
+            <div class="modal" style="max-width: 580px; width: 95%;">
+                <div class="modal-header">
+                    <h3>🔗 Add WolfNet Peer</h3>
+                    <button class="modal-close" onclick="closeAddPeerModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <!-- Mode tabs -->
+                    <div
+                        style="display:flex; gap:0; margin-bottom:20px; border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+                        <button id="peer-tab-lan" class="btn" onclick="setPeerMode('lan')"
+                            style="flex:1; border:none; border-radius:0; font-size:13px; padding:10px; background:var(--accent-primary); color:white;">
+                            🏠 LAN Peer
                         </button>
-                    </div>
-                </div>
-
-                <!-- Docker Container Stats Summary -->
-                <div id="docker-stats-summary" class="stats-grid" style="margin-bottom: 20px;"></div>
-
-                <!-- Docker Containers List -->
-                <div class="card">
-                    <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                        <h3>Docker Containers</h3>
-                        <button class="btn btn-sm btn-primary" onclick="showDockerCreate()" style="font-size:12px;">+
-                            Create Container</button>
-                    </div>
-                    <div class="card-body">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Name</th>
-                                    <th>Image</th>
-                                    <th>Status</th>
-                                    <th>IP Address</th>
-                                    <th>CPU</th>
-                                    <th>Memory</th>
-                                    <th>Ports</th>
-                                    <th>Autostart</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="docker-containers-table"></tbody>
-                        </table>
-                        <p id="docker-empty"
-                            style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
-                            No containers found. Click <strong>+ Create Container</strong> to search Docker Hub and
-                            deploy.
-                        </p>
-                    </div>
-                </div>
-
-                <!-- Docker Images -->
-                <div class="card" style="margin-top: 20px;">
-                    <div class="card-header">
-                        <h3>Docker Images</h3>
-                    </div>
-                    <div class="card-body">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Repository</th>
-                                    <th>Tag</th>
-                                    <th>ID</th>
-                                    <th>Size</th>
-                                    <th>Created</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="docker-images-table"></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-            <!-- ═══ LXC Containers Page ═══ -->
-            <div id="page-lxc" class="page-view" style="display:none;">
-                <!-- LXC Runtime Status -->
-                <div id="lxc-runtime-banner" class="card" style="margin-bottom: 20px;">
-                    <div class="card-body" style="display: flex; align-items: center; justify-content: space-between;">
-                        <div>
-                            <span style="font-size: 20px;">📦</span>
-                            <strong>LXC</strong>
-                            <span id="lxc-version" style="color: var(--text-muted); margin-left: 8px;"></span>
-                            <span id="lxc-status-badge" class="badge" style="margin-left: 8px;">Checking...</span>
-                        </div>
-                        <button id="lxc-install-btn" class="btn btn-primary btn-sm" style="display:none;"
-                            onclick="installRuntime('lxc')">
-                            Install LXC
+                        <button id="peer-tab-internet" class="btn" onclick="setPeerMode('internet')"
+                            style="flex:1; border:none; border-radius:0; font-size:13px; padding:10px; background:var(--bg-tertiary); color:var(--text-secondary);">
+                            🌍 Internet Peer
                         </button>
                     </div>
-                </div>
 
-                <!-- LXC Containers List -->
-                <div class="card">
-                    <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                        <h3>LXC Containers</h3>
-                        <button class="btn btn-sm btn-primary" onclick="showLxcCreate()" style="font-size:12px;">+
-                            Create Container</button>
-                    </div>
-                    <div class="card-body">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Name</th>
-                                    <th>State</th>
-                                    <th>IP Address</th>
-                                    <th>CPU</th>
-                                    <th>Memory</th>
-                                    <th>Autostart</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="lxc-containers-table"></tbody>
-                        </table>
-                        <p id="lxc-empty"
-                            style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
-                            No LXC containers found. Click <strong>+ Create Container</strong> to browse available
-                            templates.
+                    <!-- LAN Peer mode -->
+                    <div id="peer-mode-lan">
+                        <p style="font-size:13px; color:var(--text-secondary); margin-bottom:16px;">
+                            Add a peer on your <strong>local network</strong>. Both machines must be able to reach
+                            each other directly.
+                            The peer will be auto-discovered if discovery is enabled.
                         </p>
+                        <div class="form-group">
+                            <label>Peer Name <span style="color:var(--danger)">*</span></label>
+                            <input type="text" id="peer-name" class="form-control" placeholder="e.g. office-server">
+                        </div>
+                        <div class="form-group">
+                            <label>WolfNet IP <span style="color:var(--danger)">*</span></label>
+                            <input type="text" id="peer-ip" class="form-control" placeholder="e.g. 10.10.10.3">
+                            <small style="color:var(--text-muted);">The peer's IP on the WolfNet overlay (e.g.
+                                10.10.10.2, 10.10.10.3, etc.)</small>
+                        </div>
+                        <div class="form-group">
+                            <label>Endpoint <small style="color:var(--text-muted);">(optional)</small></label>
+                            <input type="text" id="peer-endpoint" class="form-control"
+                                placeholder="e.g. 192.168.1.50:9600">
+                            <small style="color:var(--text-muted);">Local IP:port — leave empty for auto-discovery
+                                on LAN</small>
+                        </div>
+                        <div class="form-group">
+                            <label>Public Key <small style="color:var(--text-muted);">(optional)</small></label>
+                            <input type="text" id="peer-public-key" class="form-control"
+                                placeholder="base64 public key">
+                            <small style="color:var(--text-muted);">If known, paste the peer's WolfNet public
+                                key</small>
+                        </div>
                     </div>
-                </div>
-            </div>
 
-            <!-- ═══ Virtual Machines Page ═══ -->
-            <div id="page-vms" class="page-view" style="display:none;">
-                <div class="card">
-                    <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                        <h3>Virtual Machines (KVM/QEMU)</h3>
-                        <button class="btn btn-sm btn-primary" onclick="showVmCreate()">+ Create VM</button>
-                    </div>
-                    <div class="card-body">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Name</th>
-                                    <th>Status</th>
-                                    <th>CPU/RAM</th>
-                                    <th>Disk</th>
-                                    <th>WolfNet IP</th>
-                                    <th>VNC</th>
-                                    <th>Autostart</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="vms-table"></tbody>
-                        </table>
-                        <p id="vms-empty"
-                            style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
-                            No virtual machines found. Click <strong>+ Create VM</strong> to start one.
+                    <!-- Internet Peer mode -->
+                    <div id="peer-mode-internet" style="display:none;">
+                        <p style="font-size:13px; color:var(--text-secondary); margin-bottom:16px;">
+                            Connect a peer <strong>over the internet</strong>. Generate an invite token, then run
+                            the join command on the remote machine.
                         </p>
-                    </div>
-                </div>
-            </div>
-
-            <!-- ═══ Storage Manager ═══ -->
-            <div id="page-storage" class="page-view" style="display:none;">
-                <div class="card">
-                    <div class="card-header"
-                        style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                        <h3>💾 Storage Manager</h3>
-                        <div style="display:flex; gap:8px;">
-                            <button class="btn btn-sm"
-                                style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"
-                                onclick="showImportRcloneModal()">📥 Import rclone.conf</button>
-                            <button class="btn btn-sm btn-primary" onclick="showCreateMountModal()">+ Add Mount</button>
+                        <div id="invite-loading" style="text-align:center; padding:20px;">
+                            <span style="font-size:24px;">⏳</span>
+                            <p style="color:var(--text-muted); margin-top:8px;">Generating invite token...</p>
                         </div>
-                    </div>
-                    <div class="card-body">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Name</th>
-                                    <th>Type</th>
-                                    <th>Source</th>
-                                    <th>Mount Point</th>
-                                    <th>Status</th>
-                                    <th>Options</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="storage-mounts-table"></tbody>
-                        </table>
-                        <p id="storage-empty"
-                            style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
-                            No storage mounts configured. Click <strong>+ Add Mount</strong> to add S3, NFS, directory,
-                            or WolfDisk storage.
-                        </p>
-                    </div>
-                </div>
-            </div>
-
-            <!-- ═══ WolfNet Management ═══ -->
-            <div id="page-wolfnet" class="page-view" style="display:none;">
-                <!-- WolfNet Status Banner -->
-                <div class="stats-grid" style="margin-bottom:20px;" id="wolfnet-stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Status</span>
-                            <div class="stat-icon" id="wn-status-icon"
-                                style="background:var(--success-bg); color:var(--success);">●</div>
-                        </div>
-                        <div class="stat-value" id="wn-status-val">—</div>
-                        <div class="stat-sub" id="wn-enabled-val"></div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Interface</span>
-                        </div>
-                        <div class="stat-value" id="wn-interface-val" style="font-size:18px;">—</div>
-                        <div class="stat-sub" id="wn-ip-val"></div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Connected Peers</span>
-                        </div>
-                        <div class="stat-value" id="wn-connected-val">0</div>
-                        <div class="stat-sub" id="wn-total-peers-val"></div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Actions</span>
-                        </div>
-                        <div class="stat-value" style="font-size:13px;">
-                            <div style="display:flex; gap:6px; flex-wrap:wrap;">
-                                <button class="btn btn-sm btn-success" onclick="wolfnetServiceAction('start')"
-                                    id="wn-btn-start">▶ Start</button>
-                                <button class="btn btn-sm" onclick="wolfnetServiceAction('restart')" id="wn-btn-restart"
-                                    style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary);">🔄
-                                    Restart</button>
-                                <button class="btn btn-sm btn-danger" onclick="wolfnetServiceAction('stop')"
-                                    id="wn-btn-stop">⏹ Stop</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Peers Table -->
-                <div class="card" style="margin-bottom:20px;">
-                    <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                        <h3>🌐 Peers</h3>
-                        <div style="display:flex; gap:8px;">
-                            <button class="btn btn-sm" onclick="loadWolfNet()"
-                                style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); font-size:11px;">↻
-                                Refresh</button>
-                            <button class="btn btn-sm btn-primary" onclick="showAddPeerModal()"
-                                style="font-size:12px;">+ Add Peer</button>
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Name</th>
-                                    <th>WolfNet IP</th>
-                                    <th>Endpoint</th>
-                                    <th>Status</th>
-                                    <th>Traffic</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="wolfnet-peers-table"></tbody>
-                        </table>
-                        <p id="wolfnet-peers-empty"
-                            style="display:none; text-align:center; padding:20px; color:var(--text-muted);">
-                            No peers configured. Click <strong>+ Add Peer</strong> to connect to another WolfNet node.
-                        </p>
-                    </div>
-                </div>
-
-
-                <!-- Settings Cards -->
-                <div class="card" style="margin-bottom:20px;">
-                    <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                        <h3>⚙️ Network Settings</h3>
-                        <button class="btn btn-primary btn-sm" onclick="saveWolfNetSettings()">💾 Save &amp;
-                            Restart</button>
-                    </div>
-                    <div class="card-body">
-                        <div
-                            style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:16px;">
-                            <div class="form-group">
-                                <label
-                                    style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Interface</label>
-                                <input type="text" id="wn-cfg-interface" class="form-control" placeholder="wolfnet0"
-                                    style="font-family:var(--font-mono); font-size:13px;">
-                            </div>
-                            <div class="form-group">
-                                <label style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">WolfNet
-                                    IP Address</label>
-                                <input type="text" id="wn-cfg-address" class="form-control" placeholder="10.10.10.1"
-                                    style="font-family:var(--font-mono); font-size:13px;">
-                            </div>
-                            <div class="form-group">
-                                <label style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Subnet
-                                    Mask</label>
-                                <input type="number" id="wn-cfg-subnet" class="form-control" value="24" min="8" max="30"
-                                    style="font-family:var(--font-mono); font-size:13px;">
-                            </div>
-                            <div class="form-group">
-                                <label style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Listen
-                                    Port</label>
-                                <input type="number" id="wn-cfg-port" class="form-control" value="9600"
-                                    style="font-family:var(--font-mono); font-size:13px;">
-                            </div>
-                            <div class="form-group">
-                                <label
-                                    style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">MTU</label>
-                                <input type="number" id="wn-cfg-mtu" class="form-control" value="1400"
-                                    style="font-family:var(--font-mono); font-size:13px;">
-                            </div>
-                            <div class="form-group">
-                                <label
-                                    style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Options</label>
-                                <div style="display:flex; gap:12px; padding-top:6px;">
-                                    <label
-                                        style="display:flex; align-items:center; gap:4px; font-size:12px; cursor:pointer;">
-                                        <input type="checkbox" id="wn-cfg-gateway"> Gateway
-                                    </label>
-                                    <label
-                                        style="display:flex; align-items:center; gap:4px; font-size:12px; cursor:pointer;">
-                                        <input type="checkbox" id="wn-cfg-discovery" checked> Discovery
-                                    </label>
-                                </div>
-                            </div>
-                        </div>
-                        <div id="wn-node-identity"
-                            style="margin-top:16px; padding:12px; background:var(--bg-primary); border:1px solid var(--border); border-radius:8px; display:none;">
-                            <h4 style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">🔑 This Node's
-                                Identity</h4>
-                            <div style="display:grid; grid-template-columns: auto 1fr; gap:4px 12px; font-size:12px;">
-                                <span style="color:var(--text-muted);">Hostname:</span>
-                                <span id="wn-local-hostname" style="font-family:var(--font-mono);"></span>
-                                <span style="color:var(--text-muted);">Public Key:</span>
-                                <span id="wn-local-pubkey"
-                                    style="font-family:var(--font-mono); word-break:break-all;"></span>
-                            </div>
-                        </div>
-                        <details style="margin-top:16px;">
-                            <summary style="cursor:pointer; font-size:12px; color:var(--text-muted); user-select:none;">
-                                📄 Raw Configuration (/etc/wolfnet/config.toml)</summary>
-                            <textarea id="wolfnet-config-editor" class="config-editor" spellcheck="false"
-                                style="min-height:200px; margin-top:8px;"></textarea>
-                        </details>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Add WolfNet Peer Modal -->
-            <div class="modal-overlay" id="add-peer-modal">
-                <div class="modal" style="max-width: 580px; width: 95%;">
-                    <div class="modal-header">
-                        <h3>🔗 Add WolfNet Peer</h3>
-                        <button class="modal-close" onclick="closeAddPeerModal()">&times;</button>
-                    </div>
-                    <div class="modal-body">
-                        <!-- Mode tabs -->
-                        <div
-                            style="display:flex; gap:0; margin-bottom:20px; border:1px solid var(--border); border-radius:8px; overflow:hidden;">
-                            <button id="peer-tab-lan" class="btn" onclick="setPeerMode('lan')"
-                                style="flex:1; border:none; border-radius:0; font-size:13px; padding:10px; background:var(--accent-primary); color:white;">
-                                🏠 LAN Peer
-                            </button>
-                            <button id="peer-tab-internet" class="btn" onclick="setPeerMode('internet')"
-                                style="flex:1; border:none; border-radius:0; font-size:13px; padding:10px; background:var(--bg-tertiary); color:var(--text-secondary);">
-                                🌍 Internet Peer
-                            </button>
-                        </div>
-
-                        <!-- LAN Peer mode -->
-                        <div id="peer-mode-lan">
-                            <p style="font-size:13px; color:var(--text-secondary); margin-bottom:16px;">
-                                Add a peer on your <strong>local network</strong>. Both machines must be able to reach
-                                each other directly.
-                                The peer will be auto-discovered if discovery is enabled.
-                            </p>
-                            <div class="form-group">
-                                <label>Peer Name <span style="color:var(--danger)">*</span></label>
-                                <input type="text" id="peer-name" class="form-control" placeholder="e.g. office-server">
-                            </div>
-                            <div class="form-group">
-                                <label>WolfNet IP <span style="color:var(--danger)">*</span></label>
-                                <input type="text" id="peer-ip" class="form-control" placeholder="e.g. 10.10.10.3">
-                                <small style="color:var(--text-muted);">The peer's IP on the WolfNet overlay (e.g.
-                                    10.10.10.2, 10.10.10.3, etc.)</small>
-                            </div>
-                            <div class="form-group">
-                                <label>Endpoint <small style="color:var(--text-muted);">(optional)</small></label>
-                                <input type="text" id="peer-endpoint" class="form-control"
-                                    placeholder="e.g. 192.168.1.50:9600">
-                                <small style="color:var(--text-muted);">Local IP:port — leave empty for auto-discovery
-                                    on LAN</small>
-                            </div>
-                            <div class="form-group">
-                                <label>Public Key <small style="color:var(--text-muted);">(optional)</small></label>
-                                <input type="text" id="peer-public-key" class="form-control"
-                                    placeholder="base64 public key">
-                                <small style="color:var(--text-muted);">If known, paste the peer's WolfNet public
-                                    key</small>
-                            </div>
-                        </div>
-
-                        <!-- Internet Peer mode -->
-                        <div id="peer-mode-internet" style="display:none;">
-                            <p style="font-size:13px; color:var(--text-secondary); margin-bottom:16px;">
-                                Connect a peer <strong>over the internet</strong>. Generate an invite token, then run
-                                the join command on the remote machine.
-                            </p>
-                            <div id="invite-loading" style="text-align:center; padding:20px;">
-                                <span style="font-size:24px;">⏳</span>
-                                <p style="color:var(--text-muted); margin-top:8px;">Generating invite token...</p>
-                            </div>
-                            <div id="invite-result" style="display:none;">
-                                <div
-                                    style="background:var(--bg-primary); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:16px;">
-                                    <div
-                                        style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-                                        <span style="font-size:12px; font-weight:600; color:var(--text-secondary);">📋
-                                            Run this on the remote machine:</span>
-                                        <button class="btn btn-sm" onclick="copyInviteCommand()"
-                                            style="font-size:11px;">📋 Copy</button>
-                                    </div>
-                                    <pre id="invite-command"
-                                        style="font-family:var(--font-mono); font-size:11px; white-space:pre-wrap; word-break:break-all; margin:0; color:var(--accent-primary); background:var(--bg-secondary); padding:10px; border-radius:6px;"></pre>
-                                </div>
-                                <div
-                                    style="background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.2); border-radius:8px; padding:12px; margin-bottom:12px;">
-                                    <h4 style="font-size:12px; color:#3b82f6; margin-bottom:8px;">ℹ️ How it works</h4>
-                                    <ol
-                                        style="font-size:12px; color:var(--text-secondary); margin:0; padding-left:16px; line-height:1.8;">
-                                        <li>Copy the command above and run it on the remote machine</li>
-                                        <li>It will output a <strong>reverse token</strong> — copy that</li>
-                                        <li>Run the reverse token command on <strong>this</strong> machine</li>
-                                        <li>Restart WolfNet on both machines</li>
-                                    </ol>
-                                </div>
-                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:12px;">
-                                    <div style="padding:8px; background:var(--bg-tertiary); border-radius:6px;">
-                                        <span style="color:var(--text-muted);">Your Public IP:</span><br>
-                                        <strong id="invite-public-ip">—</strong>
-                                    </div>
-                                    <div style="padding:8px; background:var(--bg-tertiary); border-radius:6px;">
-                                        <span style="color:var(--text-muted);">Your Endpoint:</span><br>
-                                        <strong id="invite-endpoint">—</strong>
-                                    </div>
-                                </div>
-                            </div>
-                            <div id="invite-error" style="display:none;">
-                                <div
-                                    style="background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.2); border-radius:8px; padding:16px; text-align:center;">
-                                    <span style="font-size:24px;">❌</span>
-                                    <p id="invite-error-msg" style="color:#ef4444; margin-top:8px;"></p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="modal-footer" id="peer-modal-footer-lan">
-                        <button class="btn" onclick="closeAddPeerModal()">Cancel</button>
-                        <button class="btn btn-primary" onclick="addWolfNetPeer()">Add Peer</button>
-                    </div>
-                    <div class="modal-footer" id="peer-modal-footer-internet" style="display:none;">
-                        <button class="btn btn-primary" onclick="closeAddPeerModal()">Done</button>
-                    </div>
-                </div>
-            </div>
-
-            <!-- WolfNet Join Command Modal (shown after adding LAN peer) -->
-            <div class="modal-overlay" id="wolfnet-join-modal">
-                <div class="modal" style="max-width: 640px; width: 95%;">
-                    <div class="modal-header">
-                        <h3>✅ Peer Added — Remote Setup</h3>
-                        <button class="modal-close" onclick="closeJoinModal()">&times;</button>
-                    </div>
-                    <div class="modal-body">
-                        <p style="margin-bottom:12px; color:var(--text-secondary);">
-                            The peer has been added to this node. Now configure the <strong>remote machine</strong>
-                            to connect back. Add this to <code>/etc/wolfnet/config.toml</code> on the remote peer:
-                        </p>
-                        <div
-                            style="background:var(--bg-primary); border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:16px;">
+                        <div id="invite-result" style="display:none;">
                             <div
-                                style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                                <span style="font-size:11px; color:var(--text-muted);">Peer config block for the remote
-                                    machine:</span>
-                                <button class="btn btn-sm" onclick="copyJoinConfig()" style="font-size:11px;">📋
-                                    Copy</button>
+                                style="background:var(--bg-primary); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:16px;">
+                                <div
+                                    style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                                    <span style="font-size:12px; font-weight:600; color:var(--text-secondary);">📋
+                                        Run this on the remote machine:</span>
+                                    <button class="btn btn-sm" onclick="copyInviteCommand()" style="font-size:11px;">📋
+                                        Copy</button>
+                                </div>
+                                <pre id="invite-command"
+                                    style="font-family:var(--font-mono); font-size:11px; white-space:pre-wrap; word-break:break-all; margin:0; color:var(--accent-primary); background:var(--bg-secondary); padding:10px; border-radius:6px;"></pre>
                             </div>
-                            <pre id="wolfnet-join-config"
-                                style="font-family:var(--font-mono); font-size:12px; white-space:pre-wrap; word-break:break-all; margin:0; color:var(--accent-primary);"></pre>
-                        </div>
-                        <p style="font-size:12px; color:var(--text-muted);">
-                            Then run <code>sudo systemctl restart wolfnet</code> on the remote machine.
-                        </p>
-                    </div>
-                    <div class="modal-footer">
-                        <button class="btn btn-primary" onclick="closeJoinModal()">Done</button>
-                    </div>
-                </div>
-            </div>
-
-
-
-            <!-- ═══ Networking ═══ -->
-            <div id="page-networking" class="page-view" style="display:none;">
-                <!-- WolfNet Card -->
-                <div class="card" style="margin-bottom:16px;">
-                    <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                        <h3>🔗 WolfNet Overlay</h3>
-                        <div id="wolfnet-actions"></div>
-                    </div>
-                    <div class="card-body" id="wolfnet-status-body">
-                        <p style="color:var(--text-muted);">Loading WolfNet status...</p>
-                    </div>
-                </div>
-
-                <!-- Network Interfaces Card -->
-                <div class="card" style="margin-bottom:16px;">
-                    <div class="card-header"
-                        style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                        <h3>🌐 Network Interfaces</h3>
-                        <button class="btn btn-sm btn-primary" onclick="showCreateVlanModal()">+ Add VLAN</button>
-                    </div>
-                    <div class="card-body">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Interface</th>
-                                    <th>State</th>
-                                    <th>Addresses</th>
-                                    <th>MAC</th>
-                                    <th>Speed</th>
-                                    <th>MTU</th>
-                                    <th>Driver</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="net-interfaces-table"></tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <!-- DNS Card -->
-                <div class="card">
-                    <div class="card-header">
-                        <h3>🔤 DNS Configuration</h3>
-                    </div>
-                    <div class="card-body" id="dns-config-body">
-                        <p style="color:var(--text-muted);">Loading DNS configuration...</p>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Create VLAN Modal -->
-            <div class="modal-overlay" id="create-vlan-modal">
-                <div class="modal" style="max-width: 480px; width: 95%;">
-                    <div class="modal-header">
-                        <h3>🏷️ Create VLAN</h3>
-                        <button class="modal-close" onclick="closeCreateVlanModal()">&times;</button>
-                    </div>
-                    <div class="modal-body">
-                        <div class="form-group">
-                            <label>Parent Interface</label>
-                            <select id="vlan-parent" class="form-control"></select>
-                        </div>
-                        <div class="form-group">
-                            <label>VLAN ID</label>
-                            <input type="number" id="vlan-id" class="form-control" min="1" max="4094"
-                                placeholder="e.g. 100">
-                        </div>
-                        <div class="form-group">
-                            <label>Name (optional — defaults to parent.vlanid)</label>
-                            <input type="text" id="vlan-name" class="form-control" placeholder="e.g. mgmt-vlan">
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button class="btn" onclick="closeCreateVlanModal()">Cancel</button>
-                        <button class="btn btn-primary" onclick="createVlan()">Create VLAN</button>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Add IP Modal -->
-            <div class="modal-overlay" id="add-ip-modal">
-                <div class="modal" style="max-width: 480px; width: 95%;">
-                    <div class="modal-header">
-                        <h3>➕ Add IP Address</h3>
-                        <button class="modal-close" onclick="closeAddIpModal()">&times;</button>
-                    </div>
-                    <div class="modal-body">
-                        <input type="hidden" id="add-ip-interface">
-                        <div class="form-group">
-                            <label>Interface: <strong id="add-ip-iface-name"></strong></label>
-                        </div>
-                        <div class="form-group">
-                            <label>IP Address</label>
-                            <input type="text" id="add-ip-address" class="form-control"
-                                placeholder="e.g. 192.168.1.100">
-                        </div>
-                        <div class="form-group">
-                            <label>Prefix Length (CIDR)</label>
-                            <input type="number" id="add-ip-prefix" class="form-control" value="24" min="1" max="128">
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button class="btn" onclick="closeAddIpModal()">Cancel</button>
-                        <button class="btn btn-primary" onclick="addIpAddress()">Add IP</button>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Mount Progress Modal -->
-            <div class="modal-overlay" id="mount-progress-modal">
-                <div class="modal" style="max-width: 420px; width: 90%;">
-                    <div class="modal-header">
-                        <h3 id="mount-progress-title">💾 Mounting Storage</h3>
-                    </div>
-                    <div class="modal-body" style="text-align: center; padding: 32px 24px;">
-                        <div id="mount-progress-spinner" style="font-size: 48px; margin-bottom: 16px;">⏳</div>
-                        <div id="mount-progress-status" style="font-size: 16px; font-weight: 600; margin-bottom: 8px;">
-                            Connecting...</div>
-                        <div id="mount-progress-detail"
-                            style="font-size: 13px; color: var(--text-muted); word-break: break-word;"></div>
-                    </div>
-                    <div class="modal-footer" id="mount-progress-footer" style="display: none;">
-                        <button class="btn btn-primary" onclick="closeMountProgress()">OK</button>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Create Storage Mount Modal -->
-            <div class="modal-overlay" id="create-mount-modal">
-                <div class="modal" style="max-width: 640px; width: 95%;">
-                    <div class="modal-header">
-                        <h3>Add Storage Mount</h3>
-                        <button class="modal-close" onclick="closeMountModal()">&times;</button>
-                    </div>
-                    <div class="modal-body">
-                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
-                            <div class="form-group" style="grid-column: 1 / -1;">
-                                <label>Name</label>
-                                <input type="text" class="form-control" id="mount-name" placeholder="My S3 backup">
+                            <div
+                                style="background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.2); border-radius:8px; padding:12px; margin-bottom:12px;">
+                                <h4 style="font-size:12px; color:#3b82f6; margin-bottom:8px;">ℹ️ How it works</h4>
+                                <ol
+                                    style="font-size:12px; color:var(--text-secondary); margin:0; padding-left:16px; line-height:1.8;">
+                                    <li>Copy the command above and run it on the remote machine</li>
+                                    <li>It will output a <strong>reverse token</strong> — copy that</li>
+                                    <li>Run the reverse token command on <strong>this</strong> machine</li>
+                                    <li>Restart WolfNet on both machines</li>
+                                </ol>
                             </div>
-                            <div class="form-group">
-                                <label>Type</label>
-                                <select class="form-control" id="mount-type" onchange="onMountTypeChange()">
-                                    <option value="s3">☁️ S3 / Object Storage</option>
-                                    <option value="nfs">🗄️ NFS Share</option>
-                                    <option value="directory">📁 Directory (bind mount)</option>
-                                    <option value="wolfdisk">🐺 WolfDisk</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label>Mount Point</label>
-                                <input type="text" class="form-control" id="mount-point"
-                                    placeholder="/mnt/wolfstack/my-mount">
-                                <small style="color:var(--text-muted); font-size:11px;">Leave blank for auto</small>
-                            </div>
-
-                            <!-- S3 Fields -->
-                            <div id="s3-fields" style="grid-column: 1 / -1;">
-                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
-                                    <div class="form-group">
-                                        <label>Provider</label>
-                                        <select class="form-control" id="s3-provider">
-                                            <option value="AWS">Amazon S3</option>
-                                            <option value="Cloudflare">Cloudflare R2</option>
-                                            <option value="DigitalOcean">DigitalOcean Spaces</option>
-                                            <option value="Wasabi">Wasabi</option>
-                                            <option value="Backblaze">Backblaze B2</option>
-                                            <option value="Minio">MinIO</option>
-                                            <option value="Other">Other S3-compatible</option>
-                                        </select>
-                                    </div>
-                                    <div class="form-group">
-                                        <label>Bucket</label>
-                                        <input type="text" class="form-control" id="s3-bucket" placeholder="my-bucket">
-                                    </div>
-                                    <div class="form-group">
-                                        <label>Access Key ID</label>
-                                        <input type="text" class="form-control" id="s3-access-key"
-                                            placeholder="AKIA...">
-                                    </div>
-                                    <div class="form-group">
-                                        <label>Secret Access Key</label>
-                                        <input type="password" class="form-control" id="s3-secret-key"
-                                            placeholder="secret">
-                                    </div>
-                                    <div class="form-group">
-                                        <label>Region</label>
-                                        <input type="text" class="form-control" id="s3-region" placeholder="us-east-1">
-                                    </div>
-                                    <div class="form-group">
-                                        <label>Endpoint (optional)</label>
-                                        <input type="text" class="form-control" id="s3-endpoint"
-                                            placeholder="https://s3.example.com">
-                                        <small style="color:var(--text-muted); font-size:11px;">For non-AWS
-                                            providers</small>
-                                    </div>
+                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:12px;">
+                                <div style="padding:8px; background:var(--bg-tertiary); border-radius:6px;">
+                                    <span style="color:var(--text-muted);">Your Public IP:</span><br>
+                                    <strong id="invite-public-ip">—</strong>
+                                </div>
+                                <div style="padding:8px; background:var(--bg-tertiary); border-radius:6px;">
+                                    <span style="color:var(--text-muted);">Your Endpoint:</span><br>
+                                    <strong id="invite-endpoint">—</strong>
                                 </div>
                             </div>
-
-                            <!-- NFS Fields -->
-                            <div id="nfs-fields" style="grid-column: 1 / -1; display:none;">
-                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
-                                    <div class="form-group" style="grid-column: 1 / -1;">
-                                        <label>NFS Source</label>
-                                        <input type="text" class="form-control" id="nfs-source"
-                                            placeholder="192.168.1.100:/data/share">
-                                        <small style="color:var(--text-muted); font-size:11px;">Format:
-                                            server:/export/path</small>
-                                    </div>
-                                    <div class="form-group" style="grid-column: 1 / -1;">
-                                        <label>NFS Options</label>
-                                        <input type="text" class="form-control" id="nfs-options"
-                                            value="rw,soft,timeo=50" placeholder="rw,soft,timeo=50">
-                                    </div>
-                                </div>
+                        </div>
+                        <div id="invite-error" style="display:none;">
+                            <div
+                                style="background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.2); border-radius:8px; padding:16px; text-align:center;">
+                                <span style="font-size:24px;">❌</span>
+                                <p id="invite-error-msg" style="color:#ef4444; margin-top:8px;"></p>
                             </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer" id="peer-modal-footer-lan">
+                    <button class="btn" onclick="closeAddPeerModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="addWolfNetPeer()">Add Peer</button>
+                </div>
+                <div class="modal-footer" id="peer-modal-footer-internet" style="display:none;">
+                    <button class="btn btn-primary" onclick="closeAddPeerModal()">Done</button>
+                </div>
+            </div>
+        </div>
 
-                            <!-- Directory Fields -->
-                            <div id="dir-fields" style="grid-column: 1 / -1; display:none;">
+        <!-- WolfNet Join Command Modal (shown after adding LAN peer) -->
+        <div class="modal-overlay" id="wolfnet-join-modal">
+            <div class="modal" style="max-width: 640px; width: 95%;">
+                <div class="modal-header">
+                    <h3>✅ Peer Added — Remote Setup</h3>
+                    <button class="modal-close" onclick="closeJoinModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p style="margin-bottom:12px; color:var(--text-secondary);">
+                        The peer has been added to this node. Now configure the <strong>remote machine</strong>
+                        to connect back. Add this to <code>/etc/wolfnet/config.toml</code> on the remote peer:
+                    </p>
+                    <div
+                        style="background:var(--bg-primary); border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:16px;">
+                        <div
+                            style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                            <span style="font-size:11px; color:var(--text-muted);">Peer config block for the remote
+                                machine:</span>
+                            <button class="btn btn-sm" onclick="copyJoinConfig()" style="font-size:11px;">📋
+                                Copy</button>
+                        </div>
+                        <pre id="wolfnet-join-config"
+                            style="font-family:var(--font-mono); font-size:12px; white-space:pre-wrap; word-break:break-all; margin:0; color:var(--accent-primary);"></pre>
+                    </div>
+                    <p style="font-size:12px; color:var(--text-muted);">
+                        Then run <code>sudo systemctl restart wolfnet</code> on the remote machine.
+                    </p>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-primary" onclick="closeJoinModal()">Done</button>
+                </div>
+            </div>
+        </div>
+
+
+
+        <!-- ═══ Networking ═══ -->
+        <div id="page-networking" class="page-view" style="display:none;">
+            <!-- WolfNet Card -->
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>🔗 WolfNet Overlay</h3>
+                    <div id="wolfnet-actions"></div>
+                </div>
+                <div class="card-body" id="wolfnet-status-body">
+                    <p style="color:var(--text-muted);">Loading WolfNet status...</p>
+                </div>
+            </div>
+
+            <!-- Network Interfaces Card -->
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-header"
+                    style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                    <h3>🌐 Network Interfaces</h3>
+                    <button class="btn btn-sm btn-primary" onclick="showCreateVlanModal()">+ Add VLAN</button>
+                </div>
+                <div class="card-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Interface</th>
+                                <th>State</th>
+                                <th>Addresses</th>
+                                <th>MAC</th>
+                                <th>Speed</th>
+                                <th>MTU</th>
+                                <th>Driver</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="net-interfaces-table"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- DNS Card -->
+            <div class="card">
+                <div class="card-header">
+                    <h3>🔤 DNS Configuration</h3>
+                </div>
+                <div class="card-body" id="dns-config-body">
+                    <p style="color:var(--text-muted);">Loading DNS configuration...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Create VLAN Modal -->
+        <div class="modal-overlay" id="create-vlan-modal">
+            <div class="modal" style="max-width: 480px; width: 95%;">
+                <div class="modal-header">
+                    <h3>🏷️ Create VLAN</h3>
+                    <button class="modal-close" onclick="closeCreateVlanModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label>Parent Interface</label>
+                        <select id="vlan-parent" class="form-control"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>VLAN ID</label>
+                        <input type="number" id="vlan-id" class="form-control" min="1" max="4094"
+                            placeholder="e.g. 100">
+                    </div>
+                    <div class="form-group">
+                        <label>Name (optional — defaults to parent.vlanid)</label>
+                        <input type="text" id="vlan-name" class="form-control" placeholder="e.g. mgmt-vlan">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" onclick="closeCreateVlanModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="createVlan()">Create VLAN</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Add IP Modal -->
+        <div class="modal-overlay" id="add-ip-modal">
+            <div class="modal" style="max-width: 480px; width: 95%;">
+                <div class="modal-header">
+                    <h3>➕ Add IP Address</h3>
+                    <button class="modal-close" onclick="closeAddIpModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" id="add-ip-interface">
+                    <div class="form-group">
+                        <label>Interface: <strong id="add-ip-iface-name"></strong></label>
+                    </div>
+                    <div class="form-group">
+                        <label>IP Address</label>
+                        <input type="text" id="add-ip-address" class="form-control" placeholder="e.g. 192.168.1.100">
+                    </div>
+                    <div class="form-group">
+                        <label>Prefix Length (CIDR)</label>
+                        <input type="number" id="add-ip-prefix" class="form-control" value="24" min="1" max="128">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" onclick="closeAddIpModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="addIpAddress()">Add IP</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Mount Progress Modal -->
+        <div class="modal-overlay" id="mount-progress-modal">
+            <div class="modal" style="max-width: 420px; width: 90%;">
+                <div class="modal-header">
+                    <h3 id="mount-progress-title">💾 Mounting Storage</h3>
+                </div>
+                <div class="modal-body" style="text-align: center; padding: 32px 24px;">
+                    <div id="mount-progress-spinner" style="font-size: 48px; margin-bottom: 16px;">⏳</div>
+                    <div id="mount-progress-status" style="font-size: 16px; font-weight: 600; margin-bottom: 8px;">
+                        Connecting...</div>
+                    <div id="mount-progress-detail"
+                        style="font-size: 13px; color: var(--text-muted); word-break: break-word;"></div>
+                </div>
+                <div class="modal-footer" id="mount-progress-footer" style="display: none;">
+                    <button class="btn btn-primary" onclick="closeMountProgress()">OK</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Create Storage Mount Modal -->
+        <div class="modal-overlay" id="create-mount-modal">
+            <div class="modal" style="max-width: 640px; width: 95%;">
+                <div class="modal-header">
+                    <h3>Add Storage Mount</h3>
+                    <button class="modal-close" onclick="closeMountModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                        <div class="form-group" style="grid-column: 1 / -1;">
+                            <label>Name</label>
+                            <input type="text" class="form-control" id="mount-name" placeholder="My S3 backup">
+                        </div>
+                        <div class="form-group">
+                            <label>Type</label>
+                            <select class="form-control" id="mount-type" onchange="onMountTypeChange()">
+                                <option value="s3">☁️ S3 / Object Storage</option>
+                                <option value="nfs">🗄️ NFS Share</option>
+                                <option value="directory">📁 Directory (bind mount)</option>
+                                <option value="wolfdisk">🐺 WolfDisk</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Mount Point</label>
+                            <input type="text" class="form-control" id="mount-point"
+                                placeholder="/mnt/wolfstack/my-mount">
+                            <small style="color:var(--text-muted); font-size:11px;">Leave blank for auto</small>
+                        </div>
+
+                        <!-- S3 Fields -->
+                        <div id="s3-fields" style="grid-column: 1 / -1;">
+                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
                                 <div class="form-group">
-                                    <label>Source Directory</label>
-                                    <input type="text" class="form-control" id="dir-source" placeholder="/data/shared">
+                                    <label>Provider</label>
+                                    <select class="form-control" id="s3-provider">
+                                        <option value="AWS">Amazon S3</option>
+                                        <option value="Cloudflare">Cloudflare R2</option>
+                                        <option value="DigitalOcean">DigitalOcean Spaces</option>
+                                        <option value="Wasabi">Wasabi</option>
+                                        <option value="Backblaze">Backblaze B2</option>
+                                        <option value="Minio">MinIO</option>
+                                        <option value="Other">Other S3-compatible</option>
+                                    </select>
                                 </div>
-                            </div>
-
-                            <!-- WolfDisk Fields -->
-                            <div id="wolfdisk-fields" style="grid-column: 1 / -1; display:none;">
                                 <div class="form-group">
-                                    <label>WolfDisk Path</label>
-                                    <input type="text" class="form-control" id="wolfdisk-source"
-                                        placeholder="/wolfdisk/data">
-                                    <small style="color:var(--text-muted); font-size:11px;">Path on the WolfDisk
-                                        filesystem</small>
+                                    <label>Bucket</label>
+                                    <input type="text" class="form-control" id="s3-bucket" placeholder="my-bucket">
                                 </div>
-                            </div>
-
-                            <!-- Global / Auto Mount options -->
-                            <div class="form-group"
-                                style="grid-column: 1 / -1; display:flex; gap:20px; padding-top:8px; border-top:1px solid var(--border);">
-                                <label
-                                    style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px;">
-                                    <input type="checkbox" id="mount-global"> 🌐 Global Mount
-                                    <small style="color:var(--text-muted); font-size:11px;">(replicate to all cluster
-                                        nodes)</small>
-                                </label>
-                                <label
-                                    style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px;">
-                                    <input type="checkbox" id="mount-auto" checked> ⚡ Auto-mount on boot
-                                </label>
+                                <div class="form-group">
+                                    <label>Access Key ID</label>
+                                    <input type="text" class="form-control" id="s3-access-key" placeholder="AKIA...">
+                                </div>
+                                <div class="form-group">
+                                    <label>Secret Access Key</label>
+                                    <input type="password" class="form-control" id="s3-secret-key" placeholder="secret">
+                                </div>
+                                <div class="form-group">
+                                    <label>Region</label>
+                                    <input type="text" class="form-control" id="s3-region" placeholder="us-east-1">
+                                </div>
+                                <div class="form-group">
+                                    <label>Endpoint (optional)</label>
+                                    <input type="text" class="form-control" id="s3-endpoint"
+                                        placeholder="https://s3.example.com">
+                                    <small style="color:var(--text-muted); font-size:11px;">For non-AWS
+                                        providers</small>
+                                </div>
                             </div>
                         </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button class="btn" onclick="closeMountModal()">Cancel</button>
-                        <button class="btn btn-primary" onclick="createStorageMount()">Create & Mount</button>
+
+                        <!-- NFS Fields -->
+                        <div id="nfs-fields" style="grid-column: 1 / -1; display:none;">
+                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                                <div class="form-group" style="grid-column: 1 / -1;">
+                                    <label>NFS Source</label>
+                                    <input type="text" class="form-control" id="nfs-source"
+                                        placeholder="192.168.1.100:/data/share">
+                                    <small style="color:var(--text-muted); font-size:11px;">Format:
+                                        server:/export/path</small>
+                                </div>
+                                <div class="form-group" style="grid-column: 1 / -1;">
+                                    <label>NFS Options</label>
+                                    <input type="text" class="form-control" id="nfs-options" value="rw,soft,timeo=50"
+                                        placeholder="rw,soft,timeo=50">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Directory Fields -->
+                        <div id="dir-fields" style="grid-column: 1 / -1; display:none;">
+                            <div class="form-group">
+                                <label>Source Directory</label>
+                                <input type="text" class="form-control" id="dir-source" placeholder="/data/shared">
+                            </div>
+                        </div>
+
+                        <!-- WolfDisk Fields -->
+                        <div id="wolfdisk-fields" style="grid-column: 1 / -1; display:none;">
+                            <div class="form-group">
+                                <label>WolfDisk Path</label>
+                                <input type="text" class="form-control" id="wolfdisk-source"
+                                    placeholder="/wolfdisk/data">
+                                <small style="color:var(--text-muted); font-size:11px;">Path on the WolfDisk
+                                    filesystem</small>
+                            </div>
+                        </div>
+
+                        <!-- Global / Auto Mount options -->
+                        <div class="form-group"
+                            style="grid-column: 1 / -1; display:flex; gap:20px; padding-top:8px; border-top:1px solid var(--border);">
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px;">
+                                <input type="checkbox" id="mount-global"> 🌐 Global Mount
+                                <small style="color:var(--text-muted); font-size:11px;">(replicate to all cluster
+                                    nodes)</small>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px;">
+                                <input type="checkbox" id="mount-auto" checked> ⚡ Auto-mount on boot
+                            </label>
+                        </div>
                     </div>
                 </div>
+                <div class="modal-footer">
+                    <button class="btn" onclick="closeMountModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="createStorageMount()">Create & Mount</button>
+                </div>
             </div>
+        </div>
 
-            <!-- Import rclone.conf Modal -->
-            <div class="modal-overlay" id="import-rclone-modal">
-                <div class="modal" style="max-width: 600px; width: 95%;">
-                    <div class="modal-header">
-                        <h3>📥 Import rclone.conf</h3>
-                        <button class="modal-close" onclick="closeImportRcloneModal()">&times;</button>
-                    </div>
-                    <div class="modal-body">
-                        <p style="font-size:13px; color:var(--text-secondary); margin-bottom:12px;">
-                            Paste your <code>rclone.conf</code> contents below. All S3-compatible remotes will be
-                            imported as storage mounts.
-                        </p>
-                        <textarea id="rclone-config-paste" class="form-control" rows="12"
-                            style="font-family: var(--font-mono); font-size:12px; resize:vertical;" placeholder="[myremote]
+        <!-- Import rclone.conf Modal -->
+        <div class="modal-overlay" id="import-rclone-modal">
+            <div class="modal" style="max-width: 600px; width: 95%;">
+                <div class="modal-header">
+                    <h3>📥 Import rclone.conf</h3>
+                    <button class="modal-close" onclick="closeImportRcloneModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p style="font-size:13px; color:var(--text-secondary); margin-bottom:12px;">
+                        Paste your <code>rclone.conf</code> contents below. All S3-compatible remotes will be
+                        imported as storage mounts.
+                    </p>
+                    <textarea id="rclone-config-paste" class="form-control" rows="12"
+                        style="font-family: var(--font-mono); font-size:12px; resize:vertical;" placeholder="[myremote]
 type = s3
 provider = AWS
 access_key_id = AKIA...
 secret_access_key = ...
 region = us-east-1"></textarea>
-                    </div>
-                    <div class="modal-footer">
-                        <button class="btn" onclick="closeImportRcloneModal()">Cancel</button>
-                        <button class="btn btn-primary" onclick="importRcloneConfig()">Import</button>
-                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" onclick="closeImportRcloneModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="importRcloneConfig()">Import</button>
                 </div>
             </div>
+        </div>
 
-            <!-- Edit Storage Mount Modal -->
-            <div class="modal-overlay" id="edit-mount-modal">
-                <div class="modal" style="max-width: 640px; width: 95%;">
-                    <div class="modal-header">
-                        <h3>⚙️ Edit Storage Mount</h3>
-                        <button class="modal-close" onclick="closeEditMountModal()">&times;</button>
+        <!-- Edit Storage Mount Modal -->
+        <div class="modal-overlay" id="edit-mount-modal">
+            <div class="modal" style="max-width: 640px; width: 95%;">
+                <div class="modal-header">
+                    <h3>⚙️ Edit Storage Mount</h3>
+                    <button class="modal-close" onclick="closeEditMountModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" id="edit-mount-id">
+                    <input type="hidden" id="edit-mount-type-value">
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                        <div class="form-group" style="grid-column: 1 / -1;">
+                            <label>Name</label>
+                            <input type="text" class="form-control" id="edit-mount-name">
+                        </div>
+                        <div class="form-group">
+                            <label>Type</label>
+                            <input type="text" class="form-control" id="edit-mount-type-display" disabled
+                                style="opacity:0.7; cursor:not-allowed;">
+                        </div>
+                        <div class="form-group">
+                            <label>Mount Point</label>
+                            <input type="text" class="form-control" id="edit-mount-point"
+                                placeholder="/mnt/wolfstack/my-mount">
+                        </div>
+
+                        <!-- S3 Edit Fields -->
+                        <div id="edit-s3-fields" style="grid-column: 1 / -1; display:none;">
+                            <div
+                                style="display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
+                                <div
+                                    style="grid-column:1/-1; font-weight:600; font-size:13px; color:var(--text-primary); margin-bottom:4px;">
+                                    ☁️ S3 Configuration</div>
+                                <div class="form-group">
+                                    <label>Provider</label>
+                                    <select class="form-control" id="edit-s3-provider">
+                                        <option value="AWS">Amazon S3</option>
+                                        <option value="Cloudflare">Cloudflare R2</option>
+                                        <option value="DigitalOcean">DigitalOcean Spaces</option>
+                                        <option value="Wasabi">Wasabi</option>
+                                        <option value="Backblaze">Backblaze B2</option>
+                                        <option value="Minio">MinIO</option>
+                                        <option value="Other">Other S3-compatible</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Bucket</label>
+                                    <input type="text" class="form-control" id="edit-s3-bucket" placeholder="my-bucket">
+                                </div>
+                                <div class="form-group">
+                                    <label>Access Key ID</label>
+                                    <input type="text" class="form-control" id="edit-s3-access-key"
+                                        placeholder="AKIA...">
+                                </div>
+                                <div class="form-group">
+                                    <label>Secret Access Key</label>
+                                    <input type="password" class="form-control" id="edit-s3-secret-key"
+                                        placeholder="Leave blank to keep unchanged">
+                                </div>
+                                <div class="form-group">
+                                    <label>Region</label>
+                                    <input type="text" class="form-control" id="edit-s3-region" placeholder="us-east-1">
+                                </div>
+                                <div class="form-group">
+                                    <label>Endpoint (optional)</label>
+                                    <input type="text" class="form-control" id="edit-s3-endpoint"
+                                        placeholder="https://s3.example.com">
+                                    <small style="color:var(--text-muted); font-size:11px;">For non-AWS
+                                        providers</small>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- NFS Edit Fields -->
+                        <div id="edit-nfs-fields" style="grid-column: 1 / -1; display:none;">
+                            <div
+                                style="display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
+                                <div
+                                    style="grid-column:1/-1; font-weight:600; font-size:13px; color:var(--text-primary); margin-bottom:4px;">
+                                    🗄️ NFS Configuration</div>
+                                <div class="form-group" style="grid-column: 1 / -1;">
+                                    <label>NFS Source</label>
+                                    <input type="text" class="form-control" id="edit-nfs-source"
+                                        placeholder="192.168.1.100:/data/share">
+                                    <small style="color:var(--text-muted); font-size:11px;">Format:
+                                        server:/export/path</small>
+                                </div>
+                                <div class="form-group" style="grid-column: 1 / -1;">
+                                    <label>NFS Options</label>
+                                    <input type="text" class="form-control" id="edit-nfs-options"
+                                        placeholder="rw,soft,timeo=50">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Directory Edit Fields -->
+                        <div id="edit-dir-fields" style="grid-column: 1 / -1; display:none;">
+                            <div
+                                style="padding:12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
+                                <div
+                                    style="font-weight:600; font-size:13px; color:var(--text-primary); margin-bottom:8px;">
+                                    📁 Directory Configuration</div>
+                                <div class="form-group">
+                                    <label>Source Directory</label>
+                                    <input type="text" class="form-control" id="edit-dir-source"
+                                        placeholder="/data/shared">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- WolfDisk Edit Fields -->
+                        <div id="edit-wolfdisk-fields" style="grid-column: 1 / -1; display:none;">
+                            <div
+                                style="padding:12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
+                                <div
+                                    style="font-weight:600; font-size:13px; color:var(--text-primary); margin-bottom:8px;">
+                                    🐺 WolfDisk Configuration</div>
+                                <div class="form-group">
+                                    <label>WolfDisk Path</label>
+                                    <input type="text" class="form-control" id="edit-wolfdisk-source"
+                                        placeholder="/wolfdisk/data">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Global / Auto Mount options -->
+                        <div class="form-group"
+                            style="grid-column: 1 / -1; display:flex; gap:20px; padding-top:8px; border-top:1px solid var(--border);">
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px;">
+                                <input type="checkbox" id="edit-mount-global"> 🌐 Global Mount
+                                <small style="color:var(--text-muted); font-size:11px;">(replicate to all cluster
+                                    nodes)</small>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px;">
+                                <input type="checkbox" id="edit-mount-auto"> ⚡ Auto-mount on boot
+                            </label>
+                        </div>
                     </div>
-                    <div class="modal-body">
-                        <input type="hidden" id="edit-mount-id">
-                        <input type="hidden" id="edit-mount-type-value">
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" onclick="closeEditMountModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="saveStorageMountEdit()">💾 Save Changes</button>
+                </div>
+            </div>
+        </div>
+
+
+        <div class="modal-overlay" id="create-vm-modal">
+            <div class="modal" style="max-width: 720px; width: 95%;">
+                <div class="modal-header">
+                    <h3>Create Virtual Machine</h3>
+                    <button class="modal-close" onclick="closeVmCreate()">&times;</button>
+                </div>
+                <!-- Tab Nav -->
+                <div style="display:flex; border-bottom:1px solid var(--border); background:var(--bg-secondary);">
+                    <button class="vm-tab-btn active" data-tab="1" onclick="switchVmTab(1)"
+                        style="flex:1; padding:10px 16px; border:none; background:none; color:var(--text-primary); font-size:13px; font-weight:600; cursor:pointer; border-bottom:2px solid transparent; transition:all .2s;">
+                        <span style="margin-right:4px;">⚙️</span> General
+                    </button>
+                    <button class="vm-tab-btn" data-tab="2" onclick="switchVmTab(2)"
+                        style="flex:1; padding:10px 16px; border:none; background:none; color:var(--text-muted); font-size:13px; font-weight:600; cursor:pointer; border-bottom:2px solid transparent; transition:all .2s;">
+                        <span style="margin-right:4px;">💾</span> Disks
+                    </button>
+                    <button class="vm-tab-btn" data-tab="3" onclick="switchVmTab(3)"
+                        style="flex:1; padding:10px 16px; border:none; background:none; color:var(--text-muted); font-size:13px; font-weight:600; cursor:pointer; border-bottom:2px solid transparent; transition:all .2s;">
+                        <span style="margin-right:4px;">🌐</span> Network &amp; Boot
+                    </button>
+                </div>
+                <div class="modal-body" style="min-height:280px;">
+                    <!-- ═══ Tab 1: General ═══ -->
+                    <div class="vm-tab-page" id="vm-tab-1">
                         <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
                             <div class="form-group" style="grid-column: 1 / -1;">
                                 <label>Name</label>
-                                <input type="text" class="form-control" id="edit-mount-name">
+                                <input type="text" class="form-control" id="new-vm-name" placeholder="my-vm">
                             </div>
                             <div class="form-group">
-                                <label>Type</label>
-                                <input type="text" class="form-control" id="edit-mount-type-display" disabled
-                                    style="opacity:0.7; cursor:not-allowed;">
+                                <label>CPUs</label>
+                                <input type="number" class="form-control" id="new-vm-cpus" value="1" min="1">
                             </div>
                             <div class="form-group">
-                                <label>Mount Point</label>
-                                <input type="text" class="form-control" id="edit-mount-point"
-                                    placeholder="/mnt/wolfstack/my-mount">
-                            </div>
-
-                            <!-- S3 Edit Fields -->
-                            <div id="edit-s3-fields" style="grid-column: 1 / -1; display:none;">
-                                <div
-                                    style="display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
-                                    <div
-                                        style="grid-column:1/-1; font-weight:600; font-size:13px; color:var(--text-primary); margin-bottom:4px;">
-                                        ☁️ S3 Configuration</div>
-                                    <div class="form-group">
-                                        <label>Provider</label>
-                                        <select class="form-control" id="edit-s3-provider">
-                                            <option value="AWS">Amazon S3</option>
-                                            <option value="Cloudflare">Cloudflare R2</option>
-                                            <option value="DigitalOcean">DigitalOcean Spaces</option>
-                                            <option value="Wasabi">Wasabi</option>
-                                            <option value="Backblaze">Backblaze B2</option>
-                                            <option value="Minio">MinIO</option>
-                                            <option value="Other">Other S3-compatible</option>
-                                        </select>
-                                    </div>
-                                    <div class="form-group">
-                                        <label>Bucket</label>
-                                        <input type="text" class="form-control" id="edit-s3-bucket"
-                                            placeholder="my-bucket">
-                                    </div>
-                                    <div class="form-group">
-                                        <label>Access Key ID</label>
-                                        <input type="text" class="form-control" id="edit-s3-access-key"
-                                            placeholder="AKIA...">
-                                    </div>
-                                    <div class="form-group">
-                                        <label>Secret Access Key</label>
-                                        <input type="password" class="form-control" id="edit-s3-secret-key"
-                                            placeholder="Leave blank to keep unchanged">
-                                    </div>
-                                    <div class="form-group">
-                                        <label>Region</label>
-                                        <input type="text" class="form-control" id="edit-s3-region"
-                                            placeholder="us-east-1">
-                                    </div>
-                                    <div class="form-group">
-                                        <label>Endpoint (optional)</label>
-                                        <input type="text" class="form-control" id="edit-s3-endpoint"
-                                            placeholder="https://s3.example.com">
-                                        <small style="color:var(--text-muted); font-size:11px;">For non-AWS
-                                            providers</small>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- NFS Edit Fields -->
-                            <div id="edit-nfs-fields" style="grid-column: 1 / -1; display:none;">
-                                <div
-                                    style="display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
-                                    <div
-                                        style="grid-column:1/-1; font-weight:600; font-size:13px; color:var(--text-primary); margin-bottom:4px;">
-                                        🗄️ NFS Configuration</div>
-                                    <div class="form-group" style="grid-column: 1 / -1;">
-                                        <label>NFS Source</label>
-                                        <input type="text" class="form-control" id="edit-nfs-source"
-                                            placeholder="192.168.1.100:/data/share">
-                                        <small style="color:var(--text-muted); font-size:11px;">Format:
-                                            server:/export/path</small>
-                                    </div>
-                                    <div class="form-group" style="grid-column: 1 / -1;">
-                                        <label>NFS Options</label>
-                                        <input type="text" class="form-control" id="edit-nfs-options"
-                                            placeholder="rw,soft,timeo=50">
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Directory Edit Fields -->
-                            <div id="edit-dir-fields" style="grid-column: 1 / -1; display:none;">
-                                <div
-                                    style="padding:12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
-                                    <div
-                                        style="font-weight:600; font-size:13px; color:var(--text-primary); margin-bottom:8px;">
-                                        📁 Directory Configuration</div>
-                                    <div class="form-group">
-                                        <label>Source Directory</label>
-                                        <input type="text" class="form-control" id="edit-dir-source"
-                                            placeholder="/data/shared">
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- WolfDisk Edit Fields -->
-                            <div id="edit-wolfdisk-fields" style="grid-column: 1 / -1; display:none;">
-                                <div
-                                    style="padding:12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
-                                    <div
-                                        style="font-weight:600; font-size:13px; color:var(--text-primary); margin-bottom:8px;">
-                                        🐺 WolfDisk Configuration</div>
-                                    <div class="form-group">
-                                        <label>WolfDisk Path</label>
-                                        <input type="text" class="form-control" id="edit-wolfdisk-source"
-                                            placeholder="/wolfdisk/data">
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Global / Auto Mount options -->
-                            <div class="form-group"
-                                style="grid-column: 1 / -1; display:flex; gap:20px; padding-top:8px; border-top:1px solid var(--border);">
-                                <label
-                                    style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px;">
-                                    <input type="checkbox" id="edit-mount-global"> 🌐 Global Mount
-                                    <small style="color:var(--text-muted); font-size:11px;">(replicate to all cluster
-                                        nodes)</small>
-                                </label>
-                                <label
-                                    style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px;">
-                                    <input type="checkbox" id="edit-mount-auto"> ⚡ Auto-mount on boot
-                                </label>
+                                <label>Memory (MB)</label>
+                                <input type="number" class="form-control" id="new-vm-memory" value="1024" min="256">
                             </div>
                         </div>
                     </div>
-                    <div class="modal-footer">
-                        <button class="btn" onclick="closeEditMountModal()">Cancel</button>
-                        <button class="btn btn-primary" onclick="saveStorageMountEdit()">💾 Save Changes</button>
-                    </div>
-                </div>
-            </div>
 
+                    <!-- ═══ Tab 2: Disks ═══ -->
+                    <div class="vm-tab-page" id="vm-tab-2" style="display:none;">
+                        <!-- OS Disk (always present) -->
+                        <div
+                            style="padding:10px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; margin-bottom:8px;">
+                            <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                                <span
+                                    style="font-weight:600; font-size:13px; color:var(--accent-light); min-width:60px;">OS
+                                    Disk</span>
+                                <span style="font-size:11px; color:var(--text-muted);">Primary boot disk
+                                    (virtio)</span>
+                            </div>
+                            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
+                                <div>
+                                    <label
+                                        style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Storage</label>
+                                    <select id="new-vm-storage" class="form-control" style="font-size:13px;">
+                                        <option value="">/var/lib/wolfstack/vms (default)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label
+                                        style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Disk
+                                        Size (GiB)</label>
+                                    <input type="number" class="form-control" id="new-vm-disk" value="32" min="1"
+                                        style="font-size:13px;">
+                                </div>
+                                <div>
+                                    <label
+                                        style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Bus</label>
+                                    <select id="new-vm-os-bus" class="form-control" style="font-size:13px;">
+                                        <option value="virtio" selected>VirtIO (fastest)</option>
+                                        <option value="ide">IDE (Windows compatible)</option>
+                                        <option value="sata">SATA</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div id="vm-bus-warning"
+                                style="display:none; margin-top:6px; padding:6px 10px; background:var(--warning-bg, rgba(245,158,11,0.1)); border:1px solid var(--warning, #f59e0b); border-radius:6px; font-size:11px; color:var(--warning, #f59e0b);">
+                                ⚠️ Windows doesn't include VirtIO drivers. Use <strong>IDE</strong> for Windows, or
+                                attach VirtIO drivers ISO on the Boot tab.
+                            </div>
+                        </div>
 
-            <div class="modal-overlay" id="create-vm-modal">
-                <div class="modal" style="max-width: 720px; width: 95%;">
-                    <div class="modal-header">
-                        <h3>Create Virtual Machine</h3>
-                        <button class="modal-close" onclick="closeVmCreate()">&times;</button>
-                    </div>
-                    <!-- Tab Nav -->
-                    <div style="display:flex; border-bottom:1px solid var(--border); background:var(--bg-secondary);">
-                        <button class="vm-tab-btn active" data-tab="1" onclick="switchVmTab(1)"
-                            style="flex:1; padding:10px 16px; border:none; background:none; color:var(--text-primary); font-size:13px; font-weight:600; cursor:pointer; border-bottom:2px solid transparent; transition:all .2s;">
-                            <span style="margin-right:4px;">⚙️</span> General
-                        </button>
-                        <button class="vm-tab-btn" data-tab="2" onclick="switchVmTab(2)"
-                            style="flex:1; padding:10px 16px; border:none; background:none; color:var(--text-muted); font-size:13px; font-weight:600; cursor:pointer; border-bottom:2px solid transparent; transition:all .2s;">
-                            <span style="margin-right:4px;">💾</span> Disks
-                        </button>
-                        <button class="vm-tab-btn" data-tab="3" onclick="switchVmTab(3)"
-                            style="flex:1; padding:10px 16px; border:none; background:none; color:var(--text-muted); font-size:13px; font-weight:600; cursor:pointer; border-bottom:2px solid transparent; transition:all .2s;">
-                            <span style="margin-right:4px;">🌐</span> Network &amp; Boot
+                        <!-- Extra Disks Container (scrollable) -->
+                        <div id="vm-extra-disks-container" style="max-height:240px; overflow-y:auto;"></div>
+
+                        <button class="btn btn-sm" onclick="addVmDiskRow()"
+                            style="margin-top:8px; font-size:12px; display:flex; align-items:center; gap:4px;">
+                            ➕ Add Disk
                         </button>
                     </div>
-                    <div class="modal-body" style="min-height:280px;">
-                        <!-- ═══ Tab 1: General ═══ -->
-                        <div class="vm-tab-page" id="vm-tab-1">
-                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
-                                <div class="form-group" style="grid-column: 1 / -1;">
-                                    <label>Name</label>
-                                    <input type="text" class="form-control" id="new-vm-name" placeholder="my-vm">
-                                </div>
-                                <div class="form-group">
-                                    <label>CPUs</label>
-                                    <input type="number" class="form-control" id="new-vm-cpus" value="1" min="1">
-                                </div>
-                                <div class="form-group">
-                                    <label>Memory (MB)</label>
-                                    <input type="number" class="form-control" id="new-vm-memory" value="1024" min="256">
-                                </div>
-                            </div>
-                        </div>
 
-                        <!-- ═══ Tab 2: Disks ═══ -->
-                        <div class="vm-tab-page" id="vm-tab-2" style="display:none;">
-                            <!-- OS Disk (always present) -->
-                            <div
-                                style="padding:10px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; margin-bottom:8px;">
-                                <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
-                                    <span
-                                        style="font-weight:600; font-size:13px; color:var(--accent-light); min-width:60px;">OS
-                                        Disk</span>
-                                    <span style="font-size:11px; color:var(--text-muted);">Primary boot disk
-                                        (virtio)</span>
-                                </div>
-                                <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
-                                    <div>
-                                        <label
-                                            style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Storage</label>
-                                        <select id="new-vm-storage" class="form-control" style="font-size:13px;">
-                                            <option value="">/var/lib/wolfstack/vms (default)</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label
-                                            style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Disk
-                                            Size (GiB)</label>
-                                        <input type="number" class="form-control" id="new-vm-disk" value="32" min="1"
-                                            style="font-size:13px;">
-                                    </div>
-                                    <div>
-                                        <label
-                                            style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Bus</label>
-                                        <select id="new-vm-os-bus" class="form-control" style="font-size:13px;">
-                                            <option value="virtio" selected>VirtIO (fastest)</option>
-                                            <option value="ide">IDE (Windows compatible)</option>
-                                            <option value="sata">SATA</option>
-                                        </select>
-                                    </div>
-                                </div>
-                                <div id="vm-bus-warning"
-                                    style="display:none; margin-top:6px; padding:6px 10px; background:var(--warning-bg, rgba(245,158,11,0.1)); border:1px solid var(--warning, #f59e0b); border-radius:6px; font-size:11px; color:var(--warning, #f59e0b);">
-                                    ⚠️ Windows doesn't include VirtIO drivers. Use <strong>IDE</strong> for Windows, or
-                                    attach VirtIO drivers ISO on the Boot tab.
-                                </div>
-                            </div>
-
-                            <!-- Extra Disks Container (scrollable) -->
-                            <div id="vm-extra-disks-container" style="max-height:240px; overflow-y:auto;"></div>
-
-                            <button class="btn btn-sm" onclick="addVmDiskRow()"
-                                style="margin-top:8px; font-size:12px; display:flex; align-items:center; gap:4px;">
-                                ➕ Add Disk
-                            </button>
+                    <!-- ═══ Tab 3: Network & Boot ═══ -->
+                    <div class="vm-tab-page" id="vm-tab-3" style="display:none;">
+                        <div class="form-group">
+                            <label>Installation ISO (Optional)</label>
+                            <input type="text" class="form-control" id="new-vm-iso"
+                                placeholder="/var/lib/wolfstack/isos/ubuntu.iso">
+                            <small style="color:var(--text-muted);">Path to an OS installer ISO on the host</small>
                         </div>
-
-                        <!-- ═══ Tab 3: Network & Boot ═══ -->
-                        <div class="vm-tab-page" id="vm-tab-3" style="display:none;">
-                            <div class="form-group">
-                                <label>Installation ISO (Optional)</label>
-                                <input type="text" class="form-control" id="new-vm-iso"
-                                    placeholder="/var/lib/wolfstack/isos/ubuntu.iso">
-                                <small style="color:var(--text-muted);">Path to an OS installer ISO on the host</small>
-                            </div>
-                            <div class="form-group" style="margin-top:12px;">
-                                <label>VirtIO Drivers ISO (Optional)</label>
-                                <input type="text" class="form-control" id="new-vm-drivers-iso"
-                                    placeholder="/var/lib/wolfstack/isos/virtio-win.iso">
-                                <small style="color:var(--text-muted);">Needed for Windows to see VirtIO disks. Download
-                                    from
-                                    <a href="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
-                                        target="_blank" style="color:var(--accent-light);">fedorapeople.org</a></small>
-                            </div>
-                            <div class="form-group" style="margin-top:12px;">
-                                <label>Network Adapter</label>
-                                <select id="new-vm-net-model" class="form-control" style="font-size:13px;">
-                                    <option value="virtio">VirtIO (fastest, Linux)</option>
-                                    <option value="e1000">Intel e1000 (Windows compatible)</option>
-                                    <option value="rtl8139">Realtek RTL8139</option>
-                                </select>
-                                <small style="color:var(--text-muted);">Windows needs Intel e1000 — VirtIO network
-                                    requires drivers</small>
-                            </div>
-                            <div class="form-group" style="margin-top:12px;">
-                                <label>WolfNet IP (Optional)</label>
-                                <input type="text" class="form-control" id="new-vm-wolfnet-ip"
-                                    placeholder="Auto-assign or e.g. 10.10.10.120">
-                                <small style="color:var(--text-muted);">Leave blank for user-mode networking, or enter
-                                    an IP for WolfNet TAP networking</small>
-                            </div>
+                        <div class="form-group" style="margin-top:12px;">
+                            <label>VirtIO Drivers ISO (Optional)</label>
+                            <input type="text" class="form-control" id="new-vm-drivers-iso"
+                                placeholder="/var/lib/wolfstack/isos/virtio-win.iso">
+                            <small style="color:var(--text-muted);">Needed for Windows to see VirtIO disks. Download
+                                from
+                                <a href="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
+                                    target="_blank" style="color:var(--accent-light);">fedorapeople.org</a></small>
                         </div>
-                    </div>
-                    <div class="modal-footer" style="display:flex; justify-content:space-between;">
-                        <div>
-                            <button class="btn" id="vm-tab-back-btn" onclick="switchVmTab('prev')"
-                                style="display:none;">←
-                                Back</button>
+                        <div class="form-group" style="margin-top:12px;">
+                            <label>Network Adapter</label>
+                            <select id="new-vm-net-model" class="form-control" style="font-size:13px;">
+                                <option value="virtio">VirtIO (fastest, Linux)</option>
+                                <option value="e1000">Intel e1000 (Windows compatible)</option>
+                                <option value="rtl8139">Realtek RTL8139</option>
+                            </select>
+                            <small style="color:var(--text-muted);">Windows needs Intel e1000 — VirtIO network
+                                requires drivers</small>
                         </div>
-                        <div style="display:flex; gap:8px;">
-                            <button class="btn" onclick="closeVmCreate()">Cancel</button>
-                            <button class="btn btn-primary" id="vm-tab-next-btn" onclick="switchVmTab('next')">Next
-                                →</button>
-                            <button class="btn btn-primary" id="vm-tab-create-btn" onclick="createVm()"
-                                style="display:none;">Create</button>
+                        <div class="form-group" style="margin-top:12px;">
+                            <label>WolfNet IP (Optional)</label>
+                            <input type="text" class="form-control" id="new-vm-wolfnet-ip"
+                                placeholder="Auto-assign or e.g. 10.10.10.120">
+                            <small style="color:var(--text-muted);">Leave blank for user-mode networking, or enter
+                                an IP for WolfNet TAP networking</small>
                         </div>
                     </div>
                 </div>
-            </div>
-
-            <!-- ═══ Container Detail Modal ═══ -->
-            <div class="modal-overlay" id="container-detail-modal">
-                <div class="modal" style="max-width: 960px; width: 95%;">
-                    <div class="modal-header">
-                        <h3 id="container-detail-title">Container Detail</h3>
-                        <button class="modal-close" onclick="closeContainerDetail()">&times;</button>
+                <div class="modal-footer" style="display:flex; justify-content:space-between;">
+                    <div>
+                        <button class="btn" id="vm-tab-back-btn" onclick="switchVmTab('prev')" style="display:none;">←
+                            Back</button>
                     </div>
-                    <div class="modal-body" id="container-detail-body">
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn" onclick="closeVmCreate()">Cancel</button>
+                        <button class="btn btn-primary" id="vm-tab-next-btn" onclick="switchVmTab('next')">Next
+                            →</button>
+                        <button class="btn btn-primary" id="vm-tab-create-btn" onclick="createVm()"
+                            style="display:none;">Create</button>
                     </div>
                 </div>
             </div>
+        </div>
+
+        <!-- ═══ Container Detail Modal ═══ -->
+        <div class="modal-overlay" id="container-detail-modal">
+            <div class="modal" style="max-width: 960px; width: 95%;">
+                <div class="modal-header">
+                    <h3 id="container-detail-title">Container Detail</h3>
+                    <button class="modal-close" onclick="closeContainerDetail()">&times;</button>
+                </div>
+                <div class="modal-body" id="container-detail-body">
+                </div>
+            </div>
+        </div>
         </div>
     </main>
 
