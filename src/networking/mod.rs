@@ -76,17 +76,9 @@ fn detect_dns_method() -> DnsMethod {
         }
     }
 
-    // 2. Check for systemd-resolved
-    if Command::new("systemctl")
-        .args(["is-active", "systemd-resolved"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
-        .unwrap_or(false)
-    {
-        return DnsMethod::SystemdResolved;
-    }
-
-    // 3. Check for NetworkManager
+    // 2. Check for NetworkManager FIRST — on Fedora/RHEL, both NM and
+    //    systemd-resolved are active, but NM is the actual DNS manager.
+    //    systemd-resolved is just a stub resolver forwarding to NM's DNS.
     if Command::new("systemctl")
         .args(["is-active", "NetworkManager"])
         .output()
@@ -94,6 +86,16 @@ fn detect_dns_method() -> DnsMethod {
         .unwrap_or(false)
     {
         return DnsMethod::NetworkManager;
+    }
+
+    // 3. Check for systemd-resolved (standalone, without NM)
+    if Command::new("systemctl")
+        .args(["is-active", "systemd-resolved"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
+        .unwrap_or(false)
+    {
+        return DnsMethod::SystemdResolved;
     }
 
     // 4. Fallback: direct resolv.conf
@@ -173,27 +175,30 @@ pub fn get_dns() -> DnsConfig {
             }
         }
         DnsMethod::NetworkManager => {
-            // On RHEL/Fedora/IBM Power, read DNS from active NM connection
-            if let Ok(out) = Command::new("nmcli")
-                .args(["-t", "-f", "IP4.DNS,IP4.DOMAIN", "device", "show"])
-                .output()
-            {
-                let text = String::from_utf8_lossy(&out.stdout);
-                for line in text.lines() {
-                    let line = line.trim();
-                    if line.starts_with("IP4.DNS") {
-                        if let Some(dns) = line.splitn(2, ':').nth(1) {
-                            let dns = dns.trim();
-                            if !dns.is_empty() && !nameservers.contains(&dns.to_string()) {
-                                nameservers.push(dns.to_string());
+            // On RHEL/Fedora/IBM Power, read DNS from the primary NM connection
+            // (ethernet or wifi), not from ALL devices which includes Tailscale etc.
+            if let Some(conn_name) = find_primary_nm_connection() {
+                if let Ok(out) = Command::new("nmcli")
+                    .args(["-t", "-f", "IP4.DNS,IP4.DOMAIN", "connection", "show", &conn_name])
+                    .output()
+                {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    for line in text.lines() {
+                        let line = line.trim();
+                        if line.starts_with("IP4.DNS") {
+                            if let Some(dns) = line.splitn(2, ':').nth(1) {
+                                let dns = dns.trim();
+                                if !dns.is_empty() && !nameservers.contains(&dns.to_string()) {
+                                    nameservers.push(dns.to_string());
+                                }
                             }
                         }
-                    }
-                    if line.starts_with("IP4.DOMAIN") {
-                        if let Some(domain) = line.splitn(2, ':').nth(1) {
-                            let domain = domain.trim();
-                            if !domain.is_empty() && !search_domains.contains(&domain.to_string()) {
-                                search_domains.push(domain.to_string());
+                        if line.starts_with("IP4.DOMAIN") {
+                            if let Some(domain) = line.splitn(2, ':').nth(1) {
+                                let domain = domain.trim();
+                                if !domain.is_empty() && !search_domains.contains(&domain.to_string()) {
+                                    search_domains.push(domain.to_string());
+                                }
                             }
                         }
                     }
@@ -202,6 +207,7 @@ pub fn get_dns() -> DnsConfig {
             // Fallback to resolv.conf if nmcli gave nothing
             if nameservers.is_empty() {
                 read_resolv_conf(&mut nameservers, &mut search_domains);
+                nameservers.retain(|ns| ns != "127.0.0.53");
             }
         }
         DnsMethod::ResolvConf => {
@@ -340,25 +346,32 @@ fn set_dns_systemd_resolved(nameservers: &[String], search_domains: &[String]) -
     Ok("DNS updated via systemd-resolved".to_string())
 }
 
-/// Set DNS via NetworkManager (Fedora, RHEL, IBM Power RHEL)
-fn set_dns_networkmanager(nameservers: &[String], search_domains: &[String]) -> Result<String, String> {
-    // Find the primary active connection
+/// Find the primary NetworkManager connection (ethernet or wifi)
+fn find_primary_nm_connection() -> Option<String> {
     let output = Command::new("nmcli")
         .args(["-t", "-f", "NAME,DEVICE,TYPE", "connection", "show", "--active"])
         .output()
-        .map_err(|e| format!("Failed to run nmcli: {}", e))?;
+        .ok()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let primary_conn = stdout.lines()
-        .filter(|l| {
-            let parts: Vec<&str> = l.split(':').collect();
-            parts.len() >= 3 && (parts[2] == "802-3-ethernet" || parts[2] == "ethernet")
-        })
-        .map(|l| l.split(':').next().unwrap_or("").to_string())
-        .next();
+    // Prefer ethernet, then wifi — skip tun/bridge/loopback
+    let primary_types = ["802-3-ethernet", "ethernet", "802-11-wireless", "wifi"];
+    for ptype in &primary_types {
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() >= 3 && parts[2] == *ptype {
+                return Some(parts[0].to_string());
+            }
+        }
+    }
+    None
+}
 
-    let conn_name = primary_conn
-        .ok_or_else(|| "No active NetworkManager ethernet connection found".to_string())?;
+/// Set DNS via NetworkManager (Fedora, RHEL, IBM Power RHEL)
+fn set_dns_networkmanager(nameservers: &[String], search_domains: &[String]) -> Result<String, String> {
+    // Find the primary active connection (ethernet or wifi)
+    let conn_name = find_primary_nm_connection()
+        .ok_or_else(|| "No active NetworkManager ethernet/wifi connection found".to_string())?;
 
     // Set DNS via nmcli
     let dns_str = nameservers.join(" ");
