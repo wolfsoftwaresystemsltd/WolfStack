@@ -1485,42 +1485,34 @@ where
         cmd.env("PBS_PASSWORD", pbs_pw);
     }
 
-    // Pipe stderr to capture progress
+    // Don't pipe stderr — proxmox-backup-client suppresses progress when not a TTY.
+    // Instead we monitor directory size growth in a separate thread.
     use std::process::Stdio;
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
 
     let mut child = cmd.spawn()
         .map_err(|e| format!("Failed to start proxmox-backup-client: {}", e))?;
 
-    // Read stderr in real-time for progress updates
-    // proxmox-backup-client uses \r (carriage return) for in-place progress,
-    // so we read byte-by-byte and split on both \r and \n
-    if let Some(stderr) = child.stderr.take() {
-        use std::io::Read;
-        let mut reader = std::io::BufReader::new(stderr);
-        let mut buf = [0u8; 1];
-        let mut line_buf = Vec::new();
+    // Monitor target directory size growth while child runs
+    let target_path = effective_target.clone();
+    let child_id = child.id();
+    let progress_fn = &on_progress;
 
-        while reader.read(&mut buf).unwrap_or(0) == 1 {
-            if buf[0] == b'\r' || buf[0] == b'\n' {
-                if !line_buf.is_empty() {
-                    let text = String::from_utf8_lossy(&line_buf).trim().to_string();
-                    line_buf.clear();
-                    if text.is_empty() { continue; }
-
-                    let pct = extract_percentage(&text);
-                    let display = if let Some(p) = pct {
-                        format!("Downloading: {:.1}%", p)
-                    } else {
-                        text
-                    };
-                    on_progress(display, pct);
-                }
-            } else {
-                line_buf.push(buf[0]);
-            }
+    loop {
+        // Check if child is still running
+        match child.try_wait() {
+            Ok(Some(_status)) => break,  // Process finished
+            Ok(None) => {},               // Still running
+            Err(_) => break,
         }
+
+        // Measure directory size
+        let dir_size = dir_size_bytes(&target_path);
+        let size_str = format_size_human(dir_size);
+        progress_fn(format!("Downloaded: {}", size_str), None);
+
+        std::thread::sleep(std::time::Duration::from_secs(2));
     }
 
     let status = child.wait()
@@ -1575,6 +1567,38 @@ where
 
     info!("Restored PBS snapshot {} archive {} to {}", snapshot_fixed, actual_archive, effective_target);
     Ok(format!("Restored {} to {}", actual_archive, effective_target))
+}
+
+/// Recursively calculate directory size in bytes
+fn dir_size_bytes(path: &str) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                total += dir_size_bytes(&p.to_string_lossy());
+            } else if let Ok(meta) = p.metadata() {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+/// Format bytes as human-readable size
+fn format_size_human(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.0} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 /// Extract percentage from proxmox-backup-client progress output
