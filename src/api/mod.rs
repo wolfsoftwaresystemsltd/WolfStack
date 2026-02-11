@@ -911,6 +911,30 @@ pub async fn docker_volumes(
     HttpResponse::Ok().json(mounts)
 }
 
+#[derive(Deserialize)]
+pub struct DockerUpdateConfigReq {
+    pub autostart: Option<bool>,
+}
+
+pub async fn docker_update_config(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<DockerUpdateConfigReq>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    
+    // Autostart
+    if let Some(autostart) = body.autostart {
+        if let Err(e) = containers::docker_update_config(&id, autostart) {
+             return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
+        }
+    }
+    
+    HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+}
+
 /// GET /api/containers/lxc/{name}/mounts — list LXC container bind mounts
 pub async fn lxc_mounts(
     req: HttpRequest,
@@ -963,6 +987,46 @@ pub async fn lxc_remove_mount(
     match containers::lxc_remove_mount(&name, &body.host_path) {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct LxcSetAutostartReq {
+    pub enabled: bool,
+}
+
+pub async fn lxc_set_autostart(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<LxcSetAutostartReq>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    
+    match containers::lxc_set_autostart(&name, body.enabled) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct LxcSetNetworkLinkReq {
+    pub link: String,
+}
+
+pub async fn lxc_set_network_link(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<LxcSetNetworkLinkReq>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    
+    match containers::lxc_set_network_link(&name, &body.link) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
     }
 }
 
@@ -1650,6 +1714,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/docker/{id}/migrate", web::post().to(docker_migrate))
         .route("/api/containers/docker/{id}/volumes", web::get().to(docker_volumes))
         .route("/api/containers/docker/import", web::post().to(docker_import))
+        .route("/api/containers/docker/{id}/config", web::post().to(docker_update_config))
         // LXC
         .route("/api/containers/lxc", web::get().to(lxc_list))
         .route("/api/containers/lxc/templates", web::get().to(lxc_templates))
@@ -1663,6 +1728,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/lxc/{name}/mounts", web::get().to(lxc_mounts))
         .route("/api/containers/lxc/{name}/mounts", web::post().to(lxc_add_mount))
         .route("/api/containers/lxc/{name}/mounts", web::delete().to(lxc_remove_mount))
+        .route("/api/containers/lxc/{name}/autostart", web::post().to(lxc_set_autostart))
+        .route("/api/containers/lxc/{name}/network-link", web::post().to(lxc_set_network_link))
         // WolfNet
         .route("/api/wolfnet/status", web::get().to(wolfnet_network_status))
         // Storage Manager

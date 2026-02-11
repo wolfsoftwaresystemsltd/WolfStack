@@ -110,6 +110,10 @@ async fn main() -> std::io::Result<()> {
     // Initialize VM manager
     let vms_manager = vms::manager::VmManager::new();
 
+    // Autostart containers & VMs
+    containers::lxc_autostart_all();
+    vms_manager.autostart_vms();
+
     // Initial self-update
     {
         let mut mon = monitor;

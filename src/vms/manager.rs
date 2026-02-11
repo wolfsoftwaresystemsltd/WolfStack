@@ -399,7 +399,7 @@ impl VmManager {
                      iso_path: Option<String>, wolfnet_ip: Option<String>,
                      disk_size_gb: Option<u32>,
                      os_disk_bus: Option<String>, net_model: Option<String>,
-                     drivers_iso: Option<String>) -> Result<(), String> {
+                     drivers_iso: Option<String>, auto_start: Option<bool>) -> Result<(), String> {
         if self.check_running(name) {
             return Err("Cannot edit VM while it is running. Stop it first.".to_string());
         }
@@ -412,6 +412,7 @@ impl VmManager {
 
         if let Some(c) = cpus { if c > 0 { config.cpus = c; } }
         if let Some(m) = memory_mb { if m >= 256 { config.memory_mb = m; } }
+        if let Some(a) = auto_start { config.auto_start = a; }
         
         // ISO: accept empty string to clear, or a path to set
         if let Some(ref iso) = iso_path {
@@ -725,6 +726,18 @@ impl VmManager {
         
         info!("Started VM {} on VNC :{} (port {}), noVNC WS :{}", name, vnc_num, vnc_port, ws_port);
         Ok(())
+    }
+
+    pub fn autostart_vms(&self) {
+        info!("Autostating VMs...");
+        for vm in self.list_vms() {
+            if vm.auto_start && !vm.running {
+                info!("Autostarting VM: {}", vm.name);
+                if let Err(e) = self.start_vm(&vm.name) {
+                    error!("Failed to autostart VM {}: {}", vm.name, e);
+                }
+            }
+        }
     }
 
     /// Create and configure a TAP interface

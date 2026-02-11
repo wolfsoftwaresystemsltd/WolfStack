@@ -120,6 +120,7 @@ struct UpdateVmRequest {
     os_disk_bus: Option<String>,
     net_model: Option<String>,
     drivers_iso: Option<String>,
+    auto_start: Option<bool>,
 }
 
 async fn update_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<UpdateVmRequest>) -> HttpResponse {
@@ -130,7 +131,7 @@ async fn update_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path
     match manager.update_vm(&name, body.cpus, body.memory_mb, body.iso_path.clone(), 
                             body.wolfnet_ip.clone(), body.disk_size_gb,
                             body.os_disk_bus.clone(), body.net_model.clone(),
-                            body.drivers_iso.clone()) {
+                            body.drivers_iso.clone(), body.auto_start) {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "success": true })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }

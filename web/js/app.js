@@ -693,6 +693,7 @@ function renderVms(vms) {
             : '—';
 
         const wolfnetIp = vm.wolfnet_ip || '—';
+        const autostart = vm.auto_start ? 'checked' : '';
 
         return `
             <tr>
@@ -702,6 +703,7 @@ function renderVms(vms) {
                 <td>${vm.disk_size_gb} GiB${(vm.extra_disks && vm.extra_disks.length > 0) ? ` <span class="badge" style="font-size:10px;">+${vm.extra_disks.length} vol${vm.extra_disks.length > 1 ? 's' : ''}</span>` : ''}</td>
                 <td>${wolfnetIp !== '—' ? `<span class="badge" style="background:var(--accent-bg); color:var(--accent);">${wolfnetIp}</span>` : '—'}</td>
                 <td>${vncText}</td>
+                <td><input type="checkbox" ${autostart} onchange="toggleVmAutostart('${vm.name}', this.checked)"></td>
                 <td>
                     <button class="btn btn-sm" style="margin:2px;" onclick="showVmLogs('${vm.name}')" title="Logs">📋</button>
                     ${vm.running ?
@@ -2591,6 +2593,7 @@ function renderDockerContainers(containers) {
             <td class="cpu-cell">${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
             <td class="mem-cell">${s.memory_usage ? formatBytes(s.memory_usage) : '-'}</td>
             <td style="font-size:11px;">${ports}</td>
+            <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleDockerAutostart('${c.id}', this.checked)"></td>
             <td>
                 ${isRunning ? `
                     <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'stop')" title="Stop">⏹</button>
@@ -2822,6 +2825,7 @@ function renderLxcContainers(containers, stats) {
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
             <td>${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
             <td>${s.memory_usage ? formatBytes(s.memory_usage) + (s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : '') : '-'}</td>
+            <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleLxcAutostart('${c.name}', this.checked)"></td>
             <td>
                 ${isRunning ? `
                     <button class="btn btn-sm" style="margin:2px;" onclick="lxcAction('${c.name}', 'stop')" title="Stop">⏹</button>
@@ -2907,6 +2911,11 @@ async function openLxcSettings(name) {
         const data = await resp.json();
         const config = data.config || '';
 
+        // Parse current settings
+        const currentLink = (config.match(/^lxc\.net\.0\.link\s*=\s*(.*)$/m) || [])[1]?.trim() || '';
+        const currentAutostart = (config.match(/^lxc\.start\.auto\s*=\s*1$/m) || [])[0] ? true : false;
+        const currentDelay = (config.match(/^lxc\.start\.delay\s*=\s*(\d+)$/m) || [])[1] || '0';
+
         // Also fetch current mounts
         let mountsHtml = '';
         try {
@@ -2936,6 +2945,32 @@ async function openLxcSettings(name) {
 
         body.innerHTML = `
             ${mountsHtml}
+            
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px;">
+                <div class="card" style="padding:12px; background:var(--bg-tertiary);">
+                    <h4 style="margin-top:0; font-size:14px;">General</h4>
+                    <div class="form-group">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <input type="checkbox" id="lxc-autostart" ${currentAutostart ? 'checked' : ''}>
+                            Autostart on Boot
+                        </label>
+                    </div>
+                    <div class="form-group" style="margin-top:8px;">
+                         <label>Start Delay (s)</label>
+                         <input type="number" id="lxc-start-delay" class="form-control" value="${currentDelay}" min="0">
+                    </div>
+                </div>
+                
+                <div class="card" style="padding:12px; background:var(--bg-tertiary);">
+                    <h4 style="margin-top:0; font-size:14px;">Network</h4>
+                    <div class="form-group">
+                        <label>Network Link (Interface/Bridge)</label>
+                        <input type="text" id="lxc-network-link" class="form-control" value="${currentLink}" placeholder="e.g. lxcbr0, br0, vlan10">
+                        <small style="color:var(--text-muted); display:block; margin-top:4px;">Enter a host interface or bridge name.</small>
+                    </div>
+                </div>
+            </div>
+
             <div style="margin-bottom: 12px;">
                 <div style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
                     <button class="btn btn-sm" onclick="addMountPoint('${name}')">📁 Add Mount Point</button>
@@ -2943,16 +2978,20 @@ async function openLxcSettings(name) {
                     <button class="btn btn-sm" onclick="addMemoryLimit('${name}')">💾 Set Memory Limit</button>
                     <button class="btn btn-sm" onclick="addCpuLimit('${name}')">⚡ Set CPU Limit</button>
                 </div>
-                <div style="font-size:11px; color:var(--text-muted); margin-bottom:8px;">
-                    Edit the raw LXC config below. Changes take effect after container restart.
-                </div>
+                <details>
+                    <summary style="cursor:pointer; color:var(--accent); font-size:12px; margin-bottom:8px;">Advanced: Raw Config Editor</summary>
+                    <div style="font-size:11px; color:var(--text-muted); margin-bottom:8px;">
+                        Edit the raw LXC config below. Changes take effect after container restart.
+                    </div>
+                    <textarea id="lxc-config-editor" style="width:100%; height:200px; background:var(--bg-primary); color:var(--text-primary);
+                        border:1px solid var(--border); border-radius:8px; padding:12px; font-family:'JetBrains Mono', monospace;
+                        font-size:12px; resize:vertical; line-height:1.5;">${escapeHtml(config)}</textarea>
+                </details>
             </div>
-            <textarea id="lxc-config-editor" style="width:100%; height:350px; background:var(--bg-primary); color:var(--text-primary);
-                border:1px solid var(--border); border-radius:8px; padding:12px; font-family:'JetBrains Mono', monospace;
-                font-size:12px; resize:vertical; line-height:1.5;">${escapeHtml(config)}</textarea>
+            
             <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:12px;">
                 <button class="btn btn-sm" onclick="closeContainerDetail()">Cancel</button>
-                <button class="btn btn-sm btn-primary" onclick="saveLxcSettings('${name}')">💾 Save Config</button>
+                <button class="btn btn-sm btn-primary" onclick="saveLxcSettings('${name}')">💾 Save Settings</button>
             </div>
         `;
     } catch (e) {
@@ -3054,22 +3093,43 @@ function addCpuLimit(name) {
 }
 
 async function saveLxcSettings(name) {
-    const content = document.getElementById('lxc-config-editor').value;
+    const editor = document.getElementById('lxc-config-editor');
+    const config = editor.value;
+    const autostartEl = document.getElementById('lxc-autostart');
+    const networkLinkEl = document.getElementById('lxc-network-link');
+
     try {
-        const resp = await fetch(apiUrl(`/api/containers/lxc/${name}/config`), {
+        // 1. Save raw config first
+        await fetch(apiUrl(`/api/containers/lxc/${name}/config`), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content }),
+            body: JSON.stringify({ content: config })
         });
-        const data = await resp.json();
-        if (resp.ok) {
-            showToast(`Config saved for ${name}. Restart container to apply.`, 'success');
-            closeContainerDetail();
-        } else {
-            showToast(data.error || 'Failed to save config', 'error');
+
+        // 2. Apply UI settings (overriding if needed)
+        if (autostartEl) {
+            await fetch(apiUrl(`/api/containers/lxc/${name}/autostart`), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: autostartEl.checked })
+            });
         }
+
+        if (networkLinkEl) {
+            const link = networkLinkEl.value.trim();
+            if (link) {
+                await fetch(apiUrl(`/api/containers/lxc/${name}/network-link`), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ link })
+                });
+            }
+        }
+
+        showToast('Settings saved successfully', 'success');
+        closeContainerDetail();
     } catch (e) {
-        showToast(`Failed: ${e.message}`, 'error');
+        showToast('Error saving settings: ' + e.message, 'error');
     }
 }
 
@@ -4332,4 +4392,57 @@ function copyInstallCmd(component) {
             showToast('Install command copied to clipboard', 'success');
         });
     }
+}
+
+async function toggleDockerAutostart(id, enabled) {
+    try {
+        await fetch(apiUrl(`/api/containers/docker/${encodeURIComponent(id)}/config`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ autostart: enabled })
+        });
+        showToast(`Docker autostart ${enabled ? 'enabled' : 'disabled'}`, 'success');
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function toggleLxcAutostart(name, enabled) {
+    try {
+        await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/autostart`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enabled })
+        });
+        showToast(`LXC autostart ${enabled ? 'enabled' : 'disabled'}`, 'success');
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function toggleVmAutostart(name, enabled) {
+    try {
+        await fetch(apiUrl(`/api/vms/${encodeURIComponent(name)}`), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ auto_start: enabled })
+        });
+        showToast(`VM autostart ${enabled ? 'enabled' : 'disabled'}`, 'success');
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+function openDockerSettings(id) {
+    alert('Docker settings not implemented yet. Use the action buttons.');
+}
+
+function escapeHtml(text) {
+    if (!text) return '';
+    return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
 }

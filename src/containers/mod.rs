@@ -657,6 +657,7 @@ pub struct ContainerInfo {
     pub ports: Vec<String>,
     pub runtime: String,  // "docker" or "lxc"
     pub ip_address: String,
+    pub autostart: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -863,6 +864,15 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                     } else {
                         bridge_ip
                     };
+                    // Parse autostart (RestartPolicy)
+                    let restart_policy = Command::new("docker")
+                        .args(["inspect", "--format", "{{.HostConfig.RestartPolicy.Name}}", &name])
+                        .output()
+                        .ok()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .unwrap_or_default();
+                    let autostart = !restart_policy.is_empty() && restart_policy != "no";
+
                     ContainerInfo {
                         id: parts.first().unwrap_or(&"").to_string(),
                         name,
@@ -877,6 +887,7 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                             .collect(),
                         runtime: "docker".to_string(),
                         ip_address: ip,
+                        autostart,
                     }
                 })
                 .collect()
@@ -1013,6 +1024,12 @@ pub fn docker_images() -> Vec<ContainerImage> {
         .unwrap_or_default()
 }
 
+/// Update Docker container configuration (currently just autostart/restart policy)
+pub fn docker_update_config(container: &str, autostart: bool) -> Result<String, String> {
+    let policy = if autostart { "unless-stopped" } else { "no" };
+    run_docker_cmd(&["update", "--restart", policy, container])
+}
+
 /// Remove a Docker image by ID or name
 pub fn docker_remove_image(image: &str) -> Result<String, String> {
     info!("Removing Docker image: {}", image);
@@ -1099,6 +1116,14 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                         }
                     }
 
+                    // Check autostart in config
+                    let config_path = format!("/var/lib/lxc/{}/config", name);
+                    let autostart = if let Ok(content) = std::fs::read_to_string(&config_path) {
+                         content.lines().any(|l| l.trim() == "lxc.start.auto = 1")
+                    } else {
+                        false
+                    };
+
                     ContainerInfo {
                         id: name.clone(),
                         name,
@@ -1109,6 +1134,7 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                         ports: vec![],
                         runtime: "lxc".to_string(),
                         ip_address: ip,
+                        autostart,
                     }
                 })
                 .collect()
@@ -1412,6 +1438,57 @@ pub fn lxc_save_config(container: &str, content: &str) -> Result<String, String>
     std::fs::write(&path, content)
         .map(|_| format!("Config saved for '{}'", container))
         .map_err(|e| format!("Failed to save config: {}", e))
+}
+
+/// Update LXC container autostart specifically
+pub fn lxc_set_autostart(container: &str, enabled: bool) -> Result<String, String> {
+    let path = format!("/var/lib/lxc/{}/config", container);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Config not found: {}", e))?;
+
+    let mut new_lines: Vec<String> = content.lines()
+        .filter(|l| !l.trim().starts_with("lxc.start.auto") && !l.trim().starts_with("lxc.start.delay"))
+        .map(|l| l.to_string())
+        .collect();
+
+    if enabled {
+        new_lines.push("lxc.start.auto = 1".to_string());
+        new_lines.push("lxc.start.delay = 5".to_string());
+    }
+
+    std::fs::write(&path, new_lines.join("\n")).map_err(|e| e.to_string())?;
+    Ok(format!("Autostart set to {}", enabled))
+}
+
+/// Update LXC container network link (bridge/vlan)
+pub fn lxc_set_network_link(container: &str, link: &str) -> Result<String, String> {
+    let path = format!("/var/lib/lxc/{}/config", container);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Config not found: {}", e))?;
+
+    let mut new_lines: Vec<String> = Vec::new();
+    let mut replaced = false;
+
+    for line in content.lines() {
+        if line.trim().starts_with("lxc.net.0.link") {
+            new_lines.push(format!("lxc.net.0.link = {}", link));
+            replaced = true;
+        } else {
+            new_lines.push(line.to_string());
+        }
+    }
+
+    if !replaced {
+        new_lines.push(format!("lxc.net.0.link = {}", link));
+    }
+
+    std::fs::write(&path, new_lines.join("\n")).map_err(|e| e.to_string())?;
+    Ok(format!("Network link set to {}", link))
+}
+
+/// Autostart all enabled LXC containers
+pub fn lxc_autostart_all() {
+    let _ = Command::new("lxc-autostart").spawn();
 }
 
 fn run_lxc_cmd(args: &[&str]) -> Result<String, String> {
