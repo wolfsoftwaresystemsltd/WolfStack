@@ -1496,7 +1496,6 @@ where
 
     // Monitor target directory size growth while child runs
     let target_path = effective_target.clone();
-    let child_id = child.id();
     let progress_fn = &on_progress;
 
     loop {
