@@ -1622,7 +1622,10 @@ pub async fn pbs_snapshots(
     let config = backup::load_pbs_config();
     match backup::list_pbs_snapshots(&config) {
         Ok(snapshots) => HttpResponse::Ok().json(snapshots),
-        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => {
+            eprintln!("PBS snapshot list failed: {}", e);
+            HttpResponse::Ok().json(serde_json::json!([]))
+        },
     }
 }
 
