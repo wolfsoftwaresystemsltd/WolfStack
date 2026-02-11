@@ -1155,6 +1155,42 @@
                 </div>
             </div>
 
+            <!-- Public IP Mappings Card -->
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-header"
+                    style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                    <h3>🌍 Public IP Mappings</h3>
+                    <button class="btn btn-sm btn-primary" onclick="showCreateMappingModal()" style="font-size:12px;">+
+                        Add Mapping</button>
+                </div>
+                <div class="card-body">
+                    <p style="font-size:12px; color:var(--text-muted); margin-bottom:12px;">
+                        Map a public IP address to a WolfNet IP so containers, VMs, or LXC instances are reachable from
+                        the internet.
+                        WolfStack automatically manages the iptables DNAT/SNAT rules.
+                    </p>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Public IP</th>
+                                <th>→ WolfNet IP</th>
+                                <th>Ports</th>
+                                <th>Protocol</th>
+                                <th>Label</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ip-mappings-table"></tbody>
+                    </table>
+                    <p id="ip-mappings-empty"
+                        style="display:none; text-align:center; padding:20px; color:var(--text-muted);">
+                        No IP mappings configured. Click <strong>+ Add Mapping</strong> to route a public IP to a
+                        WolfNet container or VM.
+                    </p>
+                </div>
+            </div>
+
             <!-- Network Interfaces Card -->
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header"
@@ -1245,6 +1281,85 @@
                 <div class="modal-footer">
                     <button class="btn" onclick="closeAddIpModal()">Cancel</button>
                     <button class="btn btn-primary" onclick="addIpAddress()">Add IP</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Create IP Mapping Modal -->
+        <div class="modal-overlay" id="create-mapping-modal">
+            <div class="modal" style="max-width: 560px; width: 95%;">
+                <div class="modal-header">
+                    <h3>🌍 Create IP Mapping</h3>
+                    <button class="modal-close" onclick="closeCreateMappingModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div
+                        style="background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.2); border-radius:8px; padding:12px; margin-bottom:16px;">
+                        <h4 style="font-size:12px; color:#3b82f6; margin-bottom:6px;">ℹ️ How it works</h4>
+                        <p style="font-size:12px; color:var(--text-secondary); margin:0; line-height:1.6;">
+                            This maps a <strong>public IP</strong> on this server to a
+                            <strong>WolfNet IP</strong> belonging to a container, VM, or LXC instance.
+                            All traffic arriving at the public IP will be forwarded to the WolfNet IP via iptables
+                            NAT rules.
+                        </p>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Public IP <span style="color:var(--danger)">*</span></label>
+                        <div style="display:flex; gap:8px;">
+                            <select id="mapping-public-ip-select" class="form-control"
+                                onchange="onMappingPublicIpSelect()" style="flex:1;">
+                                <option value="">— Select or enter manually —</option>
+                            </select>
+                            <input type="text" id="mapping-public-ip" class="form-control"
+                                placeholder="e.g. 203.0.113.4"
+                                style="flex:1; font-family:var(--font-mono); font-size:13px;">
+                        </div>
+                        <small style="color:var(--text-muted);">A public IP assigned to this server. Auto-detected IPs
+                            are shown in the dropdown.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label>WolfNet IP <span style="color:var(--danger)">*</span></label>
+                        <div style="display:flex; gap:8px;">
+                            <select id="mapping-wolfnet-ip-select" class="form-control"
+                                onchange="onMappingWolfnetIpSelect()" style="flex:1;">
+                                <option value="">— Select or enter manually —</option>
+                            </select>
+                            <input type="text" id="mapping-wolfnet-ip" class="form-control"
+                                placeholder="e.g. 10.10.10.104"
+                                style="flex:1; font-family:var(--font-mono); font-size:13px;">
+                        </div>
+                        <small style="color:var(--text-muted);">The WolfNet IP of the container, VM, or LXC instance
+                            that should receive traffic.</small>
+                    </div>
+
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                        <div class="form-group">
+                            <label>Ports <small style="color:var(--text-muted);">(optional)</small></label>
+                            <input type="text" id="mapping-ports" class="form-control" placeholder="e.g. 80,443"
+                                style="font-family:var(--font-mono); font-size:13px;">
+                            <small style="color:var(--text-muted);">Leave blank = all ports</small>
+                        </div>
+                        <div class="form-group">
+                            <label>Protocol</label>
+                            <select id="mapping-protocol" class="form-control">
+                                <option value="all">All (TCP + UDP)</option>
+                                <option value="tcp">TCP only</option>
+                                <option value="udp">UDP only</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Label <small style="color:var(--text-muted);">(optional)</small></label>
+                        <input type="text" id="mapping-label" class="form-control"
+                            placeholder="e.g. Web server, Game server">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" onclick="closeCreateMappingModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="createIpMapping()">Create Mapping</button>
                 </div>
             </div>
         </div>

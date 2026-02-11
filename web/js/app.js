@@ -2426,19 +2426,22 @@ let cachedInterfaces = [];
 
 async function loadNetworking() {
     try {
-        const [ifResp, dnsResp, wnResp] = await Promise.all([
+        const [ifResp, dnsResp, wnResp, mappingsResp] = await Promise.all([
             fetch(apiUrl('/api/networking/interfaces')),
             fetch(apiUrl('/api/networking/dns')),
             fetch(apiUrl('/api/networking/wolfnet')),
+            fetch(apiUrl('/api/networking/ip-mappings')),
         ]);
         const interfaces = await ifResp.json();
         const dns = await dnsResp.json();
         const wolfnet = await wnResp.json();
+        const mappings = mappingsResp.ok ? await mappingsResp.json() : [];
 
         cachedInterfaces = interfaces;
         renderNetInterfaces(interfaces);
         renderDnsConfig(dns);
         renderWolfNetStatus(wolfnet);
+        renderIpMappings(mappings);
     } catch (e) {
         console.error('Failed to load networking:', e);
     }
@@ -2802,6 +2805,131 @@ async function wolfnetAction(action) {
         setTimeout(loadNetworking, 2000);
     } catch (e) {
         alert('WolfNet error: ' + e.message);
+    }
+}
+
+// ─── Public IP Mappings ───
+
+function renderIpMappings(mappings) {
+    const tbody = document.getElementById('ip-mappings-table');
+    const empty = document.getElementById('ip-mappings-empty');
+    if (!tbody) return;
+
+    if (!mappings || mappings.length === 0) {
+        tbody.innerHTML = '';
+        if (empty) empty.style.display = '';
+        return;
+    }
+    if (empty) empty.style.display = 'none';
+
+    tbody.innerHTML = mappings.map(m => {
+        const statusBadge = m.enabled
+            ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e; font-size:11px;">Active</span>'
+            : '<span class="badge" style="background:rgba(107,114,128,0.2); color:#6b7280; font-size:11px;">Disabled</span>';
+
+        const portsLabel = m.ports || '<span style="color:var(--text-muted);">all</span>';
+        const protoLabel = m.protocol === 'all' ? 'TCP+UDP' : m.protocol.toUpperCase();
+        const label = m.label || '<span style="color:var(--text-muted);">—</span>';
+
+        return `<tr>
+            <td style="font-family:var(--font-mono); font-size:13px; font-weight:600;">${m.public_ip}</td>
+            <td style="font-family:var(--font-mono); font-size:13px;">${m.wolfnet_ip}</td>
+            <td style="font-family:var(--font-mono); font-size:12px;">${portsLabel}</td>
+            <td style="font-size:12px;">${protoLabel}</td>
+            <td style="font-size:12px;">${label}</td>
+            <td>${statusBadge}</td>
+            <td>
+                <button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;" onclick="removeIpMapping('${m.id}', '${m.public_ip}', '${m.wolfnet_ip}')" title="Remove mapping">🗑️</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+async function showCreateMappingModal() {
+    // Reset fields
+    document.getElementById('mapping-public-ip').value = '';
+    document.getElementById('mapping-wolfnet-ip').value = '';
+    document.getElementById('mapping-ports').value = '';
+    document.getElementById('mapping-protocol').value = 'all';
+    document.getElementById('mapping-label').value = '';
+
+    // Fetch available IPs for dropdowns
+    try {
+        const resp = await fetch(apiUrl('/api/networking/available-ips'));
+        if (resp.ok) {
+            const data = await resp.json();
+
+            // Populate public IP dropdown
+            const pubSelect = document.getElementById('mapping-public-ip-select');
+            pubSelect.innerHTML = '<option value="">— Select or enter manually —</option>';
+            (data.public_ips || []).forEach(ip => {
+                pubSelect.innerHTML += `<option value="${ip}">${ip}</option>`;
+            });
+
+            // Populate WolfNet IP dropdown
+            const wnSelect = document.getElementById('mapping-wolfnet-ip-select');
+            wnSelect.innerHTML = '<option value="">— Select or enter manually —</option>';
+            (data.wolfnet_ips || []).forEach(entry => {
+                wnSelect.innerHTML += `<option value="${entry.ip}">${entry.ip} (${entry.source})</option>`;
+            });
+        }
+    } catch (e) {
+        console.error('Failed to fetch available IPs:', e);
+    }
+
+    document.getElementById('create-mapping-modal').classList.add('active');
+}
+
+function closeCreateMappingModal() {
+    document.getElementById('create-mapping-modal').classList.remove('active');
+}
+
+function onMappingPublicIpSelect() {
+    const val = document.getElementById('mapping-public-ip-select').value;
+    if (val) document.getElementById('mapping-public-ip').value = val;
+}
+
+function onMappingWolfnetIpSelect() {
+    const val = document.getElementById('mapping-wolfnet-ip-select').value;
+    if (val) document.getElementById('mapping-wolfnet-ip').value = val;
+}
+
+async function createIpMapping() {
+    const public_ip = document.getElementById('mapping-public-ip').value.trim();
+    const wolfnet_ip = document.getElementById('mapping-wolfnet-ip').value.trim();
+    const ports = document.getElementById('mapping-ports').value.trim() || null;
+    const protocol = document.getElementById('mapping-protocol').value;
+    const label = document.getElementById('mapping-label').value.trim() || null;
+
+    if (!public_ip) { alert('Please enter a public IP address'); return; }
+    if (!wolfnet_ip) { alert('Please enter a WolfNet IP address'); return; }
+
+    try {
+        const resp = await fetch(apiUrl('/api/networking/ip-mappings'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ public_ip, wolfnet_ip, ports, protocol, label }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to create mapping');
+        closeCreateMappingModal();
+        showToast(data.message, 'success');
+        loadNetworking();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function removeIpMapping(id, publicIp, wolfnetIp) {
+    if (!confirm(`Remove mapping ${publicIp} → ${wolfnetIp}? This will also remove the iptables rules.`)) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/networking/ip-mappings/${id}`), { method: 'DELETE' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(data.message, 'success');
+        loadNetworking();
+    } catch (e) {
+        alert('Error: ' + e.message);
     }
 }
 

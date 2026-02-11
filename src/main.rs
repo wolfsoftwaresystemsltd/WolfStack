@@ -123,6 +123,9 @@ async fn main() -> std::io::Result<()> {
     // Auto-mount storage entries
     storage::auto_mount_all();
 
+    // Restore IP mapping iptables rules
+    networking::apply_ip_mappings();
+
     // Initialize VM manager
     let vms_manager = vms::manager::VmManager::new();
 

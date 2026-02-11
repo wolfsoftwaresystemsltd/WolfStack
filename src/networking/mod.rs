@@ -1082,3 +1082,307 @@ pub fn set_mtu(interface: &str, mtu: u32) -> Result<String, String> {
     }
 }
 
+// ─── Public IP → WolfNet IP Mapping ───
+
+const IP_MAPPINGS_PATH: &str = "/etc/wolfstack/ip-mappings.json";
+
+/// A mapping from a public IP to a WolfNet IP
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpMapping {
+    pub id: String,
+    pub public_ip: String,
+    pub wolfnet_ip: String,
+    pub ports: Option<String>,   // None = all ports, Some("80,443") = specific
+    pub protocol: String,        // "all", "tcp", "udp"
+    pub label: String,
+    pub enabled: bool,
+}
+
+/// Persistent config for IP mappings
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct IpMappingConfig {
+    mappings: Vec<IpMapping>,
+}
+
+fn load_ip_mapping_config() -> IpMappingConfig {
+    match std::fs::read_to_string(IP_MAPPINGS_PATH) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => IpMappingConfig::default(),
+    }
+}
+
+fn save_ip_mapping_config(config: &IpMappingConfig) -> Result<(), String> {
+    let dir = std::path::Path::new(IP_MAPPINGS_PATH).parent().unwrap();
+    std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create config dir: {}", e))?;
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    std::fs::write(IP_MAPPINGS_PATH, json)
+        .map_err(|e| format!("Failed to write {}: {}", IP_MAPPINGS_PATH, e))
+}
+
+/// List all IP mappings
+pub fn list_ip_mappings() -> Vec<IpMapping> {
+    load_ip_mapping_config().mappings
+}
+
+/// Add a new IP mapping and apply iptables rules
+pub fn add_ip_mapping(
+    public_ip: &str,
+    wolfnet_ip: &str,
+    ports: Option<&str>,
+    protocol: &str,
+    label: &str,
+) -> Result<IpMapping, String> {
+    // Validate IPs
+    if public_ip.parse::<std::net::Ipv4Addr>().is_err() {
+        return Err(format!("Invalid public IP: {}", public_ip));
+    }
+    if wolfnet_ip.parse::<std::net::Ipv4Addr>().is_err() {
+        return Err(format!("Invalid WolfNet IP: {}", wolfnet_ip));
+    }
+
+    let mut config = load_ip_mapping_config();
+
+    // Check for duplicate
+    if config.mappings.iter().any(|m| m.public_ip == public_ip && m.wolfnet_ip == wolfnet_ip) {
+        return Err(format!("{} → {} already mapped", public_ip, wolfnet_ip));
+    }
+
+    let mapping = IpMapping {
+        id: format!("{:x}", rand_id()),
+        public_ip: public_ip.to_string(),
+        wolfnet_ip: wolfnet_ip.to_string(),
+        ports: ports.map(|s| s.to_string()),
+        protocol: protocol.to_string(),
+        label: label.to_string(),
+        enabled: true,
+    };
+
+    // Apply iptables rules
+    apply_mapping_rules(&mapping)?;
+
+    config.mappings.push(mapping.clone());
+    save_ip_mapping_config(&config)?;
+
+    info!("Added IP mapping: {} → {} ({})", public_ip, wolfnet_ip, label);
+    Ok(mapping)
+}
+
+/// Remove an IP mapping by ID and clean up iptables rules
+pub fn remove_ip_mapping(id: &str) -> Result<String, String> {
+    let mut config = load_ip_mapping_config();
+    let idx = config.mappings.iter().position(|m| m.id == id)
+        .ok_or_else(|| format!("Mapping '{}' not found", id))?;
+
+    let mapping = config.mappings.remove(idx);
+    remove_mapping_rules(&mapping);
+    save_ip_mapping_config(&config)?;
+
+    info!("Removed IP mapping: {} → {}", mapping.public_ip, mapping.wolfnet_ip);
+    Ok(format!("Removed mapping {} → {}", mapping.public_ip, mapping.wolfnet_ip))
+}
+
+/// Apply iptables rules for a single mapping
+fn apply_mapping_rules(m: &IpMapping) -> Result<(), String> {
+    if !m.enabled { return Ok(()); }
+
+    // Detect gateway WolfNet IP for SNAT
+    let gateway_ip = detect_wolfnet_gateway_ip()
+        .ok_or_else(|| "Cannot detect WolfNet gateway IP — is WolfNet running?".to_string())?;
+
+    // Build port/protocol args
+    let proto_args: Vec<String> = if m.protocol != "all" {
+        vec!["-p".into(), m.protocol.clone()]
+    } else {
+        vec![]
+    };
+
+    let port_args: Vec<String> = if let Some(ref ports) = m.ports {
+        if !ports.is_empty() && m.protocol != "all" {
+            vec!["--dport".into(), ports.clone()]
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+
+    // DNAT: redirect incoming traffic to WolfNet IP
+    run_iptables(&[
+        "-t", "nat", "-A", "PREROUTING", "-d", &m.public_ip,
+    ], &proto_args, &port_args, &["-j", "DNAT", "--to-destination", &m.wolfnet_ip])?;
+
+    // SNAT: ensure return traffic goes back through this gateway
+    run_iptables(&[
+        "-t", "nat", "-A", "POSTROUTING", "-d", &m.wolfnet_ip,
+    ], &proto_args, &port_args, &["-j", "SNAT", "--to-source", &gateway_ip])?;
+
+    // FORWARD: allow DNAT'd traffic
+    run_iptables(&[
+        "-A", "FORWARD", "-d", &m.wolfnet_ip,
+    ], &proto_args, &port_args, &["-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"])?;
+
+    info!("Applied iptables rules for {} → {}", m.public_ip, m.wolfnet_ip);
+    Ok(())
+}
+
+/// Remove iptables rules for a mapping (best-effort, uses -D instead of -A)
+fn remove_mapping_rules(m: &IpMapping) {
+    let gateway_ip = detect_wolfnet_gateway_ip().unwrap_or_default();
+
+    let proto_args: Vec<String> = if m.protocol != "all" {
+        vec!["-p".into(), m.protocol.clone()]
+    } else {
+        vec![]
+    };
+    let port_args: Vec<String> = if let Some(ref ports) = m.ports {
+        if !ports.is_empty() && m.protocol != "all" {
+            vec!["--dport".into(), ports.clone()]
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+
+    // Best-effort removal — ignore errors
+    let _ = run_iptables(&[
+        "-t", "nat", "-D", "PREROUTING", "-d", &m.public_ip,
+    ], &proto_args, &port_args, &["-j", "DNAT", "--to-destination", &m.wolfnet_ip]);
+
+    let _ = run_iptables(&[
+        "-t", "nat", "-D", "POSTROUTING", "-d", &m.wolfnet_ip,
+    ], &proto_args, &port_args, &["-j", "SNAT", "--to-source", &gateway_ip]);
+
+    let _ = run_iptables(&[
+        "-D", "FORWARD", "-d", &m.wolfnet_ip,
+    ], &proto_args, &port_args, &["-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"]);
+
+    info!("Removed iptables rules for {} → {}", m.public_ip, m.wolfnet_ip);
+}
+
+/// Run an iptables command with base args + protocol + port + tail args
+fn run_iptables(base: &[&str], proto: &[String], port: &[String], tail: &[&str]) -> Result<(), String> {
+    let mut args: Vec<&str> = base.to_vec();
+    for p in proto { args.push(p.as_str()); }
+    for p in port { args.push(p.as_str()); }
+    args.extend_from_slice(tail);
+
+    let output = Command::new("iptables")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Failed to run iptables: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!("iptables {} failed: {}", args.join(" "), stderr));
+    }
+    Ok(())
+}
+
+/// Restore all IP mappings on startup (called once from main.rs)
+pub fn apply_ip_mappings() {
+    // Enable IP forwarding
+    let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
+
+    // Apply conntrack ESTABLISHED,RELATED rule (idempotent — check first)
+    let existing = Command::new("iptables")
+        .args(["-C", "FORWARD", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"])
+        .output();
+    if existing.map(|o| !o.status.success()).unwrap_or(true) {
+        let _ = Command::new("iptables")
+            .args(["-A", "FORWARD", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"])
+            .output();
+    }
+
+    let config = load_ip_mapping_config();
+    let count = config.mappings.len();
+    for mapping in &config.mappings {
+        if let Err(e) = apply_mapping_rules(mapping) {
+            warn!("Failed to restore IP mapping {} → {}: {}", mapping.public_ip, mapping.wolfnet_ip, e);
+        }
+    }
+    if count > 0 {
+        info!("Restored {} IP mapping(s)", count);
+    }
+}
+
+/// Detect this node's WolfNet IP address (for SNAT source)
+fn detect_wolfnet_gateway_ip() -> Option<String> {
+    let interfaces = list_interfaces();
+    for iface in &interfaces {
+        if iface.name.starts_with("wn") || iface.name.starts_with("wolfnet") {
+            if let Some(addr) = iface.addresses.iter().find(|a| a.family == "inet") {
+                return Some(addr.address.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Detect public (non-RFC1918) IPs on all interfaces
+pub fn detect_public_ips() -> Vec<String> {
+    let mut public_ips = Vec::new();
+    let interfaces = list_interfaces();
+    for iface in &interfaces {
+        // Skip loopback, docker, wolfnet, veth
+        if iface.name == "lo" || iface.name.starts_with("docker")
+            || iface.name.starts_with("br-") || iface.name.starts_with("veth")
+            || iface.name.starts_with("wn") || iface.name.starts_with("wolfnet")
+            || iface.name.starts_with("virbr")
+        {
+            continue;
+        }
+        for addr in &iface.addresses {
+            if addr.family == "inet" {
+                if let Ok(ip) = addr.address.parse::<std::net::Ipv4Addr>() {
+                    if !is_private_ip(ip) {
+                        public_ips.push(addr.address.clone());
+                    }
+                }
+            }
+        }
+    }
+    public_ips
+}
+
+/// Check if an IPv4 address is RFC1918 private
+fn is_private_ip(ip: std::net::Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    if octets[0] == 10 { return true; }
+    if octets[0] == 172 && (16..=31).contains(&octets[1]) { return true; }
+    if octets[0] == 192 && octets[1] == 168 { return true; }
+    if octets[0] == 127 || (octets[0] == 169 && octets[1] == 254) { return true; }
+    false
+}
+
+/// Collect WolfNet IPs in use (peers + this node)
+pub fn detect_wolfnet_ips() -> Vec<serde_json::Value> {
+    let mut ips = Vec::new();
+
+    // This node's WolfNet IP
+    if let Some(gw) = detect_wolfnet_gateway_ip() {
+        ips.push(serde_json::json!({ "ip": gw, "source": "this-node" }));
+    }
+
+    // Peers from config
+    let peers = get_wolfnet_peers();
+    for peer in &peers {
+        let ip = peer.ip.split('/').next().unwrap_or(&peer.ip).to_string();
+        if !ip.is_empty() {
+            ips.push(serde_json::json!({ "ip": ip, "source": format!("peer: {}", peer.name) }));
+        }
+    }
+
+    ips
+}
+
+/// Simple random ID generator
+fn rand_id() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    (nanos as u64) ^ (std::process::id() as u64) ^ 0xdeadbeef
+}

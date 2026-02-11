@@ -1394,6 +1394,72 @@ pub async fn net_delete_vlan(
     }
 }
 
+// ─── IP Mapping API ───
+
+#[derive(Deserialize)]
+pub struct CreateIpMappingRequest {
+    pub public_ip: String,
+    pub wolfnet_ip: String,
+    pub ports: Option<String>,
+    pub protocol: Option<String>,
+    pub label: Option<String>,
+}
+
+/// GET /api/networking/ip-mappings — list all IP mappings
+pub async fn net_list_ip_mappings(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(networking::list_ip_mappings())
+}
+
+/// POST /api/networking/ip-mappings — create an IP mapping
+pub async fn net_add_ip_mapping(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<CreateIpMappingRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let protocol = body.protocol.as_deref().unwrap_or("all");
+    let label = body.label.as_deref().unwrap_or("");
+    match networking::add_ip_mapping(
+        &body.public_ip,
+        &body.wolfnet_ip,
+        body.ports.as_deref(),
+        protocol,
+        label,
+    ) {
+        Ok(mapping) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Mapped {} → {}", mapping.public_ip, mapping.wolfnet_ip),
+            "mapping": mapping,
+        })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/networking/ip-mappings/{id} — remove an IP mapping
+pub async fn net_remove_ip_mapping(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = path.into_inner();
+    match networking::remove_ip_mapping(&id) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/networking/available-ips — detect public + wolfnet IPs for the UI
+pub async fn net_available_ips(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(serde_json::json!({
+        "public_ips": networking::detect_public_ips(),
+        "wolfnet_ips": networking::detect_wolfnet_ips(),
+    }))
+}
+
 // ─── Storage Manager API ───
 
 /// GET /api/storage/mounts — list all storage mounts with live status
@@ -1788,6 +1854,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/networking/interfaces/{name}/mtu", web::post().to(net_set_mtu))
         .route("/api/networking/vlans", web::post().to(net_create_vlan))
         .route("/api/networking/vlans/{name}", web::delete().to(net_delete_vlan))
+        // IP Mappings
+        .route("/api/networking/ip-mappings", web::get().to(net_list_ip_mappings))
+        .route("/api/networking/ip-mappings", web::post().to(net_add_ip_mapping))
+        .route("/api/networking/ip-mappings/{id}", web::delete().to(net_remove_ip_mapping))
+        .route("/api/networking/available-ips", web::get().to(net_available_ips))
         // Console WebSocket
         .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
         // Agent (cluster-secret auth — inter-node communication)

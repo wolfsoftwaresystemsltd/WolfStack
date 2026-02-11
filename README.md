@@ -88,7 +88,16 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - Containers become reachable across your entire WolfNet mesh
 - IPs auto-applied on container start/restart
 - Automatic IP allocation to avoid conflicts
-- WolfNet IPs displayed in the dashboard even when containers are stopped
+- **WolfNet IPs displayed** in the dashboard even when containers are stopped
+
+### 🌍 Public IP Mapping
+- Map public IP addresses to WolfNet IPs (containers, VMs, LXC) from the dashboard
+- Automatic iptables DNAT, SNAT, and FORWARD rule management
+- Supports all ports or specific port/protocol combinations (TCP, UDP, or both)
+- Mappings persist across reboots — stored in `/etc/wolfstack/ip-mappings.json`
+- Survives container migration between servers
+- Auto-detects available public IPs and WolfNet IPs for easy selection
+- IP forwarding enabled automatically
 
 ### 📊 Real-Time Dashboard
 - Live CPU, memory, disk, and network monitoring with 2-second refresh
@@ -135,11 +144,12 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 wolfstack/
 ├── src/
 │   ├── main.rs              # HTTP server, background tasks
-│   ├── api/mod.rs           # REST API endpoints (50+ routes)
+│   ├── api/mod.rs           # REST API endpoints (60+ routes)
 │   ├── auth/mod.rs          # Linux auth via crypt(), session management
 │   ├── agent/mod.rs         # Multi-server cluster state, polling
 │   ├── monitoring/mod.rs    # System metrics via sysinfo
 │   ├── installer/mod.rs     # Component detection, install, systemd control
+│   ├── networking/mod.rs    # Network interfaces, VLANs, DNS, IP mapping
 │   ├── console.rs           # WebSocket PTY terminal for containers and host shells
 │   ├── containers/mod.rs    # Docker & LXC management
 │   └── vms/                 # Virtual machine management
@@ -250,6 +260,20 @@ All endpoints require authentication (cookie-based session) except `/api/agent/s
 | POST | `/api/vms/{name}/volumes` | Add a storage volume to a VM |
 | DELETE | `/api/vms/{name}/volumes/{vol}` | Remove a storage volume |
 | POST | `/api/vms/{name}/volumes/{vol}/resize` | Resize a storage volume (grow only) |
+
+### Networking & IP Mappings
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/networking/interfaces` | List all network interfaces |
+| GET | `/api/networking/dns` | Get DNS configuration |
+| POST | `/api/networking/dns` | Set DNS nameservers and search domains |
+| POST | `/api/networking/vlans` | Create a VLAN interface |
+| DELETE | `/api/networking/vlans/{name}` | Delete a VLAN interface |
+| GET | `/api/networking/ip-mappings` | List all public IP → WolfNet IP mappings |
+| POST | `/api/networking/ip-mappings` | Create a new IP mapping |
+| DELETE | `/api/networking/ip-mappings/{id}` | Remove an IP mapping |
+| GET | `/api/networking/available-ips` | Auto-detect available public and WolfNet IPs |
 
 ### WolfNet & WebSocket
 
