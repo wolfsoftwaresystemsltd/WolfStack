@@ -328,10 +328,86 @@ fn mount_s3(mount: &StorageMount) -> Result<String, String> {
     let s3 = mount.s3_config.as_ref()
         .ok_or("S3 config is required for S3 mounts")?;
     
-    // Ensure rclone is installed
-    ensure_rclone_installed()?;
+    if s3.bucket.is_empty() {
+        return Err("Bucket name is required for S3 mounts".to_string());
+    }
     
-    // Write rclone config for this mount
+    // Prefer s3fs (faster, purpose-built, handles disconnects gracefully)
+    // Fall back to rclone if s3fs is not available
+    if has_s3fs() {
+        mount_s3_via_s3fs(mount, s3)
+    } else if has_rclone() {
+        info!("s3fs not found, falling back to rclone");
+        mount_s3_via_rclone(mount, s3)
+    } else {
+        // Try to install s3fs
+        install_s3fs()?;
+        mount_s3_via_s3fs(mount, s3)
+    }
+}
+
+/// Mount S3 using s3fs-fuse — fast, native, handles offline endpoints gracefully
+fn mount_s3_via_s3fs(mount: &StorageMount, s3: &S3Config) -> Result<String, String> {
+    // Write credentials file: access_key:secret_key
+    let creds_dir = "/etc/wolfstack/s3";
+    fs::create_dir_all(creds_dir)
+        .map_err(|e| format!("Failed to create credentials dir: {}", e))?;
+    
+    let creds_path = format!("{}/{}.passwd", creds_dir, mount.id);
+    fs::write(&creds_path, format!("{}:{}", s3.access_key_id, s3.secret_access_key))
+        .map_err(|e| format!("Failed to write credentials: {}", e))?;
+    
+    // Set restrictive permissions (s3fs requires 600)
+    Command::new("chmod").args(["600", &creds_path]).output().ok();
+    
+    // Build s3fs arguments
+    let mut args = vec![
+        s3.bucket.clone(),
+        mount.mount_point.clone(),
+        "-o".to_string(), format!("passwd_file={}", creds_path),
+        "-o".to_string(), "allow_other".to_string(),
+        "-o".to_string(), "mp_umask=022".to_string(),
+        "-o".to_string(), "use_cache=/tmp/wolfstack-s3cache".to_string(),
+        "-o".to_string(), "ensure_diskfree=1024".to_string(),  // keep 1GB free
+        "-o".to_string(), "connect_timeout=10".to_string(),
+        "-o".to_string(), "retries=3".to_string(),
+    ];
+    
+    // Custom endpoint for non-AWS providers (R2, MinIO, Wasabi, etc.)
+    if !s3.endpoint.is_empty() {
+        args.push("-o".to_string());
+        args.push(format!("url={}", s3.endpoint));
+        args.push("-o".to_string());
+        args.push("use_path_request_style".to_string());
+    }
+    
+    // Region
+    if !s3.region.is_empty() {
+        args.push("-o".to_string());
+        args.push(format!("endpoint={}", s3.region));
+    }
+    
+    let output = Command::new("s3fs")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Failed to run s3fs: {}", e))?;
+    
+    if output.status.success() {
+        // Verify mount
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if check_mounted(&mount.mount_point) {
+            Ok("S3 storage mounted via s3fs".to_string())
+        } else {
+            Err("s3fs started but mount point not detected — check credentials and bucket name".to_string())
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(format!("s3fs mount failed: {}", stderr))
+    }
+}
+
+/// Fallback: mount S3 using rclone (slower, less reliable on disconnect)
+fn mount_s3_via_rclone(mount: &StorageMount, s3: &S3Config) -> Result<String, String> {
     let rclone_config_dir = "/etc/wolfstack/rclone";
     fs::create_dir_all(rclone_config_dir)
         .map_err(|e| format!("Failed to create rclone config dir: {}", e))?;
@@ -339,7 +415,6 @@ fn mount_s3(mount: &StorageMount) -> Result<String, String> {
     let remote_name = format!("wolfstack-{}", mount.id);
     let config_path = format!("{}/rclone.conf", rclone_config_dir);
     
-    // Build rclone config section
     let mut config_section = format!(
         "[{}]\ntype = s3\nprovider = {}\naccess_key_id = {}\nsecret_access_key = {}\n",
         remote_name, s3.provider, s3.access_key_id, s3.secret_access_key
@@ -351,10 +426,7 @@ fn mount_s3(mount: &StorageMount) -> Result<String, String> {
         config_section.push_str(&format!("endpoint = {}\n", s3.endpoint));
     }
     
-    // Read existing config or create new
     let mut full_config = fs::read_to_string(&config_path).unwrap_or_default();
-    
-    // Remove existing section for this remote if present
     let section_header = format!("[{}]", remote_name);
     if let Some(start) = full_config.find(&section_header) {
         let end = full_config[start + section_header.len()..]
@@ -363,42 +435,31 @@ fn mount_s3(mount: &StorageMount) -> Result<String, String> {
             .unwrap_or(full_config.len());
         full_config = format!("{}{}", &full_config[..start], &full_config[end..]);
     }
-    
     full_config.push_str(&config_section);
     fs::write(&config_path, &full_config)
         .map_err(|e| format!("Failed to write rclone config: {}", e))?;
     
-    // Run rclone mount in background
-    let bucket_path = if s3.bucket.is_empty() {
-        format!("{}:", remote_name)
-    } else {
-        format!("{}:{}", remote_name, s3.bucket)
-    };
+    let bucket_path = format!("{}:{}", remote_name, s3.bucket);
     
     let child = Command::new("rclone")
         .args([
-            "mount",
-            &bucket_path,
-            &mount.mount_point,
+            "mount", &bucket_path, &mount.mount_point,
             "--config", &config_path,
             "--vfs-cache-mode", "full",
-            "--daemon",
-            "--allow-other",
-            "--allow-non-empty",
+            "--daemon", "--allow-other", "--allow-non-empty",
         ])
         .spawn();
     
     match child {
         Ok(_) => {
-            // Give it a moment to mount
             std::thread::sleep(std::time::Duration::from_secs(2));
             if check_mounted(&mount.mount_point) {
-                Ok("S3 storage mounted via rclone".to_string())
+                Ok("S3 storage mounted via rclone (consider installing s3fs for better performance)".to_string())
             } else {
                 Err("rclone mount started but mount point not detected — check credentials".to_string())
             }
         }
-        Err(e) => Err(format!("Failed to start rclone mount: {}", e)),
+        Err(e) => Err(format!("Failed to start rclone: {}", e)),
     }
 }
 
@@ -468,23 +529,29 @@ fn mount_wolfdisk(mount: &StorageMount) -> Result<String, String> {
 
 // ─── Helpers ───
 
-fn ensure_rclone_installed() -> Result<(), String> {
-    if let Ok(output) = Command::new("rclone").arg("version").output() {
-        if output.status.success() {
-            return Ok(());
-        }
-    }
-    
-    info!("Installing rclone...");
-    let output = Command::new("bash")
-        .args(["-c", "curl -s https://rclone.org/install.sh | bash"])
+fn has_s3fs() -> bool {
+    Command::new("s3fs").arg("--version").output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn has_rclone() -> bool {
+    Command::new("rclone").arg("version").output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn install_s3fs() -> Result<(), String> {
+    info!("Installing s3fs-fuse...");
+    let output = Command::new("apt-get")
+        .args(["install", "-y", "s3fs"])
         .output()
-        .map_err(|e| format!("Failed to install rclone: {}", e))?;
+        .map_err(|e| format!("Failed to install s3fs: {}", e))?;
     
     if output.status.success() {
         Ok(())
     } else {
-        Err(format!("rclone installation failed: {}", 
+        Err(format!("s3fs installation failed: {}",
             String::from_utf8_lossy(&output.stderr)))
     }
 }
