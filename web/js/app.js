@@ -677,11 +677,18 @@ function renderVms(vms) {
         const statusText = vm.running ? 'Running' : 'Stopped';
         const statusColor = vm.running ? 'var(--success)' : 'var(--danger)';
 
+        // Determine the correct host for VNC connections (remote node vs local)
+        let vncHost = window.location.hostname;
+        if (currentNodeId) {
+            const node = allNodes.find(n => n.id === currentNodeId);
+            if (node && !node.is_self) vncHost = node.address;
+        }
+
         const vncText = (vm.running && vm.vnc_port)
             ? (vm.vnc_ws_port
-                ? `<a href="/vnc.html?name=${encodeURIComponent(vm.name)}&port=${vm.vnc_ws_port}" target="_blank" 
-                    class="badge" style="cursor:pointer; text-decoration:none;" title="Open console in browser">🖥️ :${vm.vnc_port}</a>`
-                : `<span class="badge" title="Connect with VNC client to port ${vm.vnc_port}">:${vm.vnc_port}</span>`)
+                ? `<a href="/vnc.html?name=${encodeURIComponent(vm.name)}&port=${vm.vnc_ws_port}&host=${encodeURIComponent(vncHost)}" target="_blank" 
+                    class="badge" style="cursor:pointer; text-decoration:none; background:rgba(234,179,8,0.15); color:#eab308;" title="Open console in browser">🖥️ :${vm.vnc_port}</a>`
+                : `<span class="badge" style="background:rgba(234,179,8,0.15); color:#eab308;" title="Connect with VNC client to port ${vm.vnc_port}">:${vm.vnc_port}</span>`)
             : '—';
 
         const wolfnetIp = vm.wolfnet_ip || '—';
