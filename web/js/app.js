@@ -5842,7 +5842,8 @@ async function updatePbsStatusBadge() {
         } else if (status.connected) {
             setPbsBadge('\u2713 Connected (' + status.snapshot_count + ' snapshots)', '#28a745', '#fff');
         } else {
-            setPbsBadge('Disconnected', '#ffc107', '#333');
+            console.error('PBS connection failed:', status.error);
+            setPbsBadge('Disconnected: ' + (status.error || 'unknown'), '#ffc107', '#333');
         }
     } catch (e) {
         setPbsBadge('Error', '#dc3545', '#fff');
