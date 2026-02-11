@@ -306,6 +306,11 @@ body {
     padding: 28px 32px;
 }
 
+/* Ensure page-views outside .page-content still get padding */
+.main-content>.page-view {
+    padding: 28px 32px;
+}
+
 /* ─── Cards ─── */
 .card {
     background: var(--bg-card);
