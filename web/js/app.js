@@ -3761,7 +3761,14 @@ function openVmConsole(name) {
 }
 
 function openVmVnc(name, wsPort) {
-    const host = window.location.hostname;
+    let host = window.location.hostname;
+    // For remote nodes, connect to the node actually running the VM
+    if (currentNodeId) {
+        const node = allNodes.find(n => n.id === currentNodeId);
+        if (node && !node.is_self) {
+            host = node.address;
+        }
+    }
     window.open(`/vnc.html?name=${encodeURIComponent(name)}&port=${wsPort}&host=${host}`,
         'vnc_' + name, 'width=1024,height=768,menubar=no,toolbar=no');
 }
