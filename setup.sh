@@ -84,15 +84,16 @@ elif [ "$PKG_MANAGER" = "apt" ]; then
     # Add Proxmox PBS client repo (works on any Debian/Ubuntu)
     PBS_REPO_FILE="/etc/apt/sources.list.d/pbs-client.list"
     if [ ! -f "$PBS_REPO_FILE" ]; then
-        # Detect Debian codename
-        CODENAME=$(lsb_release -cs 2>/dev/null || echo "bookworm")
-        echo "deb http://download.proxmox.com/debian/pbs-client $CODENAME main" > "$PBS_REPO_FILE"
+        # Detect Debian codename — PBS builds against bookworm
+        CODENAME="bookworm"
+        echo "deb http://download.proxmox.com/debian/pbs $CODENAME pbs-no-subscription" > "$PBS_REPO_FILE"
         # Add Proxmox repo key
-        curl -fsSL "https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg" \
-            -o /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg 2>/dev/null || true
+        curl -fsSL "https://enterprise.proxmox.com/debian/proxmox-release-${CODENAME}.gpg" \
+            -o /etc/apt/trusted.gpg.d/proxmox-release-${CODENAME}.gpg 2>/dev/null || true
         apt update -qq 2>/dev/null || true
     fi
-    apt install -y proxmox-backup-client 2>/dev/null || {
+    apt install -y proxmox-backup-client 2>/dev/null || \
+    apt install -y --allow-unauthenticated proxmox-backup-client 2>/dev/null || {
         echo "⚠ Could not install proxmox-backup-client from repo."
         echo "  PBS backup/restore will not be available."
         echo "  You can install it manually later: apt install proxmox-backup-client"
