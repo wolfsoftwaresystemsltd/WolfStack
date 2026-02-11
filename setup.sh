@@ -81,13 +81,11 @@ echo "Installing Proxmox Backup Client..."
 if command -v proxmox-backup-client &> /dev/null; then
     echo "✓ proxmox-backup-client already installed"
 elif [ "$PKG_MANAGER" = "apt" ]; then
-    # Add Proxmox PBS client repo (works on any Debian/Ubuntu)
+    # Add Proxmox PBS repo for Debian/Ubuntu
     PBS_REPO_FILE="/etc/apt/sources.list.d/pbs-client.list"
     if [ ! -f "$PBS_REPO_FILE" ]; then
-        # Detect Debian codename — PBS builds against bookworm
         CODENAME="bookworm"
         echo "deb http://download.proxmox.com/debian/pbs $CODENAME pbs-no-subscription" > "$PBS_REPO_FILE"
-        # Add Proxmox repo key
         curl -fsSL "https://enterprise.proxmox.com/debian/proxmox-release-${CODENAME}.gpg" \
             -o /etc/apt/trusted.gpg.d/proxmox-release-${CODENAME}.gpg 2>/dev/null || true
         apt update -qq 2>/dev/null || true
@@ -95,21 +93,53 @@ elif [ "$PKG_MANAGER" = "apt" ]; then
     apt install -y proxmox-backup-client 2>/dev/null || \
     apt install -y --allow-unauthenticated proxmox-backup-client 2>/dev/null || {
         echo "⚠ Could not install proxmox-backup-client from repo."
-        echo "  PBS backup/restore will not be available."
         echo "  You can install it manually later: apt install proxmox-backup-client"
     }
 else
-    # For non-Debian: try downloading the static binary
-    echo "  Attempting to download static proxmox-backup-client..."
-    ARCH=$(uname -m)
-    PBS_URL="https://enterprise.proxmox.com/debian/pbs-client/proxmox-backup-client-static-${ARCH}.bin"
-    if curl -fsSL "$PBS_URL" -o /usr/local/bin/proxmox-backup-client 2>/dev/null; then
-        chmod +x /usr/local/bin/proxmox-backup-client
-        echo "✓ proxmox-backup-client (static) installed"
+    # For Fedora, RHEL, Arch, etc: download the .deb from Proxmox and extract the binary
+    # The proxmox-backup-client binary is statically linked and works on any Linux
+    echo "  Non-Debian system detected — extracting proxmox-backup-client from Proxmox .deb..."
+    PBS_TMP=$(mktemp -d)
+    ARCH=$(dpkg --print-architecture 2>/dev/null || (uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'))
+
+    # Find the latest proxmox-backup-client .deb URL from the Proxmox repo
+    PBS_PKG_URL="http://download.proxmox.com/debian/pbs/dists/bookworm/pbs-no-subscription/binary-${ARCH}/"
+    PBS_DEB=$(curl -fsSL "$PBS_PKG_URL" 2>/dev/null | grep -oP 'proxmox-backup-client_[^"]+\.deb' | sort -V | tail -1)
+
+    if [ -n "$PBS_DEB" ]; then
+        echo "  Downloading $PBS_DEB..."
+        if curl -fsSL "${PBS_PKG_URL}${PBS_DEB}" -o "${PBS_TMP}/${PBS_DEB}" 2>/dev/null; then
+            # Extract .deb: ar extracts data.tar, then we pull the binary out
+            cd "$PBS_TMP"
+            ar x "$PBS_DEB" 2>/dev/null
+            # data.tar may be .zst, .xz, or .gz compressed
+            DATA_TAR=$(ls data.tar.* 2>/dev/null | head -1)
+            if [ -n "$DATA_TAR" ]; then
+                case "$DATA_TAR" in
+                    *.zst) zstd -d "$DATA_TAR" -o data.tar 2>/dev/null || true ;;
+                    *.xz)  xz -d "$DATA_TAR" 2>/dev/null || true ;;
+                    *.gz)  gzip -d "$DATA_TAR" 2>/dev/null || true ;;
+                esac
+                if [ -f data.tar ]; then
+                    tar xf data.tar ./usr/bin/proxmox-backup-client 2>/dev/null && \
+                        cp -f usr/bin/proxmox-backup-client /usr/local/bin/proxmox-backup-client && \
+                        chmod +x /usr/local/bin/proxmox-backup-client && \
+                        echo "✓ proxmox-backup-client installed to /usr/local/bin/"
+                else
+                    echo "⚠ Failed to decompress PBS package data."
+                fi
+            else
+                echo "⚠ Could not find data archive in PBS .deb package."
+            fi
+            cd - > /dev/null
+        else
+            echo "⚠ Failed to download PBS package."
+        fi
     else
-        echo "⚠ Could not download proxmox-backup-client for $ARCH."
+        echo "⚠ Could not find proxmox-backup-client .deb for architecture: $ARCH"
         echo "  PBS integration will not be available. Install manually if needed."
     fi
+    rm -rf "$PBS_TMP"
 fi
 
 # ─── Configure FUSE for storage mounts ──────────────────────────────────────
