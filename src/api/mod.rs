@@ -421,7 +421,7 @@ pub async fn node_proxy(
     let url = format!("http://{}:{}/api/{}", node.address, node.port, api_path);
 
     let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(120))
         .build()
     {
         Ok(c) => c,
