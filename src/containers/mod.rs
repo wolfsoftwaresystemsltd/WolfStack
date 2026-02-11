@@ -1024,10 +1024,65 @@ pub fn docker_images() -> Vec<ContainerImage> {
         .unwrap_or_default()
 }
 
-/// Update Docker container configuration (currently just autostart/restart policy)
-pub fn docker_update_config(container: &str, autostart: bool) -> Result<String, String> {
-    let policy = if autostart { "unless-stopped" } else { "no" };
-    run_docker_cmd(&["update", "--restart", policy, container])
+/// Update Docker container configuration
+pub fn docker_update_config(container: &str, autostart: Option<bool>, memory_mb: Option<u64>, cpus: Option<f32>) -> Result<String, String> {
+    let mut args = vec!["update"];
+    
+    // Autostart policy
+    let policy_str;
+    if let Some(autostart) = autostart {
+        policy_str = if autostart { "unless-stopped" } else { "no" };
+        args.push("--restart");
+        args.push(policy_str);
+    }
+
+    // Memory limit
+    let mem_str;
+    if let Some(mem) = memory_mb {
+        mem_str = format!("{}m", mem);
+        args.push("--memory");
+        args.push(&mem_str);
+    }
+
+    // CPU limit
+    let cpus_str;
+    if let Some(c) = cpus {
+        cpus_str = format!("{}", c);
+        args.push("--cpus");
+        args.push(&cpus_str);
+    }
+
+    if args.len() == 1 {
+        return Ok("No changes requested".to_string());
+    }
+
+    args.push(container);
+    run_docker_cmd(&args)
+}
+
+/// Inspect a Docker container and return raw JSON
+pub fn docker_inspect(container: &str) -> Result<serde_json::Value, String> {
+    let output = Command::new("docker")
+        .args(["inspect", container])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+
+    // docker inspect returns an array, take the first element if possible
+    if let Some(arr) = json.as_array() {
+        if let Some(obj) = arr.first() {
+            return Ok(obj.clone());
+        }
+    }
+    
+    // If not array or empty array
+    Ok(json)
 }
 
 /// Remove a Docker image by ID or name

@@ -914,6 +914,8 @@ pub async fn docker_volumes(
 #[derive(Deserialize)]
 pub struct DockerUpdateConfigReq {
     pub autostart: Option<bool>,
+    pub memory_mb: Option<u64>,
+    pub cpus: Option<f32>,
 }
 
 pub async fn docker_update_config(
@@ -925,14 +927,25 @@ pub async fn docker_update_config(
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
     
-    // Autostart
-    if let Some(autostart) = body.autostart {
-        if let Err(e) = containers::docker_update_config(&id, autostart) {
-             return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
-        }
+    match containers::docker_update_config(&id, body.autostart, body.memory_mb, body.cpus) {
+         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+         Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
     }
+}
+
+/// GET /api/containers/docker/{id}/inspect — inspect raw docker config
+pub async fn docker_inspect(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
     
-    HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+    match containers::docker_inspect(&id) {
+        Ok(json) => HttpResponse::Ok().json(json),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
 }
 
 /// GET /api/containers/lxc/{name}/mounts — list LXC container bind mounts
@@ -1715,6 +1728,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/docker/{id}/volumes", web::get().to(docker_volumes))
         .route("/api/containers/docker/import", web::post().to(docker_import))
         .route("/api/containers/docker/{id}/config", web::post().to(docker_update_config))
+        .route("/api/containers/docker/{id}/inspect", web::get().to(docker_inspect))
         // LXC
         .route("/api/containers/lxc", web::get().to(lxc_list))
         .route("/api/containers/lxc/templates", web::get().to(lxc_templates))
