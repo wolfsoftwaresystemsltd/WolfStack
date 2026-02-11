@@ -5426,6 +5426,7 @@ async function loadBackups() {
         renderBackupHistory(backups);
         renderSchedules(schedules);
         populateStorageDropdown();
+        loadPbsConfig();
     } catch (e) {
         console.error('Failed to load backups:', e);
     }
@@ -5450,6 +5451,16 @@ async function populateStorageDropdown() {
     } catch (e) {
         console.error('Failed to load storage mounts for backup dropdown:', e);
     }
+    // Add PBS option if configured
+    try {
+        const pbsResp = await fetch(apiUrl('/api/backups/pbs/config'));
+        if (pbsResp.ok) {
+            const pbs = await pbsResp.json();
+            if (pbs.pbs_server) {
+                sel.innerHTML += `<option value="pbs:${escapeHtml(pbs.pbs_server)}">📦 PBS — ${escapeHtml(pbs.pbs_server)}/${escapeHtml(pbs.pbs_datastore)}</option>`;
+            }
+        }
+    } catch (e) { /* PBS not configured, skip */ }
 }
 
 function renderBackupTargets(targets) {
@@ -5779,3 +5790,198 @@ async function deleteSchedule(id) {
     loadBackups();
 }
 
+// ─── Proxmox Backup Server (PBS) Frontend ───
+
+async function loadPbsConfig() {
+    try {
+        const res = await fetch(apiUrl('/api/backups/pbs/config'));
+        if (!res.ok) return;
+        const cfg = await res.json();
+        const setVal = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || ''; };
+        setVal('pbs-server', cfg.pbs_server);
+        setVal('pbs-datastore', cfg.pbs_datastore);
+        setVal('pbs-user', cfg.pbs_user);
+        setVal('pbs-token-name', cfg.pbs_token_name);
+        setVal('pbs-fingerprint', cfg.pbs_fingerprint);
+        if (cfg.has_token_secret) {
+            const el = document.getElementById('pbs-token-secret');
+            if (el) el.placeholder = '(saved — enter new value to change)';
+        }
+        if (cfg.pbs_server) {
+            updatePbsStatusBadge();
+            loadPbsSnapshots();
+        } else {
+            setPbsBadge('Not configured', 'var(--bg-tertiary)', 'var(--text-muted)');
+        }
+    } catch (e) {
+        console.error('Failed to load PBS config:', e);
+    }
+}
+
+function setPbsBadge(text, bg, color) {
+    const badge = document.getElementById('pbs-status-badge');
+    if (badge) {
+        badge.textContent = text;
+        badge.style.background = bg;
+        badge.style.color = color;
+    }
+}
+
+async function updatePbsStatusBadge() {
+    try {
+        const res = await fetch(apiUrl('/api/backups/pbs/status'));
+        if (!res.ok) { setPbsBadge('Error', '#dc3545', '#fff'); return; }
+        const status = await res.json();
+        if (!status.installed) {
+            setPbsBadge('Client not installed', '#dc3545', '#fff');
+        } else if (status.connected) {
+            setPbsBadge('\u2713 Connected (' + status.snapshot_count + ' snapshots)', '#28a745', '#fff');
+        } else {
+            setPbsBadge('Disconnected', '#ffc107', '#333');
+        }
+    } catch (e) {
+        setPbsBadge('Error', '#dc3545', '#fff');
+    }
+}
+
+async function savePbsConfig() {
+    const getVal = id => (document.getElementById(id) || {}).value || '';
+    const body = {
+        pbs_server: getVal('pbs-server'),
+        pbs_datastore: getVal('pbs-datastore'),
+        pbs_user: getVal('pbs-user'),
+        pbs_token_name: getVal('pbs-token-name'),
+        pbs_token_secret: getVal('pbs-token-secret'),
+        pbs_fingerprint: getVal('pbs-fingerprint'),
+    };
+    if (!body.pbs_server || !body.pbs_datastore || !body.pbs_user) {
+        showToast('Server, datastore, and user are required', 'error');
+        return;
+    }
+    try {
+        const res = await fetch(apiUrl('/api/backups/pbs/config'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (data.error) showToast('PBS save failed: ' + data.error, 'error');
+        else {
+            showToast('PBS configuration saved', 'success');
+            updatePbsStatusBadge();
+            populateStorageDropdown();
+            loadPbsSnapshots();
+        }
+    } catch (e) {
+        showToast('PBS save error: ' + e.message, 'error');
+    }
+}
+
+async function testPbsConnection() {
+    setPbsBadge('Testing...', 'var(--bg-tertiary)', 'var(--text-muted)');
+    try {
+        const res = await fetch(apiUrl('/api/backups/pbs/status'));
+        const status = await res.json();
+        if (!status.installed) {
+            showToast('proxmox-backup-client is not installed', 'error');
+            setPbsBadge('Client not installed', '#dc3545', '#fff');
+        } else if (status.connected) {
+            showToast('Connected to PBS! ' + status.snapshot_count + ' snapshots found.', 'success');
+            setPbsBadge('\u2713 Connected (' + status.snapshot_count + ' snapshots)', '#28a745', '#fff');
+            loadPbsSnapshots();
+        } else {
+            showToast('PBS connection failed: ' + (status.error || 'Unknown error'), 'error');
+            setPbsBadge('Disconnected', '#ffc107', '#333');
+        }
+    } catch (e) {
+        showToast('Test failed: ' + e.message, 'error');
+        setPbsBadge('Error', '#dc3545', '#fff');
+    }
+}
+
+function formatPbsSize(bytes) {
+    if (!bytes || bytes === 0) return '\u2014';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    let size = Number(bytes);
+    while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+    return size.toFixed(1) + ' ' + units[i];
+}
+
+async function loadPbsSnapshots() {
+    const card = document.getElementById('pbs-snapshots-card');
+    const tbody = document.getElementById('pbs-snapshots-table');
+    const empty = document.getElementById('pbs-snapshots-empty');
+    if (!card || !tbody) return;
+
+    try {
+        const res = await fetch(apiUrl('/api/backups/pbs/snapshots'));
+        if (!res.ok) { card.style.display = 'none'; return; }
+        const snapshots = await res.json();
+        if (snapshots.error) { card.style.display = 'none'; return; }
+
+        card.style.display = '';
+        const list = Array.isArray(snapshots) ? snapshots : [];
+
+        if (list.length === 0) {
+            tbody.innerHTML = '';
+            if (empty) empty.style.display = '';
+            return;
+        }
+        if (empty) empty.style.display = 'none';
+
+        const TYPE_EMOJIS = { vm: '\ud83d\udda5\ufe0f', ct: '\ud83d\udce6', host: '\ud83c\udfe0' };
+
+        tbody.innerHTML = list.map(function(s) {
+            var btype = s['backup-type'] || s.backup_type || 'host';
+            var bid = s['backup-id'] || s.backup_id || '\u2014';
+            var btime = s['backup-time'] || s.backup_time || '';
+            var size = s.size || 0;
+            var emoji = TYPE_EMOJIS[btype] || '\ud83d\udcc4';
+
+            var timeStr = '\u2014';
+            if (btime) {
+                var d = typeof btime === 'number' ? new Date(btime * 1000) : new Date(btime);
+                timeStr = d.toLocaleString();
+            }
+
+            var snapshot = btype + '/' + bid + '/' + btime;
+            var snapEsc = escapeHtml(snapshot);
+
+            return '<tr>' +
+                '<td>' + emoji + ' ' + escapeHtml(btype) + '</td>' +
+                '<td><strong>' + escapeHtml(bid) + '</strong></td>' +
+                '<td style="font-size:12px;">' + timeStr + '</td>' +
+                '<td>' + formatPbsSize(size) + '</td>' +
+                '<td style="text-align:right;">' +
+                    '<button class="btn btn-sm btn-primary" onclick="restorePbsSnapshot(\x27' + snapEsc + '\x27)"' +
+                    ' style="font-size:11px; padding:3px 10px;">\u2b07\ufe0f Restore</button>' +
+                '</td>' +
+            '</tr>';
+        }).join('');
+    } catch (e) {
+        console.error('Failed to load PBS snapshots:', e);
+        card.style.display = 'none';
+    }
+}
+
+async function restorePbsSnapshot(snapshot) {
+    if (!confirm('Restore PBS snapshot:\n' + snapshot + '\n\nThis will download and restore the data to this node.')) return;
+    showToast('Starting PBS restore...', 'info');
+    try {
+        const res = await fetch(apiUrl('/api/backups/pbs/restore'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                snapshot: snapshot,
+                archive: 'root.pxar',
+                target_dir: '/var/lib/wolfstack/restored',
+            }),
+        });
+        const data = await res.json();
+        if (data.error) showToast('PBS restore failed: ' + data.error, 'error');
+        else showToast('PBS restore complete: ' + data.message, 'success');
+    } catch (e) {
+        showToast('PBS restore error: ' + e.message, 'error');
+    }
+}

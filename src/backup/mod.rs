@@ -51,6 +51,7 @@ pub enum StorageType {
     S3,
     Remote,
     Wolfdisk,
+    Pbs,
 }
 
 impl std::fmt::Display for StorageType {
@@ -60,6 +61,7 @@ impl std::fmt::Display for StorageType {
             Self::S3 => write!(f, "s3"),
             Self::Remote => write!(f, "remote"),
             Self::Wolfdisk => write!(f, "wolfdisk"),
+            Self::Pbs => write!(f, "pbs"),
         }
     }
 }
@@ -89,6 +91,24 @@ pub struct BackupStorage {
     /// Remote WolfStack node URL
     #[serde(default)]
     pub remote_url: String,
+    /// PBS server hostname/IP
+    #[serde(default)]
+    pub pbs_server: String,
+    /// PBS datastore name
+    #[serde(default)]
+    pub pbs_datastore: String,
+    /// PBS user (e.g. backup@pbs)
+    #[serde(default)]
+    pub pbs_user: String,
+    /// PBS API token name
+    #[serde(default)]
+    pub pbs_token_name: String,
+    /// PBS API token secret
+    #[serde(default)]
+    pub pbs_token_secret: String,
+    /// PBS server TLS fingerprint (optional)
+    #[serde(default)]
+    pub pbs_fingerprint: String,
 }
 
 #[allow(dead_code)]
@@ -128,6 +148,18 @@ impl BackupStorage {
             ..Self::default()
         }
     }
+
+    pub fn pbs(server: &str, datastore: &str, user: &str, token_name: &str, token_secret: &str) -> Self {
+        Self {
+            storage_type: StorageType::Pbs,
+            pbs_server: server.to_string(),
+            pbs_datastore: datastore.to_string(),
+            pbs_user: user.to_string(),
+            pbs_token_name: token_name.to_string(),
+            pbs_token_secret: token_secret.to_string(),
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for BackupStorage {
@@ -141,6 +173,12 @@ impl Default for BackupStorage {
             access_key: String::new(),
             secret_key: String::new(),
             remote_url: String::new(),
+            pbs_server: String::new(),
+            pbs_datastore: String::new(),
+            pbs_user: String::new(),
+            pbs_token_name: String::new(),
+            pbs_token_secret: String::new(),
+            pbs_fingerprint: String::new(),
         }
     }
 }
@@ -612,6 +650,7 @@ fn store_backup(local_path: &Path, storage: &BackupStorage, filename: &str) -> R
         StorageType::S3 => store_s3(local_path, storage, filename),
         StorageType::Remote => store_remote(local_path, &storage.remote_url, filename),
         StorageType::Wolfdisk => store_local(local_path, &storage.path, filename), // WolfDisk is just a mount path
+        StorageType::Pbs => store_pbs(local_path, storage, filename),
     }
 }
 
@@ -705,6 +744,52 @@ fn store_remote(local_path: &Path, remote_url: &str, filename: &str) -> Result<(
     Ok(())
 }
 
+/// Build the PBS repository string: user!token@server:datastore
+fn pbs_repo_string(storage: &BackupStorage) -> String {
+    if !storage.pbs_token_name.is_empty() {
+        format!("{}!{}@{}:{}", storage.pbs_user, storage.pbs_token_name,
+                storage.pbs_server, storage.pbs_datastore)
+    } else {
+        format!("{}@{}:{}", storage.pbs_user, storage.pbs_server, storage.pbs_datastore)
+    }
+}
+
+/// Store backup to Proxmox Backup Server
+fn store_pbs(local_path: &Path, storage: &BackupStorage, filename: &str) -> Result<(), String> {
+    let repo = pbs_repo_string(storage);
+    info!("Uploading backup to PBS: {} ({})", repo, filename);
+
+    // For tar.gz archives, we upload the staging directory as a pxar archive
+    let backup_id = filename.split('.').next().unwrap_or(filename);
+
+    let mut cmd = Command::new("proxmox-backup-client");
+    cmd.arg("backup")
+       .arg(format!("{}.pxar:{}", backup_id, local_path.parent().unwrap_or(Path::new("/tmp")).display()))
+       .arg("--repository").arg(&repo)
+       .arg("--backup-id").arg(backup_id)
+       .arg("--backup-type").arg("host");
+
+    if !storage.pbs_fingerprint.is_empty() {
+        cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
+    }
+
+    // Pass token secret via env
+    if !storage.pbs_token_secret.is_empty() {
+        cmd.env("PBS_PASSWORD", &storage.pbs_token_secret);
+    }
+
+    let output = cmd.output()
+        .map_err(|e| format!("Failed to run proxmox-backup-client: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!("PBS backup failed: {}",
+            String::from_utf8_lossy(&output.stderr)));
+    }
+
+    info!("Backup uploaded to PBS: {}", repo);
+    Ok(())
+}
+
 /// Retrieve a backup file from storage for restore
 fn retrieve_backup(entry: &BackupEntry) -> Result<PathBuf, String> {
     let staging = ensure_staging_dir()?;
@@ -724,6 +809,9 @@ fn retrieve_backup(entry: &BackupEntry) -> Result<PathBuf, String> {
         },
         StorageType::Remote => {
             return Err("Cannot restore from remote node storage directly — download the backup file first".to_string());
+        },
+        StorageType::Pbs => {
+            retrieve_from_pbs(entry, &local_path)?;
         },
     }
 
@@ -1115,6 +1203,9 @@ pub fn check_schedules() {
                             let path = Path::new(&entry.storage.path).join(&entry.filename);
                             let _ = fs::remove_file(&path);
                         },
+                        StorageType::Pbs => {
+                            // PBS handles its own garbage collection / pruning
+                        },
                         _ => {}
                     }
                     config.entries.remove(idx);
@@ -1184,4 +1275,317 @@ fn extract_name_from_filename(filename: &str) -> String {
         return name_and_rest;
     }
     filename.to_string()
+}
+
+// ─── Proxmox Backup Server (PBS) Integration ───
+
+/// Retrieve a backup from PBS — restore a specific archive from a snapshot
+fn retrieve_from_pbs(entry: &BackupEntry, dest: &Path) -> Result<(), String> {
+    let storage = &entry.storage;
+    let repo = pbs_repo_string(storage);
+
+    // The filename in the entry tells us what archive to look for
+    let backup_id = entry.filename.split('.').next().unwrap_or(&entry.filename);
+    let snapshot = format!("host/{}/latest", backup_id);
+
+    let mut cmd = Command::new("proxmox-backup-client");
+    cmd.arg("restore")
+       .arg(&snapshot)
+       .arg(format!("{}.pxar", backup_id))
+       .arg(dest.parent().unwrap_or(Path::new("/tmp")).to_string_lossy().to_string())
+       .arg("--repository").arg(&repo);
+
+    if !storage.pbs_fingerprint.is_empty() {
+        cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
+    }
+    if !storage.pbs_token_secret.is_empty() {
+        cmd.env("PBS_PASSWORD", &storage.pbs_token_secret);
+    }
+
+    let output = cmd.output()
+        .map_err(|e| format!("PBS restore failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!("PBS restore error: {}",
+            String::from_utf8_lossy(&output.stderr)));
+    }
+
+    Ok(())
+}
+
+/// List all snapshots on a Proxmox Backup Server
+pub fn list_pbs_snapshots(storage: &BackupStorage) -> Result<serde_json::Value, String> {
+    if storage.pbs_server.is_empty() || storage.pbs_datastore.is_empty() {
+        return Err("PBS server and datastore must be configured".to_string());
+    }
+
+    let repo = pbs_repo_string(storage);
+
+    let mut cmd = Command::new("proxmox-backup-client");
+    cmd.arg("snapshot").arg("list")
+       .arg("--output-format").arg("json")
+       .arg("--repository").arg(&repo);
+
+    if !storage.pbs_fingerprint.is_empty() {
+        cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
+    }
+    if !storage.pbs_token_secret.is_empty() {
+        cmd.env("PBS_PASSWORD", &storage.pbs_token_secret);
+    }
+
+    let output = cmd.output()
+        .map_err(|e| format!("Failed to run proxmox-backup-client: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!("PBS snapshot list failed: {}",
+            String::from_utf8_lossy(&output.stderr)));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let snapshots: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| format!("Failed to parse PBS output: {}", e))?;
+
+    Ok(snapshots)
+}
+
+/// Restore a specific snapshot from PBS to local staging
+pub fn restore_from_pbs(
+    storage: &BackupStorage,
+    snapshot: &str,
+    archive: &str,
+    target_dir: &str,
+) -> Result<String, String> {
+    let repo = pbs_repo_string(storage);
+
+    fs::create_dir_all(target_dir)
+        .map_err(|e| format!("Failed to create target dir: {}", e))?;
+
+    let mut cmd = Command::new("proxmox-backup-client");
+    cmd.arg("restore")
+       .arg(snapshot)
+       .arg(archive)
+       .arg(target_dir)
+       .arg("--repository").arg(&repo);
+
+    if !storage.pbs_fingerprint.is_empty() {
+        cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
+    }
+    if !storage.pbs_token_secret.is_empty() {
+        cmd.env("PBS_PASSWORD", &storage.pbs_token_secret);
+    }
+
+    let output = cmd.output()
+        .map_err(|e| format!("PBS restore failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!("PBS restore error: {}",
+            String::from_utf8_lossy(&output.stderr)));
+    }
+
+    info!("Restored PBS snapshot {} archive {} to {}", snapshot, archive, target_dir);
+    Ok(format!("Restored to {}", target_dir))
+}
+
+/// Check if PBS is reachable and proxmox-backup-client is installed
+pub fn check_pbs_status(storage: &BackupStorage) -> serde_json::Value {
+    let client_installed = Command::new("which")
+        .arg("proxmox-backup-client")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !client_installed {
+        return serde_json::json!({
+            "installed": false,
+            "connected": false,
+            "error": "proxmox-backup-client not installed"
+        });
+    }
+
+    if storage.pbs_server.is_empty() {
+        return serde_json::json!({
+            "installed": true,
+            "connected": false,
+            "error": "PBS not configured"
+        });
+    }
+
+    // Try to list snapshots as a connectivity test
+    match list_pbs_snapshots(storage) {
+        Ok(snapshots) => {
+            let count = snapshots.as_array().map(|a| a.len()).unwrap_or(0);
+            serde_json::json!({
+                "installed": true,
+                "connected": true,
+                "server": storage.pbs_server,
+                "datastore": storage.pbs_datastore,
+                "snapshot_count": count
+            })
+        },
+        Err(e) => serde_json::json!({
+            "installed": true,
+            "connected": false,
+            "server": storage.pbs_server,
+            "error": e
+        })
+    }
+}
+
+/// PBS configuration — stored in /etc/wolfstack/pbs/config.json
+pub fn load_pbs_config() -> BackupStorage {
+    let path = "/etc/wolfstack/pbs/config.json";
+    if let Ok(content) = fs::read_to_string(path) {
+        if let Ok(storage) = serde_json::from_str::<BackupStorage>(&content) {
+            return storage;
+        }
+    }
+    BackupStorage {
+        storage_type: StorageType::Pbs,
+        ..BackupStorage::default()
+    }
+}
+
+/// Save PBS configuration
+pub fn save_pbs_config(storage: &BackupStorage) -> Result<(), String> {
+    let path = "/etc/wolfstack/pbs/config.json";
+    fs::create_dir_all("/etc/wolfstack/pbs")
+        .map_err(|e| format!("Failed to create PBS config dir: {}", e))?;
+    let json = serde_json::to_string_pretty(storage)
+        .map_err(|e| format!("Failed to serialize PBS config: {}", e))?;
+    fs::write(path, json)
+        .map_err(|e| format!("Failed to write PBS config: {}", e))?;
+    Ok(())
+}
+
+// ─── Proxmox Config Translation (for migration) ───
+
+/// Parse a Proxmox VE VM .conf file into a WolfStack-compatible JSON config
+/// Proxmox format: key: value (one per line), with comments starting with #
+pub fn proxmox_conf_to_vm_config(conf: &str, vm_name: &str) -> serde_json::Value {
+    let mut cpus: u32 = 1;
+    let mut memory_mb: u32 = 1024;
+    let mut disk_size_gb: u32 = 10;
+    let mut net_model = "virtio".to_string();
+    let mut os_disk_bus = "virtio".to_string();
+    let mut iso_path: Option<String> = None;
+
+    for line in conf.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+
+        let key = parts[0].trim();
+        let value = parts[1].trim();
+
+        match key {
+            "cores" => { cpus = value.parse().unwrap_or(1); },
+            "sockets" => {
+                let sockets: u32 = value.parse().unwrap_or(1);
+                cpus *= sockets; // total = cores * sockets
+            },
+            "memory" => { memory_mb = value.parse().unwrap_or(1024); },
+            "ide0" | "ide1" | "ide2" | "scsi0" | "sata0" | "virtio0" => {
+                // Parse disk: local:vm-100-disk-0,size=32G
+                if !value.contains("media=cdrom") {
+                    for part in value.split(',') {
+                        if part.starts_with("size=") {
+                            let size_str = part.trim_start_matches("size=");
+                            disk_size_gb = size_str.trim_end_matches('G')
+                                .trim_end_matches('T')
+                                .parse().unwrap_or(10);
+                            if size_str.ends_with('T') {
+                                disk_size_gb *= 1024;
+                            }
+                        }
+                    }
+                    // Detect bus type from key
+                    if key.starts_with("ide") { os_disk_bus = "ide".to_string(); }
+                    else if key.starts_with("sata") { os_disk_bus = "ide".to_string(); } // QEMU maps sata to ide
+                    else if key.starts_with("scsi") { os_disk_bus = "scsi".to_string(); }
+                    else { os_disk_bus = "virtio".to_string(); }
+                }
+                // Check for ISO (cdrom)
+                if value.contains("media=cdrom") {
+                    let iso = value.split(',').next().unwrap_or("");
+                    if !iso.is_empty() && iso != "none" {
+                        iso_path = Some(iso.to_string());
+                    }
+                }
+            },
+            "net0" => {
+                // Parse network: virtio=XX:XX:XX:XX:XX:XX,bridge=vmbr0
+                if value.starts_with("virtio") { net_model = "virtio".to_string(); }
+                else if value.starts_with("e1000") { net_model = "e1000".to_string(); }
+                else if value.starts_with("rtl8139") { net_model = "rtl8139".to_string(); }
+            },
+            _ => {}
+        }
+    }
+
+    serde_json::json!({
+        "name": vm_name,
+        "cpus": cpus,
+        "memory_mb": memory_mb,
+        "disk_size_gb": disk_size_gb,
+        "running": false,
+        "auto_start": false,
+        "os_disk_bus": os_disk_bus,
+        "net_model": net_model,
+        "iso_path": iso_path,
+        "extra_disks": [],
+        "source": "proxmox"
+    })
+}
+
+/// Parse a Proxmox LXC .conf into key info for recreation
+pub fn proxmox_lxc_conf_to_config(conf: &str) -> serde_json::Value {
+    let mut hostname = String::new();
+    let mut memory_mb: u32 = 512;
+    let mut cpus: u32 = 1;
+    let mut rootfs_size = String::new();
+    let mut net_config = String::new();
+    let mut ostype = "ubuntu".to_string();
+
+    for line in conf.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+
+        let parts: Vec<&str> = line.splitn(2, ':').collect();
+        if parts.len() != 2 { continue; }
+
+        let key = parts[0].trim();
+        let value = parts[1].trim();
+
+        match key {
+            "hostname" => { hostname = value.to_string(); },
+            "memory" => { memory_mb = value.parse().unwrap_or(512); },
+            "cores" => { cpus = value.parse().unwrap_or(1); },
+            "rootfs" => {
+                for part in value.split(',') {
+                    if part.starts_with("size=") {
+                        rootfs_size = part.trim_start_matches("size=").to_string();
+                    }
+                }
+            },
+            "net0" => { net_config = value.to_string(); },
+            "ostype" => { ostype = value.to_string(); },
+            _ => {}
+        }
+    }
+
+    serde_json::json!({
+        "hostname": hostname,
+        "memory_mb": memory_mb,
+        "cpus": cpus,
+        "rootfs_size": rootfs_size,
+        "net_config": net_config,
+        "ostype": ostype,
+        "source": "proxmox"
+    })
 }

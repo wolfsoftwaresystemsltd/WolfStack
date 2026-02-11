@@ -710,6 +710,79 @@
                     </p>
                 </div>
             </div>
+
+            <!-- PBS Configuration Card -->
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>📦 Proxmox Backup Server</h3>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                        <span id="pbs-status-badge" style="font-size:12px; padding:3px 10px; border-radius:10px;
+                            background:var(--bg-tertiary); color:var(--text-muted);">Checking…</span>
+                        <button class="btn btn-sm btn-primary" onclick="savePbsConfig()">💾 Save</button>
+                        <button class="btn btn-sm"
+                            style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"
+                            onclick="testPbsConnection()">🔌 Test</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:12px;">
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary);">PBS Server</label>
+                            <input type="text" id="pbs-server" class="form-control" placeholder="pbs.example.com">
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary);">Datastore</label>
+                            <input type="text" id="pbs-datastore" class="form-control" placeholder="backups">
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary);">User</label>
+                            <input type="text" id="pbs-user" class="form-control" placeholder="backup@pbs">
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary);">API Token Name</label>
+                            <input type="text" id="pbs-token-name" class="form-control" placeholder="wolfstack">
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary);">API Token Secret</label>
+                            <input type="password" id="pbs-token-secret" class="form-control"
+                                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary);">TLS Fingerprint <span
+                                    style="color:var(--text-muted);">(optional)</span></label>
+                            <input type="text" id="pbs-fingerprint" class="form-control" placeholder="AA:BB:CC:...">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PBS Snapshots Browser -->
+            <div class="card" id="pbs-snapshots-card" style="display:none;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>🗂️ PBS Snapshots</h3>
+                    <button class="btn btn-sm"
+                        style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"
+                        onclick="loadPbsSnapshots()">🔄 Refresh</button>
+                </div>
+                <div class="card-body" style="overflow-x:auto;">
+                    <table class="data-table" style="width:100%;">
+                        <thead>
+                            <tr>
+                                <th>Type</th>
+                                <th>ID</th>
+                                <th>Time</th>
+                                <th>Size</th>
+                                <th style="text-align:right;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pbs-snapshots-table"></tbody>
+                    </table>
+                    <p id="pbs-snapshots-empty"
+                        style="display:none; text-align:center; padding:20px; color:var(--text-muted);">
+                        No snapshots found on PBS server.
+                    </p>
+                </div>
+            </div>
         </div>
 
         <!-- Schedule Modal (only needs name, frequency, time, retention — targets come from checked items) -->

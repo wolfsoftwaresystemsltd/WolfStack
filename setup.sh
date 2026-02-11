@@ -74,6 +74,43 @@ fi
 
 echo "✓ System dependencies installed"
 
+# ─── Install Proxmox Backup Client (optional, for PBS integration) ──────────
+echo ""
+echo "Installing Proxmox Backup Client..."
+
+if command -v proxmox-backup-client &> /dev/null; then
+    echo "✓ proxmox-backup-client already installed"
+elif [ "$PKG_MANAGER" = "apt" ]; then
+    # Add Proxmox PBS client repo (works on any Debian/Ubuntu)
+    PBS_REPO_FILE="/etc/apt/sources.list.d/pbs-client.list"
+    if [ ! -f "$PBS_REPO_FILE" ]; then
+        # Detect Debian codename
+        CODENAME=$(lsb_release -cs 2>/dev/null || echo "bookworm")
+        echo "deb http://download.proxmox.com/debian/pbs-client $CODENAME main" > "$PBS_REPO_FILE"
+        # Add Proxmox repo key
+        curl -fsSL "https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg" \
+            -o /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg 2>/dev/null || true
+        apt update -qq 2>/dev/null || true
+    fi
+    apt install -y proxmox-backup-client 2>/dev/null || {
+        echo "⚠ Could not install proxmox-backup-client from repo."
+        echo "  PBS backup/restore will not be available."
+        echo "  You can install it manually later: apt install proxmox-backup-client"
+    }
+else
+    # For non-Debian: try downloading the static binary
+    echo "  Attempting to download static proxmox-backup-client..."
+    ARCH=$(uname -m)
+    PBS_URL="https://enterprise.proxmox.com/debian/pbs-client/proxmox-backup-client-static-${ARCH}.bin"
+    if curl -fsSL "$PBS_URL" -o /usr/local/bin/proxmox-backup-client 2>/dev/null; then
+        chmod +x /usr/local/bin/proxmox-backup-client
+        echo "✓ proxmox-backup-client (static) installed"
+    else
+        echo "⚠ Could not download proxmox-backup-client for $ARCH."
+        echo "  PBS integration will not be available. Install manually if needed."
+    fi
+fi
+
 # ─── Configure FUSE for storage mounts ──────────────────────────────────────
 # Enable allow_other in FUSE (needed for s3fs mounts accessible by containers)
 if [ -f /etc/fuse.conf ]; then
@@ -84,7 +121,7 @@ fi
 
 # Create storage directories
 # rust-s3 syncs bucket contents to /var/cache/wolfstack/s3/<mount-id>/
-mkdir -p /etc/wolfstack/s3 /mnt/wolfstack /var/cache/wolfstack/s3
+mkdir -p /etc/wolfstack/s3 /etc/wolfstack/pbs /mnt/wolfstack /var/cache/wolfstack/s3
 echo "✓ Storage directories configured"
 
 # ─── Install Docker if missing ──────────────────────────────────────────────

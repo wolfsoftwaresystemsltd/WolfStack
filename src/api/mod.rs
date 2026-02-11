@@ -1603,6 +1603,105 @@ pub async fn backup_import(
     }
 }
 
+// ─── Proxmox Backup Server (PBS) API ───
+
+/// GET /api/backups/pbs/status — check PBS connectivity
+pub async fn pbs_status(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let config = backup::load_pbs_config();
+    HttpResponse::Ok().json(backup::check_pbs_status(&config))
+}
+
+/// GET /api/backups/pbs/snapshots — list all PBS snapshots
+pub async fn pbs_snapshots(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let config = backup::load_pbs_config();
+    match backup::list_pbs_snapshots(&config) {
+        Ok(snapshots) => HttpResponse::Ok().json(snapshots),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PbsRestoreRequest {
+    pub snapshot: String,
+    pub archive: String,
+    #[serde(default = "default_pbs_target_dir")]
+    pub target_dir: String,
+}
+fn default_pbs_target_dir() -> String { "/var/lib/wolfstack/restored".to_string() }
+
+/// POST /api/backups/pbs/restore — restore a PBS snapshot
+pub async fn pbs_restore(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<PbsRestoreRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let config = backup::load_pbs_config();
+    match backup::restore_from_pbs(&config, &body.snapshot, &body.archive, &body.target_dir) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/backups/pbs/config — get PBS configuration
+pub async fn pbs_config_get(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let config = backup::load_pbs_config();
+    // Return config without the token secret for security
+    HttpResponse::Ok().json(serde_json::json!({
+        "pbs_server": config.pbs_server,
+        "pbs_datastore": config.pbs_datastore,
+        "pbs_user": config.pbs_user,
+        "pbs_token_name": config.pbs_token_name,
+        "pbs_fingerprint": config.pbs_fingerprint,
+        "has_token_secret": !config.pbs_token_secret.is_empty(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct PbsConfigRequest {
+    pub pbs_server: String,
+    pub pbs_datastore: String,
+    pub pbs_user: String,
+    #[serde(default)]
+    pub pbs_token_name: String,
+    #[serde(default)]
+    pub pbs_token_secret: String,
+    #[serde(default)]
+    pub pbs_fingerprint: String,
+}
+
+/// POST /api/backups/pbs/config — save PBS configuration
+pub async fn pbs_config_save(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<PbsConfigRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let storage = backup::BackupStorage {
+        storage_type: backup::StorageType::Pbs,
+        pbs_server: body.pbs_server.clone(),
+        pbs_datastore: body.pbs_datastore.clone(),
+        pbs_user: body.pbs_user.clone(),
+        pbs_token_name: body.pbs_token_name.clone(),
+        pbs_token_secret: body.pbs_token_secret.clone(),
+        pbs_fingerprint: body.pbs_fingerprint.clone(),
+        ..backup::BackupStorage::default()
+    };
+    match backup::save_pbs_config(&storage) {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+            "message": "PBS configuration saved",
+        })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
 // ─── Storage Manager API ───
 
 /// GET /api/storage/mounts — list all storage mounts with live status
@@ -2012,6 +2111,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups/{id}", web::delete().to(backup_delete))
         .route("/api/backups/{id}/restore", web::post().to(backup_restore))
         .route("/api/backups/import", web::post().to(backup_import))
+        // PBS (Proxmox Backup Server)
+        .route("/api/backups/pbs/status", web::get().to(pbs_status))
+        .route("/api/backups/pbs/snapshots", web::get().to(pbs_snapshots))
+        .route("/api/backups/pbs/restore", web::post().to(pbs_restore))
+        .route("/api/backups/pbs/config", web::get().to(pbs_config_get))
+        .route("/api/backups/pbs/config", web::post().to(pbs_config_save))
         // Console WebSocket
         .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
         // Agent (cluster-secret auth — inter-node communication)
