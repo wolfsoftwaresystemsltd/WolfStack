@@ -50,14 +50,26 @@ echo "Installing system dependencies..."
 
 if [ "$PKG_MANAGER" = "apt" ]; then
     apt update -qq
-    apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils qemu-system-x86 qemu-utils socat
+    apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils qemu-system-x86 qemu-utils socat s3fs nfs-common fuse3
 elif [ "$PKG_MANAGER" = "dnf" ]; then
-    dnf install -y git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat
+    dnf install -y git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat s3fs-fuse nfs-utils fuse3
 elif [ "$PKG_MANAGER" = "yum" ]; then
-    yum install -y git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat
+    yum install -y git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat s3fs-fuse nfs-utils fuse
 fi
 
 echo "✓ System dependencies installed"
+
+# ─── Configure FUSE for storage mounts ──────────────────────────────────────
+# Enable allow_other in FUSE (needed for s3fs mounts accessible by containers)
+if [ -f /etc/fuse.conf ]; then
+    if ! grep -q "^user_allow_other" /etc/fuse.conf; then
+        echo "user_allow_other" >> /etc/fuse.conf
+    fi
+fi
+
+# Create storage directories
+mkdir -p /etc/wolfstack/s3 /mnt/wolfstack /tmp/wolfstack-s3cache
+echo "✓ Storage directories configured"
 
 # ─── Install Docker if missing ──────────────────────────────────────────────
 if ! command -v docker &> /dev/null; then
