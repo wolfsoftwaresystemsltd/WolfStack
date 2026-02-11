@@ -16,6 +16,7 @@ mod containers;
 mod console;
 mod storage;
 mod networking;
+mod backup;
 mod vms;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
@@ -198,6 +199,14 @@ async fn main() -> std::io::Result<()> {
             loop {
                 tokio::time::sleep(Duration::from_secs(300)).await;
                 sessions_cleanup.cleanup();
+            }
+        });
+
+        // Background: backup schedule checker (every 60s)
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                backup::check_schedules();
             }
         });
 

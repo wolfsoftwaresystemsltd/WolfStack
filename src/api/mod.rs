@@ -11,6 +11,7 @@ use crate::installer;
 use crate::containers;
 use crate::storage;
 use crate::networking;
+use crate::backup;
 use crate::agent::{ClusterState, AgentMessage};
 use crate::auth::SessionManager;
 
@@ -1460,6 +1461,148 @@ pub async fn net_available_ips(
     }))
 }
 
+// ─── Backup API ───
+
+#[derive(Deserialize)]
+pub struct CreateBackupRequest {
+    /// Optional specific target — if omitted, backup everything
+    pub target: Option<backup::BackupTarget>,
+    pub storage: backup::BackupStorage,
+}
+
+#[derive(Deserialize)]
+pub struct CreateScheduleRequest {
+    pub name: String,
+    pub frequency: backup::BackupFrequency,
+    pub time: String,
+    pub retention: u32,
+    pub backup_all: bool,
+    #[serde(default)]
+    pub targets: Vec<backup::BackupTarget>,
+    pub storage: backup::BackupStorage,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+fn default_true() -> bool { true }
+
+/// GET /api/backups — list all backup entries
+pub async fn backup_list(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(backup::list_backups())
+}
+
+/// POST /api/backups — create a backup now
+pub async fn backup_create(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<CreateBackupRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let entries = backup::create_backup(body.target.clone(), body.storage.clone());
+    let success_count = entries.iter().filter(|e| e.status == backup::BackupStatus::Completed).count();
+    let fail_count = entries.iter().filter(|e| e.status == backup::BackupStatus::Failed).count();
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": format!("{} backup(s) completed, {} failed", success_count, fail_count),
+        "entries": entries,
+    }))
+}
+
+/// DELETE /api/backups/{id} — delete a backup entry + file
+pub async fn backup_delete(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match backup::delete_backup(&path.into_inner()) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/backups/{id}/restore — restore from a backup
+pub async fn backup_restore(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match backup::restore_by_id(&path.into_inner()) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/backups/targets — list available backup targets
+pub async fn backup_targets(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(backup::list_available_targets())
+}
+
+/// GET /api/backups/schedules — list schedules
+pub async fn backup_schedules_list(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(backup::list_schedules())
+}
+
+/// POST /api/backups/schedules — create or update a schedule
+pub async fn backup_schedule_create(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<CreateScheduleRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let schedule = backup::BackupSchedule {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: body.name.clone(),
+        frequency: body.frequency.clone(),
+        time: body.time.clone(),
+        retention: body.retention,
+        backup_all: body.backup_all,
+        targets: body.targets.clone(),
+        storage: body.storage.clone(),
+        enabled: body.enabled,
+        last_run: String::new(),
+    };
+    match backup::save_schedule(schedule) {
+        Ok(s) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Schedule '{}' created", s.name),
+            "schedule": s,
+        })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/backups/schedules/{id} — delete a schedule
+pub async fn backup_schedule_delete(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match backup::delete_schedule(&path.into_inner()) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/backups/import — receive a backup from remote node
+pub async fn backup_import(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Bytes,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let filename = query.get("filename")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("import-{}.tar.gz", chrono::Utc::now().timestamp()));
+    match backup::import_backup(&body, &filename) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
 // ─── Storage Manager API ───
 
 /// GET /api/storage/mounts — list all storage mounts with live status
@@ -1859,6 +2002,16 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/networking/ip-mappings", web::post().to(net_add_ip_mapping))
         .route("/api/networking/ip-mappings/{id}", web::delete().to(net_remove_ip_mapping))
         .route("/api/networking/available-ips", web::get().to(net_available_ips))
+        // Backups
+        .route("/api/backups", web::get().to(backup_list))
+        .route("/api/backups", web::post().to(backup_create))
+        .route("/api/backups/targets", web::get().to(backup_targets))
+        .route("/api/backups/schedules", web::get().to(backup_schedules_list))
+        .route("/api/backups/schedules", web::post().to(backup_schedule_create))
+        .route("/api/backups/schedules/{id}", web::delete().to(backup_schedule_delete))
+        .route("/api/backups/{id}", web::delete().to(backup_delete))
+        .route("/api/backups/{id}/restore", web::post().to(backup_restore))
+        .route("/api/backups/import", web::post().to(backup_import))
         // Console WebSocket
         .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
         // Agent (cluster-secret auth — inter-node communication)
