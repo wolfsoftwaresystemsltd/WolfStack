@@ -903,23 +903,27 @@ async function createStorageMount() {
 
 async function mountStorage(id) {
     try {
+        showToast('Mounting storage... (this may take a moment for S3)', 'info');
         const resp = await fetch(apiUrl(`/api/storage/mounts/${id}/mount`), { method: 'POST' });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Mount failed');
+        showToast(data.message || 'Mounted successfully', 'success');
         loadStorageMounts();
     } catch (e) {
-        alert('Mount error: ' + e.message);
+        showToast('Mount error: ' + e.message, 'error');
     }
 }
 
 async function unmountStorage(id) {
     try {
+        showToast('Unmounting...', 'info');
         const resp = await fetch(apiUrl(`/api/storage/mounts/${id}/unmount`), { method: 'POST' });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Unmount failed');
+        showToast(data.message || 'Unmounted', 'success');
         loadStorageMounts();
     } catch (e) {
-        alert('Unmount error: ' + e.message);
+        showToast('Unmount error: ' + e.message, 'error');
     }
 }
 

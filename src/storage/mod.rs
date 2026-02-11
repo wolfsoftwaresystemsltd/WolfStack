@@ -139,9 +139,11 @@ pub fn list_mounts() -> Vec<StorageMount> {
         if check_mounted(&mount.mount_point) {
             mount.status = "mounted".to_string();
             mount.error_message = None;
-        } else if mount.enabled {
+        } else if mount.status == "mounted" {
+            // Was mounted but no longer — mark as unmounted
             mount.status = "unmounted".to_string();
         }
+        // Preserve "error" status with error_message intact
     }
     config.mounts
 }
@@ -264,6 +266,11 @@ pub fn create_mount(mut mount: StorageMount, do_mount: bool) -> Result<StorageMo
     // Check for duplicate mount points
     if config.mounts.iter().any(|m| m.mount_point == mount.mount_point) {
         return Err(format!("Mount point '{}' already in use", mount.mount_point));
+    }
+    
+    // Check for duplicate names (prevents double-adding the same storage)
+    if config.mounts.iter().any(|m| m.name == mount.name) {
+        return Err(format!("A mount named '{}' already exists", mount.name));
     }
     
     config.mounts.push(mount.clone());
