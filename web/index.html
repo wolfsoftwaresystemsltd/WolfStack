@@ -7,10 +7,35 @@
     <title>WolfStack — Server Management</title>
     <meta name="description" content="WolfStack server management dashboard for the Wolf software suite">
     <link rel="icon" type="image/svg+xml" href="https://wolf.uk.com/wp-content/uploads/2026/01/Group-9.svg">
-    <link rel="stylesheet" href="/css/style.css">
-    <link rel="stylesheet" href="/css/xterm.min.css" />
-    <script src="/js/vendor/xterm.min.js"></script>
-    <script src="/js/vendor/xterm-addon-fit.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <style>
+        /* Map Styles */
+        #world-map {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            z-index: 1;
+        }
+
+        .leaflet-container {
+            background: var(--bg-card) !important;
+            font-family: 'Inter', sans-serif;
+        }
+
+        .leaflet-popup-content-wrapper,
+        .leaflet-popup-tip {
+            background: var(--bg-secondary) !important;
+            color: var(--text-primary) !important;
+            box-shadow: var(--shadow-md) !important;
+            border: 1px solid var(--border);
+        }
+
+        .leaflet-popup-close-button {
+            color: var(--text-muted) !important;
+        }
+    </style>
 </head>
 
 <body>
@@ -21,7 +46,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v6.1.3</span>
+                <span class="version">v6.1.5</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -64,6 +89,16 @@
         <div class="page-content">
             <!-- ═══ Datacenter Overview ═══ -->
             <div id="page-datacenter" class="page-view">
+
+                <!-- World Map -->
+                <div class="card" style="margin-bottom: 24px; overflow: hidden;">
+                    <div class="card-header">
+                        <h3>🌍 Global Infrastructure</h3>
+                        <div style="font-size: 12px; color: var(--text-muted);">Live Server Locations</div>
+                    </div>
+                    <div id="world-map" style="height: 380px; width: 100%; border: none; border-radius: 0;"></div>
+                </div>
+
                 <div class="stats-grid" style="margin-bottom: 20px;">
                     <div class="stat-card">
                         <div class="stat-header">
@@ -102,175 +137,155 @@
 
             <!-- ═══ Dashboard Page (per-server) ═══ -->
             <div id="page-dashboard" class="page-view" style="display:none;">
-                <!-- Stats Row -->
-                <div class="stats-grid" id="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">CPU Usage</span>
+
+                <!-- Server Header -->
+                <div class="card"
+                    style="margin-bottom: 24px; background: linear-gradient(135deg, rgba(26,31,53,0.9), rgba(13,18,37,0.95)); border-color: var(--border-light);">
+                    <div class="card-body"
+                        style="display: flex; align-items: center; justify-content: space-between; padding: 24px 32px;">
+                        <div style="display: flex; align-items: center; gap: 20px;">
+                            <div
+                                style="width: 64px; height: 64px; background: var(--gradient-main); border-radius: 16px; display: flex; align-items: center; justify-content: center; font-size: 32px; box-shadow: var(--shadow-glow);">
+                                🖥️
+                            </div>
+                            <div>
+                                <h2 style="font-size: 24px; margin-bottom: 4px; color: var(--text-primary); font-weight: 700;"
+                                    id="server-header-hostname">Server</h2>
+                                <div style="display: flex; gap: 16px; font-size: 13px; color: var(--text-secondary);">
+                                    <span id="server-header-ip">127.0.0.1</span>
+                                    <span>•</span>
+                                    <span id="server-header-os">Linux</span>
+                                    <span>•</span>
+                                    <span id="server-header-uptime">Up: —</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 12px;">
+                            <button class="btn btn-primary" onclick="selectView('terminal')">
+                                <span class="icon">💻</span> Terminal
+                            </button>
+                            <button class="btn" onclick="location.reload()">
+                                <span class="icon">🔄</span> Refresh
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Main Metrics Grid -->
+                <div class="grid-2" style="margin-bottom: 24px;">
+                    <!-- CPU Card -->
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>CPU Usage</h3>
                             <div class="stat-icon" style="background: var(--accent-glow); color: var(--accent-light);">⚡
                             </div>
                         </div>
-                        <div class="stat-value" id="cpu-value">—</div>
-                        <div class="stat-sub" id="cpu-model"></div>
-                        <div class="progress-bar">
-                            <div class="fill accent" id="cpu-bar" style="width: 0%"></div>
+                        <div class="card-body">
+                            <div style="display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px;">
+                                <div class="stat-value" id="cpu-value">—</div>
+                                <div class="stat-sub" style="font-size: 14px;">Total Load</div>
+                            </div>
+                            <div class="progress-bar" style="height: 12px; margin-bottom: 16px;">
+                                <div class="fill accent" id="cpu-bar" style="width: 0%"></div>
+                            </div>
+                            <div
+                                style="font-size: 12px; color: var(--text-muted); padding-top: 12px; border-top: 1px solid var(--border);">
+                                <span id="cpu-model">Unknown CPU</span>
+                            </div>
                         </div>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Memory</span>
+
+                    <!-- Memory Card -->
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Memory Usage</h3>
                             <div class="stat-icon" style="background: var(--success-bg); color: var(--success);">🧠
                             </div>
                         </div>
-                        <div class="stat-value" id="mem-value">—</div>
-                        <div class="stat-sub" id="mem-detail"></div>
-                        <div class="progress-bar">
-                            <div class="fill success" id="mem-bar" style="width: 0%"></div>
+                        <div class="card-body">
+                            <div style="display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px;">
+                                <div class="stat-value" id="mem-value">—</div>
+                                <div class="stat-sub" style="font-size: 14px;">Used</div>
+                            </div>
+                            <div class="progress-bar" style="height: 12px; margin-bottom: 16px;">
+                                <div class="fill success" id="mem-bar" style="width: 0%"></div>
+                            </div>
+                            <div
+                                style="font-size: 12px; color: var(--text-muted); padding-top: 12px; border-top: 1px solid var(--border);">
+                                <span id="mem-detail">— / —</span>
+                            </div>
                         </div>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Disk</span>
+                </div>
+
+                <div class="grid-2" style="margin-bottom: 24px;">
+                    <!-- Disk Card -->
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Disk Usage (Root)</h3>
                             <div class="stat-icon" style="background: var(--warning-bg); color: var(--warning);">💾
                             </div>
                         </div>
-                        <div class="stat-value" id="disk-value">—</div>
-                        <div class="stat-sub" id="disk-detail"></div>
-                        <div class="progress-bar">
-                            <div class="fill warning" id="disk-bar" style="width: 0%"></div>
+                        <div class="card-body">
+                            <div style="display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px;">
+                                <div class="stat-value" id="disk-value">—</div>
+                                <div class="stat-sub" style="font-size: 14px;">Used</div>
+                            </div>
+                            <div class="progress-bar" style="height: 12px; margin-bottom: 16px;">
+                                <div class="fill warning" id="disk-bar" style="width: 0%"></div>
+                            </div>
+                            <div
+                                style="font-size: 12px; color: var(--text-muted); padding-top: 12px; border-top: 1px solid var(--border);">
+                                <span id="disk-detail">— / —</span>
+                            </div>
                         </div>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Network</span>
-                            <div class="stat-icon" style="background: var(--info-bg); color: var(--info);">🌐</div>
-                        </div>
-                        <div class="stat-value" id="net-value">—</div>
-                        <div class="stat-sub" id="net-detail"></div>
-                    </div>
-                </div>
 
-                <!-- Gauges & Server List -->
-                <div class="grid-2">
+                    <!-- Network Card (No Bar) -->
                     <div class="card">
                         <div class="card-header">
-                            <h3>System Load</h3>
-                        </div>
-                        <div class="card-body" style="display: flex; justify-content: space-around;">
-                            <div class="gauge-container">
-                                <div class="gauge">
-                                    <svg width="120" height="120" viewBox="0 0 120 120">
-                                        <circle cx="60" cy="60" r="52" fill="none" stroke-width="10" class="gauge-bg" />
-                                        <circle cx="60" cy="60" r="52" fill="none" stroke-width="10" class="gauge-fill"
-                                            id="cpu-gauge" stroke="var(--accent)" stroke-linecap="round"
-                                            stroke-dasharray="0 327" />
-                                    </svg>
-                                    <div class="gauge-text">
-                                        <div class="value" id="cpu-gauge-val">0%</div>
-                                        <div class="label">CPU</div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="gauge-container">
-                                <div class="gauge">
-                                    <svg width="120" height="120" viewBox="0 0 120 120">
-                                        <circle cx="60" cy="60" r="52" fill="none" stroke-width="10" class="gauge-bg" />
-                                        <circle cx="60" cy="60" r="52" fill="none" stroke-width="10" class="gauge-fill"
-                                            id="mem-gauge" stroke="var(--success)" stroke-linecap="round"
-                                            stroke-dasharray="0 327" />
-                                    </svg>
-                                    <div class="gauge-text">
-                                        <div class="value" id="mem-gauge-val">0%</div>
-                                        <div class="label">Memory</div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="gauge-container">
-                                <div class="gauge">
-                                    <svg width="120" height="120" viewBox="0 0 120 120">
-                                        <circle cx="60" cy="60" r="52" fill="none" stroke-width="10" class="gauge-bg" />
-                                        <circle cx="60" cy="60" r="52" fill="none" stroke-width="10" class="gauge-fill"
-                                            id="load-gauge" stroke="var(--warning)" stroke-linecap="round"
-                                            stroke-dasharray="0 327" />
-                                    </svg>
-                                    <div class="gauge-text">
-                                        <div class="value" id="load-gauge-val">0.0</div>
-                                        <div class="label">Load</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Disk Table -->
-                    <div class="card" style="margin-top: 20px;">
-                        <div class="card-header">
-                            <h3>Storage</h3>
+                            <h3>Network Traffic</h3>
+                            <div class="stat-icon" style="background: var(--info-bg); color: var(--info);">🌐</div>
                         </div>
                         <div class="card-body">
-                            <table class="data-table">
-                                <thead>
-                                    <tr>
-                                        <th>Mount</th>
-                                        <th>Filesystem</th>
-                                        <th>Total</th>
-                                        <th>Used</th>
-                                        <th>Available</th>
-                                        <th>Usage</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="disk-table"></tbody>
-                            </table>
+                            <div style="display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px;">
+                                <div class="stat-value" id="net-value">—</div>
+                                <div class="stat-sub" style="font-size: 14px;">Total I/O</div>
+                            </div>
+                            <div style="height: 12px; margin-bottom: 16px;"></div> <!-- Spacer -->
+                            <div
+                                style="font-size: 12px; color: var(--text-muted); padding-top: 12px; border-top: 1px solid var(--border);">
+                                <span id="net-detail">Rx: — | Tx: —</span>
+                            </div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Storage Table -->
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Filesystems</h3>
+                    </div>
+                    <div class="card-body" style="overflow-x: auto;">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Mount</th>
+                                    <th>Filesystem</th>
+                                    <th>Total</th>
+                                    <th>Used</th>
+                                    <th>Available</th>
+                                    <th>Usage</th>
+                                </tr>
+                            </thead>
+                            <tbody id="disk-table"></tbody>
+                        </table>
                     </div>
                 </div>
             </div>
 
 
-            <!-- ═══ Performance History ═══ -->
-            <h3
-                style="margin: 24px 0 16px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary);">
-                Performance History (10 min)</h3>
-            <div class="history-charts-grid"
-                style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 24px;">
-                <!-- CPU Chart -->
-                <div class="card chart-card">
-                    <div class="card-header" style="border-bottom: none; padding-bottom: 0;">
-                        <h3>CPU Usage</h3>
-                    </div>
-                    <div class="card-body" style="padding: 0 16px 16px 16px;">
-                        <div class="chart-canvas-wrap" style="position: relative; height: 180px; width: 100%;">
-                            <canvas id="cpu-chart-canvas"></canvas>
-                        </div>
-                    </div>
-                </div>
 
-                <!-- Memory Chart -->
-                <div class="card chart-card">
-                    <div class="card-header" style="border-bottom: none; padding-bottom: 0;">
-                        <h3>Memory Usage</h3>
-                    </div>
-                    <div class="card-body" style="padding: 0 16px 16px 16px;">
-                        <div class="chart-canvas-wrap" style="position: relative; height: 180px; width: 100%;">
-                            <canvas id="mem-chart-canvas"></canvas>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Disk Chart -->
-                <div class="card chart-card">
-                    <div class="card-header"
-                        style="border-bottom: none; padding-bottom: 0; display: flex; justify-content: space-between; align-items: center;">
-                        <h3>Disk Usage</h3>
-                        <div id="disk-chart-legend" style="display: flex; gap: 8px; font-size: 10px;"></div>
-                    </div>
-                    <div class="card-body" style="padding: 0 16px 16px 16px;">
-                        <div class="chart-canvas-wrap" style="position: relative; height: 180px; width: 100%;">
-                            <canvas id="disk-chart-canvas"></canvas>
-                        </div>
-                    </div>
-                </div>
-            </div>
 
 
         </div>

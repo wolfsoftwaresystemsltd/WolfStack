@@ -72,6 +72,16 @@ function selectServerView(nodeId, view) {
     document.getElementById('page-title').textContent = `${hostname} — ${viewTitles[view] || view}`;
     document.getElementById('hostname-display').textContent = `${hostname} (${node?.address}:${node?.port})`;
 
+    // Update Header Info
+    const headerHostname = document.getElementById('server-header-hostname');
+    if (headerHostname) headerHostname.textContent = hostname;
+
+    const headerIp = document.getElementById('server-header-ip');
+    if (headerIp) headerIp.textContent = node?.address || '—';
+
+    const headerOs = document.getElementById('server-header-os');
+    if (headerOs && node?.metrics?.os_name) headerOs.textContent = node.metrics.os_name;
+
     // Load data for the view
     if (view === 'dashboard') {
         if (node?.metrics) updateDashboard(node.metrics);
@@ -265,6 +275,75 @@ function renderDatacenterOverview() {
         <p style="margin:0; color:var(--text-muted); font-size:13px; text-align:center; padding:0 20px;">Help us build amazing open source infrastructure tools</p>
         <div style="margin-top:12px; padding:6px 16px; border-radius:6px; background:linear-gradient(135deg, #ff424d, #f96854); color:white; font-size:13px; font-weight:600;">Join on Patreon</div>
     </div>`;
+
+    // Initialize Map
+    setTimeout(() => updateMap(nodes), 100);
+}
+
+// ─── Map Logic ───
+let worldMap = null;
+let mapMarkers = {};
+
+function initMap() {
+    if (worldMap) return;
+    const mapEl = document.getElementById('world-map');
+    if (!mapEl) return;
+
+    worldMap = L.map('world-map', {
+        attributionControl: false,
+        zoomControl: false
+    }).setView([20, 0], 2);
+
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        maxZoom: 19
+    }).addTo(worldMap);
+}
+
+function updateMap(nodes) {
+    if (!document.getElementById('world-map')) return;
+    if (!worldMap) initMap();
+    if (!worldMap) return;
+
+    // Fix map size if it was hidden
+    worldMap.invalidateSize();
+
+    nodes.forEach(node => {
+        if (mapMarkers[node.id]) return;
+
+        // Deterministic hash for "Fake" Geolocation (since IPs are private 10.x)
+        // If we had public IPs, we'd fetch them here.
+        let hash = 0;
+        for (let i = 0; i < node.hostname.length; i++) hash = node.hostname.charCodeAt(i) + ((hash << 5) - hash);
+
+        const cities = [
+            [51.5074, -0.1278], // London
+            [40.7128, -74.0060], // New York
+            [35.6762, 139.6503], // Tokyo
+            [1.3521, 103.8198], // Singapore
+            [52.5200, 13.4050], // Berlin
+            [37.7749, -122.4194], // San Francisco
+            [-33.8688, 151.2093], // Sydney
+            [48.8566, 2.3522],    // Paris
+            [55.7558, 37.6173],   // Moscow
+            [-23.5505, -46.6333], // Sao Paulo
+        ];
+        const city = cities[Math.abs(hash) % cities.length];
+
+        // Add slight jitter so nodes in same city don't overlap perfectly
+        const jitter = 0.05;
+        const lat = city[0] + (Math.random() - 0.5) * jitter;
+        const lon = city[1] + (Math.random() - 0.5) * jitter;
+
+        const icon = L.divIcon({
+            className: 'custom-map-marker',
+            html: `<div style="width:12px; height:12px; background:${node.online ? '#10b981' : '#ef4444'}; border-radius:50%; border:2px solid #ffffff; box-shadow:0 0 10px ${node.online ? '#10b981' : '#ef4444'};"></div>`,
+            iconSize: [12, 12]
+        });
+
+        const marker = L.marker([lat, lon], { icon: icon }).addTo(worldMap);
+        marker.bindPopup(`<b>${node.hostname}</b><br>${node.address}<br>${node.online ? 'Online' : 'Offline'}`);
+        mapMarkers[node.id] = marker;
+    });
 }
 
 // Handle hash navigation
@@ -334,38 +413,54 @@ async function fetchMetrics() {
 }
 
 function updateDashboard(m) {
-    // Hostname
-    document.getElementById('hostname-display').textContent = m.hostname;
+    // Header Uptime
+    const headerUptime = document.getElementById('server-header-uptime');
+    if (headerUptime) headerUptime.textContent = 'Up: ' + formatUptime(m.uptime_secs);
 
     // CPU
     const cpuPct = m.cpu_usage_percent.toFixed(1);
-    document.getElementById('cpu-value').textContent = cpuPct + '%';
-    document.getElementById('cpu-model').textContent = m.cpu_model + ` (${m.cpu_count} cores)`;
-    document.getElementById('cpu-bar').style.width = cpuPct + '%';
-    document.getElementById('cpu-bar').className = 'fill ' + progressClass(m.cpu_usage_percent);
-    setGauge('cpu-gauge', m.cpu_usage_percent, 'cpu-gauge-val');
+    const cpuVal = document.getElementById('cpu-value');
+    if (cpuVal) cpuVal.textContent = cpuPct + '%';
+
+    const cpuModel = document.getElementById('cpu-model');
+    if (cpuModel) cpuModel.textContent = m.cpu_model + ` (${m.cpu_count} cores)`;
+
+    const cpuBar = document.getElementById('cpu-bar');
+    if (cpuBar) {
+        cpuBar.style.width = cpuPct + '%';
+        cpuBar.className = 'fill ' + progressClass(m.cpu_usage_percent);
+    }
 
     // Memory
     const memPct = m.memory_percent.toFixed(1);
-    document.getElementById('mem-value').textContent = memPct + '%';
-    document.getElementById('mem-detail').textContent =
-        `${formatBytes(m.memory_used_bytes)} / ${formatBytes(m.memory_total_bytes)}`;
-    document.getElementById('mem-bar').style.width = memPct + '%';
-    document.getElementById('mem-bar').className = 'fill ' + progressClass(m.memory_percent);
-    setGauge('mem-gauge', m.memory_percent, 'mem-gauge-val');
+    const memVal = document.getElementById('mem-value');
+    if (memVal) memVal.textContent = memPct + '%';
 
-    // Load
-    const loadPct = Math.min((m.load_avg.one / m.cpu_count) * 100, 100);
-    setGauge('load-gauge', loadPct, 'load-gauge-val', m.load_avg.one.toFixed(2));
+    const memDetail = document.getElementById('mem-detail');
+    if (memDetail) memDetail.textContent = `${formatBytes(m.memory_used_bytes)} / ${formatBytes(m.memory_total_bytes)}`;
+
+    const memBar = document.getElementById('mem-bar');
+    if (memBar) {
+        memBar.style.width = memPct + '%';
+        memBar.className = 'fill ' + progressClass(m.memory_percent);
+    }
 
     // Disk (primary)
     if (m.disks.length > 0) {
         const root = m.disks.find(d => d.mount_point === '/') || m.disks[0];
-        document.getElementById('disk-value').textContent = root.usage_percent.toFixed(1) + '%';
-        document.getElementById('disk-detail').textContent =
-            `${formatBytes(root.used_bytes)} / ${formatBytes(root.total_bytes)}`;
-        document.getElementById('disk-bar').style.width = root.usage_percent + '%';
-        document.getElementById('disk-bar').className = 'fill ' + progressClass(root.usage_percent);
+        const rootPct = root.usage_percent.toFixed(1);
+
+        const diskVal = document.getElementById('disk-value');
+        if (diskVal) diskVal.textContent = rootPct + '%';
+
+        const diskDetail = document.getElementById('disk-detail');
+        if (diskDetail) diskDetail.textContent = `${formatBytes(root.used_bytes)} / ${formatBytes(root.total_bytes)}`;
+
+        const diskBar = document.getElementById('disk-bar');
+        if (diskBar) {
+            diskBar.style.width = rootPct + '%';
+            diskBar.className = 'fill ' + progressClass(root.usage_percent);
+        }
     }
 
     // Disk table
@@ -640,6 +735,7 @@ function drawMultiLineChart(canvasId, legendId, historyMap) {
 
 
 function initCharts() {
+    if (!document.getElementById('cpu-chart-canvas')) return; // Exit if charts not present
     drawChart('cpu-chart-canvas', cpuHistory, 'rgba(99, 102, 241, 1)', 'rgba(99, 102, 241, 0.2)');
     drawChart('mem-chart-canvas', memHistory, 'rgba(16, 185, 129, 1)', 'rgba(16, 185, 129, 0.2)');
     drawMultiLineChart('disk-chart-canvas', 'disk-chart-legend', diskHistory);
