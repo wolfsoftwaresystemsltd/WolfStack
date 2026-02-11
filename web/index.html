@@ -621,16 +621,37 @@
 
         <!-- ═══ Backups Page ═══ -->
         <div id="page-backups" class="page-view" style="display:none;">
-            <!-- Backup Now Card -->
+            <!-- Backup Targets Card -->
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header"
                     style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
                     <h3>🛡️ Backup Manager</h3>
-                    <div style="display:flex; gap:8px;">
-                        <button class="btn btn-sm btn-primary" onclick="showCreateBackupModal()">⚡ Backup Now</button>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                        <select id="backup-storage-select" class="form-control"
+                            style="width:auto; min-width:220px; padding:5px 10px; font-size:12px;">
+                            <option value="local:/var/lib/wolfstack/backups">📁 Local — /var/lib/wolfstack/backups
+                            </option>
+                        </select>
+                        <button class="btn btn-sm btn-primary" onclick="backupSelected()">⚡ Backup Now</button>
                         <button class="btn btn-sm"
                             style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"
-                            onclick="showCreateScheduleModal()">📅 Add Schedule</button>
+                            onclick="showScheduleSelectedModal()">📅 Schedule</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div style="margin-bottom:8px; display:flex; align-items:center; gap:12px;">
+                        <label
+                            style="font-size:13px; color:var(--text-secondary); cursor:pointer; display:flex; align-items:center; gap:6px;">
+                            <input type="checkbox" id="backup-select-all"
+                                onchange="toggleAllBackupTargets(this.checked)"> Select All
+                        </label>
+                        <span id="backup-selected-count" style="font-size:12px; color:var(--text-muted);">0
+                            selected</span>
+                    </div>
+                    <div id="backup-targets-list"
+                        style="display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:8px;">
+                        <p style="text-align:center; padding:20px; color:var(--text-muted); grid-column:1/-1;">Loading
+                            targets...</p>
                     </div>
                 </div>
             </div>
@@ -657,7 +678,7 @@
                     </table>
                     <p id="backups-empty"
                         style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
-                        No backups yet. Click <strong>⚡ Backup Now</strong> to create your first backup.
+                        No backups yet. Select items above and click <strong>⚡ Backup Now</strong>.
                     </p>
                 </div>
             </div>
@@ -685,86 +706,27 @@
                     </table>
                     <p id="schedules-empty"
                         style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
-                        No schedules configured. Click <strong>📅 Add Schedule</strong> to automate backups.
+                        No schedules configured. Select targets and click <strong>📅 Schedule</strong>.
                     </p>
                 </div>
             </div>
         </div>
 
-        <!-- Create Backup Modal -->
-        <div id="create-backup-modal" class="modal-overlay">
-            <div class="modal" style="max-width:520px;">
-                <div class="modal-header">
-                    <h3>⚡ Create Backup</h3>
-                    <button class="modal-close" onclick="closeModal()">&times;</button>
-                </div>
-                <div class="modal-body">
-                    <div class="form-group">
-                        <label>Backup Target</label>
-                        <select id="backup-target-select" onchange="onBackupTargetChange()">
-                            <option value="all">🌐 Backup Everything</option>
-                        </select>
-                        <small style="color:var(--text-muted);">Select a specific container/VM or backup
-                            everything</small>
-                    </div>
-                    <div class="form-group">
-                        <label>Storage Destination</label>
-                        <select id="backup-storage-type" onchange="onBackupStorageTypeChange()">
-                            <option value="local">📁 Local Path</option>
-                            <option value="s3">☁️ S3 Storage</option>
-                            <option value="remote">🌐 Remote WolfStack Node</option>
-                            <option value="wolfdisk">💾 WolfDisk</option>
-                        </select>
-                    </div>
-                    <div id="backup-storage-local" class="form-group">
-                        <label>Local Path</label>
-                        <input type="text" id="backup-local-path" placeholder="/var/lib/wolfstack/backups"
-                            value="/var/lib/wolfstack/backups">
-                    </div>
-                    <div id="backup-storage-s3" style="display:none;">
-                        <div class="form-group"><label>Bucket</label><input type="text" id="backup-s3-bucket"
-                                placeholder="my-backups"></div>
-                        <div class="form-group"><label>Region</label><input type="text" id="backup-s3-region"
-                                placeholder="us-east-1"></div>
-                        <div class="form-group"><label>Endpoint (optional)</label><input type="text"
-                                id="backup-s3-endpoint" placeholder="https://s3.amazonaws.com"></div>
-                        <div class="form-group"><label>Access Key</label><input type="text" id="backup-s3-key"
-                                placeholder="AKIAIOSFODNN7EXAMPLE"></div>
-                        <div class="form-group"><label>Secret Key</label><input type="password" id="backup-s3-secret"
-                                placeholder="•••••••••"></div>
-                    </div>
-                    <div id="backup-storage-remote" style="display:none;">
-                        <div class="form-group"><label>Remote Node URL</label><input type="text" id="backup-remote-url"
-                                placeholder="http://10.10.10.2:8080"></div>
-                    </div>
-                    <div id="backup-storage-wolfdisk" style="display:none;">
-                        <div class="form-group"><label>WolfDisk Mount Path</label><input type="text"
-                                id="backup-wolfdisk-path" placeholder="/mnt/wolfdisk/backups"></div>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button class="btn" onclick="closeModal()"
-                        style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);">Cancel</button>
-                    <button class="btn btn-primary" onclick="createBackup()">🛡️ Start Backup</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- Create Schedule Modal -->
+        <!-- Schedule Modal (only needs name, frequency, time, retention — targets come from checked items) -->
         <div id="create-schedule-modal" class="modal-overlay">
-            <div class="modal" style="max-width:520px;">
+            <div class="modal" style="max-width:480px;">
                 <div class="modal-header">
-                    <h3>📅 Create Backup Schedule</h3>
+                    <h3>📅 Schedule Backup</h3>
                     <button class="modal-close" onclick="closeModal()">&times;</button>
                 </div>
                 <div class="modal-body">
                     <div class="form-group">
                         <label>Schedule Name</label>
-                        <input type="text" id="schedule-name" placeholder="Nightly Backup">
+                        <input type="text" id="schedule-name" class="form-control" placeholder="Nightly Backup">
                     </div>
                     <div class="form-group">
                         <label>Frequency</label>
-                        <select id="schedule-frequency">
+                        <select id="schedule-frequency" class="form-control">
                             <option value="daily">Daily</option>
                             <option value="weekly">Weekly</option>
                             <option value="monthly">Monthly</option>
@@ -772,55 +734,16 @@
                     </div>
                     <div class="form-group">
                         <label>Time (UTC, HH:MM)</label>
-                        <input type="text" id="schedule-time" placeholder="02:00" value="02:00">
-                    </div>
-                    <div class="form-group">
-                        <label>Backup Target</label>
-                        <select id="schedule-target-select">
-                            <option value="all">🌐 Backup Everything</option>
-                        </select>
+                        <input type="text" id="schedule-time" class="form-control" placeholder="02:00" value="02:00">
                     </div>
                     <div class="form-group">
                         <label>Retention (keep N backups, 0 = unlimited)</label>
-                        <input type="number" id="schedule-retention" value="7" min="0">
+                        <input type="number" id="schedule-retention" class="form-control" value="7" min="0">
                     </div>
-                    <div class="form-group">
-                        <label>Storage Destination</label>
-                        <select id="schedule-storage-type" onchange="onScheduleStorageTypeChange()">
-                            <option value="local">📁 Local Path</option>
-                            <option value="s3">☁️ S3 Storage</option>
-                            <option value="remote">🌐 Remote WolfStack Node</option>
-                            <option value="wolfdisk">💾 WolfDisk</option>
-                        </select>
-                    </div>
-                    <div id="schedule-storage-local" class="form-group">
-                        <label>Local Path</label>
-                        <input type="text" id="schedule-local-path" placeholder="/var/lib/wolfstack/backups"
-                            value="/var/lib/wolfstack/backups">
-                    </div>
-                    <div id="schedule-storage-s3" style="display:none;">
-                        <div class="form-group"><label>Bucket</label><input type="text" id="schedule-s3-bucket"
-                                placeholder="my-backups"></div>
-                        <div class="form-group"><label>Region</label><input type="text" id="schedule-s3-region"
-                                placeholder="us-east-1"></div>
-                        <div class="form-group"><label>Endpoint</label><input type="text" id="schedule-s3-endpoint"
-                                placeholder="https://s3.amazonaws.com"></div>
-                        <div class="form-group"><label>Access Key</label><input type="text" id="schedule-s3-key"></div>
-                        <div class="form-group"><label>Secret Key</label><input type="password" id="schedule-s3-secret">
-                        </div>
-                    </div>
-                    <div id="schedule-storage-remote" style="display:none;">
-                        <div class="form-group"><label>Remote Node URL</label><input type="text"
-                                id="schedule-remote-url" placeholder="http://10.10.10.2:8080"></div>
-                    </div>
-                    <div id="schedule-storage-wolfdisk" style="display:none;">
-                        <div class="form-group"><label>WolfDisk Mount Path</label><input type="text"
-                                id="schedule-wolfdisk-path" placeholder="/mnt/wolfdisk/backups"></div>
-                    </div>
+                    <p id="schedule-selected-summary" style="font-size:12px; color:var(--text-muted);"></p>
                 </div>
                 <div class="modal-footer">
-                    <button class="btn" onclick="closeModal()"
-                        style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);">Cancel</button>
+                    <button class="btn" onclick="closeModal()">Cancel</button>
                     <button class="btn btn-primary" onclick="createSchedule()">📅 Create Schedule</button>
                 </div>
             </div>

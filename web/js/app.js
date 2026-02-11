@@ -5414,17 +5414,108 @@ function escapeHtml(text) {
 
 async function loadBackups() {
     try {
-        const [backupsRes, schedulesRes] = await Promise.all([
-            fetch('/api/backups', {}),
-            fetch('/api/backups/schedules', {}),
+        const [backupsRes, schedulesRes, targetsRes] = await Promise.all([
+            fetch('/api/backups'),
+            fetch('/api/backups/schedules'),
+            fetch('/api/backups/targets'),
         ]);
         const backups = await backupsRes.json();
         const schedules = await schedulesRes.json();
+        const targets = await targetsRes.json();
+        renderBackupTargets(targets);
         renderBackupHistory(backups);
         renderSchedules(schedules);
+        populateStorageDropdown();
     } catch (e) {
         console.error('Failed to load backups:', e);
     }
+}
+
+async function populateStorageDropdown() {
+    const sel = document.getElementById('backup-storage-select');
+    if (!sel) return;
+    sel.innerHTML = '<option value="local:/var/lib/wolfstack/backups">📁 Local — /var/lib/wolfstack/backups</option>';
+    try {
+        const resp = await fetch(apiUrl('/api/storage/mounts'));
+        if (resp.ok) {
+            const mounts = await resp.json();
+            const ICONS = { s3: '☁️', nfs: '📂', directory: '📁', wolfdisk: '💾', smb: '🖧' };
+            mounts.filter(m => m.status === 'mounted' && m.mount_point).forEach(m => {
+                const icon = ICONS[m.type] || '📦';
+                const label = `${icon} ${m.name} — ${m.mount_point}`;
+                const val = `mount:${m.mount_point}`;
+                sel.innerHTML += `<option value="${escapeHtml(val)}">${escapeHtml(label)}</option>`;
+            });
+        }
+    } catch (e) {
+        console.error('Failed to load storage mounts for backup dropdown:', e);
+    }
+}
+
+function renderBackupTargets(targets) {
+    const container = document.getElementById('backup-targets-list');
+    if (!container) return;
+
+    if (!targets || targets.length === 0) {
+        container.innerHTML = '<p style="text-align:center; padding:20px; color:var(--text-muted); grid-column:1/-1;">No containers, VMs, or configs found to backup.</p>';
+        return;
+    }
+
+    const EMOJIS = { docker: '🐳', lxc: '📦', vm: '🖥️', config: '⚙️' };
+
+    container.innerHTML = targets.map(t => {
+        const emoji = EMOJIS[t.type] || '📄';
+        const label = t.type === 'config' ? 'WolfStack Config' : (t.name || t.type);
+        const typeLabel = t.type.toUpperCase();
+        const val = JSON.stringify(t).replace(/"/g, '&quot;');
+        return `<label style="display:flex; align-items:center; gap:10px; padding:10px 14px;
+            background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm);
+            cursor:pointer; transition:var(--transition); font-size:13px;"
+            onmouseover="this.style.borderColor='var(--border-light)'; this.style.background='var(--bg-card-hover)'"
+            onmouseout="this.style.borderColor='var(--border)'; this.style.background='var(--bg-input)'">
+            <input type="checkbox" class="backup-target-cb" value="${val}" onchange="updateBackupSelectedCount()">
+            <span style="font-size:18px;">${emoji}</span>
+            <span style="flex:1;">
+                <span style="font-weight:500;">${escapeHtml(label)}</span>
+                <span style="color:var(--text-muted); font-size:11px; margin-left:6px;">${typeLabel}</span>
+            </span>
+        </label>`;
+    }).join('');
+}
+
+function toggleAllBackupTargets(checked) {
+    document.querySelectorAll('.backup-target-cb').forEach(cb => cb.checked = checked);
+    updateBackupSelectedCount();
+}
+
+function updateBackupSelectedCount() {
+    const checked = document.querySelectorAll('.backup-target-cb:checked').length;
+    const total = document.querySelectorAll('.backup-target-cb').length;
+    const countEl = document.getElementById('backup-selected-count');
+    if (countEl) countEl.textContent = `${checked} of ${total} selected`;
+    const selectAll = document.getElementById('backup-select-all');
+    if (selectAll) selectAll.checked = checked === total && total > 0;
+}
+
+function getSelectedTargets() {
+    const checked = document.querySelectorAll('.backup-target-cb:checked');
+    const targets = [];
+    checked.forEach(cb => {
+        try { targets.push(JSON.parse(cb.value)); } catch (e) { }
+    });
+    return targets;
+}
+
+function getSelectedStorage() {
+    const sel = document.getElementById('backup-storage-select');
+    if (!sel) return { type: 'local', path: '/var/lib/wolfstack/backups' };
+    const val = sel.value;
+    if (val.startsWith('local:')) {
+        return { type: 'local', path: val.substring(6) };
+    } else if (val.startsWith('mount:')) {
+        return { type: 'local', path: val.substring(6) };
+    }
+    return { type: 'local', path: '/var/lib/wolfstack/backups' };
 }
 
 function renderBackupHistory(backups) {
@@ -5439,7 +5530,6 @@ function renderBackupHistory(backups) {
     }
     if (empty) empty.style.display = 'none';
 
-    // Sort by date, newest first
     backups.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
 
     tbody.innerHTML = backups.map(b => {
@@ -5524,96 +5614,64 @@ function formatBytes(bytes) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-// ─── Create Backup Modal ───
+// ─── Backup Now (selected targets) ───
 
-async function showCreateBackupModal() {
-    // Populate target dropdown with available targets
-    try {
-        const res = await fetch('/api/backups/targets', {});
-        const targets = await res.json();
-        const select = document.getElementById('backup-target-select');
-        select.innerHTML = '<option value="all">🌐 Backup Everything</option>';
-        targets.forEach(t => {
-            const emoji = { docker: '🐳', lxc: '📦', vm: '🖥️', config: '⚙️' }[t.type] || '📄';
-            const label = t.type === 'config' ? 'WolfStack Config' : `${t.type.toUpperCase()}: ${t.name}`;
-            select.innerHTML += `<option value='${JSON.stringify(t)}'>${emoji} ${label}</option>`;
-        });
-    } catch (e) {
-        console.error('Failed to load backup targets:', e);
-    }
-    document.getElementById('create-backup-modal').classList.add('active');
-}
-
-function onBackupTargetChange() {
-    // No additional logic needed for now
-}
-
-function onBackupStorageTypeChange() {
-    const type = document.getElementById('backup-storage-type').value;
-    document.getElementById('backup-storage-local').style.display = type === 'local' ? 'block' : 'none';
-    document.getElementById('backup-storage-s3').style.display = type === 's3' ? 'block' : 'none';
-    document.getElementById('backup-storage-remote').style.display = type === 'remote' ? 'block' : 'none';
-    document.getElementById('backup-storage-wolfdisk').style.display = type === 'wolfdisk' ? 'block' : 'none';
-}
-
-function buildStorageObject(prefix) {
-    const type = document.getElementById(`${prefix}-storage-type`).value;
-    const storage = { type };
-    switch (type) {
-        case 'local':
-            storage.path = document.getElementById(`${prefix}-local-path`).value || '/var/lib/wolfstack/backups';
-            break;
-        case 's3':
-            storage.bucket = document.getElementById(`${prefix}-s3-bucket`).value;
-            storage.region = document.getElementById(`${prefix}-s3-region`).value;
-            storage.endpoint = document.getElementById(`${prefix}-s3-endpoint`).value;
-            storage.access_key = document.getElementById(`${prefix}-s3-key`).value;
-            storage.secret_key = document.getElementById(`${prefix}-s3-secret`).value;
-            break;
-        case 'remote':
-            storage.remote_url = document.getElementById(`${prefix}-remote-url`).value;
-            break;
-        case 'wolfdisk':
-            storage.path = document.getElementById(`${prefix}-wolfdisk-path`).value;
-            break;
-    }
-    return storage;
-}
-
-async function createBackup() {
-    const targetVal = document.getElementById('backup-target-select').value;
-    const storage = buildStorageObject('backup');
-
-    const body = { storage };
-    if (targetVal !== 'all') {
-        try { body.target = JSON.parse(targetVal); } catch (e) { }
+async function backupSelected() {
+    const targets = getSelectedTargets();
+    if (targets.length === 0) {
+        showToast('Please select at least one item to backup', 'error');
+        return;
     }
 
-    closeModal();
+    const storage = getSelectedStorage();
 
-    // Show progress indicator
+    // Show progress
     const tbody = document.getElementById('backups-table');
     if (tbody) {
         tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:24px; color:var(--text-muted);">
             <div style="font-size:24px; margin-bottom:8px;">⏳</div>
-            Backup in progress... This may take a while for large containers/VMs.
+            Backing up ${targets.length} item${targets.length > 1 ? 's' : ''}... This may take a while.
         </td></tr>`;
     }
 
+    const allTargets = targets.length === document.querySelectorAll('.backup-target-cb').length;
+
     try {
-        const res = await fetch('/api/backups', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-        });
-        const data = await res.json();
-        if (data.error) {
-            alert(`Backup failed: ${data.error}`);
+        const body = { storage };
+        if (allTargets) {
+            // Back up everything
+            body.target = null;
         } else {
-            alert(data.message || 'Backup completed');
+            // We'll send individual requests for each target
+        }
+
+        if (allTargets) {
+            const res = await fetch('/api/backups', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ storage }),
+            });
+            const data = await res.json();
+            if (data.error) showToast(`Backup failed: ${data.error}`, 'error');
+            else showToast(data.message || 'Backup completed', 'success');
+        } else {
+            let ok = 0, fail = 0;
+            for (const t of targets) {
+                try {
+                    const res = await fetch('/api/backups', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ target: t, storage }),
+                    });
+                    const data = await res.json();
+                    if (data.error) fail++; else ok++;
+                } catch (e) { fail++; }
+            }
+            if (fail === 0) showToast(`All ${ok} backups completed`, 'success');
+            else showToast(`${ok} succeeded, ${fail} failed`, fail > 0 ? 'error' : 'success');
         }
     } catch (e) {
-        alert(`Backup error: ${e.message}`);
+        showToast(`Backup error: ${e.message}`, 'error');
     }
     loadBackups();
 }
@@ -5621,14 +5679,12 @@ async function createBackup() {
 async function deleteBackup(id) {
     if (!confirm('Delete this backup? The backup file will be permanently removed.')) return;
     try {
-        const res = await fetch(`/api/backups/${id}`, {
-            method: 'DELETE',
-            // no auth headers needed
-        });
+        const res = await fetch(`/api/backups/${id}`, { method: 'DELETE' });
         const data = await res.json();
-        if (data.error) alert(`Delete failed: ${data.error}`);
+        if (data.error) showToast(`Delete failed: ${data.error}`, 'error');
+        else showToast('Backup deleted', 'success');
     } catch (e) {
-        alert(`Delete error: ${e.message}`);
+        showToast(`Delete error: ${e.message}`, 'error');
     }
     loadBackups();
 }
@@ -5636,73 +5692,63 @@ async function deleteBackup(id) {
 async function restoreBackup(id) {
     if (!confirm('Restore from this backup? This will overwrite existing data for the target.')) return;
     try {
-        const res = await fetch(`/api/backups/${id}/restore`, {
-            method: 'POST',
-            // no auth headers needed
-        });
+        const res = await fetch(`/api/backups/${id}/restore`, { method: 'POST' });
         const data = await res.json();
-        if (data.error) {
-            alert(`Restore failed: ${data.error}`);
-        } else {
-            alert(data.message || 'Restore completed');
-        }
+        if (data.error) showToast(`Restore failed: ${data.error}`, 'error');
+        else showToast(data.message || 'Restore completed', 'success');
     } catch (e) {
-        alert(`Restore error: ${e.message}`);
+        showToast(`Restore error: ${e.message}`, 'error');
     }
     loadBackups();
 }
 
 // ─── Schedule Modal ───
 
-async function showCreateScheduleModal() {
-    // Populate target dropdown
-    try {
-        const res = await fetch('/api/backups/targets', {});
-        const targets = await res.json();
-        const select = document.getElementById('schedule-target-select');
-        select.innerHTML = '<option value="all">🌐 Backup Everything</option>';
-        targets.forEach(t => {
-            const emoji = { docker: '🐳', lxc: '📦', vm: '🖥️', config: '⚙️' }[t.type] || '📄';
-            const label = t.type === 'config' ? 'WolfStack Config' : `${t.type.toUpperCase()}: ${t.name}`;
-            select.innerHTML += `<option value='${JSON.stringify(t)}'>${emoji} ${label}</option>`;
-        });
-    } catch (e) {
-        console.error('Failed to load targets:', e);
+function showScheduleSelectedModal() {
+    const targets = getSelectedTargets();
+    if (targets.length === 0) {
+        showToast('Please select at least one item to schedule', 'error');
+        return;
     }
-    document.getElementById('create-schedule-modal').classList.add('active');
-}
 
-function onScheduleStorageTypeChange() {
-    const type = document.getElementById('schedule-storage-type').value;
-    document.getElementById('schedule-storage-local').style.display = type === 'local' ? 'block' : 'none';
-    document.getElementById('schedule-storage-s3').style.display = type === 's3' ? 'block' : 'none';
-    document.getElementById('schedule-storage-remote').style.display = type === 'remote' ? 'block' : 'none';
-    document.getElementById('schedule-storage-wolfdisk').style.display = type === 'wolfdisk' ? 'block' : 'none';
+    const summary = document.getElementById('schedule-selected-summary');
+    const allSelected = targets.length === document.querySelectorAll('.backup-target-cb').length;
+    if (summary) {
+        const storage = getSelectedStorage();
+        const storageLabel = storage.path || 'local';
+        if (allSelected) {
+            summary.textContent = `Will schedule backup of all ${targets.length} items to ${storageLabel}`;
+        } else {
+            const names = targets.map(t => t.name || t.type).join(', ');
+            summary.textContent = `Will schedule: ${names} → ${storageLabel}`;
+        }
+    }
+
+    document.getElementById('schedule-name').value = '';
+    document.getElementById('create-schedule-modal').classList.add('active');
 }
 
 async function createSchedule() {
     const name = document.getElementById('schedule-name').value.trim();
-    if (!name) { alert('Please enter a schedule name'); return; }
+    if (!name) { showToast('Please enter a schedule name', 'error'); return; }
 
     const frequency = document.getElementById('schedule-frequency').value;
     const time = document.getElementById('schedule-time').value.trim();
     const retention = parseInt(document.getElementById('schedule-retention').value) || 0;
-    const targetVal = document.getElementById('schedule-target-select').value;
-    const storage = buildStorageObject('schedule');
+    const targets = getSelectedTargets();
+    const storage = getSelectedStorage();
+    const allSelected = targets.length === document.querySelectorAll('.backup-target-cb').length;
 
     const body = {
         name,
         frequency,
         time,
         retention,
-        backup_all: targetVal === 'all',
-        targets: [],
+        backup_all: allSelected,
+        targets: allSelected ? [] : targets,
         storage,
         enabled: true,
     };
-    if (targetVal !== 'all') {
-        try { body.targets = [JSON.parse(targetVal)]; body.backup_all = false; } catch (e) { }
-    }
 
     closeModal();
     try {
@@ -5712,9 +5758,10 @@ async function createSchedule() {
             body: JSON.stringify(body),
         });
         const data = await res.json();
-        if (data.error) alert(`Schedule creation failed: ${data.error}`);
+        if (data.error) showToast(`Schedule creation failed: ${data.error}`, 'error');
+        else showToast('Schedule created', 'success');
     } catch (e) {
-        alert(`Schedule error: ${e.message}`);
+        showToast(`Schedule error: ${e.message}`, 'error');
     }
     loadBackups();
 }
@@ -5722,14 +5769,13 @@ async function createSchedule() {
 async function deleteSchedule(id) {
     if (!confirm('Delete this backup schedule?')) return;
     try {
-        const res = await fetch(`/api/backups/schedules/${id}`, {
-            method: 'DELETE',
-            // no auth headers needed
-        });
+        const res = await fetch(`/api/backups/schedules/${id}`, { method: 'DELETE' });
         const data = await res.json();
-        if (data.error) alert(`Delete failed: ${data.error}`);
+        if (data.error) showToast(`Delete failed: ${data.error}`, 'error');
+        else showToast('Schedule deleted', 'success');
     } catch (e) {
-        alert(`Delete error: ${e.message}`);
+        showToast(`Delete error: ${e.message}`, 'error');
     }
     loadBackups();
 }
+
