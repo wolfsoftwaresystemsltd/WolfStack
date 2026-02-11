@@ -2147,15 +2147,16 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups/schedules", web::get().to(backup_schedules_list))
         .route("/api/backups/schedules", web::post().to(backup_schedule_create))
         .route("/api/backups/schedules/{id}", web::delete().to(backup_schedule_delete))
-        .route("/api/backups/{id}", web::delete().to(backup_delete))
-        .route("/api/backups/{id}/restore", web::post().to(backup_restore))
         .route("/api/backups/import", web::post().to(backup_import))
-        // PBS (Proxmox Backup Server)
+        // PBS (Proxmox Backup Server) — must be before {id} routes
         .route("/api/backups/pbs/status", web::get().to(pbs_status))
         .route("/api/backups/pbs/snapshots", web::get().to(pbs_snapshots))
         .route("/api/backups/pbs/restore", web::post().to(pbs_restore))
         .route("/api/backups/pbs/config", web::get().to(pbs_config_get))
         .route("/api/backups/pbs/config", web::post().to(pbs_config_save))
+        // Generic backup {id} routes — after specific routes
+        .route("/api/backups/{id}", web::delete().to(backup_delete))
+        .route("/api/backups/{id}/restore", web::post().to(backup_restore))
         // Console WebSocket
         .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
         // Agent (cluster-secret auth — inter-node communication)
