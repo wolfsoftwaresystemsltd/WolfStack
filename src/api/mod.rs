@@ -27,6 +27,8 @@ pub struct PbsRestoreProgress {
     pub finished: bool,
     pub success: Option<bool>,
     pub message: String,
+    #[serde(skip)]
+    pub started_at: Option<std::time::Instant>,
 }
 
 /// Shared application state
@@ -1676,14 +1678,21 @@ pub async fn pbs_restore(
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
 
-    // Check if a restore is already running
+    // Check if a restore is already running (auto-expire after 30 min)
     {
-        let progress = state.pbs_restore_progress.lock().unwrap();
-        if progress.active && !progress.finished {
+        let mut progress = state.pbs_restore_progress.lock().unwrap();
+        let stale = progress.started_at
+            .map(|t| t.elapsed().as_secs() > 1800)
+            .unwrap_or(true);
+        if progress.active && !progress.finished && !stale {
             return HttpResponse::Conflict().json(serde_json::json!({
                 "error": "A restore is already in progress",
                 "snapshot": progress.snapshot,
             }));
+        }
+        // Clear stale or finished state
+        if stale || progress.finished {
+            *progress = PbsRestoreProgress::default();
         }
     }
 
@@ -1703,6 +1712,7 @@ pub async fn pbs_restore(
             finished: false,
             success: None,
             message: String::new(),
+            started_at: Some(std::time::Instant::now()),
         };
     }
 
