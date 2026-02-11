@@ -342,11 +342,21 @@
                         <!-- Performance History -->
                         <h3 style="margin-bottom: 16px; margin-top: 32px; font-size: 16px; font-weight: 600;">
                             Performance History</h3>
+                        <!-- Time Range Selector -->
+                        <div id="time-range-selector" style="display: flex; gap: 6px; margin-bottom: 16px;">
+                            <button class="btn btn-sm time-range-btn active" data-range="150"
+                                onclick="setTimeRange(150)">5m</button>
+                            <button class="btn btn-sm time-range-btn" data-range="300"
+                                onclick="setTimeRange(300)">10m</button>
+                        </div>
                         <div style="display: grid; gap: 20px; margin-bottom: 32px;">
                             <!-- CPU History -->
-                            <div class="card">
-                                <div class="card-header">
+                            <div class="card chart-card" id="cpu-chart-card">
+                                <div class="card-header"
+                                    style="display:flex; justify-content:space-between; align-items:center;">
                                     <h3>CPU History</h3>
+                                    <span id="cpu-live-value" class="chart-live-value"
+                                        style="font-size:20px; font-weight:700; color:rgba(99,102,241,1); font-family:'JetBrains Mono',monospace;">—</span>
                                 </div>
                                 <div class="card-body" style="padding: 0; min-height: 200px; position: relative;">
                                     <canvas id="cpu-chart-canvas"
@@ -354,18 +364,35 @@
                                 </div>
                             </div>
                             <!-- Memory History -->
-                            <div class="card">
-                                <div class="card-header">
+                            <div class="card chart-card" id="mem-chart-card">
+                                <div class="card-header"
+                                    style="display:flex; justify-content:space-between; align-items:center;">
                                     <h3>Memory History</h3>
+                                    <span id="mem-live-value" class="chart-live-value"
+                                        style="font-size:20px; font-weight:700; color:rgba(16,185,129,1); font-family:'JetBrains Mono',monospace;">—</span>
                                 </div>
                                 <div class="card-body" style="padding: 0; min-height: 200px; position: relative;">
                                     <canvas id="mem-chart-canvas"
                                         style="width: 100%; height: 100%; display: block;"></canvas>
                                 </div>
                             </div>
+                            <!-- Network I/O History -->
+                            <div class="card chart-card" id="net-chart-card">
+                                <div class="card-header"
+                                    style="display:flex; justify-content:space-between; align-items:center;">
+                                    <h3>Network I/O</h3>
+                                    <span id="net-live-value" class="chart-live-value"
+                                        style="font-size:16px; font-weight:600; color:var(--info); font-family:'JetBrains Mono',monospace;">—</span>
+                                </div>
+                                <div class="card-body" style="padding: 0; min-height: 200px; position: relative;">
+                                    <canvas id="net-chart-canvas"
+                                        style="width: 100%; height: 100%; display: block;"></canvas>
+                                </div>
+                            </div>
                             <!-- Disk/Net History -->
-                            <div class="card">
-                                <div class="card-header">
+                            <div class="card chart-card" id="disk-chart-card">
+                                <div class="card-header"
+                                    style="display:flex; justify-content:space-between; align-items:center;">
                                     <h3>Disk I/O History</h3>
                                     <div id="disk-chart-legend" style="display: flex; gap: 10px; font-size: 11px;">
                                     </div>
@@ -375,6 +402,10 @@
                                         style="width: 100%; height: 100%; display: block;"></canvas>
                                 </div>
                             </div>
+                        </div>
+                        <!-- Chart Tooltip (shared) -->
+                        <div id="chart-tooltip"
+                            style="display:none; position:fixed; z-index:1000; pointer-events:none; background:rgba(10,14,26,0.92); border:1px solid var(--border-light); border-radius:8px; padding:8px 12px; font-size:12px; font-family:'JetBrains Mono',monospace; color:var(--text-primary); box-shadow:0 4px 20px rgba(0,0,0,0.5); backdrop-filter:blur(8px);">
                         </div>
 
                         <!-- Storage Table (Moved) -->

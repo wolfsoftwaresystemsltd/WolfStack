@@ -7,8 +7,10 @@ let currentNodeId = null;  // null = datacenter, node ID = specific server
 let allNodes = [];         // cached node list
 let cpuHistory = [];
 let memHistory = [];
+let netHistory = []; // { timestamp, rx_bytes, tx_bytes } — cumulative
 let diskHistory = {}; // mount_point -> array of {timestamp, usage_percent}
 const MAX_HISTORY = 300; // 10 minutes at 2s intervals
+let displayRange = 150; // default 5 minutes (150 samples at 2s)
 
 // ─── API URL helper — route through proxy for remote nodes ───
 function apiUrl(path) {
@@ -259,7 +261,12 @@ function renderDatacenterOverview() {
                     <span class="server-dot online" style="display:inline-block; vertical-align:middle; margin-right:8px;"></span>
                     🖥️ ${node.hostname}${node.is_self ? ' <span style="color:var(--accent-light); font-size:12px;">(this)</span>' : ''}
                 </h3>
-                <span style="color:var(--text-muted); font-size:12px;">${node.address}:${node.port}</span>
+                <div style="display:flex; align-items:center; gap:10px;">
+                    <span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(16,185,129,0.1); color:var(--success); font-family:'JetBrains Mono',monospace;">
+                        ▲ ${formatUptimeShort(m.uptime_secs)}
+                    </span>
+                    <span style="color:var(--text-muted); font-size:12px;">${node.address}:${node.port}</span>
+                </div>
             </div>
             <div class="card-body">
                 <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; text-align:center;">
@@ -267,11 +274,13 @@ function renderDatacenterOverview() {
                         <div style="font-size:24px; font-weight:700; color:var(--accent-light);">${cpuPct}%</div>
                         <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">CPU</div>
                         <div class="progress-bar" style="margin-top:6px;"><div class="fill ${progressClass(m.cpu_usage_percent)}" style="width:${cpuPct}%"></div></div>
+                        <canvas id="spark-cpu-${node.id}" width="80" height="24" style="margin-top:4px; width:100%; height:24px;"></canvas>
                     </div>
                     <div>
                         <div style="font-size:24px; font-weight:700; color:var(--success);">${memPct}%</div>
                         <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">Memory</div>
                         <div class="progress-bar" style="margin-top:6px;"><div class="fill ${progressClass(m.memory_percent)}" style="width:${memPct}%"></div></div>
+                        <canvas id="spark-mem-${node.id}" width="80" height="24" style="margin-top:4px; width:100%; height:24px;"></canvas>
                     </div>
                     <div>
                         <div style="font-size:24px; font-weight:700; color:var(--warning);">${diskPct}%</div>
@@ -281,8 +290,7 @@ function renderDatacenterOverview() {
                 </div>
                 <div style="margin-top:12px; display:flex; gap:6px; flex-wrap:wrap;">
                     ${node.components.filter(c => c.installed).map(c =>
-            `<span style="font-size:11px; padding:2px 8px; border-radius:4px; background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'}; color:${c.running ? 'var(--success)' : 'var(--danger)'};">
-                            ${c.component}
+            `<span style="font-size:11px; padding:2px 8px; border-radius:4px; background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'}; color:${c.running ? 'var(--success)' : 'var(--danger)'};">                            ${c.component}
                         </span>`
         ).join('')}
                 </div>
@@ -298,8 +306,63 @@ function renderDatacenterOverview() {
         <div style="margin-top:12px; padding:6px 16px; border-radius:6px; background:linear-gradient(135deg, #ff424d, #f96854); color:white; font-size:13px; font-weight:600;">Join on Patreon</div>
     </div>`;
 
+    // Draw sparklines on server cards
+    setTimeout(() => drawServerSparklines(nodes), 50);
+
     // Initialize Map
     setTimeout(() => updateMap(nodes), 100);
+}
+
+// ─── Sparkline mini-charts for datacenter cards ───
+let sparkHistory = {}; // nodeId -> { cpu: [], mem: [] }
+
+function drawServerSparklines(nodes) {
+    nodes.forEach(node => {
+        if (!node.metrics) return;
+        const id = node.id;
+        if (!sparkHistory[id]) sparkHistory[id] = { cpu: [], mem: [] };
+        sparkHistory[id].cpu.push(node.metrics.cpu_usage_percent);
+        sparkHistory[id].mem.push(node.metrics.memory_percent);
+        if (sparkHistory[id].cpu.length > 30) sparkHistory[id].cpu.shift();
+        if (sparkHistory[id].mem.length > 30) sparkHistory[id].mem.shift();
+
+        drawSparkline(`spark-cpu-${id}`, sparkHistory[id].cpu, 'rgba(99,102,241,0.8)', 'rgba(99,102,241,0.15)');
+        drawSparkline(`spark-mem-${id}`, sparkHistory[id].mem, 'rgba(16,185,129,0.8)', 'rgba(16,185,129,0.15)');
+    });
+}
+
+function drawSparkline(canvasId, data, stroke, fill) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas || data.length < 2) return;
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const W = canvas.clientWidth;
+    const H = canvas.clientHeight;
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, W, H);
+
+    const step = W / (data.length - 1);
+    ctx.beginPath();
+    ctx.moveTo(0, H - (data[0] / 100) * H);
+    for (let i = 1; i < data.length; i++) {
+        const x = i * step;
+        const y = H - (Math.max(0, Math.min(100, data[i])) / 100) * H;
+        const px = (i - 1) * step;
+        const py = H - (Math.max(0, Math.min(100, data[i - 1])) / 100) * H;
+        ctx.bezierCurveTo((px + x) / 2, py, (px + x) / 2, y, x, y);
+    }
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Fill
+    ctx.lineTo((data.length - 1) * step, H);
+    ctx.lineTo(0, H);
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
 }
 
 // ─── Map Logic ───
@@ -400,6 +463,40 @@ function updateMap(nodes) {
 
         resolveAndPlace(node, placeMarker);
     });
+
+    // Draw connection lines between online servers after markers settle
+    setTimeout(() => drawMapConnections(), 2000);
+}
+
+let mapConnectionLines = [];
+function drawMapConnections() {
+    if (!worldMap) return;
+    // Clear previous lines
+    mapConnectionLines.forEach(l => worldMap.removeLayer(l));
+    mapConnectionLines = [];
+
+    const markerIds = Object.keys(mapMarkers);
+    if (markerIds.length < 2) return;
+
+    // Draw lines between all pairs
+    for (let i = 0; i < markerIds.length; i++) {
+        for (let j = i + 1; j < markerIds.length; j++) {
+            const m1 = mapMarkers[markerIds[i]];
+            const m2 = mapMarkers[markerIds[j]];
+            if (!m1 || !m2) continue;
+            const line = L.polyline(
+                [m1.getLatLng(), m2.getLatLng()],
+                {
+                    color: '#6366f1',
+                    weight: 1.5,
+                    opacity: 0.4,
+                    dashArray: '6, 8',
+                    className: 'map-connection-line'
+                }
+            ).addTo(worldMap);
+            mapConnectionLines.push(line);
+        }
+    }
 }
 
 // Deterministic jitter based on hostname so co-located servers spread visually
@@ -435,6 +532,12 @@ function formatUptime(secs) {
     if (secs >= 3600) return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
     if (secs >= 60) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
     return secs + 's';
+}
+
+function formatUptimeShort(secs) {
+    if (secs >= 86400) return Math.floor(secs / 86400) + 'd ' + Math.floor((secs % 86400) / 3600) + 'h';
+    if (secs >= 3600) return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
+    return Math.floor(secs / 60) + 'm';
 }
 
 function progressClass(percent) {
@@ -634,6 +737,12 @@ function updateDashboard(m) {
     if (cpuHistory.length > MAX_HISTORY) cpuHistory.shift();
     if (memHistory.length > MAX_HISTORY) memHistory.shift();
 
+    // Network I/O (cumulative totals — we'll calc rates in the chart)
+    const totalRx = m.network.reduce((s, n) => s + n.rx_bytes, 0);
+    const totalTx = m.network.reduce((s, n) => s + n.tx_bytes, 0);
+    netHistory.push({ timestamp: now, rx_bytes: totalRx, tx_bytes: totalTx });
+    if (netHistory.length > MAX_HISTORY) netHistory.shift();
+
     // Disk history
     m.disks.forEach(d => {
         if (!diskHistory[d.mount_point]) diskHistory[d.mount_point] = [];
@@ -641,9 +750,23 @@ function updateDashboard(m) {
         if (diskHistory[d.mount_point].length > MAX_HISTORY) diskHistory[d.mount_point].shift();
     });
 
-    drawChart('cpu-chart-canvas', cpuHistory, 'rgba(99, 102, 241, 1)', 'rgba(99, 102, 241, 0.2)');
-    drawChart('mem-chart-canvas', memHistory, 'rgba(16, 185, 129, 1)', 'rgba(16, 185, 129, 0.2)');
-    drawMultiLineChart('disk-chart-canvas', 'disk-chart-legend', diskHistory);
+    // Update live values
+    const cpuLive = document.getElementById('cpu-live-value');
+    if (cpuLive) cpuLive.textContent = m.cpu_usage_percent.toFixed(1) + '%';
+    const memLive = document.getElementById('mem-live-value');
+    if (memLive) memLive.textContent = m.memory_percent.toFixed(1) + '%';
+    // Network live value (rate)
+    if (netHistory.length >= 2) {
+        const prev = netHistory[netHistory.length - 2];
+        const cur = netHistory[netHistory.length - 1];
+        const dt = Math.max(1, cur.timestamp - prev.timestamp);
+        const rxRate = (cur.rx_bytes - prev.rx_bytes) / dt;
+        const txRate = (cur.tx_bytes - prev.tx_bytes) / dt;
+        const netLive = document.getElementById('net-live-value');
+        if (netLive) netLive.textContent = `↓${formatRate(rxRate)}  ↑${formatRate(txRate)}`;
+    }
+
+    redrawAllCharts();
 }
 
 async function fetchMetricsHistory() {
@@ -655,12 +778,22 @@ async function fetchMetricsHistory() {
         // Clear existing
         cpuHistory = [];
         memHistory = [];
+        netHistory = [];
         diskHistory = {};
 
         // Populate
         history.forEach(snap => {
             cpuHistory.push({ timestamp: snap.timestamp, value: snap.cpu_percent });
             memHistory.push({ timestamp: snap.timestamp, value: snap.memory_percent });
+
+            // Network (cumulative totals from backend)
+            if (snap.network_rx_bytes !== undefined) {
+                netHistory.push({
+                    timestamp: snap.timestamp,
+                    rx_bytes: snap.network_rx_bytes,
+                    tx_bytes: snap.network_tx_bytes
+                });
+            }
 
             snap.disks.forEach(d => {
                 if (!diskHistory[d.mount_point]) diskHistory[d.mount_point] = [];
@@ -669,23 +802,46 @@ async function fetchMetricsHistory() {
         });
 
         // Initial draw
-        drawChart('cpu-chart-canvas', cpuHistory, 'rgba(99, 102, 241, 1)', 'rgba(99, 102, 241, 0.2)');
-        drawChart('mem-chart-canvas', memHistory, 'rgba(16, 185, 129, 1)', 'rgba(16, 185, 129, 0.2)');
-        drawMultiLineChart('disk-chart-canvas', 'disk-chart-legend', diskHistory);
+        redrawAllCharts();
     } catch (e) {
         console.error('Failed to fetch history:', e);
     }
 }
 
-// ─── Simple Canvas Charts ───
 // ─── Enhanced Canvas Charts ───
 
-function drawChart(canvasId, data, strokeColor, fillColor) {
-    const canvas = document.getElementById(canvasId);
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+function formatRate(bytesPerSec) {
+    if (bytesPerSec < 1024) return bytesPerSec.toFixed(0) + ' B/s';
+    if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
+    if (bytesPerSec < 1024 * 1024 * 1024) return (bytesPerSec / (1024 * 1024)).toFixed(1) + ' MB/s';
+    return (bytesPerSec / (1024 * 1024 * 1024)).toFixed(2) + ' GB/s';
+}
 
-    // Handle DPI scaling
+function setTimeRange(samples) {
+    displayRange = samples;
+    document.querySelectorAll('.time-range-btn').forEach(b => {
+        b.classList.toggle('active', parseInt(b.dataset.range) === samples);
+    });
+    redrawAllCharts();
+}
+
+function redrawAllCharts() {
+    if (!document.getElementById('cpu-chart-canvas')) return;
+    drawChart('cpu-chart-canvas', cpuHistory, 'rgba(99, 102, 241, 1)', 'rgba(99, 102, 241, 0.2)');
+    drawChart('mem-chart-canvas', memHistory, 'rgba(16, 185, 129, 1)', 'rgba(16, 185, 129, 0.2)');
+    drawNetChart('net-chart-canvas', netHistory);
+    drawMultiLineChart('disk-chart-canvas', 'disk-chart-legend', diskHistory);
+}
+
+function sliceForRange(data) {
+    if (!data || data.length <= displayRange) return data;
+    return data.slice(data.length - displayRange);
+}
+
+function setupCanvas(canvasId) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return null;
+    const ctx = canvas.getContext('2d');
     const rect = canvas.parentElement.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     canvas.width = rect.width * dpr;
@@ -693,17 +849,12 @@ function drawChart(canvasId, data, strokeColor, fillColor) {
     ctx.scale(dpr, dpr);
     canvas.style.width = `${rect.width}px`;
     canvas.style.height = `${rect.height}px`;
-
     ctx.clearRect(0, 0, rect.width, rect.height);
+    return { canvas, ctx, rect, dpr };
+}
 
-    if (!data || data.length < 2) return;
-
-    const padding = { top: 20, right: 10, bottom: 30, left: 40 };
-    const w = rect.width - padding.left - padding.right;
-    const h = rect.height - padding.top - padding.bottom;
-
-    // Draw grid + Y-axis labels
-    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+function drawGrid(ctx, padding, w, h) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (let i = 0; i <= 4; i++) {
@@ -712,22 +863,25 @@ function drawChart(canvasId, data, strokeColor, fillColor) {
         ctx.lineTo(padding.left + w, y);
     }
     ctx.stroke();
+}
 
-    // Y-axis labels (100%, 75%, 50%, 25%, 0%)
-    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+function drawYLabels(ctx, padding, h, labels) {
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
     ctx.font = '10px Inter, sans-serif';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     for (let i = 0; i <= 4; i++) {
         const y = padding.top + (h / 4) * i;
-        const label = (100 - i * 25) + '%';
-        ctx.fillText(label, padding.left - 6, y);
+        ctx.fillText(labels[i], padding.left - 6, y);
     }
+}
 
-    // X-axis time labels
+function drawXTimeLabels(ctx, padding, w, h, dataLen) {
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = '10px Inter, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    const totalSecs = data.length * 2; // ~2s per sample
+    const totalSecs = dataLen * 2;
     const xLabelCount = 5;
     for (let i = 0; i <= xLabelCount; i++) {
         const frac = i / xLabelCount;
@@ -736,12 +890,52 @@ function drawChart(canvasId, data, strokeColor, fillColor) {
         const label = secsAgo >= 60 ? `-${Math.round(secsAgo / 60)}m` : `-${secsAgo}s`;
         ctx.fillText(label, x, padding.top + h + 6);
     }
+}
 
-    // Draw path
+function drawThresholdLines(ctx, padding, w, h) {
+    // 80% warning
+    const y80 = padding.top + h * 0.2;
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = 'rgba(245, 158, 11, 0.25)';
+    ctx.lineWidth = 1;
     ctx.beginPath();
-    const step = w / (MAX_HISTORY - 1);
+    ctx.moveTo(padding.left, y80);
+    ctx.lineTo(padding.left + w, y80);
+    ctx.stroke();
 
-    // Move to first point
+    // 95% critical
+    const y95 = padding.top + h * 0.05;
+    ctx.strokeStyle = 'rgba(239, 68, 68, 0.3)';
+    ctx.beginPath();
+    ctx.moveTo(padding.left, y95);
+    ctx.lineTo(padding.left + w, y95);
+    ctx.stroke();
+    ctx.setLineDash([]);
+}
+
+function drawChart(canvasId, fullData, strokeColor, fillColor) {
+    const setup = setupCanvas(canvasId);
+    if (!setup) return;
+    const { canvas, ctx, rect } = setup;
+
+    const data = sliceForRange(fullData);
+    if (!data || data.length < 2) return;
+
+    const padding = { top: 20, right: 10, bottom: 30, left: 40 };
+    const w = rect.width - padding.left - padding.right;
+    const h = rect.height - padding.top - padding.bottom;
+
+    // Store chart metadata for hover
+    canvas._chartMeta = { padding, w, h, data, type: 'percent', strokeColor };
+
+    drawGrid(ctx, padding, w, h);
+    drawYLabels(ctx, padding, h, ['100%', '75%', '50%', '25%', '0%']);
+    drawXTimeLabels(ctx, padding, w, h, data.length);
+    drawThresholdLines(ctx, padding, w, h);
+
+    // Draw bezier path
+    const step = w / (data.length - 1);
+    ctx.beginPath();
     const firstY = padding.top + h - (data[0].value / 100) * h;
     ctx.moveTo(padding.left, firstY);
 
@@ -749,17 +943,13 @@ function drawChart(canvasId, data, strokeColor, fillColor) {
         const x = padding.left + i * step;
         const val = Math.max(0, Math.min(100, data[i].value));
         const y = padding.top + h - (val / 100) * h;
-
-        // Simple smoothing
         const prevX = padding.left + (i - 1) * step;
         const prevVal = Math.max(0, Math.min(100, data[i - 1].value));
         const prevY = padding.top + h - (prevVal / 100) * h;
-
         const cpX = (prevX + x) / 2;
         ctx.bezierCurveTo(cpX, prevY, cpX, y, x, y);
     }
 
-    // Stroke
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.strokeStyle = strokeColor;
@@ -770,7 +960,6 @@ function drawChart(canvasId, data, strokeColor, fillColor) {
     ctx.lineTo(padding.left + (data.length - 1) * step, padding.top + h);
     ctx.lineTo(padding.left, padding.top + h);
     ctx.closePath();
-
     const gradient = ctx.createLinearGradient(0, padding.top, 0, padding.top + h);
     gradient.addColorStop(0, fillColor);
     gradient.addColorStop(1, 'rgba(0,0,0,0)');
@@ -778,85 +967,156 @@ function drawChart(canvasId, data, strokeColor, fillColor) {
     ctx.fill();
 }
 
-function drawMultiLineChart(canvasId, legendId, historyMap) {
-    const canvas = document.getElementById(canvasId);
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+function drawNetChart(canvasId, fullData) {
+    const setup = setupCanvas(canvasId);
+    if (!setup) return;
+    const { canvas, ctx, rect } = setup;
 
-    // Handle DPI scaling
-    const rect = canvas.parentElement.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
-    canvas.style.width = `${rect.width}px`;
-    canvas.style.height = `${rect.height}px`;
+    const rawData = sliceForRange(fullData);
+    if (!rawData || rawData.length < 3) return;
 
-    ctx.clearRect(0, 0, rect.width, rect.height);
+    // Calculate rates (bytes/sec)
+    const rates = [];
+    for (let i = 1; i < rawData.length; i++) {
+        const dt = Math.max(1, rawData[i].timestamp - rawData[i - 1].timestamp);
+        rates.push({
+            timestamp: rawData[i].timestamp,
+            rx: Math.max(0, (rawData[i].rx_bytes - rawData[i - 1].rx_bytes) / dt),
+            tx: Math.max(0, (rawData[i].tx_bytes - rawData[i - 1].tx_bytes) / dt)
+        });
+    }
+    if (rates.length < 2) return;
 
-    const padding = { top: 20, right: 10, bottom: 30, left: 40 };
+    const padding = { top: 20, right: 10, bottom: 30, left: 55 };
     const w = rect.width - padding.left - padding.right;
     const h = rect.height - padding.top - padding.bottom;
-    const step = w / (MAX_HISTORY - 1);
 
-    // Grid + Y-axis labels
-    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let i = 0; i <= 4; i++) {
-        const y = padding.top + (h / 4) * i;
-        ctx.moveTo(padding.left, y);
-        ctx.lineTo(padding.left + w, y);
-    }
-    ctx.stroke();
+    // Find max rate for auto-scaling
+    const maxRate = Math.max(1024, ...rates.map(r => Math.max(r.rx, r.tx))) * 1.15;
 
-    // Y-axis labels
-    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    // Store chart metadata for hover
+    canvas._chartMeta = { padding, w, h, data: rates, type: 'network', maxRate };
+
+    drawGrid(ctx, padding, w, h);
+
+    // Y-axis labels (auto-scaled)
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
     ctx.font = '10px Inter, sans-serif';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     for (let i = 0; i <= 4; i++) {
         const y = padding.top + (h / 4) * i;
-        const label = (100 - i * 25) + '%';
-        ctx.fillText(label, padding.left - 6, y);
+        const val = maxRate * (1 - i / 4);
+        ctx.fillText(formatRate(val), padding.left - 6, y);
     }
 
-    // X-axis time labels
+    drawXTimeLabels(ctx, padding, w, h, rates.length);
+
+    const step = w / (rates.length - 1);
+
+    // Draw RX line (download — cyan)
+    ctx.beginPath();
+    ctx.moveTo(padding.left, padding.top + h - (rates[0].rx / maxRate) * h);
+    for (let i = 1; i < rates.length; i++) {
+        const x = padding.left + i * step;
+        const y = padding.top + h - (rates[i].rx / maxRate) * h;
+        const prevX = padding.left + (i - 1) * step;
+        const prevY = padding.top + h - (rates[i - 1].rx / maxRate) * h;
+        ctx.bezierCurveTo((prevX + x) / 2, prevY, (prevX + x) / 2, y, x, y);
+    }
+    ctx.strokeStyle = '#06b6d4';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // RX fill
+    ctx.lineTo(padding.left + (rates.length - 1) * step, padding.top + h);
+    ctx.lineTo(padding.left, padding.top + h);
+    ctx.closePath();
+    const rxGrad = ctx.createLinearGradient(0, padding.top, 0, padding.top + h);
+    rxGrad.addColorStop(0, 'rgba(6, 182, 212, 0.2)');
+    rxGrad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = rxGrad;
+    ctx.fill();
+
+    // Draw TX line (upload — pink/magenta)
+    ctx.beginPath();
+    ctx.moveTo(padding.left, padding.top + h - (rates[0].tx / maxRate) * h);
+    for (let i = 1; i < rates.length; i++) {
+        const x = padding.left + i * step;
+        const y = padding.top + h - (rates[i].tx / maxRate) * h;
+        const prevX = padding.left + (i - 1) * step;
+        const prevY = padding.top + h - (rates[i - 1].tx / maxRate) * h;
+        ctx.bezierCurveTo((prevX + x) / 2, prevY, (prevX + x) / 2, y, x, y);
+    }
+    ctx.strokeStyle = '#e879f9';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // TX fill
+    ctx.lineTo(padding.left + (rates.length - 1) * step, padding.top + h);
+    ctx.lineTo(padding.left, padding.top + h);
+    ctx.closePath();
+    const txGrad = ctx.createLinearGradient(0, padding.top, 0, padding.top + h);
+    txGrad.addColorStop(0, 'rgba(232, 121, 249, 0.15)');
+    txGrad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = txGrad;
+    ctx.fill();
+
+    // Legend
+    ctx.font = '10px Inter, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const lx = padding.left + w - 100;
+    const ly = padding.top + 10;
+    ctx.fillStyle = '#06b6d4';
+    ctx.fillRect(lx, ly - 4, 12, 3);
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillText('↓ Download', lx + 16, ly);
+    ctx.fillStyle = '#e879f9';
+    ctx.fillRect(lx, ly + 12, 12, 3);
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillText('↑ Upload', lx + 16, ly + 16);
+}
+
+function drawMultiLineChart(canvasId, legendId, historyMap) {
+    const setup = setupCanvas(canvasId);
+    if (!setup) return;
+    const { canvas, ctx, rect } = setup;
+
+    const padding = { top: 20, right: 10, bottom: 30, left: 40 };
+    const w = rect.width - padding.left - padding.right;
+    const h = rect.height - padding.top - padding.bottom;
+
+    // Store chart metadata for hover
+    canvas._chartMeta = { padding, w, h, type: 'multi', historyMap };
+
+    drawGrid(ctx, padding, w, h);
+    drawYLabels(ctx, padding, h, ['100%', '75%', '50%', '25%', '0%']);
+
+    // Find data for x-axis labels
     const firstData = Object.values(historyMap).find(d => d && d.length >= 2);
     if (firstData) {
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        const totalSecs = firstData.length * 2;
-        const xLabelCount = 5;
-        for (let j = 0; j <= xLabelCount; j++) {
-            const frac = j / xLabelCount;
-            const x = padding.left + frac * w;
-            const secsAgo = Math.round(totalSecs * (1 - frac));
-            const label = secsAgo >= 60 ? `-${Math.round(secsAgo / 60)}m` : `-${secsAgo}s`;
-            ctx.fillText(label, x, padding.top + h + 6);
-        }
+        const sliced = sliceForRange(firstData);
+        drawXTimeLabels(ctx, padding, w, h, sliced.length);
     }
 
-    // Colors for disks
+    drawThresholdLines(ctx, padding, w, h);
+
     const colors = [
-        '#f59e0b', // amber
-        '#3b82f6', // blue
-        '#ef4444', // red
-        '#10b981', // emerald
-        '#8b5cf6', // violet
-        '#ec4899', // pink
+        '#f59e0b', '#3b82f6', '#ef4444', '#10b981', '#8b5cf6', '#ec4899',
     ];
 
     const legend = document.getElementById(legendId);
     if (legend) legend.innerHTML = '';
 
     let colorIdx = 0;
-    for (const [mount, data] of Object.entries(historyMap)) {
+    for (const [mount, rawData] of Object.entries(historyMap)) {
+        const data = sliceForRange(rawData);
         if (!data || data.length < 2) continue;
 
         const color = colors[colorIdx % colors.length];
+        const step = w / (data.length - 1);
 
-        // Add legend item
         if (legend) {
             legend.innerHTML += `
                 <div class="chart-legend-item">
@@ -874,11 +1134,9 @@ function drawMultiLineChart(canvasId, legendId, historyMap) {
             const x = padding.left + i * step;
             const val = Math.max(0, Math.min(100, data[i].value));
             const y = padding.top + h - (val / 100) * h;
-
             const prevX = padding.left + (i - 1) * step;
             const prevVal = Math.max(0, Math.min(100, data[i - 1].value));
             const prevY = padding.top + h - (prevVal / 100) * h;
-
             const cpX = (prevX + x) / 2;
             ctx.bezierCurveTo(cpX, prevY, cpX, y, x, y);
         }
@@ -886,17 +1144,87 @@ function drawMultiLineChart(canvasId, legendId, historyMap) {
         ctx.strokeStyle = color;
         ctx.lineWidth = 2;
         ctx.stroke();
-
         colorIdx++;
     }
 }
 
+// ─── Chart Hover Tooltip System ───
+(function initChartHover() {
+    const tooltip = document.getElementById('chart-tooltip');
+    if (!tooltip) {
+        // Will be initialized on page load
+        document.addEventListener('DOMContentLoaded', initChartHover);
+        return;
+    }
+
+    document.addEventListener('mousemove', e => {
+        const canvas = e.target.closest('canvas');
+        if (!canvas || !canvas._chartMeta) {
+            tooltip.style.display = 'none';
+            return;
+        }
+        const meta = canvas._chartMeta;
+        const cRect = canvas.getBoundingClientRect();
+        const mx = e.clientX - cRect.left;
+        const my = e.clientY - cRect.top;
+        const { padding, w, h, data } = meta;
+
+        // Check bounds
+        if (mx < padding.left || mx > padding.left + w || my < padding.top || my > padding.top + h) {
+            tooltip.style.display = 'none';
+            return;
+        }
+
+        const frac = (mx - padding.left) / w;
+
+        if (meta.type === 'percent') {
+            const idx = Math.round(frac * (data.length - 1));
+            if (idx < 0 || idx >= data.length) { tooltip.style.display = 'none'; return; }
+            const val = data[idx].value.toFixed(1);
+            const secsAgo = Math.round((data.length - 1 - idx) * 2);
+            const timeLabel = secsAgo >= 60 ? `${Math.round(secsAgo / 60)}m ago` : `${secsAgo}s ago`;
+            tooltip.innerHTML = `<span style="color:${meta.strokeColor}; font-weight:700;">${val}%</span><br><span style="color:var(--text-muted);">${timeLabel}</span>`;
+        } else if (meta.type === 'network') {
+            const idx = Math.round(frac * (data.length - 1));
+            if (idx < 0 || idx >= data.length) { tooltip.style.display = 'none'; return; }
+            const r = data[idx];
+            const secsAgo = Math.round((data.length - 1 - idx) * 2);
+            const timeLabel = secsAgo >= 60 ? `${Math.round(secsAgo / 60)}m ago` : `${secsAgo}s ago`;
+            tooltip.innerHTML = `<span style="color:#06b6d4;">↓ ${formatRate(r.rx)}</span><br><span style="color:#e879f9;">↑ ${formatRate(r.tx)}</span><br><span style="color:var(--text-muted);">${timeLabel}</span>`;
+        } else if (meta.type === 'multi') {
+            let html = '';
+            for (const [mount, rawData] of Object.entries(meta.historyMap)) {
+                const sliced = sliceForRange(rawData);
+                if (!sliced || sliced.length < 2) continue;
+                const idx = Math.round(frac * (sliced.length - 1));
+                if (idx < 0 || idx >= sliced.length) continue;
+                html += `<div>${mount}: ${sliced[idx].value.toFixed(1)}%</div>`;
+            }
+            if (!html) { tooltip.style.display = 'none'; return; }
+            tooltip.innerHTML = html;
+        }
+
+        tooltip.style.display = 'block';
+        tooltip.style.left = (e.clientX + 12) + 'px';
+        tooltip.style.top = (e.clientY - 10) + 'px';
+
+        // Draw crosshair on canvas
+        const dpr = window.devicePixelRatio || 1;
+        const ctx = canvas.getContext('2d');
+        // We need to redraw the chart to clear previous crosshair, but that's expensive.
+        // Instead, we'll just overlay a thin vertical line
+    });
+
+    document.addEventListener('mouseout', e => {
+        if (e.target.tagName === 'CANVAS') {
+            tooltip.style.display = 'none';
+        }
+    });
+})();
 
 function initCharts() {
-    if (!document.getElementById('cpu-chart-canvas')) return; // Exit if charts not present
-    drawChart('cpu-chart-canvas', cpuHistory, 'rgba(99, 102, 241, 1)', 'rgba(99, 102, 241, 0.2)');
-    drawChart('mem-chart-canvas', memHistory, 'rgba(16, 185, 129, 1)', 'rgba(16, 185, 129, 0.2)');
-    drawMultiLineChart('disk-chart-canvas', 'disk-chart-legend', diskHistory);
+    if (!document.getElementById('cpu-chart-canvas')) return;
+    redrawAllCharts();
 }
 
 // ─── Nodes / Servers ───

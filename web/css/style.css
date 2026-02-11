@@ -311,6 +311,35 @@ body {
     padding: 28px 32px;
 }
 
+/* ─── Time Range Selector ─── */
+.time-range-btn {
+    padding: 4px 12px;
+    font-size: 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: var(--transition);
+    font-weight: 500;
+}
+
+.time-range-btn:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
+}
+
+.time-range-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+/* ─── Chart Cards ─── */
+.chart-card canvas {
+    cursor: crosshair;
+}
+
 /* ─── Cards ─── */
 .card {
     background: var(--bg-card);

@@ -177,6 +177,10 @@ pub struct MetricsSnapshot {
     pub memory_used_bytes: u64,
     pub memory_total_bytes: u64,
     pub disks: Vec<DiskSnapshot>,
+    #[serde(default)]
+    pub network_rx_bytes: u64,
+    #[serde(default)]
+    pub network_tx_bytes: u64,
 }
 
 /// Ring buffer of historical metric snapshots
@@ -195,6 +199,9 @@ impl MetricsHistory {
 
     /// Record a snapshot from current SystemMetrics
     pub fn push(&mut self, metrics: &SystemMetrics) {
+        let (rx_total, tx_total) = metrics.network.iter().fold((0u64, 0u64), |(rx, tx), n| {
+            (rx + n.rx_bytes, tx + n.tx_bytes)
+        });
         let snap = MetricsSnapshot {
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -210,6 +217,8 @@ impl MetricsHistory {
                 used_bytes: d.used_bytes,
                 total_bytes: d.total_bytes,
             }).collect(),
+            network_rx_bytes: rx_total,
+            network_tx_bytes: tx_total,
         };
 
         if self.snapshots.len() >= self.max_size {
