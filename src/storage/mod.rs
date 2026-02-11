@@ -514,13 +514,22 @@ fn mount_s3_via_rust_s3(mount: &StorageMount, s3: &S3Config) -> Result<String, S
 
     // Build region
     let region = if !s3.endpoint.is_empty() {
+        // Ensure endpoint has a scheme
+        let endpoint = if !s3.endpoint.starts_with("http://") && !s3.endpoint.starts_with("https://") {
+            format!("https://{}", s3.endpoint)
+        } else {
+            s3.endpoint.clone()
+        };
+        info!("S3 connecting to endpoint: {} bucket: {}", endpoint, s3.bucket);
         Region::Custom {
             region: if s3.region.is_empty() { "us-east-1".to_string() } else { s3.region.clone() },
-            endpoint: s3.endpoint.clone(),
+            endpoint,
         }
     } else {
-        s3.region.parse::<Region>()
-            .unwrap_or(Region::UsEast1)
+        let region = s3.region.parse::<Region>()
+            .unwrap_or(Region::UsEast1);
+        info!("S3 connecting to region: {:?} bucket: {}", region, s3.bucket);
+        region
     };
 
     // Create bucket handle
