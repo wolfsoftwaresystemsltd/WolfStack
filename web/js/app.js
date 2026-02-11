@@ -6149,12 +6149,16 @@ async function restorePbsSnapshot(snapshot, backupType) {
     if (!confirm('Restore PBS snapshot:\n' + snapshot + '\n\nRestore to: ' + targetDir + '\n\nThis will download and restore the data to this node.')) return;
 
     // Find the clicked button and show progress
-    const btn = event && event.target;
-    const origText = btn ? btn.innerHTML : '';
-    if (btn) { btn.disabled = true; btn.innerHTML = '<span style="display:inline-block; width:12px; height:12px; border:2px solid rgba(255,255,255,0.3); border-top-color:#fff; border-radius:50%; animation:spin 0.8s linear infinite; vertical-align:middle;"></span> Restoring...'; }
-    showToast('🔄 Downloading from PBS and restoring... This may take a while.', 'info');
+    var btn = event && event.target;
+    var origText = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span style="display:inline-block; width:12px; height:12px; border:2px solid rgba(255,255,255,0.3); border-top-color:#fff; border-radius:50%; animation:spin 0.8s linear infinite; vertical-align:middle;"></span> Starting...';
+    }
+    showToast('🔄 Starting PBS restore... Progress will update live.', 'info');
+
     try {
-        const res = await fetch(apiUrl('/api/backups/pbs/restore'), {
+        var res = await fetch(apiUrl('/api/backups/pbs/restore'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -6163,19 +6167,51 @@ async function restorePbsSnapshot(snapshot, backupType) {
                 target_dir: targetDir,
             }),
         });
-        const data = await res.json();
+        var data = await res.json();
         if (data.error) {
-            console.error('PBS restore error detail:', data.error);
+            console.error('PBS restore error:', data.error);
             showToast('PBS restore failed: ' + data.error, 'error');
+            if (btn) { btn.disabled = false; btn.innerHTML = origText; }
+            return;
         }
-        else {
-            showToast('✅ PBS restore complete: ' + data.message, 'success');
-            // Refresh relevant lists so restored items appear
-            if (typeof loadContainers === 'function') loadContainers();
-            if (typeof loadVMs === 'function') loadVMs();
-        }
+
+        // Start polling for progress
+        var pollInterval = setInterval(async function () {
+            try {
+                var pres = await fetch(apiUrl('/api/backups/pbs/restore/progress'));
+                if (!pres.ok) return;
+                var progress = await pres.json();
+
+                // Update button with progress
+                if (btn && progress.active) {
+                    var pct = progress.percentage != null ? progress.percentage.toFixed(1) : '?';
+                    var barWidth = progress.percentage != null ? Math.min(progress.percentage, 100) : 0;
+                    btn.innerHTML =
+                        '<div style="position:relative; min-width:100px; padding:3px 8px; text-align:center;">' +
+                        '<div style="position:absolute; left:0; top:0; bottom:0; width:' + barWidth + '%; background:rgba(255,255,255,0.15); border-radius:4px; transition:width 0.5s;"></div>' +
+                        '<span style="position:relative; font-size:11px;">' + pct + '% — ' + (progress.progress_text || 'Working...') + '</span>' +
+                        '</div>';
+                }
+
+                if (progress.finished) {
+                    clearInterval(pollInterval);
+                    if (progress.success) {
+                        showToast('✅ PBS restore complete: ' + progress.message, 'success');
+                        if (typeof loadContainers === 'function') loadContainers();
+                        if (typeof loadVMs === 'function') loadVMs();
+                    } else {
+                        showToast('❌ PBS restore failed: ' + progress.message, 'error');
+                    }
+                    if (btn) { btn.disabled = false; btn.innerHTML = origText; }
+                }
+            } catch (e) {
+                // Polling error — keep trying
+                console.warn('Progress poll error:', e);
+            }
+        }, 2000);
+
     } catch (e) {
         showToast('PBS restore error: ' + e.message, 'error');
+        if (btn) { btn.disabled = false; btn.innerHTML = origText; }
     }
-    if (btn) { btn.disabled = false; btn.innerHTML = origText; }
 }

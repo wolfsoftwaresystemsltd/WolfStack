@@ -1,7 +1,7 @@
 //! REST API for WolfStack dashboard and agent communication
 
 use actix_web::{web, HttpResponse, HttpRequest, cookie::Cookie};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::process::Command;
 use tracing::info;
@@ -17,6 +17,18 @@ use crate::auth::SessionManager;
 
 mod console;
 
+/// Progress state for PBS restore operations
+#[derive(Clone, Serialize, Default)]
+pub struct PbsRestoreProgress {
+    pub active: bool,
+    pub snapshot: String,
+    pub progress_text: String,
+    pub percentage: Option<f64>,
+    pub finished: bool,
+    pub success: Option<bool>,
+    pub message: String,
+}
+
 /// Shared application state
 pub struct AppState {
     pub monitor: std::sync::Mutex<SystemMonitor>,
@@ -25,6 +37,7 @@ pub struct AppState {
     pub sessions: Arc<SessionManager>,
     pub vms: std::sync::Mutex<crate::vms::manager::VmManager>,
     pub cluster_secret: String,
+    pub pbs_restore_progress: std::sync::Mutex<PbsRestoreProgress>,
 }
 
 // ─── Auth helpers ───
@@ -1656,17 +1669,85 @@ pub struct PbsRestoreRequest {
 }
 fn default_pbs_target_dir() -> String { "/var/lib/wolfstack/restored".to_string() }
 
-/// POST /api/backups/pbs/restore — restore a PBS snapshot
+/// POST /api/backups/pbs/restore — restore a PBS snapshot (runs in background)
 pub async fn pbs_restore(
     req: HttpRequest, state: web::Data<AppState>,
     body: web::Json<PbsRestoreRequest>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    let config = backup::load_pbs_config();
-    match backup::restore_from_pbs(&config, &body.snapshot, &body.archive, &body.target_dir) {
-        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
-        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+
+    // Check if a restore is already running
+    {
+        let progress = state.pbs_restore_progress.lock().unwrap();
+        if progress.active && !progress.finished {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "A restore is already in progress",
+                "snapshot": progress.snapshot,
+            }));
+        }
     }
+
+    let config = backup::load_pbs_config();
+    let snapshot = body.snapshot.clone();
+    let archive = body.archive.clone();
+    let target_dir = body.target_dir.clone();
+
+    // Reset progress state
+    {
+        let mut progress = state.pbs_restore_progress.lock().unwrap();
+        *progress = PbsRestoreProgress {
+            active: true,
+            snapshot: snapshot.clone(),
+            progress_text: "Starting restore...".to_string(),
+            percentage: Some(0.0),
+            finished: false,
+            success: None,
+            message: String::new(),
+        };
+    }
+
+    // Spawn background thread
+    let state_clone = state.clone();
+    std::thread::spawn(move || {
+        match backup::restore_from_pbs_with_progress(&config, &snapshot, &archive, &target_dir, |text, pct| {
+            if let Ok(mut progress) = state_clone.pbs_restore_progress.lock() {
+                progress.progress_text = text;
+                progress.percentage = pct;
+            }
+        }) {
+            Ok(msg) => {
+                if let Ok(mut progress) = state_clone.pbs_restore_progress.lock() {
+                    progress.finished = true;
+                    progress.success = Some(true);
+                    progress.message = msg;
+                    progress.percentage = Some(100.0);
+                    progress.progress_text = "Restore complete!".to_string();
+                }
+            }
+            Err(e) => {
+                if let Ok(mut progress) = state_clone.pbs_restore_progress.lock() {
+                    progress.finished = true;
+                    progress.success = Some(false);
+                    progress.message = e;
+                    progress.progress_text = "Restore failed".to_string();
+                }
+            }
+        }
+    });
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "started",
+        "message": "Restore started in background",
+    }))
+}
+
+/// GET /api/backups/pbs/restore/progress — poll restore progress
+pub async fn pbs_restore_progress(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let progress = state.pbs_restore_progress.lock().unwrap().clone();
+    HttpResponse::Ok().json(progress)
 }
 
 /// GET /api/backups/pbs/config — get PBS configuration
@@ -2152,6 +2233,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups/pbs/status", web::get().to(pbs_status))
         .route("/api/backups/pbs/snapshots", web::get().to(pbs_snapshots))
         .route("/api/backups/pbs/restore", web::post().to(pbs_restore))
+        .route("/api/backups/pbs/restore/progress", web::get().to(pbs_restore_progress))
         .route("/api/backups/pbs/config", web::get().to(pbs_config_get))
         .route("/api/backups/pbs/config", web::post().to(pbs_config_save))
         // Generic backup {id} routes — after specific routes

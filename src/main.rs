@@ -152,6 +152,7 @@ async fn main() -> std::io::Result<()> {
             sessions: sessions.clone(),
             vms: Mutex::new(vms_manager),
             cluster_secret: cluster_secret.clone(),
+            pbs_restore_progress: Mutex::new(Default::default()),
         });
 
         // Background: periodic self-monitoring update

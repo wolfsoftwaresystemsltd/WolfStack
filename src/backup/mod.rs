@@ -1470,6 +1470,112 @@ pub fn restore_from_pbs(
     Ok(format!("Restored to {}", target_dir))
 }
 
+/// Restore with real-time progress tracking via callback
+pub fn restore_from_pbs_with_progress<F>(
+    storage: &BackupStorage,
+    snapshot: &str,
+    archive: &str,
+    target_dir: &str,
+    on_progress: F,
+) -> Result<String, String>
+where
+    F: Fn(String, Option<f64>),
+{
+    let repo = pbs_repo_string(storage);
+
+    fs::create_dir_all(target_dir)
+        .map_err(|e| format!("Failed to create target dir: {}", e))?;
+
+    let snapshot_fixed = fix_pbs_snapshot_timestamp(snapshot);
+    info!("PBS restore (with progress): snapshot='{}' (fixed='{}'), archive='{}', target='{}'",
+          snapshot, snapshot_fixed, archive, target_dir);
+
+    on_progress("Detecting archive...".to_string(), Some(1.0));
+
+    let actual_archive = if archive.is_empty() || archive == "root.pxar" {
+        detect_pbs_archive(storage, &snapshot_fixed).unwrap_or_else(|| "root.pxar".to_string())
+    } else {
+        archive.to_string()
+    };
+    info!("Using archive: {}", actual_archive);
+    on_progress(format!("Downloading {}...", actual_archive), Some(2.0));
+
+    let mut cmd = Command::new("proxmox-backup-client");
+    cmd.arg("restore")
+       .arg(&snapshot_fixed)
+       .arg(&actual_archive)
+       .arg(target_dir)
+       .arg("--repository").arg(&repo)
+       .arg("--ignore-ownership").arg("true");
+
+    if !storage.pbs_fingerprint.is_empty() {
+        cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
+    }
+    if !storage.pbs_namespace.is_empty() {
+        cmd.arg("--ns").arg(&storage.pbs_namespace);
+    }
+    let pbs_pw = if !storage.pbs_token_secret.is_empty() { &storage.pbs_token_secret }
+                 else { &storage.pbs_password };
+    if !pbs_pw.is_empty() {
+        cmd.env("PBS_PASSWORD", pbs_pw);
+    }
+
+    // Pipe stderr to capture progress
+    use std::process::Stdio;
+    use std::io::BufRead;
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn()
+        .map_err(|e| format!("Failed to start proxmox-backup-client: {}", e))?;
+
+    // Read stderr in real-time for progress updates
+    if let Some(stderr) = child.stderr.take() {
+        let reader = std::io::BufReader::new(stderr);
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                let trimmed = line.trim().to_string();
+                if trimmed.is_empty() { continue; }
+
+                // Try to extract percentage from lines like:
+                // "  4.13% (1.02 GiB of 24.49 GiB)"
+                // or progress bar output
+                let pct = extract_percentage(&trimmed);
+                let display = if let Some(p) = pct {
+                    format!("Downloading: {:.1}%", p)
+                } else {
+                    trimmed.clone()
+                };
+                on_progress(display, pct);
+            }
+        }
+    }
+
+    let status = child.wait()
+        .map_err(|e| format!("PBS restore wait failed: {}", e))?;
+
+    if !status.success() {
+        error!("PBS restore failed for snapshot '{}'", snapshot_fixed);
+        return Err("PBS restore failed — check server logs".to_string());
+    }
+
+    info!("Restored PBS snapshot {} archive {} to {}", snapshot_fixed, actual_archive, target_dir);
+    Ok(format!("Restored {} to {}", actual_archive, target_dir))
+}
+
+/// Extract percentage from proxmox-backup-client progress output
+fn extract_percentage(line: &str) -> Option<f64> {
+    // Pattern: "  4.13% (1.02 GiB of 24.49 GiB)"  or "100.00%"
+    if let Some(pos) = line.find('%') {
+        let before = &line[..pos];
+        // Find the start of the number (walk back from %)
+        let num_str = before.trim_start().split_whitespace().last()?;
+        num_str.parse::<f64>().ok()
+    } else {
+        None
+    }
+}
+
 /// Convert Unix epoch timestamps in snapshot IDs to ISO format
 /// Input:  "ct/105/1707600000" -> "ct/105/2024-02-11T04:00:00Z"
 /// If already in ISO format (contains 'T'), pass through unchanged
