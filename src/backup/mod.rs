@@ -1411,65 +1411,6 @@ pub fn list_pbs_snapshots(storage: &BackupStorage) -> Result<serde_json::Value, 
     Ok(snapshots)
 }
 
-/// Restore a specific snapshot from PBS to local staging
-pub fn restore_from_pbs(
-    storage: &BackupStorage,
-    snapshot: &str,
-    archive: &str,
-    target_dir: &str,
-) -> Result<String, String> {
-    let repo = pbs_repo_string(storage);
-
-    fs::create_dir_all(target_dir)
-        .map_err(|e| format!("Failed to create target dir: {}", e))?;
-
-    // The snapshot comes as "type/id/timestamp" — convert Unix epoch timestamp
-    // to the ISO format that proxmox-backup-client expects (e.g. 2024-02-11T12:00:00Z)
-    let snapshot_fixed = fix_pbs_snapshot_timestamp(snapshot);
-    info!("PBS restore: snapshot='{}' (fixed='{}'), archive='{}', target='{}'",
-          snapshot, snapshot_fixed, archive, target_dir);
-
-    // Try to auto-detect the archive name by listing snapshot contents
-    let actual_archive = if archive.is_empty() || archive == "root.pxar" {
-        detect_pbs_archive(storage, &snapshot_fixed).unwrap_or_else(|| "root.pxar".to_string())
-    } else {
-        archive.to_string()
-    };
-    info!("Using archive: {}", actual_archive);
-
-    let mut cmd = Command::new("proxmox-backup-client");
-    cmd.arg("restore")
-       .arg(&snapshot_fixed)
-       .arg(&actual_archive)
-       .arg(target_dir)
-       .arg("--repository").arg(&repo)
-       .arg("--ignore-ownership").arg("true");
-
-    if !storage.pbs_fingerprint.is_empty() {
-        cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
-    }
-    if !storage.pbs_namespace.is_empty() {
-        cmd.arg("--ns").arg(&storage.pbs_namespace);
-    }
-    let pbs_pw = if !storage.pbs_token_secret.is_empty() { &storage.pbs_token_secret }
-                 else { &storage.pbs_password };
-    if !pbs_pw.is_empty() {
-        cmd.env("PBS_PASSWORD", pbs_pw);
-    }
-
-    let output = cmd.output()
-        .map_err(|e| format!("PBS restore failed: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        error!("PBS restore error for snapshot '{}': {}", snapshot_fixed, stderr);
-        return Err(format!("PBS restore error: {}", stderr));
-    }
-
-    info!("Restored PBS snapshot {} archive {} to {}", snapshot_fixed, actual_archive, target_dir);
-    Ok(format!("Restored to {}", target_dir))
-}
-
 /// Restore with real-time progress tracking via callback
 pub fn restore_from_pbs_with_progress<F>(
     storage: &BackupStorage,
