@@ -145,16 +145,15 @@
                     style="margin-bottom: 24px; background: linear-gradient(145deg, var(--card-bg), var(--bg-secondary)); border: 1px solid var(--border-color);">
                     <div style="display: flex; gap: 40px; align-items: flex-start; flex-wrap: wrap;">
                         <!-- Logo (ASCII-ish) -->
-                        <div style="flex-shrink: 0; display: flex; align-items: center; justify-content: center;">
-                            <pre
-                                style="font-family: 'Fira Code', monospace; line-height: 1.2; color: var(--accent); font-weight: bold; margin: 0; font-size: 14px;">
-   _.._  _,
-  /   .\'_)    WolfStack
- ;  _  |      ---------
- ; ( ' |      v6.1.7
-  ; \_ / 
-   `""`
-                            </pre>
+                        <!-- Logo (Text) -->
+                        <div
+                            style="flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; padding-right: 20px;">
+                            <h1
+                                style="color: var(--success); margin: 0; font-size: 32px; font-weight: 800; letter-spacing: -1px; line-height: 1; font-family: 'Inter', sans-serif;">
+                                WolfStack</h1>
+                            <div
+                                style="color: var(--success); font-size: 16px; font-weight: 600; margin-top: 6px; opacity: 0.9; letter-spacing: 0.5px;">
+                                v6.1.8</div>
                         </div>
 
                         <!-- Details -->
@@ -188,7 +187,7 @@
                                     style="display: flex; justify-content: space-between; border-bottom: 1px dashed var(--border-color); padding-bottom: 4px;">
                                     <span style="color: var(--accent); font-weight: 600;">cpu</span>
                                     <span id="neo-cpu"
-                                        style="color: var(--text-primary); text-align: right; max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">...</span>
+                                        style="color: var(--text-primary); text-align: right; word-break: break-word;">...</span>
                                 </div>
                                 <div
                                     style="display: flex; justify-content: space-between; border-bottom: 1px dashed var(--border-color); padding-bottom: 4px;">
