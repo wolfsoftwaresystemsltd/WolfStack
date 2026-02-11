@@ -239,7 +239,20 @@ else
             WOLFNET_SUBNET="10.10.10"  # fallback anyway
         fi
 
+        # Check the candidate IP isn't already taken by another node
+        # (e.g. two servers with the same last octet on different subnets)
         WOLFNET_IP="${WOLFNET_SUBNET}.${LAST_OCTET}"
+        TRIES=0
+        while [ $TRIES -lt 253 ]; do
+            # Quick ping check — if nobody responds, it's free
+            if ! ping -c 1 -W 1 "$WOLFNET_IP" &>/dev/null; then
+                break
+            fi
+            echo "  ⚠ ${WOLFNET_IP} already in use, trying next..."
+            LAST_OCTET=$(( (LAST_OCTET % 254) + 1 ))
+            WOLFNET_IP="${WOLFNET_SUBNET}.${LAST_OCTET}"
+            TRIES=$((TRIES + 1))
+        done
 
         # Generate keys
         KEY_FILE="/etc/wolfnet/private.key"
