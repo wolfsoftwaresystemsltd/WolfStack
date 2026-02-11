@@ -6184,13 +6184,15 @@ async function restorePbsSnapshot(snapshot, backupType) {
 
                 // Update button with progress
                 if (btn && progress.active) {
-                    var pct = progress.percentage != null ? progress.percentage.toFixed(1) : '?';
-                    var barWidth = progress.percentage != null ? Math.min(progress.percentage, 100) : 0;
+                    var label = progress.progress_text || 'Working...';
+                    if (progress.percentage != null) {
+                        label = progress.percentage.toFixed(1) + '% — ' + label;
+                    }
                     btn.innerHTML =
-                        '<div style="position:relative; min-width:100px; padding:3px 8px; text-align:center;">' +
-                        '<div style="position:absolute; left:0; top:0; bottom:0; width:' + barWidth + '%; background:rgba(255,255,255,0.15); border-radius:4px; transition:width 0.5s;"></div>' +
-                        '<span style="position:relative; font-size:11px;">' + pct + '% — ' + (progress.progress_text || 'Working...') + '</span>' +
-                        '</div>';
+                        '<div style="position:relative; min-width:120px; padding:3px 8px; text-align:center;">' +
+                        '<span style="position:relative; font-size:11px;">' +
+                        '<span style="display:inline-block; width:12px; height:12px; border:2px solid rgba(255,255,255,0.3); border-top-color:#fff; border-radius:50%; animation:spin 0.8s linear infinite; vertical-align:middle; margin-right:6px;"></span>' +
+                        label + '</span></div>';
                 }
 
                 if (progress.finished) {
