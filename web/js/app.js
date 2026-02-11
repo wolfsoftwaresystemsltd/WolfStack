@@ -552,7 +552,7 @@ function updateDashboard(m) {
         const neoIp = document.getElementById('neo-ip');
         if (neoIp) {
             // Find current node in global nodes list
-            const currentNode = nodes.find(n => n.id === currentNodeId);
+            const currentNode = allNodes.find(n => n.id === currentNodeId);
             neoIp.textContent = currentNode?.public_ip || '— (private)';
         }
     }
