@@ -540,53 +540,62 @@ fn mount_s3_via_rust_s3(mount: &StorageMount, s3: &S3Config) -> Result<String, S
         .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
 
     let sync_result = rt.block_on(async {
-        // List objects in bucket (top-level, first 1000)
-        let list = bucket.list("".to_string(), None).await
-            .map_err(|e| format!("Failed to list S3 bucket '{}': {}", s3.bucket, e))?;
+        // Wrap the entire S3 operation in a timeout
+        let timeout_duration = std::time::Duration::from_secs(30);
+        match tokio::time::timeout(timeout_duration, async {
+            // List objects in bucket (top-level, first 1000)
+            let list = bucket.list("".to_string(), None).await
+                .map_err(|e| format!("Failed to list S3 bucket '{}': {}", s3.bucket, e))?;
 
-        let mut synced = 0usize;
-        for item in &list {
-            for obj in &item.contents {
-                let key = &obj.key;
-                // Skip directory markers
-                if key.ends_with('/') {
-                    // Create directory
-                    let dir_path = format!("{}/{}", cache_dir, key);
-                    fs::create_dir_all(&dir_path).ok();
-                    continue;
-                }
+            let mut synced = 0usize;
+            for item in &list {
+                for obj in &item.contents {
+                    let key = &obj.key;
+                    // Skip directory markers
+                    if key.ends_with('/') {
+                        let dir_path = format!("{}/{}", cache_dir, key);
+                        fs::create_dir_all(&dir_path).ok();
+                        continue;
+                    }
 
-                let local_path = format!("{}/{}", cache_dir, key);
+                    let local_path = format!("{}/{}", cache_dir, key);
 
-                // Create parent directories
-                if let Some(parent) = Path::new(&local_path).parent() {
-                    fs::create_dir_all(parent).ok();
-                }
+                    // Create parent directories
+                    if let Some(parent) = Path::new(&local_path).parent() {
+                        fs::create_dir_all(parent).ok();
+                    }
 
-                // Check if local file exists and matches size
-                let needs_download = match fs::metadata(&local_path) {
-                    Ok(meta) => meta.len() != obj.size,
-                    Err(_) => true,
-                };
+                    // Check if local file exists and matches size
+                    let needs_download = match fs::metadata(&local_path) {
+                        Ok(meta) => meta.len() != obj.size,
+                        Err(_) => true,
+                    };
 
-                if needs_download {
-                    match bucket.get_object(key).await {
-                        Ok(response) => {
-                            if let Err(e) = fs::write(&local_path, response.bytes()) {
-                                error!("Failed to write {}: {}", local_path, e);
-                            } else {
-                                synced += 1;
+                    if needs_download {
+                        match bucket.get_object(key).await {
+                            Ok(response) => {
+                                if let Err(e) = fs::write(&local_path, response.bytes()) {
+                                    error!("Failed to write {}: {}", local_path, e);
+                                } else {
+                                    synced += 1;
+                                }
                             }
-                        }
-                        Err(e) => {
-                            error!("Failed to download s3://{}/{}: {}", s3.bucket, key, e);
+                            Err(e) => {
+                                error!("Failed to download s3://{}/{}: {}", s3.bucket, key, e);
+                            }
                         }
                     }
                 }
             }
-        }
 
-        Ok::<usize, String>(synced)
+            Ok::<usize, String>(synced)
+        }).await {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "S3 connection timed out after 30s — check endpoint '{}', credentials, and bucket '{}'",
+                s3.endpoint, s3.bucket
+            )),
+        }
     })?;
 
     // Bind-mount the cache directory to the mount point

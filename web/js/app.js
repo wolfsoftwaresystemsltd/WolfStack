@@ -902,8 +902,15 @@ async function createStorageMount() {
 }
 
 async function mountStorage(id) {
+    // Find and update the mount button for immediate feedback
+    const btn = document.querySelector(`button[onclick="mountStorage('${id}')"]`);
+    const origText = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.innerHTML = '⏳ Connecting...';
+        btn.disabled = true;
+        btn.style.opacity = '0.7';
+    }
     try {
-        showToast('Mounting storage... (this may take a moment for S3)', 'info');
         const resp = await fetch(apiUrl(`/api/storage/mounts/${id}/mount`), { method: 'POST' });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Mount failed');
@@ -911,6 +918,12 @@ async function mountStorage(id) {
         loadStorageMounts();
     } catch (e) {
         showToast('Mount error: ' + e.message, 'error');
+        // Restore button on error
+        if (btn) {
+            btn.innerHTML = origText;
+            btn.disabled = false;
+            btn.style.opacity = '';
+        }
     }
 }
 
