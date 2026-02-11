@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{info, error, warn};
-use chrono::{Utc, NaiveTime, Datelike, Weekday};
+use tracing::{info, error};
+use chrono::{Utc, Datelike};
 use uuid::Uuid;
 
 const BACKUP_CONFIG_PATH: &str = "/etc/wolfstack/backups.json";
@@ -91,6 +91,7 @@ pub struct BackupStorage {
     pub remote_url: String,
 }
 
+#[allow(dead_code)]
 impl BackupStorage {
     pub fn local(path: &str) -> Self {
         Self {
@@ -630,7 +631,7 @@ fn store_s3(local_path: &Path, storage: &BackupStorage, filename: &str) -> Resul
     info!("Uploading backup to S3: {}/{}", storage.bucket, filename);
 
     // Use tokio runtime for the async S3 upload
-    let rt = tokio::runtime::Handle::try_current()
+    let _rt = tokio::runtime::Handle::try_current()
         .map_err(|_| "No tokio runtime available".to_string())?;
 
     let data = fs::read(local_path)
