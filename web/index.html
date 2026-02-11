@@ -727,30 +727,43 @@
                 <div class="card-body">
                     <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:12px;">
                         <div class="form-group">
-                            <label style="font-size:12px; color:var(--text-secondary);">PBS Server</label>
-                            <input type="text" id="pbs-server" class="form-control" placeholder="pbs.example.com">
+                            <label style="font-size:12px; color:var(--text-secondary);">Server</label>
+                            <input type="text" id="pbs-server" class="form-control" placeholder="pbs.example.com:8007">
                         </div>
                         <div class="form-group">
                             <label style="font-size:12px; color:var(--text-secondary);">Datastore</label>
                             <input type="text" id="pbs-datastore" class="form-control" placeholder="backups">
                         </div>
                         <div class="form-group">
-                            <label style="font-size:12px; color:var(--text-secondary);">User</label>
+                            <label style="font-size:12px; color:var(--text-secondary);">Username</label>
                             <input type="text" id="pbs-user" class="form-control" placeholder="backup@pbs">
                         </div>
                         <div class="form-group">
-                            <label style="font-size:12px; color:var(--text-secondary);">API Token Name</label>
+                            <label style="font-size:12px; color:var(--text-secondary);">Password <span
+                                    style="color:var(--text-muted);">(or use API token below)</span></label>
+                            <input type="password" id="pbs-password" class="form-control" placeholder="password">
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary);">API Token Name <span
+                                    style="color:var(--text-muted);">(optional)</span></label>
                             <input type="text" id="pbs-token-name" class="form-control" placeholder="wolfstack">
                         </div>
                         <div class="form-group">
-                            <label style="font-size:12px; color:var(--text-secondary);">API Token Secret</label>
+                            <label style="font-size:12px; color:var(--text-secondary);">API Token Secret <span
+                                    style="color:var(--text-muted);">(optional)</span></label>
                             <input type="password" id="pbs-token-secret" class="form-control"
                                 placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
                         </div>
                         <div class="form-group">
-                            <label style="font-size:12px; color:var(--text-secondary);">TLS Fingerprint <span
+                            <label style="font-size:12px; color:var(--text-secondary);">Namespace <span
                                     style="color:var(--text-muted);">(optional)</span></label>
-                            <input type="text" id="pbs-fingerprint" class="form-control" placeholder="AA:BB:CC:...">
+                            <input type="text" id="pbs-namespace" class="form-control" placeholder="">
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary);">Fingerprint <span
+                                    style="color:var(--text-muted);">(optional, for self-signed certs)</span></label>
+                            <input type="text" id="pbs-fingerprint" class="form-control"
+                                placeholder="SHA-256 fingerprint">
                         </div>
                     </div>
                 </div>

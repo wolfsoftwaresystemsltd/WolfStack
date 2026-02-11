@@ -106,9 +106,15 @@ pub struct BackupStorage {
     /// PBS API token secret
     #[serde(default)]
     pub pbs_token_secret: String,
+    /// PBS password (alternative to API token)
+    #[serde(default)]
+    pub pbs_password: String,
     /// PBS server TLS fingerprint (optional)
     #[serde(default)]
     pub pbs_fingerprint: String,
+    /// PBS namespace (optional, for organizing backups)
+    #[serde(default)]
+    pub pbs_namespace: String,
 }
 
 #[allow(dead_code)]
@@ -178,7 +184,9 @@ impl Default for BackupStorage {
             pbs_user: String::new(),
             pbs_token_name: String::new(),
             pbs_token_secret: String::new(),
+            pbs_password: String::new(),
             pbs_fingerprint: String::new(),
+            pbs_namespace: String::new(),
         }
     }
 }
@@ -772,10 +780,15 @@ fn store_pbs(local_path: &Path, storage: &BackupStorage, filename: &str) -> Resu
     if !storage.pbs_fingerprint.is_empty() {
         cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
     }
+    if !storage.pbs_namespace.is_empty() {
+        cmd.arg("--ns").arg(&storage.pbs_namespace);
+    }
 
-    // Pass token secret via env
-    if !storage.pbs_token_secret.is_empty() {
-        cmd.env("PBS_PASSWORD", &storage.pbs_token_secret);
+    // Pass token secret or password via env
+    let pbs_pw = if !storage.pbs_token_secret.is_empty() { &storage.pbs_token_secret }
+                 else { &storage.pbs_password };
+    if !pbs_pw.is_empty() {
+        cmd.env("PBS_PASSWORD", pbs_pw);
     }
 
     let output = cmd.output()
@@ -1329,8 +1342,13 @@ pub fn list_pbs_snapshots(storage: &BackupStorage) -> Result<serde_json::Value, 
     if !storage.pbs_fingerprint.is_empty() {
         cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
     }
-    if !storage.pbs_token_secret.is_empty() {
-        cmd.env("PBS_PASSWORD", &storage.pbs_token_secret);
+    if !storage.pbs_namespace.is_empty() {
+        cmd.arg("--ns").arg(&storage.pbs_namespace);
+    }
+    let pbs_pw = if !storage.pbs_token_secret.is_empty() { &storage.pbs_token_secret }
+                 else { &storage.pbs_password };
+    if !pbs_pw.is_empty() {
+        cmd.env("PBS_PASSWORD", pbs_pw);
     }
 
     let output = cmd.output()
@@ -1370,8 +1388,13 @@ pub fn restore_from_pbs(
     if !storage.pbs_fingerprint.is_empty() {
         cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
     }
-    if !storage.pbs_token_secret.is_empty() {
-        cmd.env("PBS_PASSWORD", &storage.pbs_token_secret);
+    if !storage.pbs_namespace.is_empty() {
+        cmd.arg("--ns").arg(&storage.pbs_namespace);
+    }
+    let pbs_pw = if !storage.pbs_token_secret.is_empty() { &storage.pbs_token_secret }
+                 else { &storage.pbs_password };
+    if !pbs_pw.is_empty() {
+        cmd.env("PBS_PASSWORD", pbs_pw);
     }
 
     let output = cmd.output()

@@ -5803,8 +5803,13 @@ async function loadPbsConfig() {
         setVal('pbs-user', cfg.pbs_user);
         setVal('pbs-token-name', cfg.pbs_token_name);
         setVal('pbs-fingerprint', cfg.pbs_fingerprint);
+        setVal('pbs-namespace', cfg.pbs_namespace);
         if (cfg.has_token_secret) {
             const el = document.getElementById('pbs-token-secret');
+            if (el) el.placeholder = '(saved — enter new value to change)';
+        }
+        if (cfg.has_password) {
+            const el = document.getElementById('pbs-password');
             if (el) el.placeholder = '(saved — enter new value to change)';
         }
         if (cfg.pbs_server) {
@@ -5850,9 +5855,11 @@ async function savePbsConfig() {
         pbs_server: getVal('pbs-server'),
         pbs_datastore: getVal('pbs-datastore'),
         pbs_user: getVal('pbs-user'),
+        pbs_password: getVal('pbs-password'),
         pbs_token_name: getVal('pbs-token-name'),
         pbs_token_secret: getVal('pbs-token-secret'),
         pbs_fingerprint: getVal('pbs-fingerprint'),
+        pbs_namespace: getVal('pbs-namespace'),
     };
     if (!body.pbs_server || !body.pbs_datastore || !body.pbs_user) {
         showToast('Server, datastore, and user are required', 'error');
@@ -5932,7 +5939,7 @@ async function loadPbsSnapshots() {
 
         const TYPE_EMOJIS = { vm: '\ud83d\udda5\ufe0f', ct: '\ud83d\udce6', host: '\ud83c\udfe0' };
 
-        tbody.innerHTML = list.map(function(s) {
+        tbody.innerHTML = list.map(function (s) {
             var btype = s['backup-type'] || s.backup_type || 'host';
             var bid = s['backup-id'] || s.backup_id || '\u2014';
             var btime = s['backup-time'] || s.backup_time || '';
@@ -5954,10 +5961,10 @@ async function loadPbsSnapshots() {
                 '<td style="font-size:12px;">' + timeStr + '</td>' +
                 '<td>' + formatPbsSize(size) + '</td>' +
                 '<td style="text-align:right;">' +
-                    '<button class="btn btn-sm btn-primary" onclick="restorePbsSnapshot(\x27' + snapEsc + '\x27)"' +
-                    ' style="font-size:11px; padding:3px 10px;">\u2b07\ufe0f Restore</button>' +
+                '<button class="btn btn-sm btn-primary" onclick="restorePbsSnapshot(\x27' + snapEsc + '\x27)"' +
+                ' style="font-size:11px; padding:3px 10px;">\u2b07\ufe0f Restore</button>' +
                 '</td>' +
-            '</tr>';
+                '</tr>';
         }).join('');
     } catch (e) {
         console.error('Failed to load PBS snapshots:', e);

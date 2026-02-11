@@ -1661,7 +1661,9 @@ pub async fn pbs_config_get(
         "pbs_user": config.pbs_user,
         "pbs_token_name": config.pbs_token_name,
         "pbs_fingerprint": config.pbs_fingerprint,
+        "pbs_namespace": config.pbs_namespace,
         "has_token_secret": !config.pbs_token_secret.is_empty(),
+        "has_password": !config.pbs_password.is_empty(),
     }))
 }
 
@@ -1675,7 +1677,11 @@ pub struct PbsConfigRequest {
     #[serde(default)]
     pub pbs_token_secret: String,
     #[serde(default)]
+    pub pbs_password: String,
+    #[serde(default)]
     pub pbs_fingerprint: String,
+    #[serde(default)]
+    pub pbs_namespace: String,
 }
 
 /// POST /api/backups/pbs/config — save PBS configuration
@@ -1691,7 +1697,9 @@ pub async fn pbs_config_save(
         pbs_user: body.pbs_user.clone(),
         pbs_token_name: body.pbs_token_name.clone(),
         pbs_token_secret: body.pbs_token_secret.clone(),
+        pbs_password: body.pbs_password.clone(),
         pbs_fingerprint: body.pbs_fingerprint.clone(),
+        pbs_namespace: body.pbs_namespace.clone(),
         ..backup::BackupStorage::default()
     };
     match backup::save_pbs_config(&storage) {
