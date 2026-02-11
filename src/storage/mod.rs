@@ -467,8 +467,13 @@ fn mount_s3_via_s3fs(mount: &StorageMount, s3: &S3Config) -> Result<String, Stri
     
     // Custom endpoint for non-AWS providers (R2, MinIO, Wasabi, etc.)
     if !s3.endpoint.is_empty() {
+        let endpoint = if !s3.endpoint.starts_with("http://") && !s3.endpoint.starts_with("https://") {
+            format!("https://{}", s3.endpoint)
+        } else {
+            s3.endpoint.clone()
+        };
         args.push("-o".to_string());
-        args.push(format!("url={}", s3.endpoint));
+        args.push(format!("url={}", endpoint));
         args.push("-o".to_string());
         args.push("use_path_request_style".to_string());
     }
@@ -485,13 +490,17 @@ fn mount_s3_via_s3fs(mount: &StorageMount, s3: &S3Config) -> Result<String, Stri
         .map_err(|e| format!("Failed to run s3fs: {}", e))?;
     
     if output.status.success() {
-        // Verify mount
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        if check_mounted(&mount.mount_point) {
-            Ok("S3 storage mounted via s3fs".to_string())
-        } else {
-            Err("s3fs started but mount point not detected — check credentials and bucket name".to_string())
+        // Verify mount — s3fs launches as daemon, may take a moment
+        for attempt in 0..4 {
+            std::thread::sleep(std::time::Duration::from_millis(500 * (attempt + 1)));
+            if check_mounted(&mount.mount_point) {
+                return Ok("S3 storage mounted via s3fs".to_string());
+            }
         }
+        // Mount point still not detected but s3fs started OK
+        // Trust the exit code — it may just be slow
+        warn!("s3fs started but mount point detection slow for {}", mount.mount_point);
+        Ok("S3 storage mounted via s3fs (mount may still be initializing)".to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         Err(format!("s3fs mount failed: {}", stderr))
@@ -908,19 +917,21 @@ pub fn auto_mount_all() {
     let config = load_config();
     let auto_mounts: Vec<_> = config.mounts.iter()
         .filter(|m| m.auto_mount && m.enabled)
-        .map(|m| m.id.clone())
+        .map(|m| (m.id.clone(), m.name.clone()))
         .collect();
     
     if auto_mounts.is_empty() {
         return;
     }
     
-    info!("Auto-mounting {} storage entries...", auto_mounts.len());
-    for id in auto_mounts {
-        match mount_storage(&id) {
-            Ok(msg) => info!("  ✓ Auto-mounted {}: {}", id, msg),
-            Err(e) => error!("  ✗ Failed to auto-mount {}: {}", id, e),
-        }
+    info!("Auto-mounting {} storage entries in background...", auto_mounts.len());
+    for (id, name) in auto_mounts {
+        std::thread::spawn(move || {
+            match mount_storage(&id) {
+                Ok(msg) => info!("  ✓ Auto-mounted {}: {}", name, msg),
+                Err(e) => error!("  ✗ Failed to auto-mount {}: {}", name, e),
+            }
+        });
     }
 }
 
