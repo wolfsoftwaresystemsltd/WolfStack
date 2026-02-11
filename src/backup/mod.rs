@@ -996,16 +996,21 @@ pub fn list_available_targets() -> Vec<BackupTarget> {
         }
     }
 
-    // VMs
+    // VMs (stored as {name}.json in the vms directory)
     let vm_dir = Path::new("/var/lib/wolfstack/vms");
     if vm_dir.exists() {
-        if let Ok(dirs) = fs::read_dir(vm_dir) {
-            for entry in dirs.flatten() {
-                if entry.path().is_dir() {
-                    targets.push(BackupTarget {
-                        target_type: BackupTargetType::Vm,
-                        name: entry.file_name().to_string_lossy().to_string(),
-                    });
+        if let Ok(entries) = fs::read_dir(vm_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("json")
+                    && !path.to_string_lossy().contains(".runtime.")
+                {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        targets.push(BackupTarget {
+                            target_type: BackupTargetType::Vm,
+                            name: stem.to_string(),
+                        });
+                    }
                 }
             }
         }
