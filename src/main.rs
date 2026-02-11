@@ -89,6 +89,22 @@ async fn main() -> std::io::Result<()> {
 
     // Load built-in cluster secret for inter-node authentication
     let cluster_secret = auth::load_cluster_secret();
+
+    // Fetch public IP (best effort)
+    let public_ip = match reqwest::Client::builder().timeout(Duration::from_secs(2)).build() {
+        Ok(client) => {
+            match client.get("https://ifconfig.me/ip").send().await {
+                Ok(resp) => resp.text().await.ok(),
+                Err(_) => None,
+            }
+        }
+        Err(_) => None,
+    };
+    if let Some(ip) = &public_ip {
+        info!("  Public IP:  {}", ip);
+    } else {
+        info!("  Public IP:  (detection failed)");
+    }
     info!("");
 
     // Initialize monitoring
@@ -122,7 +138,7 @@ async fn main() -> std::io::Result<()> {
         let docker_count = containers::docker_list_all().len() as u32;
         let lxc_count = containers::lxc_list_all().len() as u32;
         let vm_count = vms_manager.list_vms().len() as u32;
-        cluster.update_self(metrics, components, docker_count, lxc_count, vm_count);
+        cluster.update_self(metrics, components, docker_count, lxc_count, vm_count, public_ip.clone());
 
         // Create app state
         let app_state = web::Data::new(api::AppState {
@@ -137,6 +153,8 @@ async fn main() -> std::io::Result<()> {
         // Background: periodic self-monitoring update
         let state_clone = app_state.clone();
         let cluster_clone = cluster.clone();
+        // Clone public_ip for the background task
+        let public_ip = public_ip.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -154,7 +172,10 @@ async fn main() -> std::io::Result<()> {
                 let docker_count = containers::docker_list_all().len() as u32;
                 let lxc_count = containers::lxc_list_all().len() as u32;
                 let vm_count = state_clone.vms.lock().unwrap().list_vms().len() as u32;
-                cluster_clone.update_self(metrics, components, docker_count, lxc_count, vm_count);
+                // Use the initially detected public_ip (cloned into the closure)
+                // Note: If public IP changes (dynamic IP), we'd need to re-fetch it periodically.
+                // For now, assuming static public IP session.
+                cluster_clone.update_self(metrics, components, docker_count, lxc_count, vm_count, public_ip.clone());
             }
         });
 

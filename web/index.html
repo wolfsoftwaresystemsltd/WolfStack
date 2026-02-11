@@ -48,7 +48,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v6.1.6</span>
+                <span class="version">v6.1.7</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -282,6 +282,43 @@
                             </thead>
                             <tbody id="disk-table"></tbody>
                         </table>
+                        <!-- Performance History -->
+                        <h3 style="margin-bottom: 16px; margin-top: 32px; font-size: 16px; font-weight: 600;">
+                            Performance History</h3>
+                        <div class="grid-3" style="margin-bottom: 24px;">
+                            <!-- CPU History -->
+                            <div class="card">
+                                <div class="card-header">
+                                    <h3>CPU History</h3>
+                                </div>
+                                <div class="card-body" style="padding: 0; min-height: 200px; position: relative;">
+                                    <canvas id="cpu-chart-canvas"
+                                        style="width: 100%; height: 100%; display: block;"></canvas>
+                                </div>
+                            </div>
+                            <!-- Memory History -->
+                            <div class="card">
+                                <div class="card-header">
+                                    <h3>Memory History</h3>
+                                </div>
+                                <div class="card-body" style="padding: 0; min-height: 200px; position: relative;">
+                                    <canvas id="mem-chart-canvas"
+                                        style="width: 100%; height: 100%; display: block;"></canvas>
+                                </div>
+                            </div>
+                            <!-- Disk/Net History -->
+                            <div class="card">
+                                <div class="card-header">
+                                    <h3>Disk I/O History</h3>
+                                    <div id="disk-chart-legend" style="display: flex; gap: 10px; font-size: 11px;">
+                                    </div>
+                                </div>
+                                <div class="card-body" style="padding: 0; min-height: 200px; position: relative;">
+                                    <canvas id="disk-chart-canvas"
+                                        style="width: 100%; height: 100%; display: block;"></canvas>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>

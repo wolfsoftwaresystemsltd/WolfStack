@@ -77,14 +77,36 @@ function selectServerView(nodeId, view) {
     if (headerHostname) headerHostname.textContent = hostname;
 
     const headerIp = document.getElementById('server-header-ip');
-    if (headerIp) headerIp.textContent = node?.address || '—';
+    if (headerIp) {
+        let ipText = node?.address || '—';
+        if (node?.public_ip) ipText = `${node.public_ip} (Public) • ${ipText}`;
+        headerIp.textContent = ipText;
+    }
 
     const headerOs = document.getElementById('server-header-os');
     if (headerOs && node?.metrics?.os_name) headerOs.textContent = node.metrics.os_name;
 
     // Load data for the view
     if (view === 'dashboard') {
+        // Clear history for new server view to show fresh data
+        cpuHistory = [];
+        memHistory = [];
+        diskHistory = {};
+
+        // Clear canvases if they exist
+        const cpuCtx = document.getElementById('cpu-chart-canvas')?.getContext('2d');
+        if (cpuCtx) cpuCtx.clearRect(0, 0, cpuCtx.canvas.width, cpuCtx.canvas.height);
+
+        const memCtx = document.getElementById('mem-chart-canvas')?.getContext('2d');
+        if (memCtx) memCtx.clearRect(0, 0, memCtx.canvas.width, memCtx.canvas.height);
+
+        const diskCtx = document.getElementById('disk-chart-canvas')?.getContext('2d');
+        if (diskCtx) diskCtx.clearRect(0, 0, diskCtx.canvas.width, diskCtx.canvas.height);
+
         if (node?.metrics) updateDashboard(node.metrics);
+
+        // If it's the local node (is_self), we could fetch history, but for now we'll build it live
+        if (node?.is_self) fetchMetricsHistory();
     }
     if (view === 'components') loadComponents();
     if (view === 'services') loadComponents();
@@ -283,6 +305,8 @@ function renderDatacenterOverview() {
 // ─── Map Logic ───
 let worldMap = null;
 let mapMarkers = {};
+let geoCache = {};
+let fetchingGeo = {};
 
 function initMap() {
     if (worldMap) return;
@@ -307,6 +331,87 @@ function updateMap(nodes) {
     // Fix map size if it was hidden
     worldMap.invalidateSize();
 
+    nodes.forEach(node => {
+        if (mapMarkers[node.id]) return;
+
+        // Function to place marker
+        const placeMarker = (lat, lon) => {
+            const icon = L.divIcon({
+                className: 'custom-map-marker',
+                html: `<div style="width:12px; height:12px; background:${node.online ? '#10b981' : '#ef4444'}; border-radius:50%; border:2px solid #ffffff; box-shadow:0 0 10px ${node.online ? '#10b981' : '#ef4444'};"></div>`,
+                iconSize: [12, 12]
+            });
+            const marker = L.marker([lat, lon], { icon: icon }).addTo(worldMap);
+            // Include Public IP in popup if available
+            let popupContent = `<b>${node.hostname}</b><br>${node.address}`;
+            if (node.public_ip) popupContent += `<br>Public: ${node.public_ip}`;
+            popupContent += `<br>${node.online ? 'Online' : 'Offline'}`;
+
+            marker.bindPopup(popupContent);
+            mapMarkers[node.id] = marker;
+        };
+
+        // Real Geolocation via Public IP
+        if (node.public_ip) {
+            if (geoCache[node.public_ip]) {
+                const [lat, lon] = geoCache[node.public_ip];
+                placeMarker(lat, lon);
+                return;
+            }
+
+            // Fetch if not already fetching
+            if (!fetchingGeo[node.public_ip]) {
+                fetchingGeo[node.public_ip] = true;
+                // Use ip-api.com (HTTP). Note: Mixed content warning if dashboard is HTTPS.
+                // Assuming dashboard is HTTP for now based on port 8553.
+                fetch(`http://ip-api.com/json/${node.public_ip}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            geoCache[node.public_ip] = [data.lat, data.lon];
+                            placeMarker(data.lat, data.lon);
+                        } else {
+                            // Fallback to hash if geoloc fails
+                            useHashLocation(node, placeMarker);
+                        }
+                    })
+                    .catch(() => useHashLocation(node, placeMarker));
+            }
+            return;
+        }
+
+        // Fallback: Deterministic hash for "Fake" Geolocation
+        useHashLocation(node, placeMarker);
+    });
+}
+
+function useHashLocation(node, placeMarker) {
+    let hash = 0;
+    for (let i = 0; i < node.hostname.length; i++) hash = node.hostname.charCodeAt(i) + ((hash << 5) - hash);
+
+    const cities = [
+        [51.5074, -0.1278], // London
+        [40.7128, -74.0060], // New York
+        [35.6762, 139.6503], // Tokyo
+        [1.3521, 103.8198], // Singapore
+        [52.5200, 13.4050], // Berlin
+        [37.7749, -122.4194], // San Francisco
+        [-33.8688, 151.2093], // Sydney
+        [48.8566, 2.3522],    // Paris
+        [55.7558, 37.6173],   // Moscow
+        [-23.5505, -46.6333], // Sao Paulo
+    ];
+    const city = cities[Math.abs(hash) % cities.length];
+
+    // Add slight jitter so nodes in same city don't overlap perfectly
+    const jitter = 0.05;
+    const lat = city[0] + (Math.random() - 0.5) * jitter;
+    const lon = city[1] + (Math.random() - 0.5) * jitter;
+
+    placeMarker(lat, lon);
+}
+// Old loop for reference (replaced by above)
+function unused_loop_reference() {
     nodes.forEach(node => {
         if (mapMarkers[node.id]) return;
 
