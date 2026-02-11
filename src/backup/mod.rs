@@ -1442,7 +1442,8 @@ pub fn restore_from_pbs(
        .arg(&snapshot_fixed)
        .arg(&actual_archive)
        .arg(target_dir)
-       .arg("--repository").arg(&repo);
+       .arg("--repository").arg(&repo)
+       .arg("--ignore-ownership").arg("true");
 
     if !storage.pbs_fingerprint.is_empty() {
         cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
