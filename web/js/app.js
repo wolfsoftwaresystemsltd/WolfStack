@@ -33,14 +33,11 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', wolfnet: 'WolfNet' };
+    const titles = { datacenter: 'Datacenter' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
         renderDatacenterOverview();
-    }
-    if (page === 'wolfnet') {
-        loadWolfNet();
     }
 }
 
