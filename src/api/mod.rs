@@ -1076,6 +1076,24 @@ pub async fn net_get_dns(req: HttpRequest, state: web::Data<AppState>) -> HttpRe
     HttpResponse::Ok().json(networking::get_dns())
 }
 
+#[derive(Deserialize)]
+pub struct DnsSetRequest {
+    pub nameservers: Vec<String>,
+    pub search_domains: Vec<String>,
+}
+
+/// POST /api/networking/dns — set DNS configuration
+pub async fn net_set_dns(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<DnsSetRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match networking::set_dns(body.nameservers.clone(), body.search_domains.clone()) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"message": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+    }
+}
+
 /// GET /api/networking/wolfnet — get WolfNet overlay status
 pub async fn net_get_wolfnet(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
@@ -1544,6 +1562,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // Networking
         .route("/api/networking/interfaces", web::get().to(net_list_interfaces))
         .route("/api/networking/dns", web::get().to(net_get_dns))
+        .route("/api/networking/dns", web::post().to(net_set_dns))
         .route("/api/networking/wolfnet", web::get().to(net_get_wolfnet))
         .route("/api/networking/interfaces/{name}/ip", web::post().to(net_add_ip))
         .route("/api/networking/interfaces/{name}/ip", web::delete().to(net_remove_ip))

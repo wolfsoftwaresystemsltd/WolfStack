@@ -1769,16 +1769,34 @@ function renderWolfNetStatus(wn) {
     }
 }
 
+let currentDns = { nameservers: [], search_domains: [], method: 'resolv.conf', editable: true };
+
 function renderDnsConfig(dns) {
+    currentDns = dns;
     const body = document.getElementById('dns-config-body');
     if (!body) return;
 
+    const methodLabel = {
+        'netplan': 'Netplan',
+        'networkmanager': 'NetworkManager',
+        'systemd-resolved': 'systemd-resolved',
+        'resolv.conf': '/etc/resolv.conf'
+    }[dns.method] || dns.method;
+
     const servers = dns.nameservers.length > 0
-        ? dns.nameservers.map(s => `<div style="font-family:var(--font-mono); font-size:13px; padding:4px 0;">🔹 ${s}</div>`).join('')
+        ? dns.nameservers.map((s, i) => `
+            <div style="display:flex; align-items:center; gap:8px; font-family:var(--font-mono); font-size:13px; padding:4px 0;">
+                <span>🔹 ${s}</span>
+                ${dns.editable ? `<button onclick="removeDnsNameserver(${i})" title="Remove" style="background:none; border:none; color:var(--danger); cursor:pointer; font-size:14px; padding:0 4px;">✕</button>` : ''}
+            </div>`).join('')
         : '<span style="color:var(--text-muted);">No nameservers configured</span>';
 
     const domains = dns.search_domains.length > 0
-        ? dns.search_domains.map(d => `<span class="badge" style="background:var(--bg-tertiary); color:var(--text-primary); font-size:11px; margin-right:4px;">${d}</span>`).join('')
+        ? dns.search_domains.map((d, i) => `
+            <span class="badge" style="background:var(--bg-tertiary); color:var(--text-primary); font-size:11px; margin-right:4px; display:inline-flex; align-items:center; gap:4px;">
+                ${d}
+                ${dns.editable ? `<button onclick="removeDnsSearchDomain(${i})" style="background:none; border:none; color:var(--danger); cursor:pointer; font-size:12px; padding:0; line-height:1;">✕</button>` : ''}
+            </span>`).join('')
         : '<span style="color:var(--text-muted);">None</span>';
 
     body.innerHTML = `
@@ -1786,15 +1804,76 @@ function renderDnsConfig(dns) {
             <div>
                 <h4 style="margin-bottom:8px; font-size:13px; color:var(--text-secondary);">Nameservers</h4>
                 ${servers}
+                ${dns.editable ? `
+                <div style="display:flex; gap:6px; margin-top:8px;">
+                    <input type="text" id="dns-new-ns" placeholder="e.g. 1.1.1.1" style="flex:1; padding:6px 10px; border:1px solid var(--border-color); border-radius:6px; background:var(--bg-primary); color:var(--text-primary); font-family:var(--font-mono); font-size:12px;">
+                    <button onclick="addDnsNameserver()" class="btn-sm" style="padding:6px 12px; background:var(--accent-primary); color:white; border:none; border-radius:6px; cursor:pointer; font-size:12px; white-space:nowrap;">+ Add</button>
+                </div>` : ''}
             </div>
             <div>
                 <h4 style="margin-bottom:8px; font-size:13px; color:var(--text-secondary);">Search Domains</h4>
                 <div style="display:flex; flex-wrap:wrap; gap:4px;">${domains}</div>
+                ${dns.editable ? `
+                <div style="display:flex; gap:6px; margin-top:8px;">
+                    <input type="text" id="dns-new-domain" placeholder="e.g. example.com" style="flex:1; padding:6px 10px; border:1px solid var(--border-color); border-radius:6px; background:var(--bg-primary); color:var(--text-primary); font-family:var(--font-mono); font-size:12px;">
+                    <button onclick="addDnsSearchDomain()" class="btn-sm" style="padding:6px 12px; background:var(--accent-primary); color:white; border:none; border-radius:6px; cursor:pointer; font-size:12px; white-space:nowrap;">+ Add</button>
+                </div>` : ''}
             </div>
         </div>
         <p style="margin-top:12px; font-size:11px; color:var(--text-muted);">
-            Read from <code>/etc/resolv.conf</code>. Edit DNS via your system's network manager (netplan, NetworkManager, systemd-resolved).
+            Managed via <strong>${methodLabel}</strong>${dns.method === 'netplan' ? ' (writes to /etc/netplan/99-wolfstack-dns.yaml)' : dns.method === 'systemd-resolved' ? ' (writes to /etc/systemd/resolved.conf.d/wolfstack-dns.conf)' : dns.method === 'networkmanager' ? ' (sets via nmcli)' : ''}.
         </p>`;
+}
+
+async function saveDns(nameservers, searchDomains) {
+    try {
+        const resp = await fetch(apiUrl('/api/networking/dns'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ nameservers, search_domains: searchDomains }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to update DNS');
+        showToast(data.message || 'DNS updated', 'success');
+        loadNetworking();
+    } catch (e) {
+        alert('DNS update failed: ' + e.message);
+    }
+}
+
+function addDnsNameserver() {
+    const input = document.getElementById('dns-new-ns');
+    const ns = input.value.trim();
+    if (!ns) return;
+    // Basic IP validation
+    if (!/^[\d.:a-fA-F]+$/.test(ns)) { alert('Invalid IP address'); return; }
+    if (currentDns.nameservers.includes(ns)) { alert('Already exists'); return; }
+    const updated = [...currentDns.nameservers, ns];
+    saveDns(updated, currentDns.search_domains);
+}
+
+function removeDnsNameserver(index) {
+    const ns = currentDns.nameservers[index];
+    if (!confirm(`Remove nameserver ${ns}?`)) return;
+    const updated = currentDns.nameservers.filter((_, i) => i !== index);
+    saveDns(updated, currentDns.search_domains);
+}
+
+function addDnsSearchDomain() {
+    const input = document.getElementById('dns-new-domain');
+    const domain = input.value.trim();
+    if (!domain) return;
+    if (!/^[a-zA-Z0-9.-]+$/.test(domain)) { alert('Invalid domain'); return; }
+    if (currentDns.search_domains.includes(domain)) { alert('Already exists'); return; }
+    const updated = [...currentDns.search_domains, domain];
+    saveDns(currentDns.nameservers, updated);
+}
+
+function removeDnsSearchDomain(index) {
+    const domain = currentDns.search_domains[index];
+    if (!confirm(`Remove search domain ${domain}?`)) return;
+    const updated = currentDns.search_domains.filter((_, i) => i !== index);
+    saveDns(currentDns.nameservers, updated);
 }
 
 async function toggleInterface(name, up) {
