@@ -1601,19 +1601,6 @@ fn format_size_human(bytes: u64) -> String {
     }
 }
 
-/// Extract percentage from proxmox-backup-client progress output
-fn extract_percentage(line: &str) -> Option<f64> {
-    // Pattern: "  4.13% (1.02 GiB of 24.49 GiB)"  or "100.00%"
-    if let Some(pos) = line.find('%') {
-        let before = &line[..pos];
-        // Find the start of the number (walk back from %)
-        let num_str = before.trim_start().split_whitespace().last()?;
-        num_str.parse::<f64>().ok()
-    } else {
-        None
-    }
-}
-
 /// Convert Unix epoch timestamps in snapshot IDs to ISO format
 /// Input:  "ct/105/1707600000" -> "ct/105/2024-02-11T04:00:00Z"
 /// If already in ISO format (contains 'T'), pass through unchanged
