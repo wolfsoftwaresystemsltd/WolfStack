@@ -188,7 +188,7 @@ pub enum AgentMessage {
 }
 
 /// Poll remote nodes for their status
-pub async fn poll_remote_nodes(cluster: Arc<ClusterState>) {
+pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: String) {
     let nodes = cluster.get_all_nodes();
     for node in nodes {
         if node.is_self { continue; }
@@ -201,7 +201,9 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>) {
             .build()
         {
             Ok(client) => {
-                match client.get(&url).send().await {
+                match client.get(&url)
+                    .header("X-WolfStack-Secret", &cluster_secret)
+                    .send().await {
                     Ok(resp) => {
                         if let Ok(msg) = resp.json::<AgentMessage>().await {
                             if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components, docker_count, lxc_count } = msg {

@@ -21,6 +21,7 @@ pub struct AppState {
     pub cluster: Arc<ClusterState>,
     pub sessions: Arc<SessionManager>,
     pub vms: std::sync::Mutex<crate::vms::manager::VmManager>,
+    pub cluster_secret: String,
 }
 
 // ─── Auth helpers ───
@@ -33,12 +34,16 @@ fn get_session_token(req: &HttpRequest) -> Option<String> {
 
 /// Check if request is authenticated; returns username or error response
 pub fn require_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<String, HttpResponse> {
-    // Accept internal proxy requests from other WolfStack nodes
-    // (The originating node already validated the user's session)
-    if let Some(val) = req.headers().get("X-WolfStack-Internal") {
-        if val.to_str().unwrap_or("") == "proxy" {
-            return Ok("proxy".to_string());
+    // Accept internal requests from other WolfStack nodes if they provide the cluster secret
+    if let Some(val) = req.headers().get("X-WolfStack-Secret") {
+        let provided = val.to_str().unwrap_or("");
+        if crate::auth::validate_cluster_secret(provided, &state.cluster_secret) {
+            return Ok("cluster-node".to_string());
         }
+        // Invalid secret — do NOT fall through to session auth
+        return Err(HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Invalid cluster secret"
+        })));
     }
     match get_session_token(req) {
         Some(token) => {
@@ -51,6 +56,25 @@ pub fn require_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<St
         }
         None => Err(HttpResponse::Unauthorized().json(serde_json::json!({
             "error": "Not authenticated"
+        }))),
+    }
+}
+
+/// Require cluster secret authentication for inter-node endpoints
+pub fn require_cluster_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<(), HttpResponse> {
+    match req.headers().get("X-WolfStack-Secret") {
+        Some(val) => {
+            let provided = val.to_str().unwrap_or("");
+            if crate::auth::validate_cluster_secret(provided, &state.cluster_secret) {
+                Ok(())
+            } else {
+                Err(HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "Invalid cluster secret"
+                })))
+            }
+        }
+        None => Err(HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Cluster authentication required"
         }))),
     }
 }
@@ -350,7 +374,8 @@ pub async fn request_certificate(req: HttpRequest, state: web::Data<AppState>, b
 // ─── Agent API (server-to-server, no auth required) ───
 
 /// GET /api/agent/status — return this node's status (for remote polling)
-pub async fn agent_status(state: web::Data<AppState>) -> HttpResponse {
+pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_cluster_auth(&req, &state) { return e; }
     let metrics = state.monitor.lock().unwrap().collect();
     let components = installer::get_all_status();
     let hostname = metrics.hostname.clone();
@@ -413,8 +438,8 @@ pub async fn node_proxy(
     if let Some(ct) = req.headers().get("content-type") {
         builder = builder.header("content-type", ct.to_str().unwrap_or("application/json"));
     }
-    // Internal proxy header — remote node trusts this since originating node already authed
-    builder = builder.header("X-WolfStack-Internal", "proxy");
+    // Cluster secret — remote node validates this instead of session cookie
+    builder = builder.header("X-WolfStack-Secret", state.cluster_secret.clone());
     if !body.is_empty() {
         builder = builder.body(body.to_vec());
     }
@@ -645,7 +670,9 @@ pub async fn wolfnet_network_status(req: HttpRequest, state: web::Data<AppState>
     for node in &nodes {
         if node.is_self || !node.online { continue; }
         let url = format!("http://{}:{}/api/wolfnet/used-ips", node.address, node.port);
-        if let Ok(resp) = client.get(&url).send().await {
+        if let Ok(resp) = client.get(&url)
+            .header("X-WolfStack-Secret", state.cluster_secret.clone())
+            .send().await {
             if let Ok(ips) = resp.json::<Vec<String>>().await {
                 for ip_str in ips {
                     let parts: Vec<&str> = ip_str.split('.').collect();
@@ -663,8 +690,9 @@ pub async fn wolfnet_network_status(req: HttpRequest, state: web::Data<AppState>
     HttpResponse::Ok().json(status)
 }
 
-/// GET /api/wolfnet/used-ips — returns WolfNet IPs in use on this node (no auth, cluster-internal)
-pub async fn wolfnet_used_ips_endpoint() -> HttpResponse {
+/// GET /api/wolfnet/used-ips — returns WolfNet IPs in use on this node (cluster-internal)
+pub async fn wolfnet_used_ips_endpoint(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_cluster_auth(&req, &state) { return e; }
     let ips = containers::wolfnet_used_ips();
     HttpResponse::Ok().json(ips)
 }
@@ -1264,10 +1292,13 @@ pub async fn storage_sync_s3(
     }
 }
 
-/// POST /api/agent/storage/apply — receive and apply a mount config from another node (no auth)
+/// POST /api/agent/storage/apply — receive and apply a mount config from another node (cluster-auth)
 pub async fn agent_storage_apply(
+    req: HttpRequest,
+    state: web::Data<AppState>,
     body: web::Json<storage::StorageMount>,
 ) -> HttpResponse {
+    if let Err(e) = require_cluster_auth(&req, &state) { return e; }
     let mount = body.into_inner();
     match storage::create_mount(mount, true) {
         Ok(m) => HttpResponse::Ok().json(serde_json::json!({
@@ -1291,6 +1322,7 @@ async fn sync_mount_to_cluster(
         let url = format!("http://{}:{}/api/agent/storage/apply", node.address, node.port);
         let client = reqwest::Client::new();
         match client.post(&url)
+            .header("X-WolfStack-Secret", state.cluster_secret.clone())
             .json(mount)
             .timeout(std::time::Duration::from_secs(10))
             .send()
@@ -1390,7 +1422,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/storage/mounts/{id}/sync-s3", web::post().to(storage_sync_s3))
         // Console WebSocket
         .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
-        // Agent (no auth — used by other WolfStack nodes)
+        // Agent (cluster-secret auth — inter-node communication)
         .route("/api/agent/status", web::get().to(agent_status))
         .route("/api/agent/storage/apply", web::post().to(agent_storage_apply))
         .route("/api/wolfnet/used-ips", web::get().to(wolfnet_used_ips_endpoint))

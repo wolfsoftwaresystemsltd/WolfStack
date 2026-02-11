@@ -85,6 +85,10 @@ async fn main() -> std::io::Result<()> {
     info!("  Node ID:    {}", node_id);
     info!("  Hostname:   {}", hostname);
     info!("  Dashboard:  http://{}:{}", cli.bind, cli.port);
+
+    // Load or generate cluster secret for inter-node authentication
+    let cluster_secret = auth::load_cluster_secret();
+    info!("  Cluster key: {}", "/etc/wolfstack/cluster.key");
     info!("");
 
     // Initialize monitoring
@@ -121,6 +125,7 @@ async fn main() -> std::io::Result<()> {
             cluster: cluster.clone(),
             sessions: sessions.clone(),
             vms: Mutex::new(vms_manager),
+            cluster_secret: cluster_secret.clone(),
         });
 
         // Background: periodic self-monitoring update
@@ -143,10 +148,11 @@ async fn main() -> std::io::Result<()> {
 
         // Background: poll remote nodes
         let cluster_poll = cluster.clone();
+        let secret_poll = cluster_secret.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(10)).await;
-                agent::poll_remote_nodes(cluster_poll.clone()).await;
+                agent::poll_remote_nodes(cluster_poll.clone(), secret_poll.clone()).await;
             }
         });
 
