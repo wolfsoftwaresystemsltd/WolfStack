@@ -722,6 +722,20 @@ pub fn get_wolfnet_config() -> Result<String, String> {
         .map_err(|e| format!("Failed to read WolfNet config: {}", e))
 }
 
+/// Get local WolfNet node info (public key, address, port) from runtime status
+pub fn get_wolfnet_local_info() -> Option<serde_json::Value> {
+    let status_path = "/var/run/wolfnet/status.json";
+    let content = std::fs::read_to_string(status_path).ok()?;
+    let status: serde_json::Value = serde_json::from_str(&content).ok()?;
+    Some(serde_json::json!({
+        "hostname": status["hostname"],
+        "address": status["address"],
+        "public_key": status["public_key"],
+        "listen_port": status["listen_port"],
+        "interface": status["interface"],
+    }))
+}
+
 /// Save the raw WolfNet config file
 pub fn save_wolfnet_config(content: &str) -> Result<String, String> {
     std::fs::write("/etc/wolfnet/config.toml", content)

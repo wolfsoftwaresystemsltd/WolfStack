@@ -1138,8 +1138,23 @@ pub async fn net_add_wolfnet_peer(req: HttpRequest, state: web::Data<AppState>, 
     let ip = body.ip.as_deref().unwrap_or("");
     let public_key = body.public_key.as_deref();
     match networking::add_wolfnet_peer(&body.name, endpoint, ip, public_key) {
-        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"message": msg})),
+        Ok(msg) => {
+            let local_info = networking::get_wolfnet_local_info();
+            HttpResponse::Ok().json(serde_json::json!({
+                "message": msg,
+                "local_info": local_info,
+            }))
+        },
         Err(e) => HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    }
+}
+
+/// GET /api/networking/wolfnet/local-info — get this node's WolfNet identity
+pub async fn net_get_wolfnet_local_info(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match networking::get_wolfnet_local_info() {
+        Some(info) => HttpResponse::Ok().json(info),
+        None => HttpResponse::Ok().json(serde_json::json!({"error": "WolfNet not running or status unavailable"})),
     }
 }
 
@@ -1654,6 +1669,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/networking/wolfnet/config", web::put().to(net_save_wolfnet_config))
         .route("/api/networking/wolfnet/peers", web::post().to(net_add_wolfnet_peer))
         .route("/api/networking/wolfnet/peers", web::delete().to(net_remove_wolfnet_peer))
+        .route("/api/networking/wolfnet/local-info", web::get().to(net_get_wolfnet_local_info))
         .route("/api/networking/wolfnet/action", web::post().to(net_wolfnet_action))
         .route("/api/networking/interfaces/{name}/ip", web::post().to(net_add_ip))
         .route("/api/networking/interfaces/{name}/ip", web::delete().to(net_remove_ip))

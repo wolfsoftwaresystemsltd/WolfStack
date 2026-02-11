@@ -67,7 +67,6 @@ function selectServerView(nodeId, view) {
         networking: 'Networking',
         wolfnet: 'WolfNet',
         certificates: 'Certificates',
-        monitoring: 'Live Metrics',
     };
     document.getElementById('page-title').textContent = `${hostname} — ${viewTitles[view] || view}`;
     document.getElementById('hostname-display').textContent = `${hostname} (${node?.address}:${node?.port})`;
@@ -80,7 +79,7 @@ function selectServerView(nodeId, view) {
     if (view === 'services') loadComponents();
     if (view === 'containers') loadDockerContainers();
     if (view === 'lxc') loadLxcContainers();
-    if (view === 'monitoring') initCharts();
+
     if (view === 'terminal') {
         // Open host terminal directly
         openConsole('host', hostname);
@@ -163,9 +162,7 @@ function buildServerTree(nodes) {
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="certificates" onclick="selectServerView('${node.id}', 'certificates')">
                     <span class="icon">🔒</span> Certificates
                 </a>
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="monitoring" onclick="selectServerView('${node.id}', 'monitoring')">
-                    <span class="icon">📈</span> Metrics
-                </a>
+
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
                     <span class="icon">💻</span> Terminal
                 </a>
@@ -2022,9 +2019,10 @@ let wolfnetData = null;
 
 async function loadWolfNet() {
     try {
-        const [statusResp, configResp] = await Promise.all([
+        const [statusResp, configResp, localInfoResp] = await Promise.all([
             fetch(apiUrl('/api/networking/wolfnet')),
             fetch(apiUrl('/api/networking/wolfnet/config')),
+            fetch(apiUrl('/api/networking/wolfnet/local-info')),
         ]);
         const status = await statusResp.json();
         let config = '';
@@ -2032,14 +2030,22 @@ async function loadWolfNet() {
             const configData = await configResp.json();
             config = configData.config || '';
         }
+        let localInfo = null;
+        if (localInfoResp.ok) {
+            localInfo = await localInfoResp.json();
+            if (localInfo.error) localInfo = null;
+        }
         wolfnetData = status;
-        renderWolfNetPage(status, config);
+        wolfnetLocalInfo = localInfo;
+        renderWolfNetPage(status, config, localInfo);
     } catch (e) {
         console.error('Failed to load WolfNet:', e);
     }
 }
 
-function renderWolfNetPage(wn, config) {
+let wolfnetLocalInfo = null;
+
+function renderWolfNetPage(wn, config, localInfo) {
     // Status cards
     const statusEl = document.getElementById('wn-status-val');
     const statusIcon = document.getElementById('wn-status-icon');
@@ -2101,10 +2107,36 @@ function renderWolfNetPage(wn, config) {
         }
     }
 
-    // Config editor
+    // Populate structured settings from config
+    if (config) {
+        const getVal = (key) => {
+            const m = config.match(new RegExp(`^${key}\\s*=\\s*["']?([^"'\\n]+)["']?`, 'm'));
+            return m ? m[1].trim() : '';
+        };
+        const el = (id) => document.getElementById(id);
+        if (el('wn-cfg-interface')) el('wn-cfg-interface').value = getVal('interface');
+        if (el('wn-cfg-address')) el('wn-cfg-address').value = getVal('address');
+        if (el('wn-cfg-subnet')) el('wn-cfg-subnet').value = getVal('subnet') || '24';
+        if (el('wn-cfg-port')) el('wn-cfg-port').value = getVal('listen_port') || '9600';
+        if (el('wn-cfg-mtu')) el('wn-cfg-mtu').value = getVal('mtu') || '1400';
+        if (el('wn-cfg-gateway')) el('wn-cfg-gateway').checked = getVal('gateway') === 'true';
+        if (el('wn-cfg-discovery')) el('wn-cfg-discovery').checked = getVal('discovery') !== 'false';
+    }
+
+    // Config editor (raw)
     const editor = document.getElementById('wolfnet-config-editor');
     if (editor && config !== undefined) {
         editor.value = config;
+    }
+
+    // Node identity
+    if (localInfo && localInfo.public_key) {
+        const identEl = document.getElementById('wn-node-identity');
+        if (identEl) identEl.style.display = '';
+        const hostnameEl = document.getElementById('wn-local-hostname');
+        const pubkeyEl = document.getElementById('wn-local-pubkey');
+        if (hostnameEl) hostnameEl.textContent = localInfo.hostname || '—';
+        if (pubkeyEl) pubkeyEl.textContent = localInfo.public_key;
     }
 }
 
@@ -2137,9 +2169,34 @@ async function addWolfNetPeer() {
         if (!resp.ok) throw new Error(data.error || 'Failed to add peer');
         closeAddPeerModal();
         showToast(data.message || 'Peer added', 'success');
+
+        // Show join command modal with reverse config
+        const info = data.local_info;
+        if (info && info.public_key) {
+            let configSnippet = `[[peers]]\nname = "${info.hostname || 'remote-node'}"\npublic_key = "${info.public_key}"\nallowed_ip = "${info.address}"\n`;
+            if (info.listen_port) {
+                configSnippet += `# endpoint = "YOUR_PUBLIC_IP:${info.listen_port}"\n`;
+            }
+            const joinEl = document.getElementById('wolfnet-join-config');
+            if (joinEl) joinEl.textContent = configSnippet;
+            document.getElementById('wolfnet-join-modal').classList.add('active');
+        }
         setTimeout(loadWolfNet, 2000);
     } catch (e) {
         alert('Error: ' + e.message);
+    }
+}
+
+function closeJoinModal() {
+    document.getElementById('wolfnet-join-modal').classList.remove('active');
+}
+
+function copyJoinConfig() {
+    const el = document.getElementById('wolfnet-join-config');
+    if (el) {
+        navigator.clipboard.writeText(el.textContent).then(() => {
+            showToast('Copied to clipboard', 'success');
+        });
     }
 }
 
@@ -2160,10 +2217,34 @@ async function removeWolfNetPeer(name) {
     }
 }
 
-async function saveWolfNetConfig() {
+async function saveWolfNetSettings() {
+    if (!confirm('Save settings and restart WolfNet?')) return;
+    // Read current config and update the [network] section values
     const editor = document.getElementById('wolfnet-config-editor');
-    const config = editor.value;
-    if (!confirm('Save configuration and restart WolfNet?')) return;
+    let config = editor ? editor.value : '';
+    const el = (id) => document.getElementById(id);
+
+    // Update values in TOML
+    const updates = {
+        'interface': el('wn-cfg-interface')?.value || 'wolfnet0',
+        'address': el('wn-cfg-address')?.value || '10.10.10.1',
+        'subnet': el('wn-cfg-subnet')?.value || '24',
+        'listen_port': el('wn-cfg-port')?.value || '9600',
+        'mtu': el('wn-cfg-mtu')?.value || '1400',
+        'gateway': el('wn-cfg-gateway')?.checked ? 'true' : 'false',
+        'discovery': el('wn-cfg-discovery')?.checked ? 'true' : 'false',
+    };
+    for (const [key, val] of Object.entries(updates)) {
+        const isStr = ['interface', 'address'].includes(key);
+        const replacement = isStr ? `${key} = "${val}"` : `${key} = ${val}`;
+        const regex = new RegExp(`^${key}\\s*=.*`, 'm');
+        if (regex.test(config)) {
+            config = config.replace(regex, replacement);
+        }
+    }
+    // Also update the raw editor
+    if (editor) editor.value = config;
+
     try {
         const resp = await fetch(apiUrl('/api/networking/wolfnet/config'), {
             method: 'PUT',
@@ -2173,7 +2254,31 @@ async function saveWolfNetConfig() {
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Failed to save');
         showToast(data.message || 'Config saved', 'success');
-        // Restart after saving
+        await fetch(apiUrl('/api/networking/wolfnet/action'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'restart' }),
+        });
+        showToast('WolfNet restarted', 'success');
+        setTimeout(loadWolfNet, 2000);
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function saveWolfNetConfig() {
+    const editor = document.getElementById('wolfnet-config-editor');
+    const config = editor.value;
+    if (!confirm('Save raw configuration and restart WolfNet?')) return;
+    try {
+        const resp = await fetch(apiUrl('/api/networking/wolfnet/config'), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to save');
+        showToast(data.message || 'Config saved', 'success');
         await fetch(apiUrl('/api/networking/wolfnet/action'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

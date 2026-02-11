@@ -434,60 +434,7 @@
                 </div>
             </div>
 
-            <!-- ═══ Monitoring Page ═══ -->
-            <div id="page-monitoring" class="page-view" style="display:none;">
-                <div class="grid-2">
-                    <div class="card">
-                        <div class="card-header">
-                            <h3>CPU History</h3>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="cpu-chart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="card">
-                        <div class="card-header">
-                            <h3>Memory History</h3>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="mem-chart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="card" style="margin-top: 20px;">
-                    <div class="card-header">
-                        <h3>Network Interfaces</h3>
-                    </div>
-                    <div class="card-body">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Interface</th>
-                                    <th>RX (Received)</th>
-                                    <th>TX (Sent)</th>
-                                    <th>Packets RX</th>
-                                    <th>Packets TX</th>
-                                </tr>
-                            </thead>
-                            <tbody id="network-table"></tbody>
-                        </table>
-                    </div>
-                </div>
-                <div class="card" style="margin-top: 20px;">
-                    <div class="card-header">
-                        <h3>System Information</h3>
-                    </div>
-                    <div class="card-body">
-                        <table class="data-table" id="sysinfo-table">
-                            <tbody></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
+
 
             <!-- ═══ Docker Containers Page ═══ -->
             <div id="page-containers" class="page-view" style="display:none;">
@@ -756,20 +703,80 @@
                     </div>
                 </div>
 
-                <!-- Config Editor -->
-                <div class="card">
+
+                <!-- Settings Cards -->
+                <div class="card" style="margin-bottom:20px;">
                     <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                        <h3>⚙️ Configuration</h3>
-                        <div style="display:flex; gap:8px; align-items:center;">
-                            <span
-                                style="font-size:12px; color:var(--text-muted); font-family:'JetBrains Mono', monospace;">/etc/wolfnet/config.toml</span>
-                            <button class="btn btn-primary btn-sm" onclick="saveWolfNetConfig()">💾 Save &
-                                Restart</button>
-                        </div>
+                        <h3>⚙️ Network Settings</h3>
+                        <button class="btn btn-primary btn-sm" onclick="saveWolfNetSettings()">💾 Save &amp;
+                            Restart</button>
                     </div>
                     <div class="card-body">
-                        <textarea id="wolfnet-config-editor" class="config-editor" spellcheck="false"
-                            style="min-height:250px;"></textarea>
+                        <div
+                            style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:16px;">
+                            <div class="form-group">
+                                <label
+                                    style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Interface</label>
+                                <input type="text" id="wn-cfg-interface" class="form-control" placeholder="wolfnet0"
+                                    style="font-family:var(--font-mono); font-size:13px;">
+                            </div>
+                            <div class="form-group">
+                                <label style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">WolfNet
+                                    IP Address</label>
+                                <input type="text" id="wn-cfg-address" class="form-control" placeholder="10.10.10.1"
+                                    style="font-family:var(--font-mono); font-size:13px;">
+                            </div>
+                            <div class="form-group">
+                                <label style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Subnet
+                                    Mask</label>
+                                <input type="number" id="wn-cfg-subnet" class="form-control" value="24" min="8" max="30"
+                                    style="font-family:var(--font-mono); font-size:13px;">
+                            </div>
+                            <div class="form-group">
+                                <label style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Listen
+                                    Port</label>
+                                <input type="number" id="wn-cfg-port" class="form-control" value="9600"
+                                    style="font-family:var(--font-mono); font-size:13px;">
+                            </div>
+                            <div class="form-group">
+                                <label
+                                    style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">MTU</label>
+                                <input type="number" id="wn-cfg-mtu" class="form-control" value="1400"
+                                    style="font-family:var(--font-mono); font-size:13px;">
+                            </div>
+                            <div class="form-group">
+                                <label
+                                    style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Options</label>
+                                <div style="display:flex; gap:12px; padding-top:6px;">
+                                    <label
+                                        style="display:flex; align-items:center; gap:4px; font-size:12px; cursor:pointer;">
+                                        <input type="checkbox" id="wn-cfg-gateway"> Gateway
+                                    </label>
+                                    <label
+                                        style="display:flex; align-items:center; gap:4px; font-size:12px; cursor:pointer;">
+                                        <input type="checkbox" id="wn-cfg-discovery" checked> Discovery
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="wn-node-identity"
+                            style="margin-top:16px; padding:12px; background:var(--bg-primary); border:1px solid var(--border); border-radius:8px; display:none;">
+                            <h4 style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">🔑 This Node's
+                                Identity</h4>
+                            <div style="display:grid; grid-template-columns: auto 1fr; gap:4px 12px; font-size:12px;">
+                                <span style="color:var(--text-muted);">Hostname:</span>
+                                <span id="wn-local-hostname" style="font-family:var(--font-mono);"></span>
+                                <span style="color:var(--text-muted);">Public Key:</span>
+                                <span id="wn-local-pubkey"
+                                    style="font-family:var(--font-mono); word-break:break-all;"></span>
+                            </div>
+                        </div>
+                        <details style="margin-top:16px;">
+                            <summary style="cursor:pointer; font-size:12px; color:var(--text-muted); user-select:none;">
+                                📄 Raw Configuration (/etc/wolfnet/config.toml)</summary>
+                            <textarea id="wolfnet-config-editor" class="config-editor" spellcheck="false"
+                                style="min-height:200px; margin-top:8px;"></textarea>
+                        </details>
                     </div>
                 </div>
             </div>
@@ -813,6 +820,42 @@
                     </div>
                 </div>
             </div>
+
+            <!-- WolfNet Join Command Modal -->
+            <div class="modal-overlay" id="wolfnet-join-modal">
+                <div class="modal" style="max-width: 640px; width: 95%;">
+                    <div class="modal-header">
+                        <h3>✅ Peer Added — Remote Setup</h3>
+                        <button class="modal-close" onclick="closeJoinModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <p style="margin-bottom:12px; color:var(--text-secondary);">
+                            The peer has been added to this node. Now configure the <strong>remote machine</strong>
+                            to connect back. Add this to <code>/etc/wolfnet/config.toml</code> on the remote peer:
+                        </p>
+                        <div
+                            style="background:var(--bg-primary); border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:16px;">
+                            <div
+                                style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                                <span style="font-size:11px; color:var(--text-muted);">Peer config block for the remote
+                                    machine:</span>
+                                <button class="btn btn-sm" onclick="copyJoinConfig()" style="font-size:11px;">📋
+                                    Copy</button>
+                            </div>
+                            <pre id="wolfnet-join-config"
+                                style="font-family:var(--font-mono); font-size:12px; white-space:pre-wrap; word-break:break-all; margin:0; color:var(--accent-primary);"></pre>
+                        </div>
+                        <p style="font-size:12px; color:var(--text-muted);">
+                            Then run <code>sudo systemctl restart wolfnet</code> on the remote machine.
+                        </p>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-primary" onclick="closeJoinModal()">Done</button>
+                    </div>
+                </div>
+            </div>
+
+
 
             <!-- ═══ Networking ═══ -->
             <div id="page-networking" class="page-view" style="display:none;">
@@ -1364,7 +1407,8 @@ region = us-east-1"></textarea>
                     <div class="modal-footer" style="display:flex; justify-content:space-between;">
                         <div>
                             <button class="btn" id="vm-tab-back-btn" onclick="switchVmTab('prev')"
-                                style="display:none;">← Back</button>
+                                style="display:none;">←
+                                Back</button>
                         </div>
                         <div style="display:flex; gap:8px;">
                             <button class="btn" onclick="closeVmCreate()">Cancel</button>
