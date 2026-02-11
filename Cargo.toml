@@ -1,6 +1,6 @@
 [package]
 name = "wolfstack"
-version = "5.8.0"
+version = "5.9.1"
 edition = "2021"
 authors = ["Wolf Software Systems Ltd"]
 description = "Server management platform for the Wolf software suite"
@@ -50,6 +50,10 @@ sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
 rand = "0.8"
+
+# S3 client (pure Rust — works on IBM Power/ppc64le, no C/C++ deps)
+rust-s3 = { version = "0.35", default-features = false, features = ["tokio-rustls-tls"] }
+lz4_flex = "0.11"
 
 [[bin]]
 name = "wolfstack"

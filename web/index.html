@@ -21,7 +21,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v5.7.0</span>
+                <span class="version">v5.9.1</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -834,6 +834,156 @@ region = us-east-1"></textarea>
                     <div class="modal-footer">
                         <button class="btn" onclick="closeImportRcloneModal()">Cancel</button>
                         <button class="btn btn-primary" onclick="importRcloneConfig()">Import</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Edit Storage Mount Modal -->
+            <div class="modal-overlay" id="edit-mount-modal">
+                <div class="modal" style="max-width: 640px; width: 95%;">
+                    <div class="modal-header">
+                        <h3>⚙️ Edit Storage Mount</h3>
+                        <button class="modal-close" onclick="closeEditMountModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <input type="hidden" id="edit-mount-id">
+                        <input type="hidden" id="edit-mount-type-value">
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                            <div class="form-group" style="grid-column: 1 / -1;">
+                                <label>Name</label>
+                                <input type="text" class="form-control" id="edit-mount-name">
+                            </div>
+                            <div class="form-group">
+                                <label>Type</label>
+                                <input type="text" class="form-control" id="edit-mount-type-display" disabled
+                                    style="opacity:0.7; cursor:not-allowed;">
+                            </div>
+                            <div class="form-group">
+                                <label>Mount Point</label>
+                                <input type="text" class="form-control" id="edit-mount-point"
+                                    placeholder="/mnt/wolfstack/my-mount">
+                            </div>
+
+                            <!-- S3 Edit Fields -->
+                            <div id="edit-s3-fields" style="grid-column: 1 / -1; display:none;">
+                                <div
+                                    style="display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
+                                    <div
+                                        style="grid-column:1/-1; font-weight:600; font-size:13px; color:var(--text-primary); margin-bottom:4px;">
+                                        ☁️ S3 Configuration</div>
+                                    <div class="form-group">
+                                        <label>Provider</label>
+                                        <select class="form-control" id="edit-s3-provider">
+                                            <option value="AWS">Amazon S3</option>
+                                            <option value="Cloudflare">Cloudflare R2</option>
+                                            <option value="DigitalOcean">DigitalOcean Spaces</option>
+                                            <option value="Wasabi">Wasabi</option>
+                                            <option value="Backblaze">Backblaze B2</option>
+                                            <option value="Minio">MinIO</option>
+                                            <option value="Other">Other S3-compatible</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Bucket</label>
+                                        <input type="text" class="form-control" id="edit-s3-bucket"
+                                            placeholder="my-bucket">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Access Key ID</label>
+                                        <input type="text" class="form-control" id="edit-s3-access-key"
+                                            placeholder="AKIA...">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Secret Access Key</label>
+                                        <input type="password" class="form-control" id="edit-s3-secret-key"
+                                            placeholder="Leave blank to keep unchanged">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Region</label>
+                                        <input type="text" class="form-control" id="edit-s3-region"
+                                            placeholder="us-east-1">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Endpoint (optional)</label>
+                                        <input type="text" class="form-control" id="edit-s3-endpoint"
+                                            placeholder="https://s3.example.com">
+                                        <small style="color:var(--text-muted); font-size:11px;">For non-AWS
+                                            providers</small>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- NFS Edit Fields -->
+                            <div id="edit-nfs-fields" style="grid-column: 1 / -1; display:none;">
+                                <div
+                                    style="display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
+                                    <div
+                                        style="grid-column:1/-1; font-weight:600; font-size:13px; color:var(--text-primary); margin-bottom:4px;">
+                                        🗄️ NFS Configuration</div>
+                                    <div class="form-group" style="grid-column: 1 / -1;">
+                                        <label>NFS Source</label>
+                                        <input type="text" class="form-control" id="edit-nfs-source"
+                                            placeholder="192.168.1.100:/data/share">
+                                        <small style="color:var(--text-muted); font-size:11px;">Format:
+                                            server:/export/path</small>
+                                    </div>
+                                    <div class="form-group" style="grid-column: 1 / -1;">
+                                        <label>NFS Options</label>
+                                        <input type="text" class="form-control" id="edit-nfs-options"
+                                            placeholder="rw,soft,timeo=50">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Directory Edit Fields -->
+                            <div id="edit-dir-fields" style="grid-column: 1 / -1; display:none;">
+                                <div
+                                    style="padding:12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
+                                    <div
+                                        style="font-weight:600; font-size:13px; color:var(--text-primary); margin-bottom:8px;">
+                                        📁 Directory Configuration</div>
+                                    <div class="form-group">
+                                        <label>Source Directory</label>
+                                        <input type="text" class="form-control" id="edit-dir-source"
+                                            placeholder="/data/shared">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- WolfDisk Edit Fields -->
+                            <div id="edit-wolfdisk-fields" style="grid-column: 1 / -1; display:none;">
+                                <div
+                                    style="padding:12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
+                                    <div
+                                        style="font-weight:600; font-size:13px; color:var(--text-primary); margin-bottom:8px;">
+                                        🐺 WolfDisk Configuration</div>
+                                    <div class="form-group">
+                                        <label>WolfDisk Path</label>
+                                        <input type="text" class="form-control" id="edit-wolfdisk-source"
+                                            placeholder="/wolfdisk/data">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Global / Auto Mount options -->
+                            <div class="form-group"
+                                style="grid-column: 1 / -1; display:flex; gap:20px; padding-top:8px; border-top:1px solid var(--border);">
+                                <label
+                                    style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px;">
+                                    <input type="checkbox" id="edit-mount-global"> 🌐 Global Mount
+                                    <small style="color:var(--text-muted); font-size:11px;">(replicate to all cluster
+                                        nodes)</small>
+                                </label>
+                                <label
+                                    style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px;">
+                                    <input type="checkbox" id="edit-mount-auto"> ⚡ Auto-mount on boot
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" onclick="closeEditMountModal()">Cancel</button>
+                        <button class="btn btn-primary" onclick="saveStorageMountEdit()">💾 Save Changes</button>
                     </div>
                 </div>
             </div>

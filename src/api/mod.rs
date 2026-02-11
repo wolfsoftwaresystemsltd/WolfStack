@@ -1229,6 +1229,27 @@ pub async fn storage_sync_mount(
     }
 }
 
+/// POST /api/storage/mounts/{id}/sync-s3 — sync local changes back to S3 bucket
+pub async fn storage_sync_s3(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = path.into_inner();
+    
+    // Run in blocking thread since S3 upload may take a while
+    let result = web::block(move || {
+        storage::sync_to_s3(&id)
+    }).await;
+    
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Internal error: {}", e) })),
+    }
+}
+
 /// POST /api/agent/storage/apply — receive and apply a mount config from another node (no auth)
 pub async fn agent_storage_apply(
     body: web::Json<storage::StorageMount>,
@@ -1351,6 +1372,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/storage/mounts/{id}/mount", web::post().to(storage_do_mount))
         .route("/api/storage/mounts/{id}/unmount", web::post().to(storage_do_unmount))
         .route("/api/storage/mounts/{id}/sync", web::post().to(storage_sync_mount))
+        .route("/api/storage/mounts/{id}/sync-s3", web::post().to(storage_sync_s3))
         // Console WebSocket
         .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
         // Agent (no auth — used by other WolfStack nodes)

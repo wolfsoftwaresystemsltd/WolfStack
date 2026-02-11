@@ -705,12 +705,14 @@ function renderVms(vms) {
 
 const MOUNT_TYPE_ICONS = { s3: '☁️', nfs: '🗄️', directory: '📁', wolfdisk: '🐺' };
 const MOUNT_TYPE_LABELS = { s3: 'S3', nfs: 'NFS', directory: 'Directory', wolfdisk: 'WolfDisk' };
+let allStorageMounts = [];  // cache for edit modal
 
 async function loadStorageMounts() {
     try {
         const resp = await fetch(apiUrl('/api/storage/mounts'));
         if (!resp.ok) throw new Error('Failed to fetch mounts');
         const mounts = await resp.json();
+        allStorageMounts = mounts;
         renderStorageMounts(mounts);
     } catch (e) {
         console.error('Failed to load storage mounts:', e);
@@ -766,6 +768,7 @@ function renderStorageMounts(mounts) {
             <td>${statusBadge}</td>
             <td>${globalBadge}${autoBadge}</td>
             <td style="white-space:nowrap;">
+                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="openEditMount('${m.id}')" title="Settings">⚙️</button>
                 ${mountBtn}
                 ${syncBtn}
                 <button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;" onclick="deleteStorageMount('${m.id}', '${m.name}')">🗑️</button>
@@ -917,6 +920,112 @@ async function syncStorageMount(id) {
         loadStorageMounts();
     } catch (e) {
         alert('Sync error: ' + e.message);
+    }
+}
+
+// ─── Edit Storage Mount ───
+
+function openEditMount(id) {
+    const m = allStorageMounts.find(x => x.id === id);
+    if (!m) return alert('Mount not found');
+
+    document.getElementById('edit-mount-id').value = m.id;
+    document.getElementById('edit-mount-name').value = m.name;
+    document.getElementById('edit-mount-type-value').value = m.type;
+    document.getElementById('edit-mount-type-display').value = (MOUNT_TYPE_ICONS[m.type] || '📦') + ' ' + (MOUNT_TYPE_LABELS[m.type] || m.type);
+    document.getElementById('edit-mount-point').value = m.mount_point;
+    document.getElementById('edit-mount-global').checked = !!m.global;
+    document.getElementById('edit-mount-auto').checked = !!m.auto_mount;
+
+    // Hide all type-specific sections
+    document.getElementById('edit-s3-fields').style.display = 'none';
+    document.getElementById('edit-nfs-fields').style.display = 'none';
+    document.getElementById('edit-dir-fields').style.display = 'none';
+    document.getElementById('edit-wolfdisk-fields').style.display = 'none';
+
+    if (m.type === 's3') {
+        document.getElementById('edit-s3-fields').style.display = 'block';
+        const s3 = m.s3_config || {};
+        document.getElementById('edit-s3-provider').value = s3.provider || 'AWS';
+        document.getElementById('edit-s3-bucket').value = s3.bucket || '';
+        document.getElementById('edit-s3-access-key').value = s3.access_key_id || '';
+        document.getElementById('edit-s3-secret-key').value = '';
+        document.getElementById('edit-s3-secret-key').placeholder = s3.access_key_id ? 'Leave blank to keep unchanged' : 'Enter secret key';
+        document.getElementById('edit-s3-region').value = s3.region || '';
+        document.getElementById('edit-s3-endpoint').value = s3.endpoint || '';
+    } else if (m.type === 'nfs') {
+        document.getElementById('edit-nfs-fields').style.display = 'block';
+        document.getElementById('edit-nfs-source').value = m.source || '';
+        document.getElementById('edit-nfs-options').value = m.nfs_options || '';
+    } else if (m.type === 'directory') {
+        document.getElementById('edit-dir-fields').style.display = 'block';
+        document.getElementById('edit-dir-source').value = m.source || '';
+    } else if (m.type === 'wolfdisk') {
+        document.getElementById('edit-wolfdisk-fields').style.display = 'block';
+        document.getElementById('edit-wolfdisk-source').value = m.source || '';
+    }
+
+    document.getElementById('edit-mount-modal').classList.add('active');
+}
+
+function closeEditMountModal() {
+    document.getElementById('edit-mount-modal').classList.remove('active');
+}
+
+async function saveStorageMountEdit() {
+    const id = document.getElementById('edit-mount-id').value;
+    const type = document.getElementById('edit-mount-type-value').value;
+    const name = document.getElementById('edit-mount-name').value.trim();
+    const mount_point = document.getElementById('edit-mount-point').value.trim();
+    const global = document.getElementById('edit-mount-global').checked;
+    const auto_mount = document.getElementById('edit-mount-auto').checked;
+
+    if (!name) return alert('Name is required');
+
+    const payload = { name, mount_point, global, auto_mount };
+
+    if (type === 's3') {
+        const secretVal = document.getElementById('edit-s3-secret-key').value;
+        payload.s3_config = {
+            provider: document.getElementById('edit-s3-provider').value,
+            bucket: document.getElementById('edit-s3-bucket').value.trim(),
+            access_key_id: document.getElementById('edit-s3-access-key').value.trim(),
+            secret_access_key: secretVal || '••••••••',
+            region: document.getElementById('edit-s3-region').value.trim(),
+            endpoint: document.getElementById('edit-s3-endpoint').value.trim(),
+        };
+    } else if (type === 'nfs') {
+        payload.source = document.getElementById('edit-nfs-source').value.trim();
+        payload.nfs_options = document.getElementById('edit-nfs-options').value.trim();
+    } else if (type === 'directory') {
+        payload.source = document.getElementById('edit-dir-source').value.trim();
+    } else if (type === 'wolfdisk') {
+        payload.source = document.getElementById('edit-wolfdisk-source').value.trim();
+    }
+
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/mounts/${id}`), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to save mount');
+        closeEditMountModal();
+        showToast('Storage mount updated', 'success');
+        loadStorageMounts();
+
+        // If global was set, auto-sync to cluster
+        if (global) {
+            try {
+                await fetch(apiUrl(`/api/storage/mounts/${id}/sync`), { method: 'POST' });
+                showToast('Mount synced to cluster nodes', 'success');
+            } catch (e) {
+                // Sync failure is non-critical
+            }
+        }
+    } catch (e) {
+        alert('Error saving mount: ' + e.message);
     }
 }
 

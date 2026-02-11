@@ -68,7 +68,8 @@ if [ -f /etc/fuse.conf ]; then
 fi
 
 # Create storage directories
-mkdir -p /etc/wolfstack/s3 /mnt/wolfstack /tmp/wolfstack-s3cache
+# rust-s3 syncs bucket contents to /var/cache/wolfstack/s3/<mount-id>/
+mkdir -p /etc/wolfstack/s3 /mnt/wolfstack /var/cache/wolfstack/s3
 echo "✓ Storage directories configured"
 
 # ─── Install Docker if missing ──────────────────────────────────────────────

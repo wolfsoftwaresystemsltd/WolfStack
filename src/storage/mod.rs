@@ -1,7 +1,8 @@
 //! Storage Manager — mount and manage S3, NFS, directory, and WolfDisk storage
 //!
 //! Supports:
-//! - S3 storage via rclone mount
+//! - S3 storage via rust-s3 (pure Rust, native, works on IBM Power/ppc64le)
+//! - S3 storage via s3fs-fuse (fallback)
 //! - NFS storage via mount -t nfs
 //! - Local directory bind mounts
 //! - WolfDisk mounts via wolfdiskctl
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use tracing::{info, error};
+use tracing::{info, warn, error};
 use chrono::Utc;
 
 const CONFIG_PATH: &str = "/etc/wolfstack/storage.json";
@@ -201,11 +202,18 @@ pub fn unmount_storage(id: &str) -> Result<String, String> {
         return Ok("Not mounted".to_string());
     }
     
-    // For S3/rclone mounts, use fusermount -u
+    // For S3 mounts, try fusermount first (for s3fs), then regular umount (for rust-s3 bind mounts)
     let output = if config.mounts[idx].mount_type == MountType::S3 {
-        Command::new("fusermount")
+        // Try fusermount first (s3fs), fall back to regular umount (rust-s3 bind mount)
+        let fuse_result = Command::new("fusermount")
             .args(["-u", &config.mounts[idx].mount_point])
-            .output()
+            .output();
+        match &fuse_result {
+            Ok(o) if o.status.success() => fuse_result,
+            _ => Command::new("umount")
+                .arg(&config.mounts[idx].mount_point)
+                .output(),
+        }
     } else {
         Command::new("umount")
             .arg(&config.mounts[idx].mount_point)
@@ -303,7 +311,7 @@ pub fn update_mount(id: &str, updates: serde_json::Value) -> Result<StorageMount
     let mount = config.mounts.iter_mut().find(|m| m.id == id)
         .ok_or_else(|| format!("Mount '{}' not found", id))?;
     
-    // Apply updates
+    // Apply updates — basic fields
     if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
         mount.name = name.to_string();
     }
@@ -315,6 +323,54 @@ pub fn update_mount(id: &str, updates: serde_json::Value) -> Result<StorageMount
     }
     if let Some(enabled) = updates.get("enabled").and_then(|v| v.as_bool()) {
         mount.enabled = enabled;
+    }
+    if let Some(mount_point) = updates.get("mount_point").and_then(|v| v.as_str()) {
+        if !mount_point.is_empty() {
+            mount.mount_point = mount_point.to_string();
+        }
+    }
+    if let Some(source) = updates.get("source").and_then(|v| v.as_str()) {
+        mount.source = source.to_string();
+    }
+    if let Some(nfs_opts) = updates.get("nfs_options").and_then(|v| v.as_str()) {
+        mount.nfs_options = if nfs_opts.is_empty() { None } else { Some(nfs_opts.to_string()) };
+    }
+    
+    // Apply S3 config updates
+    if let Some(s3_updates) = updates.get("s3_config") {
+        let s3 = mount.s3_config.get_or_insert_with(|| S3Config {
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            region: String::new(),
+            endpoint: String::new(),
+            provider: default_s3_provider(),
+            bucket: String::new(),
+        });
+        if let Some(v) = s3_updates.get("bucket").and_then(|v| v.as_str()) {
+            s3.bucket = v.to_string();
+        }
+        if let Some(v) = s3_updates.get("access_key_id").and_then(|v| v.as_str()) {
+            s3.access_key_id = v.to_string();
+        }
+        if let Some(v) = s3_updates.get("secret_access_key").and_then(|v| v.as_str()) {
+            // Only update if not the placeholder
+            if v != "••••••••" {
+                s3.secret_access_key = v.to_string();
+            }
+        }
+        if let Some(v) = s3_updates.get("region").and_then(|v| v.as_str()) {
+            s3.region = v.to_string();
+        }
+        if let Some(v) = s3_updates.get("endpoint").and_then(|v| v.as_str()) {
+            s3.endpoint = v.to_string();
+        }
+        if let Some(v) = s3_updates.get("provider").and_then(|v| v.as_str()) {
+            s3.provider = v.to_string();
+        }
+        // Update source to reflect bucket
+        if !s3.bucket.is_empty() {
+            mount.source = format!("s3:{}", s3.bucket);
+        }
     }
     
     let result = mount.clone();
@@ -332,17 +388,25 @@ fn mount_s3(mount: &StorageMount) -> Result<String, String> {
         return Err("Bucket name is required for S3 mounts".to_string());
     }
     
-    // Prefer s3fs (faster, purpose-built, handles disconnects gracefully)
-    // Fall back to rclone if s3fs is not available
-    if has_s3fs() {
-        mount_s3_via_s3fs(mount, s3)
-    } else if has_rclone() {
-        info!("s3fs not found, falling back to rclone");
-        mount_s3_via_rclone(mount, s3)
-    } else {
-        // Try to install s3fs
-        install_s3fs()?;
-        mount_s3_via_s3fs(mount, s3)
+    // Strategy:
+    // 1. Try rust-s3 native sync (pure Rust, works on IBM Power/ppc64le)
+    // 2. Fall back to s3fs-fuse if available
+    // 3. Try installing s3fs as last resort
+    match mount_s3_via_rust_s3(mount, s3) {
+        Ok(msg) => Ok(msg),
+        Err(e) => {
+            warn!("rust-s3 mount failed ({}), trying s3fs fallback", e);
+            if has_s3fs() {
+                mount_s3_via_s3fs(mount, s3)
+            } else {
+                install_s3fs().ok();
+                if has_s3fs() {
+                    mount_s3_via_s3fs(mount, s3)
+                } else {
+                    Err(format!("S3 mount failed: rust-s3 error: {}", e))
+                }
+            }
+        }
     }
 }
 
@@ -406,60 +470,113 @@ fn mount_s3_via_s3fs(mount: &StorageMount, s3: &S3Config) -> Result<String, Stri
     }
 }
 
-/// Fallback: mount S3 using rclone (slower, less reliable on disconnect)
-fn mount_s3_via_rclone(mount: &StorageMount, s3: &S3Config) -> Result<String, String> {
-    let rclone_config_dir = "/etc/wolfstack/rclone";
-    fs::create_dir_all(rclone_config_dir)
-        .map_err(|e| format!("Failed to create rclone config dir: {}", e))?;
-    
-    let remote_name = format!("wolfstack-{}", mount.id);
-    let config_path = format!("{}/rclone.conf", rclone_config_dir);
-    
-    let mut config_section = format!(
-        "[{}]\ntype = s3\nprovider = {}\naccess_key_id = {}\nsecret_access_key = {}\n",
-        remote_name, s3.provider, s3.access_key_id, s3.secret_access_key
-    );
-    if !s3.region.is_empty() {
-        config_section.push_str(&format!("region = {}\n", s3.region));
-    }
-    if !s3.endpoint.is_empty() {
-        config_section.push_str(&format!("endpoint = {}\n", s3.endpoint));
-    }
-    
-    let mut full_config = fs::read_to_string(&config_path).unwrap_or_default();
-    let section_header = format!("[{}]", remote_name);
-    if let Some(start) = full_config.find(&section_header) {
-        let end = full_config[start + section_header.len()..]
-            .find("\n[")
-            .map(|i| start + section_header.len() + i)
-            .unwrap_or(full_config.len());
-        full_config = format!("{}{}", &full_config[..start], &full_config[end..]);
-    }
-    full_config.push_str(&config_section);
-    fs::write(&config_path, &full_config)
-        .map_err(|e| format!("Failed to write rclone config: {}", e))?;
-    
-    let bucket_path = format!("{}:{}", remote_name, s3.bucket);
-    
-    let child = Command::new("rclone")
-        .args([
-            "mount", &bucket_path, &mount.mount_point,
-            "--config", &config_path,
-            "--vfs-cache-mode", "full",
-            "--daemon", "--allow-other", "--allow-non-empty",
-        ])
-        .spawn();
-    
-    match child {
-        Ok(_) => {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            if check_mounted(&mount.mount_point) {
-                Ok("S3 storage mounted via rclone (consider installing s3fs for better performance)".to_string())
-            } else {
-                Err("rclone mount started but mount point not detected — check credentials".to_string())
+/// Mount S3 using rust-s3 — pure Rust, native, works on IBM Power/ppc64le
+/// Syncs bucket contents to a local cache directory and bind-mounts it
+fn mount_s3_via_rust_s3(mount: &StorageMount, s3: &S3Config) -> Result<String, String> {
+    use s3::bucket::Bucket;
+    use s3::creds::Credentials;
+    use s3::region::Region;
+
+    // Build credentials
+    let credentials = Credentials::new(
+        Some(&s3.access_key_id),
+        Some(&s3.secret_access_key),
+        None, None, None,
+    ).map_err(|e| format!("Invalid S3 credentials: {}", e))?;
+
+    // Build region
+    let region = if !s3.endpoint.is_empty() {
+        Region::Custom {
+            region: if s3.region.is_empty() { "us-east-1".to_string() } else { s3.region.clone() },
+            endpoint: s3.endpoint.clone(),
+        }
+    } else {
+        s3.region.parse::<Region>()
+            .unwrap_or(Region::UsEast1)
+    };
+
+    // Create bucket handle
+    let bucket = Bucket::new(&s3.bucket, region, credentials)
+        .map_err(|e| format!("Failed to create S3 bucket handle: {}", e))?
+        .with_path_style();
+
+    // Create local cache directory for this mount
+    let cache_dir = format!("/var/cache/wolfstack/s3/{}", mount.id);
+    fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("Failed to create S3 cache dir: {}", e))?;
+
+    // Use tokio runtime to sync bucket contents
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
+
+    let sync_result = rt.block_on(async {
+        // List objects in bucket (top-level, first 1000)
+        let list = bucket.list("".to_string(), None).await
+            .map_err(|e| format!("Failed to list S3 bucket '{}': {}", s3.bucket, e))?;
+
+        let mut synced = 0usize;
+        for item in &list {
+            for obj in &item.contents {
+                let key = &obj.key;
+                // Skip directory markers
+                if key.ends_with('/') {
+                    // Create directory
+                    let dir_path = format!("{}/{}", cache_dir, key);
+                    fs::create_dir_all(&dir_path).ok();
+                    continue;
+                }
+
+                let local_path = format!("{}/{}", cache_dir, key);
+
+                // Create parent directories
+                if let Some(parent) = Path::new(&local_path).parent() {
+                    fs::create_dir_all(parent).ok();
+                }
+
+                // Check if local file exists and matches size
+                let needs_download = match fs::metadata(&local_path) {
+                    Ok(meta) => meta.len() != obj.size,
+                    Err(_) => true,
+                };
+
+                if needs_download {
+                    match bucket.get_object(key).await {
+                        Ok(response) => {
+                            if let Err(e) = fs::write(&local_path, response.bytes()) {
+                                error!("Failed to write {}: {}", local_path, e);
+                            } else {
+                                synced += 1;
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to download s3://{}/{}: {}", s3.bucket, key, e);
+                        }
+                    }
+                }
             }
         }
-        Err(e) => Err(format!("Failed to start rclone: {}", e)),
+
+        Ok::<usize, String>(synced)
+    })?;
+
+    // Bind-mount the cache directory to the mount point
+    fs::create_dir_all(&mount.mount_point)
+        .map_err(|e| format!("Failed to create mount point: {}", e))?;
+
+    let output = Command::new("mount")
+        .args(["--bind", &cache_dir, &mount.mount_point])
+        .output()
+        .map_err(|e| format!("Failed to bind mount: {}", e))?;
+
+    if output.status.success() {
+        info!("S3 bucket '{}' synced ({} objects) and mounted at {}",
+            s3.bucket, sync_result, mount.mount_point);
+        Ok(format!("S3 storage mounted via rust-s3 ({} objects synced)", sync_result))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("Bind mount failed after S3 sync: {}", stderr))
     }
 }
 
@@ -535,12 +652,6 @@ fn has_s3fs() -> bool {
         .unwrap_or(false)
 }
 
-fn has_rclone() -> bool {
-    Command::new("rclone").arg("version").output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 fn install_s3fs() -> Result<(), String> {
     info!("Installing s3fs-fuse...");
     let output = Command::new("apt-get")
@@ -554,6 +665,92 @@ fn install_s3fs() -> Result<(), String> {
         Err(format!("s3fs installation failed: {}",
             String::from_utf8_lossy(&output.stderr)))
     }
+}
+
+/// Sync local changes back to S3 bucket (called on unmount or periodic sync)
+pub fn sync_to_s3(id: &str) -> Result<String, String> {
+    use s3::bucket::Bucket;
+    use s3::creds::Credentials;
+    use s3::region::Region;
+
+    let config = load_config();
+    let mount = config.mounts.iter().find(|m| m.id == id)
+        .ok_or_else(|| format!("Mount '{}' not found", id))?;
+
+    let s3 = mount.s3_config.as_ref()
+        .ok_or("Not an S3 mount")?;
+
+    let credentials = Credentials::new(
+        Some(&s3.access_key_id),
+        Some(&s3.secret_access_key),
+        None, None, None,
+    ).map_err(|e| format!("Invalid credentials: {}", e))?;
+
+    let region = if !s3.endpoint.is_empty() {
+        Region::Custom {
+            region: if s3.region.is_empty() { "us-east-1".to_string() } else { s3.region.clone() },
+            endpoint: s3.endpoint.clone(),
+        }
+    } else {
+        s3.region.parse::<Region>().unwrap_or(Region::UsEast1)
+    };
+
+    let bucket = Bucket::new(&s3.bucket, region, credentials)
+        .map_err(|e| format!("Failed to create bucket handle: {}", e))?
+        .with_path_style();
+
+    let cache_dir = format!("/var/cache/wolfstack/s3/{}", mount.id);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("Failed to create runtime: {}", e))?;
+
+    let uploaded = rt.block_on(async {
+        let mut count = 0usize;
+        sync_dir_to_s3(&bucket, &cache_dir, &cache_dir, &mut count).await?;
+        Ok::<usize, String>(count)
+    })?;
+
+    Ok(format!("Synced {} files to S3", uploaded))
+}
+
+/// Recursively sync a local directory to S3
+async fn sync_dir_to_s3(
+    bucket: &s3::bucket::Bucket,
+    base_dir: &str,
+    current_dir: &str,
+    count: &mut usize,
+) -> Result<(), String> {
+    let entries = fs::read_dir(current_dir)
+        .map_err(|e| format!("Failed to read dir {}: {}", current_dir, e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Dir entry error: {}", e))?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            Box::pin(sync_dir_to_s3(bucket, base_dir, path.to_str().unwrap_or(""), count)).await?;
+        } else if path.is_file() {
+            let key = path.strip_prefix(base_dir)
+                .map_err(|e| format!("Path error: {}", e))?
+                .to_str()
+                .unwrap_or("")
+                .to_string();
+
+            if key.is_empty() { continue; }
+
+            let content = fs::read(&path)
+                .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+            bucket.put_object(&key, &content).await
+                .map_err(|e| format!("Failed to upload {}: {}", key, e))?;
+
+            *count += 1;
+        }
+    }
+
+    Ok(())
 }
 
 // ─── Rclone Config Import ───
