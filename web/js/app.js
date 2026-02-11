@@ -331,6 +331,55 @@ function updateMap(nodes) {
     // Fix map size if it was hidden
     worldMap.invalidateSize();
 
+    // Find the self node (local server) — its public_ip is the best geolocation reference
+    const selfNode = nodes.find(n => n.is_self);
+    const selfPublicIp = selfNode?.public_ip;
+
+    // Helper: resolve a node's location, then call placeMarker
+    const resolveAndPlace = (node, placeMarker) => {
+        const ipToGeolocate = node.public_ip || selfPublicIp;
+
+        if (ipToGeolocate) {
+            // Check cache first
+            if (geoCache[ipToGeolocate]) {
+                const [baseLat, baseLon] = geoCache[ipToGeolocate];
+                const [lat, lon] = jitterCoords(baseLat, baseLon, node.hostname);
+                placeMarker(lat, lon);
+                return;
+            }
+
+            // Fetch geolocation if not already fetching
+            if (!fetchingGeo[ipToGeolocate]) {
+                fetchingGeo[ipToGeolocate] = true;
+                fetch(`http://ip-api.com/json/${ipToGeolocate}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            geoCache[ipToGeolocate] = [data.lat, data.lon];
+                            const [lat, lon] = jitterCoords(data.lat, data.lon, node.hostname);
+                            placeMarker(lat, lon);
+                        } else {
+                            // API failed — use London as last resort
+                            const [lat, lon] = jitterCoords(51.5074, -0.1278, node.hostname);
+                            placeMarker(lat, lon);
+                        }
+                    })
+                    .catch(() => {
+                        const [lat, lon] = jitterCoords(51.5074, -0.1278, node.hostname);
+                        placeMarker(lat, lon);
+                    });
+            } else {
+                // Already fetching — wait a moment and retry from cache
+                setTimeout(() => resolveAndPlace(node, placeMarker), 1000);
+            }
+            return;
+        }
+
+        // No public IP at all — use London as last resort with jitter
+        const [lat, lon] = jitterCoords(51.5074, -0.1278, node.hostname);
+        placeMarker(lat, lon);
+    };
+
     nodes.forEach(node => {
         if (mapMarkers[node.id]) return;
 
@@ -342,114 +391,28 @@ function updateMap(nodes) {
                 iconSize: [12, 12]
             });
             const marker = L.marker([lat, lon], { icon: icon }).addTo(worldMap);
-            // Include Public IP in popup if available
             let popupContent = `<b>${node.hostname}</b><br>${node.address}`;
             if (node.public_ip) popupContent += `<br>Public: ${node.public_ip}`;
             popupContent += `<br>${node.online ? 'Online' : 'Offline'}`;
-
             marker.bindPopup(popupContent);
             mapMarkers[node.id] = marker;
         };
 
-        // Real Geolocation via Public IP
-        if (node.public_ip) {
-            if (geoCache[node.public_ip]) {
-                const [lat, lon] = geoCache[node.public_ip];
-                placeMarker(lat, lon);
-                return;
-            }
-
-            // Fetch if not already fetching
-            if (!fetchingGeo[node.public_ip]) {
-                fetchingGeo[node.public_ip] = true;
-                // Use ip-api.com (HTTP). Note: Mixed content warning if dashboard is HTTPS.
-                // Assuming dashboard is HTTP for now based on port 8553.
-                fetch(`http://ip-api.com/json/${node.public_ip}`)
-                    .then(r => r.json())
-                    .then(data => {
-                        if (data.status === 'success') {
-                            geoCache[node.public_ip] = [data.lat, data.lon];
-                            placeMarker(data.lat, data.lon);
-                        } else {
-                            // Fallback to hash if geoloc fails
-                            useHashLocation(node, placeMarker);
-                        }
-                    })
-                    .catch(() => useHashLocation(node, placeMarker));
-            }
-            return;
-        }
-
-        // Fallback: Deterministic hash for "Fake" Geolocation
-        useHashLocation(node, placeMarker);
+        resolveAndPlace(node, placeMarker);
     });
 }
 
-function useHashLocation(node, placeMarker) {
+// Deterministic jitter based on hostname so co-located servers spread visually
+function jitterCoords(baseLat, baseLon, hostname) {
     let hash = 0;
-    for (let i = 0; i < node.hostname.length; i++) hash = node.hostname.charCodeAt(i) + ((hash << 5) - hash);
-
-    const cities = [
-        [51.5074, -0.1278], // London
-        [40.7128, -74.0060], // New York
-        [35.6762, 139.6503], // Tokyo
-        [1.3521, 103.8198], // Singapore
-        [52.5200, 13.4050], // Berlin
-        [37.7749, -122.4194], // San Francisco
-        [-33.8688, 151.2093], // Sydney
-        [48.8566, 2.3522],    // Paris
-        [55.7558, 37.6173],   // Moscow
-        [-23.5505, -46.6333], // Sao Paulo
-    ];
-    const city = cities[Math.abs(hash) % cities.length];
-
-    // Add slight jitter so nodes in same city don't overlap perfectly
-    const jitter = 0.05;
-    const lat = city[0] + (Math.random() - 0.5) * jitter;
-    const lon = city[1] + (Math.random() - 0.5) * jitter;
-
-    placeMarker(lat, lon);
+    for (let i = 0; i < hostname.length; i++) hash = hostname.charCodeAt(i) + ((hash << 5) - hash);
+    const jitter = 0.08;
+    const latOffset = ((Math.abs(hash) % 1000) / 1000 - 0.5) * jitter;
+    const lonOffset = ((Math.abs(hash >> 8) % 1000) / 1000 - 0.5) * jitter;
+    return [baseLat + latOffset, baseLon + lonOffset];
 }
-// Old loop for reference (replaced by above)
-function unused_loop_reference() {
-    nodes.forEach(node => {
-        if (mapMarkers[node.id]) return;
 
-        // Deterministic hash for "Fake" Geolocation (since IPs are private 10.x)
-        // If we had public IPs, we'd fetch them here.
-        let hash = 0;
-        for (let i = 0; i < node.hostname.length; i++) hash = node.hostname.charCodeAt(i) + ((hash << 5) - hash);
 
-        const cities = [
-            [51.5074, -0.1278], // London
-            [40.7128, -74.0060], // New York
-            [35.6762, 139.6503], // Tokyo
-            [1.3521, 103.8198], // Singapore
-            [52.5200, 13.4050], // Berlin
-            [37.7749, -122.4194], // San Francisco
-            [-33.8688, 151.2093], // Sydney
-            [48.8566, 2.3522],    // Paris
-            [55.7558, 37.6173],   // Moscow
-            [-23.5505, -46.6333], // Sao Paulo
-        ];
-        const city = cities[Math.abs(hash) % cities.length];
-
-        // Add slight jitter so nodes in same city don't overlap perfectly
-        const jitter = 0.05;
-        const lat = city[0] + (Math.random() - 0.5) * jitter;
-        const lon = city[1] + (Math.random() - 0.5) * jitter;
-
-        const icon = L.divIcon({
-            className: 'custom-map-marker',
-            html: `<div style="width:12px; height:12px; background:${node.online ? '#10b981' : '#ef4444'}; border-radius:50%; border:2px solid #ffffff; box-shadow:0 0 10px ${node.online ? '#10b981' : '#ef4444'};"></div>`,
-            iconSize: [12, 12]
-        });
-
-        const marker = L.marker([lat, lon], { icon: icon }).addTo(worldMap);
-        marker.bindPopup(`<b>${node.hostname}</b><br>${node.address}<br>${node.online ? 'Online' : 'Offline'}`);
-        mapMarkers[node.id] = marker;
-    });
-}
 
 // Handle hash navigation
 window.addEventListener('hashchange', () => {
