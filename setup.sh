@@ -165,13 +165,14 @@ else
         exit 1
     fi
 
-    # Clone WolfScale repo (contains WolfNet source)
-    WOLFSCALE_DIR="/opt/wolfscale-src"
-    if [ -d "$WOLFSCALE_DIR" ]; then
-        cd "$WOLFSCALE_DIR" && git fetch origin && git reset --hard origin/main
+    # Download WolfNet source
+    echo "  Downloading WolfNet..."
+    WOLFNET_SRC_DIR="/opt/wolfnet-src"
+    if [ -d "$WOLFNET_SRC_DIR" ]; then
+        cd "$WOLFNET_SRC_DIR" && git fetch origin && git reset --hard origin/main
     else
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFSCALE_DIR"
-        cd "$WOLFSCALE_DIR"
+        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+        cd "$WOLFNET_SRC_DIR"
     fi
 
     # Ensure Rust is available for building WolfNet
@@ -189,19 +190,19 @@ else
 
     # Build WolfNet
     echo "  Building WolfNet..."
-    cd "$WOLFSCALE_DIR/wolfnet"
+    cd "$WOLFNET_SRC_DIR/wolfnet"
     if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
-        chown -R "$REAL_USER:$REAL_USER" "$WOLFSCALE_DIR"
-        su - "$REAL_USER" -c "cd $WOLFSCALE_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
+        chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
+        su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
     else
         cargo build --release
     fi
 
     # Install binaries
-    cp "$WOLFSCALE_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
+    cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
     chmod +x /usr/local/bin/wolfnet
-    if [ -f "$WOLFSCALE_DIR/wolfnet/target/release/wolfnetctl" ]; then
-        cp "$WOLFSCALE_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+    if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
+        cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
         chmod +x /usr/local/bin/wolfnetctl
     fi
     echo "  ✓ WolfNet binary installed"
