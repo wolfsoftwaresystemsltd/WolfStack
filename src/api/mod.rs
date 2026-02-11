@@ -1100,6 +1100,81 @@ pub async fn net_get_wolfnet(req: HttpRequest, state: web::Data<AppState>) -> Ht
     HttpResponse::Ok().json(networking::get_wolfnet_status())
 }
 
+/// GET /api/networking/wolfnet/config — get raw WolfNet config
+pub async fn net_get_wolfnet_config(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match networking::get_wolfnet_config() {
+        Ok(config) => HttpResponse::Ok().json(serde_json::json!({"config": config})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WolfNetConfigSave {
+    pub config: String,
+}
+
+/// PUT /api/networking/wolfnet/config — save raw WolfNet config
+pub async fn net_save_wolfnet_config(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfNetConfigSave>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match networking::save_wolfnet_config(&body.config) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"message": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WolfNetAddPeer {
+    pub name: String,
+    pub endpoint: Option<String>,
+    pub ip: Option<String>,
+    pub public_key: Option<String>,
+}
+
+/// POST /api/networking/wolfnet/peers — add a WolfNet peer
+pub async fn net_add_wolfnet_peer(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfNetAddPeer>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let endpoint = body.endpoint.as_deref().unwrap_or("");
+    let ip = body.ip.as_deref().unwrap_or("");
+    let public_key = body.public_key.as_deref();
+    match networking::add_wolfnet_peer(&body.name, endpoint, ip, public_key) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"message": msg})),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WolfNetRemovePeer {
+    pub name: String,
+}
+
+/// DELETE /api/networking/wolfnet/peers — remove a WolfNet peer
+pub async fn net_remove_wolfnet_peer(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfNetRemovePeer>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match networking::remove_wolfnet_peer(&body.name) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"message": msg})),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WolfNetAction {
+    pub action: String,
+}
+
+/// POST /api/networking/wolfnet/action — start/stop/restart WolfNet
+pub async fn net_wolfnet_action(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfNetAction>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let allowed = ["start", "stop", "restart", "enable", "disable"];
+    if !allowed.contains(&body.action.as_str()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid action"}));
+    }
+    match networking::wolfnet_service_action(&body.action) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"message": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct IpAction {
     pub address: String,
@@ -1575,6 +1650,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/networking/dns", web::get().to(net_get_dns))
         .route("/api/networking/dns", web::post().to(net_set_dns))
         .route("/api/networking/wolfnet", web::get().to(net_get_wolfnet))
+        .route("/api/networking/wolfnet/config", web::get().to(net_get_wolfnet_config))
+        .route("/api/networking/wolfnet/config", web::put().to(net_save_wolfnet_config))
+        .route("/api/networking/wolfnet/peers", web::post().to(net_add_wolfnet_peer))
+        .route("/api/networking/wolfnet/peers", web::delete().to(net_remove_wolfnet_peer))
+        .route("/api/networking/wolfnet/action", web::post().to(net_wolfnet_action))
         .route("/api/networking/interfaces/{name}/ip", web::post().to(net_add_ip))
         .route("/api/networking/interfaces/{name}/ip", web::delete().to(net_remove_ip))
         .route("/api/networking/interfaces/{name}/state", web::post().to(net_set_state))

@@ -33,10 +33,14 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    document.getElementById('page-title').textContent = page === 'datacenter' ? 'Datacenter' : page;
+    const titles = { datacenter: 'Datacenter', wolfnet: 'WolfNet' };
+    document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
         renderDatacenterOverview();
+    }
+    if (page === 'wolfnet') {
+        loadWolfNet();
     }
 }
 
@@ -64,6 +68,7 @@ function selectServerView(nodeId, view) {
         lxc: 'LXC',
         storage: 'Storage',
         networking: 'Networking',
+        wolfnet: 'WolfNet',
         certificates: 'Certificates',
         monitoring: 'Live Metrics',
     };
@@ -86,6 +91,7 @@ function selectServerView(nodeId, view) {
     if (view === 'vms') loadVms();
     if (view === 'storage') loadStorageMounts();
     if (view === 'networking') loadNetworking();
+    if (view === 'wolfnet') loadWolfNet();
 }
 
 // ─── Server Tree ───
@@ -153,6 +159,9 @@ function buildServerTree(nodes) {
                 </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="networking" onclick="selectServerView('${node.id}', 'networking')">
                     <span class="icon">🌐</span> Networking
+                </a>
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="wolfnet" onclick="selectServerView('${node.id}', 'wolfnet')">
+                    <span class="icon">🔗</span> WolfNet
                 </a>
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="certificates" onclick="selectServerView('${node.id}', 'certificates')">
                     <span class="icon">🔒</span> Certificates
@@ -2010,6 +2019,195 @@ async function wolfnetAction(action) {
     }
 }
 
+// ─── WolfNet Management Page ───
+
+let wolfnetData = null;
+
+async function loadWolfNet() {
+    try {
+        const [statusResp, configResp] = await Promise.all([
+            fetch(apiUrl('/api/networking/wolfnet')),
+            fetch(apiUrl('/api/networking/wolfnet/config')),
+        ]);
+        const status = await statusResp.json();
+        let config = '';
+        if (configResp.ok) {
+            const configData = await configResp.json();
+            config = configData.config || '';
+        }
+        wolfnetData = status;
+        renderWolfNetPage(status, config);
+    } catch (e) {
+        console.error('Failed to load WolfNet:', e);
+    }
+}
+
+function renderWolfNetPage(wn, config) {
+    // Status cards
+    const statusEl = document.getElementById('wn-status-val');
+    const statusIcon = document.getElementById('wn-status-icon');
+    const enabledEl = document.getElementById('wn-enabled-val');
+    const ifaceEl = document.getElementById('wn-interface-val');
+    const ipEl = document.getElementById('wn-ip-val');
+    const connectedEl = document.getElementById('wn-connected-val');
+    const totalPeersEl = document.getElementById('wn-total-peers-val');
+
+    if (!wn.installed) {
+        if (statusEl) statusEl.textContent = 'Not Installed';
+        if (statusIcon) { statusIcon.style.background = 'var(--danger-bg)'; statusIcon.style.color = 'var(--danger)'; }
+        if (enabledEl) enabledEl.textContent = 'Install from Components page';
+        if (ifaceEl) ifaceEl.textContent = '—';
+        if (ipEl) ipEl.textContent = '';
+        if (connectedEl) connectedEl.textContent = '0';
+        if (totalPeersEl) totalPeersEl.textContent = '';
+        return;
+    }
+
+    if (statusEl) statusEl.textContent = wn.running ? 'Running' : 'Stopped';
+    if (statusIcon) {
+        statusIcon.style.background = wn.running ? 'var(--success-bg)' : 'var(--danger-bg)';
+        statusIcon.style.color = wn.running ? 'var(--success)' : 'var(--danger)';
+    }
+    if (enabledEl) enabledEl.textContent = wn.running ? 'Service active' : 'Service inactive';
+    if (ifaceEl) ifaceEl.textContent = wn.interface || '—';
+    if (ipEl) ipEl.textContent = wn.ip || '';
+
+    const connectedCount = wn.peers.filter(p => p.connected).length;
+    if (connectedEl) connectedEl.textContent = connectedCount;
+    if (totalPeersEl) totalPeersEl.textContent = `of ${wn.peers.length} total`;
+
+    // Peers table
+    const table = document.getElementById('wolfnet-peers-table');
+    const empty = document.getElementById('wolfnet-peers-empty');
+    if (table) {
+        if (wn.peers.length === 0) {
+            table.innerHTML = '';
+            if (empty) empty.style.display = 'block';
+        } else {
+            if (empty) empty.style.display = 'none';
+            table.innerHTML = wn.peers.map(p => `
+                <tr>
+                    <td style="font-weight:600;">${escapeHtml(p.name)}</td>
+                    <td style="font-family:var(--font-mono); font-size:12px;">${escapeHtml(p.ip) || '—'}</td>
+                    <td style="font-family:var(--font-mono); font-size:12px;">${escapeHtml(p.endpoint) || '<span style="color:var(--text-muted);">auto-discovery</span>'}</td>
+                    <td>${p.connected
+                    ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e;">Connected</span>'
+                    : '<span class="badge" style="background:rgba(239,68,68,0.15); color:#ef4444;">Unreachable</span>'
+                }</td>
+                    <td>
+                        <div style="display:flex; gap:4px;">
+                            <button class="btn btn-sm btn-danger" onclick="removeWolfNetPeer('${escapeHtml(p.name)}')" style="font-size:11px; padding:3px 8px;" title="Remove peer">🗑️</button>
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+        }
+    }
+
+    // Config editor
+    const editor = document.getElementById('wolfnet-config-editor');
+    if (editor && config !== undefined) {
+        editor.value = config;
+    }
+}
+
+function showAddPeerModal() {
+    document.getElementById('peer-name').value = '';
+    document.getElementById('peer-ip').value = '';
+    document.getElementById('peer-endpoint').value = '';
+    document.getElementById('peer-public-key').value = '';
+    document.getElementById('add-peer-modal').classList.add('active');
+}
+function closeAddPeerModal() {
+    document.getElementById('add-peer-modal').classList.remove('active');
+}
+
+async function addWolfNetPeer() {
+    const name = document.getElementById('peer-name').value.trim();
+    const ip = document.getElementById('peer-ip').value.trim();
+    const endpoint = document.getElementById('peer-endpoint').value.trim();
+    const public_key = document.getElementById('peer-public-key').value.trim();
+
+    if (!name) { alert('Please enter a peer name'); return; }
+
+    try {
+        const resp = await fetch(apiUrl('/api/networking/wolfnet/peers'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, ip: ip || null, endpoint: endpoint || null, public_key: public_key || null }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to add peer');
+        closeAddPeerModal();
+        showToast(data.message || 'Peer added', 'success');
+        setTimeout(loadWolfNet, 2000);
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function removeWolfNetPeer(name) {
+    if (!confirm(`Remove peer "${name}"? WolfNet will be restarted.`)) return;
+    try {
+        const resp = await fetch(apiUrl('/api/networking/wolfnet/peers'), {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to remove peer');
+        showToast(data.message || 'Peer removed', 'success');
+        setTimeout(loadWolfNet, 2000);
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function saveWolfNetConfig() {
+    const editor = document.getElementById('wolfnet-config-editor');
+    const config = editor.value;
+    if (!confirm('Save configuration and restart WolfNet?')) return;
+    try {
+        const resp = await fetch(apiUrl('/api/networking/wolfnet/config'), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to save');
+        showToast(data.message || 'Config saved', 'success');
+        // Restart after saving
+        await fetch(apiUrl('/api/networking/wolfnet/action'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'restart' }),
+        });
+        showToast('WolfNet restarted', 'success');
+        setTimeout(loadWolfNet, 2000);
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function wolfnetServiceAction(action) {
+    try {
+        const resp = await fetch(apiUrl('/api/networking/wolfnet/action'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(`WolfNet ${action}: success`, 'success');
+        setTimeout(loadWolfNet, 2000);
+    } catch (e) {
+        alert('WolfNet error: ' + e.message);
+    }
+}
+
+
+
+
 // ─── Docker ───
 
 async function loadDockerContainers() {
@@ -2581,6 +2779,7 @@ async function saveLxcSettings(name) {
 }
 
 function escapeHtml(text) {
+    if (text == null) return '';
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;

@@ -21,13 +21,16 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v5.10.1</span>
+                <span class="version">v5.11.0</span>
             </div>
         </div>
         <nav class="sidebar-nav">
             <div class="nav-section">
                 <a class="nav-item active" data-page="datacenter" onclick="selectView('datacenter')">
                     <span class="icon">🏢</span> Datacenter
+                </a>
+                <a class="nav-item" data-page="wolfnet" onclick="selectView('wolfnet')">
+                    <span class="icon">🔗</span> WolfNet
                 </a>
             </div>
             <div class="nav-section">
@@ -675,6 +678,141 @@
                             No storage mounts configured. Click <strong>+ Add Mount</strong> to add S3, NFS, directory,
                             or WolfDisk storage.
                         </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ WolfNet Management ═══ -->
+            <div id="page-wolfnet" class="page-view" style="display:none;">
+                <!-- WolfNet Status Banner -->
+                <div class="stats-grid" style="margin-bottom:20px;" id="wolfnet-stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Status</span>
+                            <div class="stat-icon" id="wn-status-icon"
+                                style="background:var(--success-bg); color:var(--success);">●</div>
+                        </div>
+                        <div class="stat-value" id="wn-status-val">—</div>
+                        <div class="stat-sub" id="wn-enabled-val"></div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Interface</span>
+                        </div>
+                        <div class="stat-value" id="wn-interface-val" style="font-size:18px;">—</div>
+                        <div class="stat-sub" id="wn-ip-val"></div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Connected Peers</span>
+                        </div>
+                        <div class="stat-value" id="wn-connected-val">0</div>
+                        <div class="stat-sub" id="wn-total-peers-val"></div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Actions</span>
+                        </div>
+                        <div class="stat-value" style="font-size:13px;">
+                            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                                <button class="btn btn-sm btn-success" onclick="wolfnetServiceAction('start')"
+                                    id="wn-btn-start">▶ Start</button>
+                                <button class="btn btn-sm" onclick="wolfnetServiceAction('restart')" id="wn-btn-restart"
+                                    style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary);">🔄
+                                    Restart</button>
+                                <button class="btn btn-sm btn-danger" onclick="wolfnetServiceAction('stop')"
+                                    id="wn-btn-stop">⏹ Stop</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Peers Table -->
+                <div class="card" style="margin-bottom:20px;">
+                    <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>🌐 Peers</h3>
+                        <div style="display:flex; gap:8px;">
+                            <button class="btn btn-sm" onclick="loadWolfNet()"
+                                style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); font-size:11px;">↻
+                                Refresh</button>
+                            <button class="btn btn-sm btn-primary" onclick="showAddPeerModal()"
+                                style="font-size:12px;">+ Add Peer</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>WolfNet IP</th>
+                                    <th>Endpoint</th>
+                                    <th>Status</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="wolfnet-peers-table"></tbody>
+                        </table>
+                        <p id="wolfnet-peers-empty"
+                            style="display:none; text-align:center; padding:20px; color:var(--text-muted);">
+                            No peers configured. Click <strong>+ Add Peer</strong> to connect to another WolfNet node.
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Config Editor -->
+                <div class="card">
+                    <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>⚙️ Configuration</h3>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <span
+                                style="font-size:12px; color:var(--text-muted); font-family:'JetBrains Mono', monospace;">/etc/wolfnet/config.toml</span>
+                            <button class="btn btn-primary btn-sm" onclick="saveWolfNetConfig()">💾 Save &
+                                Restart</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <textarea id="wolfnet-config-editor" class="config-editor" spellcheck="false"
+                            style="min-height:250px;"></textarea>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Add WolfNet Peer Modal -->
+            <div class="modal-overlay" id="add-peer-modal">
+                <div class="modal" style="max-width: 520px; width: 95%;">
+                    <div class="modal-header">
+                        <h3>🔗 Add WolfNet Peer</h3>
+                        <button class="modal-close" onclick="closeAddPeerModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-group">
+                            <label>Peer Name <span style="color:var(--danger)">*</span></label>
+                            <input type="text" id="peer-name" class="form-control" placeholder="e.g. office-server">
+                        </div>
+                        <div class="form-group">
+                            <label>WolfNet IP</label>
+                            <input type="text" id="peer-ip" class="form-control" placeholder="e.g. 10.10.10.2">
+                            <small style="color:var(--text-muted);">The peer's IP address on the WolfNet overlay
+                                network</small>
+                        </div>
+                        <div class="form-group">
+                            <label>Endpoint</label>
+                            <input type="text" id="peer-endpoint" class="form-control"
+                                placeholder="e.g. office.example.com:9600 or 203.0.113.5:9600">
+                            <small style="color:var(--text-muted);">Public IP/hostname:port for direct connection (leave
+                                empty for auto-discovery)</small>
+                        </div>
+                        <div class="form-group">
+                            <label>Public Key</label>
+                            <input type="text" id="peer-public-key" class="form-control"
+                                placeholder="(optional) base64 public key">
+                            <small style="color:var(--text-muted);">The peer's WolfNet public key for
+                                authentication</small>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" onclick="closeAddPeerModal()">Cancel</button>
+                        <button class="btn btn-primary" onclick="addWolfNetPeer()">Add Peer</button>
                     </div>
                 </div>
             </div>

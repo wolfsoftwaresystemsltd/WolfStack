@@ -703,6 +703,144 @@ fn get_wolfnet_peers() -> Vec<WolfNetPeer> {
     peers
 }
 
+/// Read the raw WolfNet config file
+pub fn get_wolfnet_config() -> Result<String, String> {
+    std::fs::read_to_string("/etc/wolfnet/config.toml")
+        .map_err(|e| format!("Failed to read WolfNet config: {}", e))
+}
+
+/// Save the raw WolfNet config file
+pub fn save_wolfnet_config(content: &str) -> Result<String, String> {
+    std::fs::write("/etc/wolfnet/config.toml", content)
+        .map_err(|e| format!("Failed to write WolfNet config: {}", e))?;
+    info!("WolfNet config saved");
+    Ok("Configuration saved".to_string())
+}
+
+/// Add a peer to WolfNet config
+pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option<&str>) -> Result<String, String> {
+    let config_path = "/etc/wolfnet/config.toml";
+    let mut content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read config: {}", e))?;
+
+    // Check for duplicate
+    if content.contains(&format!("name = \"{}\"", name)) {
+        return Err(format!("Peer '{}' already exists", name));
+    }
+
+    // Append peer section
+    content.push_str(&format!("\n\n[[peers]]\nname = \"{}\"\n", name));
+    if !endpoint.is_empty() {
+        content.push_str(&format!("endpoint = \"{}\"\n", endpoint));
+    }
+    if !ip.is_empty() {
+        content.push_str(&format!("ip = \"{}\"\n", ip));
+    }
+    if let Some(pk) = public_key {
+        if !pk.is_empty() {
+            content.push_str(&format!("public_key = \"{}\"\n", pk));
+        }
+    }
+
+    std::fs::write(config_path, &content)
+        .map_err(|e| format!("Failed to write config: {}", e))?;
+
+    info!("Added WolfNet peer: {} ({})", name, ip);
+
+    // Restart WolfNet to apply
+    let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
+
+    Ok(format!("Peer '{}' added and WolfNet restarted", name))
+}
+
+/// Remove a peer from WolfNet config by name
+pub fn remove_wolfnet_peer(name: &str) -> Result<String, String> {
+    let config_path = "/etc/wolfnet/config.toml";
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read config: {}", e))?;
+
+    let mut result_lines: Vec<String> = Vec::new();
+    let mut in_target_peer = false;
+    let mut found = false;
+    let mut i = 0;
+    let lines: Vec<&str> = content.lines().collect();
+
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if trimmed == "[[peers]]" {
+            // Check if the next few lines contain our target peer name
+            let mut is_target = false;
+            for j in (i + 1)..std::cmp::min(i + 10, lines.len()) {
+                let check = lines[j].trim();
+                if check.starts_with('[') && check != "[[peers]]" { break; }
+                if check == "[[peers]]" { break; }
+                if check.starts_with("name") {
+                    let val = check.split('=').nth(1).unwrap_or("").trim().trim_matches('"');
+                    if val == name {
+                        is_target = true;
+                        found = true;
+                    }
+                    break;
+                }
+            }
+            if is_target {
+                in_target_peer = true;
+                // Skip blank lines before this [[peers]] block
+                while result_lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+                    result_lines.pop();
+                }
+                i += 1;
+                continue;
+            }
+        }
+
+        if in_target_peer {
+            if trimmed.starts_with('[') || (trimmed.is_empty() && i + 1 < lines.len() && lines[i + 1].trim().starts_with('[')) {
+                in_target_peer = false;
+                if !trimmed.is_empty() {
+                    result_lines.push(lines[i].to_string());
+                }
+            }
+            i += 1;
+            continue;
+        }
+
+        result_lines.push(lines[i].to_string());
+        i += 1;
+    }
+
+    if !found {
+        return Err(format!("Peer '{}' not found in config", name));
+    }
+
+    let new_content = result_lines.join("\n");
+    std::fs::write(config_path, &new_content)
+        .map_err(|e| format!("Failed to write config: {}", e))?;
+
+    info!("Removed WolfNet peer: {}", name);
+
+    // Restart WolfNet to apply
+    let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
+
+    Ok(format!("Peer '{}' removed and WolfNet restarted", name))
+}
+
+/// Restart or start WolfNet service
+pub fn wolfnet_service_action(action: &str) -> Result<String, String> {
+    let output = Command::new("systemctl")
+        .args([action, "wolfnet"])
+        .output()
+        .map_err(|e| format!("Failed to {} wolfnet: {}", action, e))?;
+
+    if output.status.success() {
+        info!("WolfNet {}: success", action);
+        Ok(format!("WolfNet {}", action))
+    } else {
+        Err(format!("Failed to {} WolfNet: {}", action,
+            String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
 /// Add an IP address to an interface
 pub fn add_ip(interface: &str, address: &str, prefix: u32) -> Result<String, String> {
     let cidr = format!("{}/{}", address, prefix);
@@ -803,3 +941,4 @@ pub fn set_mtu(interface: &str, mtu: u32) -> Result<String, String> {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
 }
+
