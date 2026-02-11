@@ -5415,8 +5415,8 @@ function escapeHtml(text) {
 async function loadBackups() {
     try {
         const [backupsRes, schedulesRes] = await Promise.all([
-            fetch('/api/backups', { headers: authHeaders() }),
-            fetch('/api/backups/schedules', { headers: authHeaders() }),
+            fetch('/api/backups', {}),
+            fetch('/api/backups/schedules', {}),
         ]);
         const backups = await backupsRes.json();
         const schedules = await schedulesRes.json();
@@ -5529,7 +5529,7 @@ function formatBytes(bytes) {
 async function showCreateBackupModal() {
     // Populate target dropdown with available targets
     try {
-        const res = await fetch('/api/backups/targets', { headers: authHeaders() });
+        const res = await fetch('/api/backups/targets', {});
         const targets = await res.json();
         const select = document.getElementById('backup-target-select');
         select.innerHTML = '<option value="all">🌐 Backup Everything</option>';
@@ -5603,7 +5603,7 @@ async function createBackup() {
     try {
         const res = await fetch('/api/backups', {
             method: 'POST',
-            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
         const data = await res.json();
@@ -5623,7 +5623,7 @@ async function deleteBackup(id) {
     try {
         const res = await fetch(`/api/backups/${id}`, {
             method: 'DELETE',
-            headers: authHeaders(),
+            // no auth headers needed
         });
         const data = await res.json();
         if (data.error) alert(`Delete failed: ${data.error}`);
@@ -5638,7 +5638,7 @@ async function restoreBackup(id) {
     try {
         const res = await fetch(`/api/backups/${id}/restore`, {
             method: 'POST',
-            headers: authHeaders(),
+            // no auth headers needed
         });
         const data = await res.json();
         if (data.error) {
@@ -5657,7 +5657,7 @@ async function restoreBackup(id) {
 async function showCreateScheduleModal() {
     // Populate target dropdown
     try {
-        const res = await fetch('/api/backups/targets', { headers: authHeaders() });
+        const res = await fetch('/api/backups/targets', {});
         const targets = await res.json();
         const select = document.getElementById('schedule-target-select');
         select.innerHTML = '<option value="all">🌐 Backup Everything</option>';
@@ -5708,7 +5708,7 @@ async function createSchedule() {
     try {
         const res = await fetch('/api/backups/schedules', {
             method: 'POST',
-            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
         const data = await res.json();
@@ -5724,7 +5724,7 @@ async function deleteSchedule(id) {
     try {
         const res = await fetch(`/api/backups/schedules/${id}`, {
             method: 'DELETE',
-            headers: authHeaders(),
+            // no auth headers needed
         });
         const data = await res.json();
         if (data.error) alert(`Delete failed: ${data.error}`);
