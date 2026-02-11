@@ -1499,7 +1499,25 @@ pub async fn backup_create(
     body: web::Json<CreateBackupRequest>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    let entries = backup::create_backup(body.target.clone(), body.storage.clone());
+    // If PBS storage selected, merge in saved secrets (frontend doesn't send them)
+    let mut storage = body.storage.clone();
+    if storage.storage_type == backup::StorageType::Pbs {
+        let saved = backup::load_pbs_config();
+        if storage.pbs_password.is_empty() && !saved.pbs_password.is_empty() {
+            storage.pbs_password = saved.pbs_password;
+        }
+        if storage.pbs_token_secret.is_empty() && !saved.pbs_token_secret.is_empty() {
+            storage.pbs_token_secret = saved.pbs_token_secret;
+        }
+        // Also fill in any missing connection details from saved config
+        if storage.pbs_server.is_empty() { storage.pbs_server = saved.pbs_server; }
+        if storage.pbs_datastore.is_empty() { storage.pbs_datastore = saved.pbs_datastore; }
+        if storage.pbs_user.is_empty() { storage.pbs_user = saved.pbs_user; }
+        if storage.pbs_token_name.is_empty() { storage.pbs_token_name = saved.pbs_token_name; }
+        if storage.pbs_fingerprint.is_empty() { storage.pbs_fingerprint = saved.pbs_fingerprint; }
+        if storage.pbs_namespace.is_empty() { storage.pbs_namespace = saved.pbs_namespace; }
+    }
+    let entries = backup::create_backup(body.target.clone(), storage);
     let success_count = entries.iter().filter(|e| e.status == backup::BackupStatus::Completed).count();
     let fail_count = entries.iter().filter(|e| e.status == backup::BackupStatus::Failed).count();
     HttpResponse::Ok().json(serde_json::json!({
@@ -1693,14 +1711,24 @@ pub async fn pbs_config_save(
     body: web::Json<PbsConfigRequest>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
+    // Preserve existing secrets if the user didn't re-enter them
+    let existing = backup::load_pbs_config();
     let storage = backup::BackupStorage {
         storage_type: backup::StorageType::Pbs,
         pbs_server: body.pbs_server.clone(),
         pbs_datastore: body.pbs_datastore.clone(),
         pbs_user: body.pbs_user.clone(),
         pbs_token_name: body.pbs_token_name.clone(),
-        pbs_token_secret: body.pbs_token_secret.clone(),
-        pbs_password: body.pbs_password.clone(),
+        pbs_token_secret: if body.pbs_token_secret.is_empty() {
+            existing.pbs_token_secret
+        } else {
+            body.pbs_token_secret.clone()
+        },
+        pbs_password: if body.pbs_password.is_empty() {
+            existing.pbs_password
+        } else {
+            body.pbs_password.clone()
+        },
         pbs_fingerprint: body.pbs_fingerprint.clone(),
         pbs_namespace: body.pbs_namespace.clone(),
         ..backup::BackupStorage::default()

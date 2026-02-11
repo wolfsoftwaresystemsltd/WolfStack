@@ -587,6 +587,16 @@ body {
     }
 }
 
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
 .server-info h4 {
     font-size: 14px;
     font-weight: 600;

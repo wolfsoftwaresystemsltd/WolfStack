@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{info, error};
+use tracing::{info, error, warn};
 use chrono::{Utc, Datelike};
 use uuid::Uuid;
 
@@ -391,9 +391,11 @@ pub fn backup_vm(name: &str) -> Result<(PathBuf, u64), String> {
     let filename = format!("vm-{}-{}.tar.gz", name, timestamp);
     let tar_path = staging.join(&filename);
 
-    let vm_dir = format!("/var/lib/wolfstack/vms/{}", name);
-    if !Path::new(&vm_dir).exists() {
-        return Err(format!("VM directory not found: {}", vm_dir));
+    let vm_base = "/var/lib/wolfstack/vms";
+    let config_file = format!("{}.json", name);
+    let config_path = format!("{}/{}", vm_base, config_file);
+    if !Path::new(&config_path).exists() {
+        return Err(format!("VM config not found: {}", config_path));
     }
 
     // Check if VM is running (check for QEMU process)
@@ -416,10 +418,38 @@ pub fn backup_vm(name: &str) -> Result<(PathBuf, u64), String> {
         }
     }
 
-    // Find all files belonging to this VM (config + disk images)
-    // We tar the entire VM directory which contains config.json and disk images
+    // Collect all files belonging to this VM:
+    // - {name}.json (config - required)
+    // - {name}.qcow2 (OS disk)
+    // - {name}.log, {name}.runtime.json (optional)
+    // - {name}/ subdirectory (extra volumes, if exists)
+    let mut tar_items: Vec<String> = vec![config_file];
+    
+    // Add OS disk image
+    let disk_file = format!("{}.qcow2", name);
+    if Path::new(&format!("{}/{}", vm_base, disk_file)).exists() {
+        tar_items.push(disk_file);
+    }
+    
+    // Add optional files (log, runtime)
+    for ext in &["log", "runtime.json"] {
+        let f = format!("{}.{}", name, ext);
+        if Path::new(&format!("{}/{}", vm_base, f)).exists() {
+            tar_items.push(f);
+        }
+    }
+    
+    // Add VM subdirectory if it exists (extra volumes stored here)
+    if Path::new(&format!("{}/{}", vm_base, name)).is_dir() {
+        tar_items.push(name.to_string());
+    }
+
     let output = Command::new("tar")
-        .args(["czf", &tar_path.to_string_lossy(), "-C", "/var/lib/wolfstack/vms", name])
+        .arg("czf")
+        .arg(&tar_path.to_string_lossy().to_string())
+        .arg("-C")
+        .arg(vm_base)
+        .args(&tar_items)
         .output()
         .map_err(|e| format!("Failed to tar VM: {}", e))?;
 
@@ -929,6 +959,7 @@ pub fn restore_vm(entry: &BackupEntry) -> Result<String, String> {
     fs::create_dir_all(vm_base).map_err(|e| format!("Failed to create VM dir: {}", e))?;
 
     // Extract to /var/lib/wolfstack/vms/
+    // The tar contains: {name}.json, {name}.qcow2, and optionally {name}/ directory
     let output = Command::new("tar")
         .args(["xzf", &local_path.to_string_lossy(), "-C", vm_base])
         .output()
@@ -938,6 +969,20 @@ pub fn restore_vm(entry: &BackupEntry) -> Result<String, String> {
 
     if !output.status.success() {
         return Err(format!("VM extract failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+
+    // Verify the config JSON was restored
+    let config_path = format!("{}/{}.json", vm_base, entry.target.name);
+    if !Path::new(&config_path).exists() {
+        // Legacy backup format: config might be inside a subdirectory
+        let legacy_config = format!("{}/{}/config.json", vm_base, entry.target.name);
+        if Path::new(&legacy_config).exists() {
+            // Move it to the expected flat location
+            let _ = fs::copy(&legacy_config, &config_path);
+            info!("Migrated legacy VM config to {}", config_path);
+        } else {
+            warn!("VM config not found after restore: {} — VM may not appear in list until config is recreated", config_path);
+        }
     }
 
     info!("VM restore complete: {}", entry.target.name);
@@ -1378,10 +1423,24 @@ pub fn restore_from_pbs(
     fs::create_dir_all(target_dir)
         .map_err(|e| format!("Failed to create target dir: {}", e))?;
 
+    // The snapshot comes as "type/id/timestamp" — convert Unix epoch timestamp
+    // to the ISO format that proxmox-backup-client expects (e.g. 2024-02-11T12:00:00Z)
+    let snapshot_fixed = fix_pbs_snapshot_timestamp(snapshot);
+    info!("PBS restore: snapshot='{}' (fixed='{}'), archive='{}', target='{}'",
+          snapshot, snapshot_fixed, archive, target_dir);
+
+    // Try to auto-detect the archive name by listing snapshot contents
+    let actual_archive = if archive.is_empty() || archive == "root.pxar" {
+        detect_pbs_archive(storage, &snapshot_fixed).unwrap_or_else(|| archive.to_string())
+    } else {
+        archive.to_string()
+    };
+    info!("Using archive: {}", actual_archive);
+
     let mut cmd = Command::new("proxmox-backup-client");
     cmd.arg("restore")
-       .arg(snapshot)
-       .arg(archive)
+       .arg(&snapshot_fixed)
+       .arg(&actual_archive)
        .arg(target_dir)
        .arg("--repository").arg(&repo);
 
@@ -1401,12 +1460,89 @@ pub fn restore_from_pbs(
         .map_err(|e| format!("PBS restore failed: {}", e))?;
 
     if !output.status.success() {
-        return Err(format!("PBS restore error: {}",
-            String::from_utf8_lossy(&output.stderr)));
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        error!("PBS restore error for snapshot '{}': {}", snapshot_fixed, stderr);
+        return Err(format!("PBS restore error: {}", stderr));
     }
 
-    info!("Restored PBS snapshot {} archive {} to {}", snapshot, archive, target_dir);
+    info!("Restored PBS snapshot {} archive {} to {}", snapshot_fixed, actual_archive, target_dir);
     Ok(format!("Restored to {}", target_dir))
+}
+
+/// Convert Unix epoch timestamps in snapshot IDs to ISO format
+/// Input:  "ct/105/1707600000" -> "ct/105/2024-02-11T04:00:00Z"
+/// If already in ISO format (contains 'T'), pass through unchanged
+fn fix_pbs_snapshot_timestamp(snapshot: &str) -> String {
+    let parts: Vec<&str> = snapshot.splitn(3, '/').collect();
+    if parts.len() != 3 {
+        return snapshot.to_string();
+    }
+    let timestamp_part = parts[2];
+    // If it already contains 'T' or '-', it's probably already in ISO format
+    if timestamp_part.contains('T') || timestamp_part.contains('-') {
+        return snapshot.to_string();
+    }
+    // Try to parse as Unix epoch
+    if let Ok(epoch) = timestamp_part.parse::<i64>() {
+        if let Some(dt) = chrono::DateTime::from_timestamp(epoch, 0) {
+            return format!("{}/{}/{}", parts[0], parts[1], dt.format("%Y-%m-%dT%H:%M:%SZ"));
+        }
+    }
+    snapshot.to_string()
+}
+
+/// Try to detect the correct archive name by listing snapshot files
+fn detect_pbs_archive(storage: &BackupStorage, snapshot: &str) -> Option<String> {
+    let repo = pbs_repo_string(storage);
+    let mut cmd = Command::new("proxmox-backup-client");
+    cmd.arg("snapshot").arg("files")
+       .arg(snapshot)
+       .arg("--output-format").arg("json")
+       .arg("--repository").arg(&repo);
+
+    if !storage.pbs_fingerprint.is_empty() {
+        cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
+    }
+    if !storage.pbs_namespace.is_empty() {
+        cmd.arg("--ns").arg(&storage.pbs_namespace);
+    }
+    let pbs_pw = if !storage.pbs_token_secret.is_empty() { &storage.pbs_token_secret }
+                 else { &storage.pbs_password };
+    if !pbs_pw.is_empty() {
+        cmd.env("PBS_PASSWORD", pbs_pw);
+    }
+
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        warn!("Failed to list snapshot files: {}", String::from_utf8_lossy(&output.stderr));
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let files: serde_json::Value = serde_json::from_str(&stdout).ok()?;
+    
+    // Look for .pxar or .img archives (skip index.json and catalog)
+    if let Some(arr) = files.as_array() {
+        for f in arr {
+            let filename = f.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+            // Prefer .pxar (filesystem backup), then .img (disk image)
+            if filename.ends_with(".pxar.didx") || filename.ends_with(".pxar") {
+                let name = filename.trim_end_matches(".didx");
+                info!("Auto-detected PBS archive: {}", name);
+                return Some(name.to_string());
+            }
+        }
+        // Fallback to .img
+        for f in arr {
+            let filename = f.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+            if filename.ends_with(".img.fidx") || filename.ends_with(".img") {
+                let name = filename.trim_end_matches(".fidx");
+                info!("Auto-detected PBS archive (img): {}", name);
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Check if PBS is reachable and proxmox-backup-client is installed

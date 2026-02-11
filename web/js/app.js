@@ -5517,7 +5517,10 @@ function getSelectedTargets() {
     return targets;
 }
 
-function getSelectedStorage() {
+// Cached PBS config for use as storage target
+let _cachedPbsConfig = null;
+
+async function getSelectedStorage() {
     const sel = document.getElementById('backup-storage-select');
     if (!sel) return { type: 'local', path: '/var/lib/wolfstack/backups' };
     const val = sel.value;
@@ -5525,6 +5528,28 @@ function getSelectedStorage() {
         return { type: 'local', path: val.substring(6) };
     } else if (val.startsWith('mount:')) {
         return { type: 'local', path: val.substring(6) };
+    } else if (val.startsWith('pbs:')) {
+        // Load the full PBS config so the backend has all fields
+        if (!_cachedPbsConfig) {
+            try {
+                const res = await fetch(apiUrl('/api/backups/pbs/config'));
+                if (res.ok) _cachedPbsConfig = await res.json();
+            } catch (e) { /* fall through */ }
+        }
+        if (_cachedPbsConfig) {
+            return {
+                type: 'pbs',
+                pbs_server: _cachedPbsConfig.pbs_server || '',
+                pbs_datastore: _cachedPbsConfig.pbs_datastore || '',
+                pbs_user: _cachedPbsConfig.pbs_user || '',
+                pbs_token_name: _cachedPbsConfig.pbs_token_name || '',
+                pbs_fingerprint: _cachedPbsConfig.pbs_fingerprint || '',
+                pbs_namespace: _cachedPbsConfig.pbs_namespace || '',
+                // Secrets are stored on server, leave empty so backend preserves them
+                pbs_token_secret: '',
+                pbs_password: '',
+            };
+        }
     }
     return { type: 'local', path: '/var/lib/wolfstack/backups' };
 }
@@ -5627,6 +5652,44 @@ function formatBytes(bytes) {
 
 // ─── Backup Now (selected targets) ───
 
+function showBackupProgress(container, items, title) {
+    const EMOJIS = { docker: '🐳', lxc: '📦', vm: '🖥️', config: '⚙️' };
+    container.innerHTML = `
+        <tr><td colspan="7" style="padding:0; border:none;">
+            <div style="padding:20px; background:var(--bg-primary); border-radius:var(--radius-sm); border:1px solid var(--border);">
+                <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
+                    <div class="spinner" style="width:20px; height:20px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite;"></div>
+                    <strong id="backup-progress-title">${title}</strong>
+                </div>
+                <div id="backup-progress-items" style="display:grid; gap:6px;">
+                    ${items.map((t, i) => {
+        const emoji = EMOJIS[t.type || t.target_type] || '📄';
+        const name = t.name || t.type || 'item';
+        return `<div id="backup-item-${i}" style="display:flex; align-items:center; gap:8px; padding:6px 10px; background:var(--bg-tertiary); border-radius:var(--radius-sm); font-size:13px;">
+                            <span style="width:20px; text-align:center;" id="backup-icon-${i}">⏳</span>
+                            <span>${emoji} <strong>${escapeHtml(name)}</strong></span>
+                            <span id="backup-status-${i}" style="margin-left:auto; color:var(--text-muted); font-size:12px;">Waiting...</span>
+                        </div>`;
+    }).join('')}
+                </div>
+            </div>
+        </td></tr>`;
+}
+
+function updateBackupItemStatus(index, status, success) {
+    const icon = document.getElementById(`backup-icon-${index}`);
+    const statusEl = document.getElementById(`backup-status-${index}`);
+    const row = document.getElementById(`backup-item-${index}`);
+    if (icon) icon.textContent = success === true ? '✅' : success === false ? '❌' : '⏳';
+    if (statusEl) {
+        statusEl.textContent = status;
+        statusEl.style.color = success === true ? 'var(--success)' : success === false ? '#ef4444' : 'var(--accent)';
+    }
+    if (row && success !== null) {
+        row.style.borderLeft = `3px solid ${success ? 'var(--success)' : '#ef4444'}`;
+    }
+}
+
 async function backupSelected() {
     const targets = getSelectedTargets();
     if (targets.length === 0) {
@@ -5634,40 +5697,61 @@ async function backupSelected() {
         return;
     }
 
-    const storage = getSelectedStorage();
+    const storage = await getSelectedStorage();
+    const storageLabel = storage.type === 'pbs' ? `PBS (${storage.pbs_server})` : (storage.path || storage.type);
 
-    // Show progress
+    // Disable backup button
+    const backupBtn = document.querySelector('[onclick="backupSelected()"]');
+    if (backupBtn) { backupBtn.disabled = true; backupBtn.textContent = '⏳ Backing up...'; }
+
     const tbody = document.getElementById('backups-table');
-    if (tbody) {
-        tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:24px; color:var(--text-muted);">
-            <div style="font-size:24px; margin-bottom:8px;">⏳</div>
-            Backing up ${targets.length} item${targets.length > 1 ? 's' : ''}... This may take a while.
-        </td></tr>`;
-    }
-
     const allTargets = targets.length === document.querySelectorAll('.backup-target-cb').length;
 
     try {
-        const body = { storage };
         if (allTargets) {
-            // Back up everything
-            body.target = null;
-        } else {
-            // We'll send individual requests for each target
-        }
+            // All targets — single request
+            if (tbody) showBackupProgress(tbody, targets, `Backing up all ${targets.length} items to ${storageLabel}...`);
 
-        if (allTargets) {
+            // Mark all as in-progress
+            targets.forEach((_, i) => updateBackupItemStatus(i, 'Backing up...', null));
+
             const res = await fetch('/api/backups', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ storage }),
             });
             const data = await res.json();
-            if (data.error) showToast(`Backup failed: ${data.error}`, 'error');
-            else showToast(data.message || 'Backup completed', 'success');
+
+            if (data.error) {
+                targets.forEach((_, i) => updateBackupItemStatus(i, 'Failed', false));
+                showToast(`Backup failed: ${data.error}`, 'error');
+            } else {
+                // Mark individual results
+                const entries = data.entries || [];
+                targets.forEach((t, i) => {
+                    const entry = entries[i];
+                    if (entry && entry.status === 'completed') {
+                        updateBackupItemStatus(i, `Done (${formatBytes(entry.size_bytes || 0)})`, true);
+                    } else if (entry) {
+                        updateBackupItemStatus(i, entry.error || 'Failed', false);
+                    } else {
+                        updateBackupItemStatus(i, 'Done', true);
+                    }
+                });
+                showToast(data.message || 'Backup completed', 'success');
+            }
         } else {
+            // Individual targets — sequential requests with per-item progress
+            if (tbody) showBackupProgress(tbody, targets, `Backing up ${targets.length} item${targets.length > 1 ? 's' : ''} to ${storageLabel}...`);
+
             let ok = 0, fail = 0;
-            for (const t of targets) {
+            for (let i = 0; i < targets.length; i++) {
+                const t = targets[i];
+                const name = t.name || t.type || 'item';
+                updateBackupItemStatus(i, 'Backing up...', null);
+                const titleEl = document.getElementById('backup-progress-title');
+                if (titleEl) titleEl.textContent = `Backing up ${name} (${i + 1}/${targets.length})...`;
+
                 try {
                     const res = await fetch('/api/backups', {
                         method: 'POST',
@@ -5675,16 +5759,33 @@ async function backupSelected() {
                         body: JSON.stringify({ target: t, storage }),
                     });
                     const data = await res.json();
-                    if (data.error) fail++; else ok++;
-                } catch (e) { fail++; }
+                    if (data.error) {
+                        fail++;
+                        updateBackupItemStatus(i, data.error, false);
+                    } else {
+                        ok++;
+                        const entry = (data.entries || [])[0];
+                        const sizeStr = entry ? formatBytes(entry.size_bytes || 0) : '';
+                        updateBackupItemStatus(i, `Done${sizeStr ? ' (' + sizeStr + ')' : ''}`, true);
+                    }
+                } catch (e) {
+                    fail++;
+                    updateBackupItemStatus(i, e.message, false);
+                }
             }
+            const titleEl = document.getElementById('backup-progress-title');
+            if (titleEl) titleEl.textContent = fail === 0 ? `✅ All ${ok} backups completed!` : `Done: ${ok} succeeded, ${fail} failed`;
             if (fail === 0) showToast(`All ${ok} backups completed`, 'success');
-            else showToast(`${ok} succeeded, ${fail} failed`, fail > 0 ? 'error' : 'success');
+            else showToast(`${ok} succeeded, ${fail} failed`, 'error');
         }
     } catch (e) {
         showToast(`Backup error: ${e.message}`, 'error');
     }
-    loadBackups();
+
+    // Re-enable button
+    if (backupBtn) { backupBtn.disabled = false; backupBtn.textContent = '⚡ Backup Now'; }
+    // Refresh after a short delay so user can see the final status
+    setTimeout(() => loadBackups(), 2000);
 }
 
 async function deleteBackup(id) {
@@ -5702,14 +5803,20 @@ async function deleteBackup(id) {
 
 async function restoreBackup(id) {
     if (!confirm('Restore from this backup? This will overwrite existing data for the target.')) return;
+    // Find the button and show progress
+    const btn = event && event.target;
+    const origText = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner" style="display:inline-block; width:12px; height:12px; border:2px solid var(--border); border-top-color:#fff; border-radius:50%; animation:spin 0.8s linear infinite; vertical-align:middle;"></span> Restoring...'; }
+    showToast('🔄 Restore in progress... This may take a while.', 'info');
     try {
         const res = await fetch(`/api/backups/${id}/restore`, { method: 'POST' });
         const data = await res.json();
         if (data.error) showToast(`Restore failed: ${data.error}`, 'error');
-        else showToast(data.message || 'Restore completed', 'success');
+        else showToast(data.message || '✅ Restore completed!', 'success');
     } catch (e) {
         showToast(`Restore error: ${e.message}`, 'error');
     }
+    if (btn) { btn.disabled = false; btn.textContent = origText; }
     loadBackups();
 }
 
@@ -5813,14 +5920,44 @@ async function loadPbsConfig() {
             if (el) el.placeholder = '(saved — enter new value to change)';
         }
         if (cfg.pbs_server) {
+            // Show saved summary, hide form
+            showPbsConfigSaved(cfg);
             updatePbsStatusBadge();
             loadPbsSnapshots();
         } else {
+            // No config yet — show the form
+            showPbsConfigForm();
             setPbsBadge('Not configured', 'var(--bg-tertiary)', 'var(--text-muted)');
         }
     } catch (e) {
         console.error('Failed to load PBS config:', e);
     }
+}
+
+function showPbsConfigSaved(cfg) {
+    const saved = document.getElementById('pbs-config-saved');
+    const form = document.getElementById('pbs-config-form');
+    if (saved) {
+        // Populate summary
+        const setS = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val || '—'; };
+        if (cfg) {
+            setS('pbs-saved-server', cfg.pbs_server);
+            setS('pbs-saved-datastore', cfg.pbs_datastore);
+            setS('pbs-saved-user', cfg.pbs_user);
+            var authType = cfg.has_token_secret ? '🔑 API Token' : (cfg.has_password ? '🔒 Password' : '⚠️ None');
+            if (cfg.pbs_token_name) authType += ' (' + cfg.pbs_token_name + ')';
+            setS('pbs-saved-auth', authType);
+        }
+        saved.style.display = '';
+    }
+    if (form) form.style.display = 'none';
+}
+
+function showPbsConfigForm() {
+    const saved = document.getElementById('pbs-config-saved');
+    const form = document.getElementById('pbs-config-form');
+    if (saved) saved.style.display = 'none';
+    if (form) form.style.display = '';
 }
 
 function setPbsBadge(text, bg, color) {
@@ -5882,6 +6019,15 @@ async function savePbsConfig() {
         if (data.error) showToast('PBS save failed: ' + data.error, 'error');
         else {
             showToast('PBS configuration saved', 'success');
+            // Switch to saved summary view with credentials hidden
+            showPbsConfigSaved({
+                pbs_server: body.pbs_server,
+                pbs_datastore: body.pbs_datastore,
+                pbs_user: body.pbs_user,
+                pbs_token_name: body.pbs_token_name,
+                has_token_secret: !!body.pbs_token_secret,
+                has_password: !!body.pbs_password,
+            });
             updatePbsStatusBadge();
             populateStorageDropdown();
             loadPbsSnapshots();
@@ -5926,11 +6072,9 @@ async function loadPbsSnapshots() {
     const card = document.getElementById('pbs-snapshots-card');
     const tbody = document.getElementById('pbs-snapshots-table');
     const empty = document.getElementById('pbs-snapshots-empty');
-    if (!card || !tbody) return;
 
     try {
         const res = await fetch(apiUrl('/api/backups/pbs/snapshots'));
-        if (!res.ok) { card.style.display = 'none'; return; }
         const snapshots = await res.json();
         if (snapshots.error) { card.style.display = 'none'; return; }
 
@@ -5944,32 +6088,49 @@ async function loadPbsSnapshots() {
         }
         if (empty) empty.style.display = 'none';
 
-        const TYPE_EMOJIS = { vm: '\ud83d\udda5\ufe0f', ct: '\ud83d\udce6', host: '\ud83c\udfe0' };
+        const TYPE_EMOJIS = { vm: '🖥️', ct: '📦', host: '🏠' };
+        const TYPE_LABELS = { vm: 'VM', ct: 'Container', host: 'Host' };
+
+        // Sort newest first by backup-time
+        list.sort(function (a, b) {
+            var ta = a['backup-time'] || a.backup_time || 0;
+            var tb = b['backup-time'] || b.backup_time || 0;
+            return (typeof tb === 'number' ? tb : new Date(tb).getTime()) -
+                (typeof ta === 'number' ? ta : new Date(ta).getTime());
+        });
 
         tbody.innerHTML = list.map(function (s) {
             var btype = s['backup-type'] || s.backup_type || 'host';
-            var bid = s['backup-id'] || s.backup_id || '\u2014';
+            var bid = s['backup-id'] || s.backup_id || '—';
             var btime = s['backup-time'] || s.backup_time || '';
             var size = s.size || 0;
-            var emoji = TYPE_EMOJIS[btype] || '\ud83d\udcc4';
+            var comment = s.comment || s.notes || '';
+            var emoji = TYPE_EMOJIS[btype] || '📄';
+            var typeLabel = TYPE_LABELS[btype] || btype;
 
-            var timeStr = '\u2014';
+            var timeStr = '—';
             if (btime) {
                 var d = typeof btime === 'number' ? new Date(btime * 1000) : new Date(btime);
                 timeStr = d.toLocaleString();
             }
 
+            // Show name: use comment if available, otherwise backup-id
+            var displayName = comment ? escapeHtml(comment) : escapeHtml(bid);
+
             var snapshot = btype + '/' + bid + '/' + btime;
             var snapEsc = escapeHtml(snapshot);
+            var btypeEsc = escapeHtml(btype);
 
             return '<tr>' +
-                '<td>' + emoji + ' ' + escapeHtml(btype) + '</td>' +
-                '<td><strong>' + escapeHtml(bid) + '</strong></td>' +
+                '<td>' + emoji + ' ' + escapeHtml(typeLabel) + '</td>' +
+                '<td><strong>' + displayName + '</strong>' +
+                (comment ? '<br><span style="font-size:11px; color:var(--text-muted);">ID: ' + escapeHtml(bid) + '</span>' : '') +
+                '</td>' +
                 '<td style="font-size:12px;">' + timeStr + '</td>' +
                 '<td>' + formatPbsSize(size) + '</td>' +
                 '<td style="text-align:right;">' +
-                '<button class="btn btn-sm btn-primary" onclick="restorePbsSnapshot(\x27' + snapEsc + '\x27)"' +
-                ' style="font-size:11px; padding:3px 10px;">\u2b07\ufe0f Restore</button>' +
+                '<button class="btn btn-sm btn-primary" onclick="restorePbsSnapshot(\x27' + snapEsc + '\x27, \x27' + btypeEsc + '\x27)"' +
+                ' style="font-size:11px; padding:3px 10px;">⬇️ Restore</button>' +
                 '</td>' +
                 '</tr>';
         }).join('');
@@ -5979,23 +6140,39 @@ async function loadPbsSnapshots() {
     }
 }
 
-async function restorePbsSnapshot(snapshot) {
-    if (!confirm('Restore PBS snapshot:\n' + snapshot + '\n\nThis will download and restore the data to this node.')) return;
-    showToast('Starting PBS restore...', 'info');
+async function restorePbsSnapshot(snapshot, backupType) {
+    // Choose sensible restore target based on backup type
+    var targetDir = '/var/lib/wolfstack/restored';
+    if (backupType === 'ct') targetDir = '/var/lib/lxc';
+    else if (backupType === 'vm') targetDir = '/var/lib/wolfstack/vms';
+
+    if (!confirm('Restore PBS snapshot:\n' + snapshot + '\n\nRestore to: ' + targetDir + '\n\nThis will download and restore the data to this node.')) return;
+
+    // Find the clicked button and show progress
+    const btn = event && event.target;
+    const origText = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span style="display:inline-block; width:12px; height:12px; border:2px solid rgba(255,255,255,0.3); border-top-color:#fff; border-radius:50%; animation:spin 0.8s linear infinite; vertical-align:middle;"></span> Restoring...'; }
+    showToast('🔄 Downloading from PBS and restoring... This may take a while.', 'info');
     try {
         const res = await fetch(apiUrl('/api/backups/pbs/restore'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 snapshot: snapshot,
-                archive: 'root.pxar',
-                target_dir: '/var/lib/wolfstack/restored',
+                archive: '',
+                target_dir: targetDir,
             }),
         });
         const data = await res.json();
         if (data.error) showToast('PBS restore failed: ' + data.error, 'error');
-        else showToast('PBS restore complete: ' + data.message, 'success');
+        else {
+            showToast('✅ PBS restore complete: ' + data.message, 'success');
+            // Refresh relevant lists so restored items appear
+            if (typeof loadContainers === 'function') loadContainers();
+            if (typeof loadVMs === 'function') loadVMs();
+        }
     } catch (e) {
         showToast('PBS restore error: ' + e.message, 'error');
     }
+    if (btn) { btn.disabled = false; btn.innerHTML = origText; }
 }
