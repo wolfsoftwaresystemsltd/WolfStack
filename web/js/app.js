@@ -6664,7 +6664,7 @@ function openAiSettings() {
 
 async function loadAiConfig() {
     try {
-        var resp = await fetch('/api/ai/config'));
+        var resp = await fetch('/api/ai/config');
         var cfg = await resp.json();
         var el;
         if ((el = document.getElementById('ai-provider'))) el.value = cfg.provider || 'claude';
@@ -6689,7 +6689,7 @@ async function fetchAiModels(provider, selectedModel) {
     if (!select) return;
     select.innerHTML = '<option value="">Loading models...</option>';
     try {
-        var resp = await fetch('/api/ai/models?provider=' + encodeURIComponent(provider)));
+        var resp = await fetch('/api/ai/models?provider=' + encodeURIComponent(provider));
         var data = await resp.json();
         if (data.error && (!data.models || !data.models.length)) {
             select.innerHTML = '<option value="">Enter API key and save to load models</option>';
@@ -6740,7 +6740,7 @@ async function saveAiConfig() {
         check_interval_minutes: parseInt((document.getElementById('ai-check-interval') || {}).value) || 60,
     };
     try {
-        var resp = await fetch('/api/ai/config'), {
+        var resp = await fetch('/api/ai/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(config)
@@ -6761,7 +6761,7 @@ async function saveAiConfig() {
 
 async function loadAiStatus() {
     try {
-        var resp = await fetch('/api/ai/status'));
+        var resp = await fetch('/api/ai/status');
         var status = await resp.json();
         var textEl = document.getElementById('ai-status-text');
         var detailEl = document.getElementById('ai-status-detail');
@@ -6789,7 +6789,7 @@ async function loadAiStatus() {
 
 async function loadAiAlerts() {
     try {
-        var resp = await fetch('/api/ai/alerts'));
+        var resp = await fetch('/api/ai/alerts');
         var alerts = await resp.json();
         var container = document.getElementById('ai-alerts-list');
         if (!container) return;
@@ -6828,13 +6828,13 @@ async function testAiConnection() {
     };
     try {
         // Save first
-        await fetch('/api/ai/config'), {
+        await fetch('/api/ai/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(config)
         });
         // Now test
-        var resp = await fetch('/api/ai/chat'), {
+        var resp = await fetch('/api/ai/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message: 'Say "Hello! AI Agent is working." in one short sentence.' })
