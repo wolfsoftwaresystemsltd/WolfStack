@@ -138,6 +138,16 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - Request Let's Encrypt certificates via Certbot
 - One-click certificate provisioning
 
+### 🤖 AI Agent
+- Built-in AI assistant powered by **Claude** or **Gemini**
+- 🐺 Chat bubble in the bottom-right corner for instant help
+- Ask questions about your servers, WolfStack, WolfNet, WolfDisk, WolfProxy, and WolfServe
+- **Background health monitoring** — periodically checks system metrics and sends email alerts via SMTP
+- Knowledge base loaded from your Wolf suite documentation
+- **Dynamic model list** — fetches available models from the provider's API
+- Configurable API keys, provider, model, email settings, and health check interval
+- **Automatic update check** — compares running version to GitHub
+
 ## Architecture
 
 ```
@@ -147,6 +157,7 @@ wolfstack/
 │   ├── api/mod.rs           # REST API endpoints (60+ routes)
 │   ├── auth/mod.rs          # Linux auth via crypt(), session management
 │   ├── agent/mod.rs         # Multi-server cluster state, polling
+│   ├── ai/mod.rs            # AI agent (Claude/Gemini chat, health monitoring, email alerts)
 │   ├── monitoring/mod.rs    # System metrics via sysinfo
 │   ├── installer/mod.rs     # Component detection, install, systemd control
 │   ├── networking/mod.rs    # Network interfaces, VLANs, DNS, IP mapping
@@ -288,6 +299,17 @@ All endpoints require authentication (cookie-based session) except `/api/agent/s
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | ANY | `/api/nodes/{id}/proxy/{path}` | Proxy any API call to a remote node |
+
+### AI Agent
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/ai/config` | Get AI config (API keys masked) |
+| POST | `/api/ai/config` | Save AI config (provider, keys, model, email settings) |
+| POST | `/api/ai/chat` | Send a chat message to the AI assistant |
+| GET | `/api/ai/status` | AI agent status (configured, provider, model, alerts) |
+| GET | `/api/ai/alerts` | Historical health check alerts |
+| GET | `/api/ai/models` | List available models for the configured provider |
 
 ### Agent (No Auth)
 
