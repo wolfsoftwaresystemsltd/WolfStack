@@ -59,13 +59,14 @@
             </div>
             <div class="nav-section">
                 <div class="nav-section-title">Servers</div>
-                <input type="text" id="sidebar-node-search" placeholder="Search nodes..." oninput="filterSidebarNodes()"
-                    style="
+                <input type="text" id="sidebar-node-search" placeholder="🔍 Search nodes..."
+                    oninput="filterSidebarNodes()" style="
                     width: calc(100% - 24px); margin: 0 12px 8px; padding: 6px 10px;
-                    background: var(--bg-tertiary); border: 1px solid var(--border-color);
+                    background: rgba(99,102,241,0.06); border: 1px solid rgba(99,102,241,0.2);
                     border-radius: 6px; color: var(--text); font-size: 12px;
-                    outline: none; font-family: inherit;
-                ">
+                    outline: none; font-family: inherit; transition: all 0.2s ease;
+                " onfocus="this.style.borderColor='rgba(99,102,241,0.5)';this.style.boxShadow='0 0 8px rgba(99,102,241,0.15)';this.style.background='rgba(99,102,241,0.1)'"
+                    onblur="this.style.borderColor='rgba(99,102,241,0.2)';this.style.boxShadow='none';this.style.background='rgba(99,102,241,0.06)'">
                 <div id="server-tree">
                     <div style="padding: 8px 16px; color: var(--text-muted); font-size: 12px;">Loading...</div>
                 </div>
