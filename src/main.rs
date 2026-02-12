@@ -19,6 +19,7 @@ mod storage;
 mod networking;
 mod backup;
 mod vms;
+mod proxmox;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_files;

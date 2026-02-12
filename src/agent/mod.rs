@@ -34,7 +34,17 @@ pub struct Node {
     pub vm_count: u32,
     #[serde(default)]
     pub public_ip: Option<String>,
+    #[serde(default = "default_node_type")]
+    pub node_type: String,              // "wolfstack" or "proxmox"
+    #[serde(default)]
+    pub pve_token: Option<String>,      // PVEAPIToken string
+    #[serde(default)]
+    pub pve_fingerprint: Option<String>,
+    #[serde(default)]
+    pub pve_node_name: Option<String>,  // Proxmox node name for API calls
 }
+
+fn default_node_type() -> String { "wolfstack".to_string() }
 
 /// Cluster state
 pub struct ClusterState {
@@ -106,6 +116,10 @@ impl ClusterState {
             lxc_count,
             vm_count,
             public_ip,
+            node_type: "wolfstack".to_string(),
+            pve_token: None,
+            pve_fingerprint: None,
+            pve_node_name: None,
         });
     }
 
@@ -136,6 +150,16 @@ impl ClusterState {
 
     /// Add a server by address — persists to disk
     pub fn add_server(&self, address: String, port: u16) -> String {
+        self.add_server_full(address, port, "wolfstack".to_string(), None, None, None)
+    }
+
+    /// Add a Proxmox server
+    pub fn add_proxmox_server(&self, address: String, port: u16, token: String, fingerprint: Option<String>, node_name: String) -> String {
+        self.add_server_full(address, port, "proxmox".to_string(), Some(token), fingerprint, Some(node_name))
+    }
+
+    /// Add a server with full options
+    fn add_server_full(&self, address: String, port: u16, node_type: String, pve_token: Option<String>, pve_fingerprint: Option<String>, pve_node_name: Option<String>) -> String {
         let id = format!("node-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let mut nodes = self.nodes.write().unwrap();
@@ -153,6 +177,10 @@ impl ClusterState {
             lxc_count: 0,
             vm_count: 0,
             public_ip: None,
+            node_type,
+            pve_token,
+            pve_fingerprint,
+            pve_node_name,
         });
         drop(nodes);
         self.save_nodes();
@@ -215,6 +243,82 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
     for node in nodes {
         if node.is_self { continue; }
 
+        if node.node_type == "proxmox" {
+            // ── Poll Proxmox node via PVE API ──
+            let token = match &node.pve_token {
+                Some(t) if !t.is_empty() => t.clone(),
+                _ => { debug!("Skipping PVE node {} — no token", node.id); continue; }
+            };
+            let pve_name = node.pve_node_name.clone().unwrap_or_else(|| node.hostname.clone());
+            let fp = node.pve_fingerprint.as_deref();
+
+            match crate::proxmox::poll_pve_node(&node.address, node.port, &token, fp, &pve_name).await {
+                Ok((status, lxc_count, vm_count)) => {
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                    let mem_pct = if status.mem_total > 0 {
+                        (status.mem_used as f32 / status.mem_total as f32) * 100.0
+                    } else { 0.0 };
+                    let disk_avail = status.disk_total.saturating_sub(status.disk_used);
+                    let disk_pct = if status.disk_total > 0 {
+                        (status.disk_used as f32 / status.disk_total as f32) * 100.0
+                    } else { 0.0 };
+
+                    let metrics = crate::monitoring::SystemMetrics {
+                        hostname: status.hostname.clone(),
+                        cpu_usage_percent: status.cpu * 100.0,
+                        cpu_count: status.maxcpu as usize,
+                        cpu_model: "Proxmox VE".to_string(),
+                        memory_total_bytes: status.mem_total,
+                        memory_used_bytes: status.mem_used,
+                        memory_percent: mem_pct,
+                        swap_total_bytes: 0,
+                        swap_used_bytes: 0,
+                        disks: vec![crate::monitoring::DiskMetrics {
+                            name: "rootfs".to_string(),
+                            mount_point: "/".to_string(),
+                            fs_type: "".to_string(),
+                            total_bytes: status.disk_total,
+                            used_bytes: status.disk_used,
+                            available_bytes: disk_avail,
+                            usage_percent: disk_pct,
+                        }],
+                        network: vec![],
+                        load_avg: crate::monitoring::LoadAverage { one: 0.0, five: 0.0, fifteen: 0.0 },
+                        processes: 0,
+                        uptime_secs: status.uptime,
+                        os_name: Some("Proxmox VE".to_string()),
+                        os_version: None,
+                        kernel_version: None,
+                    };
+
+                    cluster.update_remote(Node {
+                        id: node.id.clone(),
+                        hostname: status.hostname,
+                        address: node.address.clone(),
+                        port: node.port,
+                        last_seen: now,
+                        metrics: Some(metrics),
+                        components: vec![],
+                        online: true,
+                        is_self: false,
+                        docker_count: 0,
+                        lxc_count,
+                        vm_count,
+                        public_ip: None,
+                        node_type: "proxmox".to_string(),
+                        pve_token: node.pve_token.clone(),
+                        pve_fingerprint: node.pve_fingerprint.clone(),
+                        pve_node_name: node.pve_node_name.clone(),
+                    });
+                }
+                Err(e) => {
+                    debug!("Failed to poll PVE node {}: {}", node.id, e);
+                }
+            }
+            continue;
+        }
+
+        // ── Poll WolfStack node via agent ──
         let url = format!("http://{}:{}/api/agent/status", node.address, node.port);
         debug!("Polling remote node {} at {}", node.id, url);
 
@@ -244,6 +348,10 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                     lxc_count,
                                     vm_count,
                                     public_ip: public_ip.clone(),
+                                    node_type: "wolfstack".to_string(),
+                                    pve_token: None,
+                                    pve_fingerprint: None,
+                                    pve_node_name: None,
                                 });
                             }
                         }

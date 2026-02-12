@@ -280,9 +280,13 @@ function renderDatacenterOverview() {
 
     container.innerHTML = nodes.map(node => {
         const m = node.metrics;
+        const isPve = node.node_type === 'proxmox';
+        const nodeIcon = isPve ? '🟠' : '🖥️';
+        const pveBadge = isPve ? ' <span style="font-size:10px; padding:1px 6px; border-radius:3px; background:rgba(255,165,0,0.15); color:#f5a623; margin-left:6px;">PVE</span>' : '';
+
         if (!m) {
             return `<div class="card">
-                <div class="card-header"><h3>🖥️ ${node.hostname}${node.is_self ? ' <span style="color:var(--accent-light); font-size:12px;">(this)</span>' : ''}</h3></div>
+                <div class="card-header"><h3>${nodeIcon} ${node.hostname}${pveBadge}${node.is_self ? ' <span style="color:var(--accent-light); font-size:12px;">(this)</span>' : ''}</h3></div>
                 <div class="card-body" style="text-align:center; color:var(--text-muted); padding:30px;">
                     <span style="color:var(--danger);">● Offline</span>
                 </div>
@@ -298,7 +302,7 @@ function renderDatacenterOverview() {
             <div class="card-header">
                 <h3>
                     <span class="server-dot online" style="display:inline-block; vertical-align:middle; margin-right:8px;"></span>
-                    🖥️ ${node.hostname}${node.is_self ? ' <span style="color:var(--accent-light); font-size:12px;">(this)</span>' : ''}
+                    ${nodeIcon} ${node.hostname}${pveBadge}${node.is_self ? ' <span style="color:var(--accent-light); font-size:12px;">(this)</span>' : ''}
                 </h3>
                 <div style="display:flex; align-items:center; gap:10px;">
                     <span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(16,185,129,0.1); color:var(--success); font-family:'JetBrains Mono',monospace;">
@@ -328,7 +332,7 @@ function renderDatacenterOverview() {
                     </div>
                 </div>
                 <div style="margin-top:12px; display:flex; gap:6px; flex-wrap:wrap;">
-                    ${node.components.filter(c => c.installed).map(c =>
+                    ${isPve ? `<span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(255,165,0,0.1); color:#f5a623;">🟠 ${node.vm_count || 0} VMs</span><span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(99,102,241,0.1); color:var(--accent-light);">📦 ${node.lxc_count || 0} Containers</span>` : node.components.filter(c => c.installed).map(c =>
             `<span style="font-size:11px; padding:2px 8px; border-radius:4px; background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'}; color:${c.running ? 'var(--success)' : 'var(--danger)'};">                            ${c.component}
                         </span>`
         ).join('')}
@@ -2201,24 +2205,96 @@ function closeModal() {
 }
 
 async function addServer() {
+    const nodeType = (document.getElementById('new-server-type') || {}).value || 'wolfstack';
     const address = document.getElementById('new-server-address').value.trim();
-    const port = parseInt(document.getElementById('new-server-port').value) || 8553;
+    const port = parseInt(document.getElementById('new-server-port').value) || (nodeType === 'proxmox' ? 8006 : 8553);
 
     if (!address) { showToast('Enter a server address', 'error'); return; }
 
+    var payload = { address, port, node_type: nodeType };
+
+    if (nodeType === 'proxmox') {
+        var pveToken = (document.getElementById('new-pve-token') || {}).value.trim();
+        var pveName = (document.getElementById('new-pve-node-name') || {}).value.trim();
+        var pveFingerprint = (document.getElementById('new-pve-fingerprint') || {}).value.trim();
+
+        if (!pveToken || !pveName) {
+            showToast('PVE Node Name and API Token are required', 'error');
+            return;
+        }
+        payload.pve_token = pveToken;
+        payload.pve_node_name = pveName;
+        if (pveFingerprint) payload.pve_fingerprint = pveFingerprint;
+    }
+
     try {
-        const resp = await fetch('/api/nodes', {
+        var resp = await fetch('/api/nodes', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ address, port })
+            body: JSON.stringify(payload)
         });
-        const data = await resp.json();
-        showToast(`Server ${address} added`, 'success');
+        var data = await resp.json();
+        if (data.error) {
+            showToast(data.error, 'error');
+            return;
+        }
+        var label = nodeType === 'proxmox' ? 'Proxmox node' : 'Server';
+        showToast(label + ' ' + address + ' added', 'success');
         closeModal();
         document.getElementById('new-server-address').value = '';
+        if (document.getElementById('new-pve-token')) document.getElementById('new-pve-token').value = '';
+        if (document.getElementById('new-pve-node-name')) document.getElementById('new-pve-node-name').value = '';
+        if (document.getElementById('new-pve-fingerprint')) document.getElementById('new-pve-fingerprint').value = '';
         fetchNodes();
     } catch (e) {
         showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+function togglePveFields() {
+    var sel = (document.getElementById('new-server-type') || {}).value;
+    var pveFields = document.getElementById('pve-fields');
+    var wsHint = document.getElementById('wolfstack-hint');
+    var portLabel = document.getElementById('new-server-port-label');
+    var portInput = document.getElementById('new-server-port');
+
+    if (sel === 'proxmox') {
+        if (pveFields) pveFields.style.display = 'block';
+        if (wsHint) wsHint.style.display = 'none';
+        if (portLabel) portLabel.textContent = 'Port (default: 8006)';
+        if (portInput) portInput.value = '8006';
+    } else {
+        if (pveFields) pveFields.style.display = 'none';
+        if (wsHint) wsHint.style.display = 'block';
+        if (portLabel) portLabel.textContent = 'Port (default: 8553)';
+        if (portInput) portInput.value = '8553';
+    }
+}
+
+// ─── Proxmox Resource Management ───
+async function loadPveResources(nodeId) {
+    try {
+        var resp = await fetch('/api/nodes/' + nodeId + '/pve/resources');
+        var data = await resp.json();
+        if (data.error) { showToast(data.error, 'error'); return []; }
+        return data;
+    } catch (e) {
+        showToast('Failed to load PVE resources: ' + e.message, 'error');
+        return [];
+    }
+}
+
+async function pveGuestAction(nodeId, vmid, action) {
+    try {
+        var resp = await fetch('/api/nodes/' + nodeId + '/pve/' + vmid + '/' + action, { method: 'POST' });
+        var data = await resp.json();
+        if (data.error) {
+            showToast('PVE action failed: ' + data.error, 'error');
+        } else {
+            showToast('VMID ' + vmid + ': ' + action + ' sent', 'success');
+        }
+    } catch (e) {
+        showToast('PVE action failed: ' + e.message, 'error');
     }
 }
 

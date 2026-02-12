@@ -2218,15 +2218,44 @@ region = us-east-1"></textarea>
             </div>
             <div class="modal-body">
                 <div class="form-group">
+                    <label>Node Type</label>
+                    <select class="form-control" id="new-server-type" onchange="togglePveFields()">
+                        <option value="wolfstack">🐺 WolfStack</option>
+                        <option value="proxmox">🟠 Proxmox VE</option>
+                    </select>
+                </div>
+                <div class="form-group">
                     <label>Server Address</label>
                     <input type="text" class="form-control" id="new-server-address"
                         placeholder="10.10.10.1 or hostname">
                 </div>
                 <div class="form-group">
-                    <label>Port (default: 8553)</label>
+                    <label id="new-server-port-label">Port (default: 8553)</label>
                     <input type="number" class="form-control" id="new-server-port" value="8553">
                 </div>
-                <p style="font-size: 12px; color: var(--text-muted);">
+                <!-- Proxmox-specific fields -->
+                <div id="pve-fields" style="display:none;">
+                    <div class="form-group">
+                        <label>PVE Node Name</label>
+                        <input type="text" class="form-control" id="new-pve-node-name"
+                            placeholder="pve1 (as shown in Proxmox UI)">
+                    </div>
+                    <div class="form-group">
+                        <label>API Token</label>
+                        <input type="text" class="form-control" id="new-pve-token"
+                            placeholder="user@pam!tokenid=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                    </div>
+                    <div class="form-group">
+                        <label>TLS Fingerprint (optional)</label>
+                        <input type="text" class="form-control" id="new-pve-fingerprint"
+                            placeholder="XX:XX:XX:... (leave blank to skip verification)">
+                    </div>
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Create an API token in Proxmox: Datacenter → Permissions → API Tokens.<br>
+                        Ensure the token has at least PVEAuditor + PVEVMUser roles.
+                    </p>
+                </div>
+                <p id="wolfstack-hint" style="font-size: 12px; color: var(--text-muted);">
                     If using WolfNet, enter the WolfNet IP (e.g. 10.10.10.x).
                     Otherwise, enter the server's regular IP or hostname.
                 </p>

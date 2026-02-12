@@ -198,18 +198,53 @@ pub async fn get_node(req: HttpRequest, state: web::Data<AppState>, path: web::P
 pub struct AddServerRequest {
     pub address: String,
     pub port: Option<u16>,
+    #[serde(default)]
+    pub node_type: Option<String>,       // "wolfstack" (default) or "proxmox"
+    #[serde(default)]
+    pub pve_token: Option<String>,       // PVEAPIToken=user@realm!tokenid=uuid
+    #[serde(default)]
+    pub pve_fingerprint: Option<String>,
+    #[serde(default)]
+    pub pve_node_name: Option<String>,
 }
 
 pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::Json<AddServerRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let port = body.port.unwrap_or(8553);
-    let id = state.cluster.add_server(body.address.clone(), port);
-    info!("Added server {} at {}:{}", id, body.address, port);
-    HttpResponse::Ok().json(serde_json::json!({
-        "id": id,
-        "address": body.address,
-        "port": port
-    }))
+
+    let node_type = body.node_type.as_deref().unwrap_or("wolfstack");
+
+    if node_type == "proxmox" {
+        let port = body.port.unwrap_or(8006);
+        let token = body.pve_token.clone().unwrap_or_default();
+        let fingerprint = body.pve_fingerprint.clone();
+        let pve_node_name = body.pve_node_name.clone().unwrap_or_default();
+
+        if token.is_empty() || pve_node_name.is_empty() {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Proxmox nodes require pve_token and pve_node_name"
+            }));
+        }
+
+        let id = state.cluster.add_proxmox_server(body.address.clone(), port, token, fingerprint, pve_node_name.clone());
+        info!("Added Proxmox node {} at {}:{} (node: {})", id, body.address, port, pve_node_name);
+        HttpResponse::Ok().json(serde_json::json!({
+            "id": id,
+            "address": body.address,
+            "port": port,
+            "node_type": "proxmox",
+            "pve_node_name": pve_node_name
+        }))
+    } else {
+        let port = body.port.unwrap_or(8553);
+        let id = state.cluster.add_server(body.address.clone(), port);
+        info!("Added server {} at {}:{}", id, body.address, port);
+        HttpResponse::Ok().json(serde_json::json!({
+            "id": id,
+            "address": body.address,
+            "port": port,
+            "node_type": "wolfstack"
+        }))
+    }
 }
 
 /// DELETE /api/nodes/{id} — remove a server
@@ -220,6 +255,99 @@ pub async fn remove_node(req: HttpRequest, state: web::Data<AppState>, path: web
         HttpResponse::Ok().json(serde_json::json!({ "removed": true }))
     } else {
         HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" }))
+    }
+}
+
+/// GET /api/nodes/{id}/pve/resources — list VMs and containers on a Proxmox node
+pub async fn get_pve_resources(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+
+    let node = match state.cluster.get_node(&id) {
+        Some(n) if n.node_type == "proxmox" => n,
+        Some(_) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Not a Proxmox node" })),
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" })),
+    };
+
+    let token = node.pve_token.unwrap_or_default();
+    let pve_name = node.pve_node_name.unwrap_or_default();
+    let fp = node.pve_fingerprint.as_deref();
+
+    let client = crate::proxmox::PveClient::new(&node.address, node.port, &token, fp, &pve_name);
+    match client.list_all_guests().await {
+        Ok(guests) => HttpResponse::Ok().json(guests),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/nodes/{id}/pve/{vmid}/{action} — start/stop/restart a Proxmox guest
+pub async fn pve_guest_action(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String, String)>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, vmid_str, action) = path.into_inner();
+
+    let node = match state.cluster.get_node(&id) {
+        Some(n) if n.node_type == "proxmox" => n,
+        Some(_) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Not a Proxmox node" })),
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" })),
+    };
+
+    let vmid: u64 = match vmid_str.parse() {
+        Ok(v) => v,
+        Err(_) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid VMID" })),
+    };
+
+    // Validate action
+    if !["start", "stop", "shutdown", "reboot"].contains(&action.as_str()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid action. Use: start, stop, shutdown, reboot" }));
+    }
+
+    let token = node.pve_token.unwrap_or_default();
+    let pve_name = node.pve_node_name.unwrap_or_default();
+    let fp = node.pve_fingerprint.as_deref();
+
+    let client = crate::proxmox::PveClient::new(&node.address, node.port, &token, fp, &pve_name);
+
+    // Determine guest type by listing all and finding the VMID
+    let guests = client.list_all_guests().await.unwrap_or_default();
+    let guest_type = guests.iter()
+        .find(|g| g.vmid == vmid)
+        .map(|g| g.guest_type.clone())
+        .unwrap_or_else(|| "qemu".to_string()); // default to qemu
+
+    match client.guest_action(vmid, &guest_type, &action).await {
+        Ok(upid) => HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "upid": upid,
+            "vmid": vmid,
+            "action": action
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/nodes/{id}/pve/test — test Proxmox API connection
+pub async fn pve_test_connection(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+
+    let node = match state.cluster.get_node(&id) {
+        Some(n) if n.node_type == "proxmox" => n,
+        Some(_) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Not a Proxmox node" })),
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" })),
+    };
+
+    let token = node.pve_token.unwrap_or_default();
+    let pve_name = node.pve_node_name.unwrap_or_default();
+    let fp = node.pve_fingerprint.as_deref();
+
+    let client = crate::proxmox::PveClient::new(&node.address, node.port, &token, fp, &pve_name);
+    match client.test_connection().await {
+        Ok(version) => HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "version": version,
+            "node_name": pve_name
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
 }
 
@@ -2488,6 +2616,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/nodes", web::post().to(add_node))
         .route("/api/nodes/{id}", web::get().to(get_node))
         .route("/api/nodes/{id}", web::delete().to(remove_node))
+        // Proxmox integration
+        .route("/api/nodes/{id}/pve/resources", web::get().to(get_pve_resources))
+        .route("/api/nodes/{id}/pve/test", web::post().to(pve_test_connection))
+        .route("/api/nodes/{id}/pve/{vmid}/{action}", web::post().to(pve_guest_action))
         // Components
         .route("/api/components", web::get().to(get_components))
         .route("/api/components/{name}/detail", web::get().to(get_component_detail))
