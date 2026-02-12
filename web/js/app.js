@@ -6638,7 +6638,6 @@ async function loadAiConfig() {
         if ((el = document.getElementById('ai-provider'))) el.value = cfg.provider || 'claude';
         if ((el = document.getElementById('ai-claude-key'))) el.value = cfg.has_claude_key ? cfg.claude_api_key : '';
         if ((el = document.getElementById('ai-gemini-key'))) el.value = cfg.has_gemini_key ? cfg.gemini_api_key : '';
-        if ((el = document.getElementById('ai-model'))) el.value = cfg.model || 'claude-sonnet-4-20250514';
         if ((el = document.getElementById('ai-email-enabled'))) el.checked = cfg.email_enabled || false;
         if ((el = document.getElementById('ai-email-to'))) el.value = cfg.email_to || '';
         if ((el = document.getElementById('ai-smtp-host'))) el.value = cfg.smtp_host || '';
@@ -6646,8 +6645,51 @@ async function loadAiConfig() {
         if ((el = document.getElementById('ai-smtp-user'))) el.value = cfg.smtp_user || '';
         if ((el = document.getElementById('ai-smtp-pass'))) el.value = cfg.has_smtp_pass ? cfg.smtp_pass : '';
         if ((el = document.getElementById('ai-check-interval'))) el.value = cfg.check_interval_minutes || 60;
+        // Fetch models for the current provider, then select the saved model
+        await fetchAiModels(cfg.provider || 'claude', cfg.model || '');
     } catch (e) {
         console.error('Failed to load AI config:', e);
+    }
+}
+
+async function fetchAiModels(provider, selectedModel) {
+    var select = document.getElementById('ai-model');
+    if (!select) return;
+    select.innerHTML = '<option value="">Loading models...</option>';
+    try {
+        var resp = await fetch(apiUrl('/api/ai/models?provider=' + encodeURIComponent(provider)));
+        var data = await resp.json();
+        if (data.error && (!data.models || !data.models.length)) {
+            select.innerHTML = '<option value="">Enter API key and save to load models</option>';
+            return;
+        }
+        var models = data.models || [];
+        if (!models.length) {
+            select.innerHTML = '<option value="">No models found — check API key</option>';
+            return;
+        }
+        select.innerHTML = '';
+        models.forEach(function (m) {
+            var opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            select.appendChild(opt);
+        });
+        // Select the saved model if it exists in the list
+        if (selectedModel) {
+            select.value = selectedModel;
+            // If the saved model isn't in the list, add it
+            if (select.value !== selectedModel) {
+                var opt = document.createElement('option');
+                opt.value = selectedModel;
+                opt.textContent = selectedModel + ' (saved)';
+                select.insertBefore(opt, select.firstChild);
+                select.value = selectedModel;
+            }
+        }
+    } catch (e) {
+        select.innerHTML = '<option value="">Error loading models</option>';
+        console.error('Failed to fetch models:', e);
     }
 }
 
@@ -6673,13 +6715,15 @@ async function saveAiConfig() {
         });
         var data = await resp.json();
         if (data.status === 'saved') {
-            showToast('AI settings saved', 'success');
+            alert('Settings Saved');
             loadAiStatus();
+            // Refresh models list after save (in case key changed)
+            fetchAiModels(config.provider, config.model);
         } else {
-            showToast(data.error || 'Failed to save', 'error');
+            alert('Error: ' + (data.error || 'Failed to save'));
         }
     } catch (e) {
-        showToast('Error: ' + e.message, 'error');
+        alert('Error: ' + e.message);
     }
 }
 
@@ -6736,8 +6780,28 @@ async function loadAiAlerts() {
 }
 
 async function testAiConnection() {
-    showToast('Testing AI connection...', 'info');
+    // First save settings so the backend has the latest keys
+    var config = {
+        provider: (document.getElementById('ai-provider') || {}).value || 'claude',
+        claude_api_key: (document.getElementById('ai-claude-key') || {}).value || '',
+        gemini_api_key: (document.getElementById('ai-gemini-key') || {}).value || '',
+        model: (document.getElementById('ai-model') || {}).value || '',
+        email_enabled: (document.getElementById('ai-email-enabled') || {}).checked || false,
+        email_to: (document.getElementById('ai-email-to') || {}).value || '',
+        smtp_host: (document.getElementById('ai-smtp-host') || {}).value || '',
+        smtp_port: parseInt((document.getElementById('ai-smtp-port') || {}).value) || 587,
+        smtp_user: (document.getElementById('ai-smtp-user') || {}).value || '',
+        smtp_pass: (document.getElementById('ai-smtp-pass') || {}).value || '',
+        check_interval_minutes: parseInt((document.getElementById('ai-check-interval') || {}).value) || 60,
+    };
     try {
+        // Save first
+        await fetch(apiUrl('/api/ai/config'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        });
+        // Now test
         var resp = await fetch(apiUrl('/api/ai/chat'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -6745,15 +6809,17 @@ async function testAiConnection() {
         });
         var data = await resp.json();
         if (data.error) {
-            showToast('AI Error: ' + data.error, 'error');
+            alert('AI Error: ' + data.error);
         } else {
-            showToast('✅ AI responded: ' + (data.response || '').substring(0, 100), 'success');
+            alert('✅ AI responded: ' + (data.response || '').substring(0, 200));
         }
     } catch (e) {
-        showToast('Connection failed: ' + e.message, 'error');
+        alert('Connection failed: ' + e.message);
     }
 }
 
 function onAiProviderChange() {
-    // Could highlight relevant key field, but both are always shown
+    var provider = (document.getElementById('ai-provider') || {}).value || 'claude';
+    fetchAiModels(provider, '');
 }
+

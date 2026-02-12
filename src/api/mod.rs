@@ -1366,6 +1366,26 @@ pub async fn ai_alerts(
     HttpResponse::Ok().json(alerts)
 }
 
+/// GET /api/ai/models?provider=claude|gemini — list available models
+pub async fn ai_models(
+    req: HttpRequest, state: web::Data<AppState>, query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let config = state.ai_agent.config.lock().unwrap().clone();
+    let provider = query.get("provider").map(|s| s.as_str()).unwrap_or(&config.provider);
+    let api_key = match provider {
+        "gemini" => &config.gemini_api_key,
+        _ => &config.claude_api_key,
+    };
+    if api_key.is_empty() {
+        return HttpResponse::Ok().json(serde_json::json!({ "models": [], "error": "No API key configured for this provider" }));
+    }
+    match state.ai_agent.list_models(provider, api_key).await {
+        Ok(models) => HttpResponse::Ok().json(serde_json::json!({ "models": models })),
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({ "models": [], "error": e })),
+    }
+}
+
 // ─── Networking API ───
 
 /// GET /api/networking/interfaces — list all network interfaces
@@ -2407,6 +2427,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/ai/chat", web::post().to(ai_chat))
         .route("/api/ai/status", web::get().to(ai_status))
         .route("/api/ai/alerts", web::get().to(ai_alerts))
+        .route("/api/ai/models", web::get().to(ai_models))
         // Storage Manager
         .route("/api/storage/mounts", web::get().to(storage_list_mounts))
         .route("/api/storage/mounts", web::post().to(storage_create_mount))

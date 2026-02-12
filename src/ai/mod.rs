@@ -186,6 +186,64 @@ impl AiAgent {
         Ok(response)
     }
 
+    /// List available models for the configured provider
+    pub async fn list_models(&self, provider: &str, api_key: &str) -> Result<Vec<String>, String> {
+        match provider {
+            "gemini" => {
+                let url = format!(
+                    "https://generativelanguage.googleapis.com/v1beta/models?key={}",
+                    api_key
+                );
+                let resp = self.client.get(&url)
+                    .send().await
+                    .map_err(|e| format!("Gemini API error: {}", e))?;
+                let status = resp.status();
+                let text = resp.text().await.map_err(|e| format!("Gemini response error: {}", e))?;
+                if !status.is_success() {
+                    return Err(format!("Gemini API {} — {}", status, text));
+                }
+                let json: serde_json::Value = serde_json::from_str(&text)
+                    .map_err(|e| format!("Gemini JSON error: {}", e))?;
+                let models = json["models"].as_array()
+                    .map(|arr| arr.iter().filter_map(|m| {
+                        let name = m["name"].as_str()?;
+                        // name is like "models/gemini-2.0-flash" — strip prefix
+                        let short = name.strip_prefix("models/").unwrap_or(name);
+                        // Only include generateContent-capable models
+                        let methods = m["supportedGenerationMethods"].as_array()?;
+                        if methods.iter().any(|m| m.as_str() == Some("generateContent")) {
+                            Some(short.to_string())
+                        } else {
+                            None
+                        }
+                    }).collect())
+                    .unwrap_or_default();
+                Ok(models)
+            }
+            _ => {
+                // Claude models API
+                let resp = self.client.get("https://api.anthropic.com/v1/models")
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .send().await
+                    .map_err(|e| format!("Claude API error: {}", e))?;
+                let status = resp.status();
+                let text = resp.text().await.map_err(|e| format!("Claude response error: {}", e))?;
+                if !status.is_success() {
+                    return Err(format!("Claude API {} — {}", status, text));
+                }
+                let json: serde_json::Value = serde_json::from_str(&text)
+                    .map_err(|e| format!("Claude JSON error: {}", e))?;
+                let models = json["data"].as_array()
+                    .map(|arr| arr.iter().filter_map(|m| {
+                        m["id"].as_str().map(|s| s.to_string())
+                    }).collect())
+                    .unwrap_or_default();
+                Ok(models)
+            }
+        }
+    }
+
     /// Run a health check — analyze system metrics and return findings  
     pub async fn health_check(&self, metrics_summary: &str) -> Option<String> {
         let config = self.config.lock().unwrap().clone();

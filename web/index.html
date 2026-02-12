@@ -64,14 +64,10 @@
                 </div>
             </div>
         </nav>
-        <nav class="sidebar-nav" style="padding: 0 12px; margin-bottom: 8px;">
-            <div class="nav-section">
-                <a class="nav-item" data-page="ai-settings" onclick="selectView('ai-settings')">
-                    <span class="icon">🤖</span> AI Agent
-                </a>
-            </div>
-        </nav>
         <div class="sidebar-footer">
+            <button class="btn btn-sm" onclick="selectView('ai-settings')" style="width: 100%; margin-bottom: 8px;">
+                🤖 AI Agent
+            </button>
             <button class="btn btn-sm" onclick="openAddServerModal()" style="width: 100%; margin-bottom: 8px;">
                 + Add Server
             </button>
@@ -1087,16 +1083,7 @@
                             <div class="form-group" style="margin-bottom:16px;">
                                 <label>Model</label>
                                 <select id="ai-model" class="form-control">
-                                    <optgroup label="Claude Models">
-                                        <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
-                                        <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
-                                        <option value="claude-3-haiku-20240307">Claude 3 Haiku (fast)</option>
-                                    </optgroup>
-                                    <optgroup label="Gemini Models">
-                                        <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
-                                        <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash Lite</option>
-                                        <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
-                                    </optgroup>
+                                    <option value="">Select a provider and enter API key first</option>
                                 </select>
                             </div>
                             <div class="form-group" style="margin-bottom:16px;">
@@ -2286,7 +2273,7 @@ region = us-east-1"></textarea>
         <div id="ai-chat-panel" style="display:none;position:fixed;bottom:90px;right:24px;width:420px;height:540px;
          background:var(--bg-secondary);border:1px solid var(--border);border-radius:16px;
          box-shadow:0 8px 40px rgba(0,0,0,0.5);z-index:9998;overflow:hidden;
-         display:none;flex-direction:column;">
+         flex-direction:column;">
             <!-- Header -->
             <div style="padding:16px 20px;background:linear-gradient(135deg,var(--accent),var(--accent-light));
              display:flex;justify-content:space-between;align-items:center;">
