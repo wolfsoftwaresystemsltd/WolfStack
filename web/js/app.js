@@ -3811,6 +3811,22 @@ function toggleIpv6Mode() {
     if (staticFields) staticFields.style.display = (mode && mode.value === 'static') ? 'block' : 'none';
 }
 
+async function findNextWolfnetIp() {
+    try {
+        var resp = await fetch(apiUrl('/api/wolfnet/next-ip'));
+        var data = await resp.json();
+        if (data.ip) {
+            var el = document.getElementById('lxc-wolfnet-ip');
+            if (el) el.value = data.ip;
+            showToast('Next available: ' + data.ip, 'success');
+        } else {
+            showToast('No available WolfNet IPs (10.10.10.2-254 all used)', 'error');
+        }
+    } catch (e) {
+        showToast('Failed to check available IPs: ' + e.message, 'error');
+    }
+}
+
 async function openLxcSettings(name) {
     const modal = document.getElementById('container-detail-modal');
     const title = document.getElementById('container-detail-title');
@@ -3961,19 +3977,21 @@ async function openLxcSettings(name) {
                     </div>
                 </div>
 
-                <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
+                    <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
                     <h4 style="margin:0 0 8px 0;font-size:13px;">🐺 WolfNet</h4>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                    <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end;">
                         <div class="form-group" style="margin:0;">
                             <label>WolfNet IP</label>
                             <input type="text" id="lxc-wolfnet-ip" class="form-control" value="${escapeHtml(cfg.wolfnet_ip || '')}"
                                 placeholder="e.g. 10.10.10.50 (leave blank for none)">
                         </div>
-                        <div class="form-group" style="margin:0;">
-                            <label>&nbsp;</label>
-                            <div style="font-size:11px;color:var(--text-muted);padding:8px 0;">Gateway is handled automatically by WolfNet — no need to configure it here.</div>
+                        <div style="display:flex;gap:4px;padding-bottom:2px;">
+                            <button class="btn btn-sm" onclick="findNextWolfnetIp()" title="Find next available WolfNet IP"
+                                style="padding:6px 10px;font-size:11px;">🔍 Next Available</button>
                         </div>
                     </div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">Gateway is handled automatically by WolfNet — no need to configure it here.</div>
+                    <div id="wolfnet-ip-warning" style="display:none;font-size:11px;color:var(--warning);margin-top:4px;"></div>
                 </div>
 
                 <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
@@ -4212,6 +4230,7 @@ async function saveLxcSettings(name) {
         nesting_enabled: (document.getElementById('lxc-feat-nesting') || {}).checked || false,
         nfs_enabled: (document.getElementById('lxc-feat-nfs') || {}).checked || false,
         keyctl_enabled: (document.getElementById('lxc-feat-keyctl') || {}).checked || false,
+        wolfnet_ip: (document.getElementById('lxc-wolfnet-ip') || {}).value || '',
     };
 
     try {
@@ -4224,6 +4243,8 @@ async function saveLxcSettings(name) {
         if (resp.ok) {
             showToast('Settings saved — restart container to apply changes', 'success');
             closeContainerDetail();
+            // Refresh the container list
+            if (typeof loadLxcContainers === 'function') loadLxcContainers();
             // Check for network conflicts
             try {
                 var cr = await fetch(apiUrl('/api/network/conflicts'));

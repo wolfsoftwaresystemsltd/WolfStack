@@ -1534,6 +1534,9 @@ pub struct LxcParsedConfig {
 
     // Raw config for advanced editing
     pub raw_config: String,
+
+    // WolfNet
+    pub wolfnet_ip: String,
 }
 
 /// Parse an LXC container config into structured form
@@ -1626,6 +1629,12 @@ pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
         }
     }
 
+    // Read WolfNet IP from file
+    let wolfnet_ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", container);
+    if let Ok(ip) = std::fs::read_to_string(&wolfnet_ip_file) {
+        cfg.wolfnet_ip = ip.trim().to_string();
+    }
+
     Some(cfg)
 }
 
@@ -1661,6 +1670,9 @@ pub struct LxcSettingsUpdate {
     pub nesting_enabled: Option<bool>,
     pub nfs_enabled: Option<bool>,
     pub keyctl_enabled: Option<bool>,
+
+    // WolfNet
+    pub wolfnet_ip: Option<String>,
 }
 
 pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<String, String> {
@@ -1846,6 +1858,21 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
     std::fs::write(&path, &output)
         .map_err(|e| format!("Failed to write config: {}", e))?;
 
+    // Handle WolfNet IP separately (stored in .wolfnet/ip file)
+    if let Some(ref wip) = settings.wolfnet_ip {
+        let wolfnet_dir = format!("/var/lib/lxc/{}/.wolfnet", container);
+        let wolfnet_ip_file = format!("{}/ip", wolfnet_dir);
+        let ip_trimmed = wip.trim();
+        if ip_trimmed.is_empty() {
+            // Remove WolfNet IP
+            let _ = std::fs::remove_file(&wolfnet_ip_file);
+        } else {
+            let _ = std::fs::create_dir_all(&wolfnet_dir);
+            std::fs::write(&wolfnet_ip_file, ip_trimmed)
+                .map_err(|e| format!("Failed to write WolfNet IP: {}", e))?;
+        }
+    }
+
     Ok(format!("Settings updated for '{}'", container))
 }
 
@@ -1893,6 +1920,63 @@ pub fn lxc_set_network_link(container: &str, link: &str) -> Result<String, Strin
 
     std::fs::write(&path, new_lines.join("\n")).map_err(|e| e.to_string())?;
     Ok(format!("Network link set to {}", link))
+}
+
+/// Find the next available WolfNet IP (10.10.10.x) not in use by any LXC container
+pub fn next_available_wolfnet_ip() -> Option<String> {
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Scan all LXC containers for WolfNet IPs
+    if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", name);
+            if let Ok(ip) = std::fs::read_to_string(&ip_file) {
+                let ip = ip.trim().to_string();
+                if !ip.is_empty() {
+                    used.insert(ip);
+                }
+            }
+        }
+    }
+
+    // Scan VM configs for WolfNet IPs
+    if let Ok(entries) = std::fs::read_dir("/etc/wolfstack/vms") {
+        for entry in entries.flatten() {
+            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(vm) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(ip) = vm.get("wolfnet_ip").and_then(|v| v.as_str()) {
+                        if !ip.is_empty() {
+                            used.insert(ip.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check Docker containers with WolfNet labels
+    if let Ok(output) = std::process::Command::new("docker")
+        .args(["ps", "-a", "--format", "{{.Label \"wolfnet.ip\"}}"])
+        .output() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let ip = line.trim().to_string();
+            if !ip.is_empty() && ip != "<no value>" {
+                used.insert(ip);
+            }
+        }
+    }
+
+    // Find next available in 10.10.10.2 - 10.10.10.254
+    for i in 2..=254u8 {
+        let candidate = format!("10.10.10.{}", i);
+        if !used.contains(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 /// Detect duplicate MAC addresses and IP addresses across all LXC containers

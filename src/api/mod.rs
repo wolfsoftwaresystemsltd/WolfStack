@@ -1095,6 +1095,17 @@ pub async fn lxc_update_settings(
     }
 }
 
+/// GET /api/wolfnet/next-ip — find next available WolfNet IP
+pub async fn wolfnet_next_ip(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match containers::next_available_wolfnet_ip() {
+        Some(ip) => HttpResponse::Ok().json(serde_json::json!({ "ip": ip })),
+        None => HttpResponse::Ok().json(serde_json::json!({ "ip": null, "error": "No available IPs in 10.10.10.0/24" })),
+    }
+}
+
 /// GET /api/network/conflicts — detect duplicate MACs/IPs across LXC containers
 pub async fn network_conflicts(
     req: HttpRequest, state: web::Data<AppState>,
@@ -2236,6 +2247,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/network/conflicts", web::get().to(network_conflicts))
         // WolfNet
         .route("/api/wolfnet/status", web::get().to(wolfnet_network_status))
+        .route("/api/wolfnet/next-ip", web::get().to(wolfnet_next_ip))
         // Storage Manager
         .route("/api/storage/mounts", web::get().to(storage_list_mounts))
         .route("/api/storage/mounts", web::post().to(storage_create_mount))
