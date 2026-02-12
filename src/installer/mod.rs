@@ -356,14 +356,19 @@ fn parse_certbot_certificates() -> Vec<(String, String, String, String)> {
         Some(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         Some(ref o) => {
             // certbot might output to stderr too
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            tracing::debug!("certbot certificates failed (exit {}): {}", o.status, stderr);
             let combined = format!(
                 "{}\n{}",
                 String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
+                stderr
             );
             combined
         }
-        _ => return Vec::new(),
+        _ => {
+            tracing::debug!("Failed to execute 'sudo certbot certificates'");
+            return Vec::new();
+        }
     };
 
     let mut results = Vec::new();
@@ -402,6 +407,46 @@ fn parse_certbot_certificates() -> Vec<(String, String, String, String)> {
     results
 }
 
+/// Directly scan /etc/letsencrypt/live/ for certificate directories
+/// This works even when certbot CLI isn't available or sudo fails
+/// Returns Vec of (domain, cert_path, key_path)
+fn scan_letsencrypt_live() -> Vec<(String, String, String)> {
+    let live_dir = std::path::Path::new("/etc/letsencrypt/live");
+    if !live_dir.exists() {
+        return Vec::new();
+    }
+
+    let mut results = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(live_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            // Skip the README directory that certbot creates
+            if path.file_name().map(|n| n == "README").unwrap_or(false) {
+                continue;
+            }
+
+            let cert = path.join("fullchain.pem");
+            let key = path.join("privkey.pem");
+            if cert.exists() && key.exists() {
+                let domain = path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                results.push((
+                    domain,
+                    cert.to_string_lossy().to_string(),
+                    key.to_string_lossy().to_string(),
+                ));
+            }
+        }
+    }
+
+    results
+}
+
 /// Find TLS certificate files for a domain (Let's Encrypt or /etc/wolfstack/)
 /// Returns (cert_path, key_path) if both exist
 pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
@@ -412,7 +457,7 @@ pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
         return Some((ws_cert.to_string(), ws_key.to_string()));
     }
 
-    // Use certbot to find certificates
+    // Try certbot CLI first
     let certs = parse_certbot_certificates();
 
     // If a specific domain was requested, look for it
@@ -424,8 +469,20 @@ pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
         }
     }
 
-    // Otherwise return the first available certificate
+    // Return first certbot result if any
     if let Some((_domains, cert, key, _expiry)) = certs.first() {
+        return Some((cert.clone(), key.clone()));
+    }
+
+    // Fallback: directly scan /etc/letsencrypt/live/
+    let live_certs = scan_letsencrypt_live();
+    if let Some(d) = domain {
+        if let Some((_dom, cert, key)) = live_certs.iter().find(|(dom, _, _)| dom == d) {
+            return Some((cert.clone(), key.clone()));
+        }
+    }
+    if let Some((_dom, cert, key)) = live_certs.first() {
+        info!("Found Let's Encrypt certificate via filesystem scan: {}", cert);
         return Some((cert.clone(), key.clone()));
     }
 
@@ -435,14 +492,30 @@ pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
 /// List all domains with Let's Encrypt certificates
 pub fn list_certificates() -> Vec<serde_json::Value> {
     let mut results = Vec::new();
+    let mut seen_domains = std::collections::HashSet::new();
 
-    // Get certs from certbot
+    // Get certs from certbot CLI
     for (domains, cert_path, key_path, expiry) in parse_certbot_certificates() {
+        seen_domains.insert(cert_path.clone());
         results.push(serde_json::json!({
             "domain": domains,
             "cert_path": cert_path,
             "key_path": key_path,
             "expiry": expiry,
+            "valid": true,
+        }));
+    }
+
+    // Fallback: scan /etc/letsencrypt/live/ for any certs certbot CLI missed
+    for (domain, cert_path, key_path) in scan_letsencrypt_live() {
+        if seen_domains.contains(&cert_path) {
+            continue; // Already found via certbot
+        }
+        results.push(serde_json::json!({
+            "domain": domain,
+            "cert_path": cert_path,
+            "key_path": key_path,
+            "source": "filesystem",
             "valid": true,
         }));
     }
