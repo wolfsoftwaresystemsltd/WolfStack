@@ -1327,6 +1327,48 @@ pub async fn ai_sync_config(
     HttpResponse::Ok().json(serde_json::json!({"status": "synced"}))
 }
 
+/// POST /api/ai/test-email — send a test email to verify SMTP settings
+pub async fn ai_test_email(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let config = state.ai_agent.config.lock().unwrap().clone();
+
+    if !config.email_enabled || config.email_to.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Email alerts not enabled or no recipient configured"
+        }));
+    }
+
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let version = env!("CARGO_PKG_VERSION");
+
+    let subject = format!("[WolfStack] Test Email from {}", hostname);
+    let body = format!(
+        "✅ WolfStack Test Email\n\n\
+         This is a test email from your WolfStack AI Agent.\n\n\
+         Hostname: {}\n\
+         Version: {}\n\
+         Time: {}\n\n\
+         If you received this, your email alert settings are working correctly.",
+        hostname, version,
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    );
+
+    match crate::ai::send_alert_email(&config, &subject, &body) {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+            "status": "sent",
+            "message": format!("Test email sent to {}", config.email_to)
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to send: {}", e)
+        })),
+    }
+}
+
 /// POST /api/ai/chat — send a message to the AI agent
 #[derive(Deserialize)]
 pub struct AiChatRequest {
@@ -2504,6 +2546,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/ai/models", web::get().to(ai_models))
         .route("/api/ai/exec", web::post().to(ai_exec))
         .route("/api/ai/config/sync", web::post().to(ai_sync_config))
+        .route("/api/ai/test-email", web::post().to(ai_test_email))
         // Storage Manager
         .route("/api/storage/mounts", web::get().to(storage_list_mounts))
         .route("/api/storage/mounts", web::post().to(storage_create_mount))

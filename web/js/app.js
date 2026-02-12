@@ -6853,6 +6853,20 @@ async function testAiConnection() {
     }
 }
 
+async function sendTestEmail() {
+    try {
+        var resp = await fetch('/api/ai/test-email', { method: 'POST' });
+        var data = await resp.json();
+        if (data.error) {
+            showToast('❌ ' + data.error, 'error');
+        } else {
+            showToast('📧 ' + (data.message || 'Test email sent!'), 'success');
+        }
+    } catch (e) {
+        showToast('Failed to send test email: ' + e.message, 'error');
+    }
+}
+
 function onAiProviderChange() {
     var provider = (document.getElementById('ai-provider') || {}).value || 'claude';
     fetchAiModels(provider, '');

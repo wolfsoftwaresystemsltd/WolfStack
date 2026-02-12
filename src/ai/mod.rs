@@ -882,7 +882,7 @@ async fn call_gemini(
 
 // ─── Email Alerts ───
 
-fn send_alert_email(config: &AiConfig, subject: &str, body: &str) -> Result<(), String> {
+pub fn send_alert_email(config: &AiConfig, subject: &str, body: &str) -> Result<(), String> {
     use lettre::{Message, SmtpTransport, Transport};
     use lettre::transport::smtp::authentication::Credentials;
 
@@ -924,9 +924,11 @@ pub fn build_metrics_summary(
     let disk_percent = if disk_total_gb > 0.0 { (disk_used_gb / disk_total_gb * 100.0) as u32 } else { 0 };
     let uptime_hours = uptime_secs / 3600;
     let uptime_days = uptime_hours / 24;
+    let version = env!("CARGO_PKG_VERSION");
 
     format!(
         "Hostname: {}\n\
+         WolfStack Version: {}\n\
          CPU Usage: {:.1}%\n\
          Memory: {:.1}/{:.1} GB ({}%)\n\
          Disk: {:.1}/{:.1} GB ({}%)\n\
@@ -935,6 +937,7 @@ pub fn build_metrics_summary(
          Virtual Machines: {}\n\
          Uptime: {} days {} hours",
         hostname,
+        version,
         cpu_percent,
         memory_used_gb, memory_total_gb, mem_percent,
         disk_used_gb, disk_total_gb, disk_percent,

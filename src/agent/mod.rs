@@ -200,7 +200,17 @@ pub enum AgentMessage {
 }
 
 /// Poll remote nodes for their status
-pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: String) {
+pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: String, ai_agent: Option<Arc<crate::ai::AiAgent>>) {
+    // Snapshot previous online state BEFORE polling
+    let previous_states: HashMap<String, (bool, String)> = {
+        let nodes = cluster.nodes.read().unwrap();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        nodes.values()
+            .filter(|n| !n.is_self)
+            .map(|n| (n.id.clone(), (now - n.last_seen < 30, n.hostname.clone())))
+            .collect()
+    };
+
     let nodes = cluster.get_all_nodes();
     for node in nodes {
         if node.is_self { continue; }
@@ -233,7 +243,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                     docker_count,
                                     lxc_count,
                                     vm_count,
-                                    public_ip: public_ip.clone(), // Clone the inner Option<String>
+                                    public_ip: public_ip.clone(),
                                 });
                             }
                         }
@@ -245,6 +255,72 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
             }
             Err(e) => {
                 warn!("Failed to create HTTP client: {}", e);
+            }
+        }
+    }
+
+    // After polling, detect state changes and send emails
+    // Only the node with the lowest ID sends emails to avoid duplicates
+    if let Some(ref ai) = ai_agent {
+        let config = ai.config.lock().unwrap().clone();
+        if config.email_enabled && !config.email_to.is_empty() {
+            let current_nodes = cluster.get_all_nodes();
+            // Determine if we are the primary alerter (lowest self_id among online nodes)
+            let self_id = &cluster.self_id;
+            let is_primary = current_nodes.iter()
+                .filter(|n| n.online)
+                .map(|n| &n.id)
+                .min()
+                .map(|min_id| min_id == self_id)
+                .unwrap_or(true); // If no nodes online, we're it
+
+            if is_primary {
+                for node in current_nodes.iter().filter(|n| !n.is_self) {
+                    let (was_online, hostname) = previous_states.get(&node.id)
+                        .cloned()
+                        .unwrap_or((false, node.hostname.clone()));
+
+                    let display_name = if hostname.is_empty() { &node.address } else { &hostname };
+
+                    if was_online && !node.online {
+                        // Node went OFFLINE
+                        let subject = format!("[WolfStack ALERT] {} has gone offline", display_name);
+                        let body = format!(
+                            "⚠️ Node Offline Alert\n\n\
+                             Hostname: {}\n\
+                             Address: {}:{}\n\
+                             Status: OFFLINE\n\
+                             Time: {}\n\n\
+                             This node is no longer responding to cluster health checks.\n\
+                             Please investigate immediately.",
+                            display_name, node.address, node.port,
+                            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+                        );
+                        if let Err(e) = crate::ai::send_alert_email(&config, &subject, &body) {
+                            warn!("Failed to send node-offline email for {}: {}", display_name, e);
+                        } else {
+                            tracing::info!("Sent node-offline alert email for {}", display_name);
+                        }
+                    } else if !was_online && node.online {
+                        // Node came back ONLINE
+                        let subject = format!("[WolfStack OK] {} has been restored", display_name);
+                        let body = format!(
+                            "✅ Node Restored\n\n\
+                             Hostname: {}\n\
+                             Address: {}:{}\n\
+                             Status: ONLINE\n\
+                             Time: {}\n\n\
+                             This node is responding to cluster health checks again.",
+                            display_name, node.address, node.port,
+                            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+                        );
+                        if let Err(e) = crate::ai::send_alert_email(&config, &subject, &body) {
+                            warn!("Failed to send node-restored email for {}: {}", display_name, e);
+                        } else {
+                            tracing::info!("Sent node-restored alert email for {}", display_name);
+                        }
+                    }
+                }
             }
         }
     }
