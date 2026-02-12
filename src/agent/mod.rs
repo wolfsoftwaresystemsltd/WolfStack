@@ -76,14 +76,24 @@ impl ClusterState {
         state
     }
 
-    /// Remove nodes that match our own address/port but have a different ID
+    /// Remove ghost nodes: nodes with same hostname or matching self_id pattern but different ID
     fn cleanup_ghosts(&self) {
+        let hostname = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_default();
         let mut nodes = self.nodes.write().unwrap();
-        let initial_count = nodes.len();
         
-        // Collect IDs to remove
+        // Collect IDs of ghost nodes to remove:
+        // - Any non-self WolfStack node whose hostname matches ours (previous restarts of this server)
+        // - Any non-self node whose ID matches our self_id (shouldn't happen, but safety)
         let ghost_ids: Vec<String> = nodes.values()
-            .filter(|n| !n.is_self && n.address == self.self_address && n.port == self.port)
+            .filter(|n| {
+                if n.is_self || n.id == self.self_id {
+                    return false;
+                }
+                // Ghost: same hostname + same port + wolfstack type
+                (n.hostname == hostname && n.port == self.port && n.node_type == "wolfstack")
+            })
             .map(|n| n.id.clone())
             .collect();
 
@@ -92,7 +102,10 @@ impl ClusterState {
         }
 
         if !ghost_ids.is_empty() {
-            debug!("Cleaned up {} ghost nodes with same address ({}:{})", ghost_ids.len(), self.self_address, self.port);
+            tracing::info!("Cleaned up {} ghost node(s) (hostname={}, port={})", ghost_ids.len(), hostname, self.port);
+            // Persist the cleaned-up state
+            drop(nodes);
+            self.save_nodes();
         }
     }
 
@@ -198,11 +211,22 @@ impl ClusterState {
         self.add_server_full(address, port, "proxmox".to_string(), Some(token), fingerprint, Some(node_name), pve_cluster_name.clone(), pve_cluster_name)
     }
 
-    /// Add a server with full options
+    /// Add a server with full options (deduplicates by address+port+pve_node_name)
     fn add_server_full(&self, address: String, port: u16, node_type: String, pve_token: Option<String>, pve_fingerprint: Option<String>, pve_node_name: Option<String>, pve_cluster_name: Option<String>, cluster_name: Option<String>) -> String {
+        let mut nodes = self.nodes.write().unwrap();
+        
+        // Dedup: check if a node with the same address+port+node_type already exists
+        if let Some(existing) = nodes.values().find(|n| {
+            n.address == address && n.port == port && n.node_type == node_type
+                && n.pve_node_name == pve_node_name
+        }) {
+            let existing_id = existing.id.clone();
+            debug!("Node already exists at {}:{} (type={}, id={}), skipping add", address, port, node_type, existing_id);
+            return existing_id;
+        }
+        
         let id = format!("node-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let mut nodes = self.nodes.write().unwrap();
         nodes.insert(id.clone(), Node {
             id: id.clone(),
             hostname: address.clone(),
@@ -420,20 +444,22 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                     cluster_name: node.cluster_name.clone(),
                                 });
 
-                                // Merge known_nodes (gossip)
+                                // Merge known_nodes (gossip) — with dedup by address+port
                                 let current_nodes = cluster.get_all_nodes();
                                 for known in known_nodes {
-                                    // Only add nodes we don't know about
-                                    // And specifically care about Proxmox nodes or other WolfStack nodes
-                                    if !current_nodes.iter().any(|n| n.id == known.id) && known.id != cluster.self_id {
+                                    if known.id == cluster.self_id {
+                                        continue; // Skip ourselves
+                                    }
+                                    // Check both ID and address+port to prevent ghost re-addition
+                                    let already_known = current_nodes.iter().any(|n| {
+                                        n.id == known.id || (n.address == known.address && n.port == known.port && n.pve_node_name == known.pve_node_name)
+                                    });
+                                    if !already_known {
                                         debug!("Discovered new node via gossip from {}: {} ({})", node.id, known.id, known.node_type);
-                                        // We just add it as offline; it will be polled next cycle
                                         let mut new_node = known.clone();
                                         new_node.online = false; 
                                         new_node.is_self = false;
                                         cluster.update_remote(new_node);
-                                        // Persist immediately so we remember them
-                                        // The update_remote doesn't save automatically for performance, but adding a new node should
                                         cluster.save_nodes();
                                     }
                                 }
