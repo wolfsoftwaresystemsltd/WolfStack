@@ -6524,6 +6524,38 @@ async function restorePbsSnapshot(snapshot, backupType) {
 }
 
 // ═══════════════════════════════════════════════════
+// Version Check
+// ═══════════════════════════════════════════════════
+
+function checkForUpdates() {
+    var currentVersion = '';
+    var versionEl = document.querySelector('.version');
+    if (versionEl) currentVersion = versionEl.textContent.replace(/^v/i, '').trim();
+    if (!currentVersion) return;
+
+    fetch('https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/main/Cargo.toml')
+        .then(function (r) { return r.text(); })
+        .then(function (text) {
+            var match = text.match(/^version\s*=\s*"([^"]+)"/m);
+            if (!match) return;
+            var latestVersion = match[1];
+            if (latestVersion !== currentVersion) {
+                var banner = document.getElementById('update-banner');
+                var bannerText = document.getElementById('update-banner-text');
+                if (banner) {
+                    banner.style.display = 'block';
+                    if (bannerText) bannerText.textContent = 'Update available: v' + latestVersion + ' (current: v' + currentVersion + ')';
+                }
+            }
+        })
+        .catch(function () { /* silently ignore — no internet or private repo */ });
+}
+
+// Check for updates on page load, then every 6 hours
+setTimeout(checkForUpdates, 5000);
+setInterval(checkForUpdates, 6 * 60 * 60 * 1000);
+
+// ═══════════════════════════════════════════════════
 // AI Agent — Chat & Settings
 // ═══════════════════════════════════════════════════
 

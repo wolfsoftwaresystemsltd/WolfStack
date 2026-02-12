@@ -48,7 +48,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v6.4.1</span>
+                <span class="version">v6.4.2</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -65,6 +65,12 @@
             </div>
         </nav>
         <div class="sidebar-footer">
+            <div id="update-banner" style="display:none;margin-bottom:8px;padding:8px 12px;border-radius:8px;
+                 background:rgba(234,179,8,0.15);border:1px solid rgba(234,179,8,0.3);font-size:12px;
+                 color:var(--text);text-align:center;cursor:pointer;"
+                onclick="window.open('https://github.com/wolfsoftwaresystemsltd/WolfStack/releases','_blank')">
+                🔔 <span id="update-banner-text">Update available</span>
+            </div>
             <button class="btn btn-sm" onclick="selectView('ai-settings')" style="width: 100%; margin-bottom: 8px;">
                 🤖 AI Agent
             </button>
