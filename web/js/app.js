@@ -36,11 +36,15 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter' };
+    const titles = { datacenter: 'Datacenter', 'ai-settings': 'AI Agent' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
         renderDatacenterOverview();
+    } else if (page === 'ai-settings') {
+        loadAiConfig();
+        loadAiStatus();
+        loadAiAlerts();
     }
 }
 
@@ -6517,4 +6521,239 @@ async function restorePbsSnapshot(snapshot, backupType) {
         showToast('PBS restore error: ' + e.message, 'error');
         if (btn) { btn.disabled = false; btn.innerHTML = origText; }
     }
+}
+
+// ═══════════════════════════════════════════════════
+// AI Agent — Chat & Settings
+// ═══════════════════════════════════════════════════
+
+var aiChatOpen = false;
+
+function toggleAiChat() {
+    aiChatOpen = !aiChatOpen;
+    var panel = document.getElementById('ai-chat-panel');
+    var bubble = document.getElementById('ai-chat-bubble');
+    if (panel) {
+        panel.style.display = aiChatOpen ? 'flex' : 'none';
+    }
+    if (bubble) {
+        bubble.style.transform = aiChatOpen ? 'scale(0.9)' : 'scale(1)';
+    }
+    if (aiChatOpen) {
+        var input = document.getElementById('ai-chat-input');
+        if (input) input.focus();
+    }
+}
+
+async function sendAiMessage() {
+    var input = document.getElementById('ai-chat-input');
+    var msg = (input.value || '').trim();
+    if (!msg) return;
+    input.value = '';
+
+    var messages = document.getElementById('ai-chat-messages');
+
+    // Add user message
+    var userDiv = document.createElement('div');
+    userDiv.style.cssText = 'background:var(--accent);color:#fff;border-radius:12px;padding:12px 16px;max-width:85%;align-self:flex-end;font-size:13px;line-height:1.5;';
+    userDiv.textContent = msg;
+    messages.appendChild(userDiv);
+
+    // Add typing indicator
+    var typing = document.createElement('div');
+    typing.id = 'ai-typing';
+    typing.style.cssText = 'background:var(--bg-tertiary);border-radius:12px;padding:12px 16px;max-width:85%;align-self:flex-start;font-size:13px;color:var(--text-muted);';
+    typing.innerHTML = '<span style="animation:pulse 1s infinite;">🐺 Thinking...</span>';
+    messages.appendChild(typing);
+    messages.scrollTop = messages.scrollHeight;
+
+    // Update status
+    var statusEl = document.getElementById('ai-chat-status');
+    if (statusEl) statusEl.textContent = 'Thinking...';
+
+    try {
+        var resp = await fetch(apiUrl('/api/ai/chat'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: msg })
+        });
+        var data = await resp.json();
+
+        // Remove typing indicator
+        var t = document.getElementById('ai-typing');
+        if (t) t.remove();
+
+        // Add response
+        var aiDiv = document.createElement('div');
+        aiDiv.style.cssText = 'background:var(--bg-tertiary);border-radius:12px;padding:12px 16px;max-width:85%;align-self:flex-start;font-size:13px;line-height:1.5;color:var(--text);';
+
+        if (data.error) {
+            aiDiv.innerHTML = '<span style="color:var(--danger);">⚠️ ' + escapeHtml(data.error) + '</span>';
+        } else {
+            aiDiv.innerHTML = formatAiResponse(data.response || '');
+        }
+        messages.appendChild(aiDiv);
+        if (statusEl) statusEl.textContent = 'Ready';
+    } catch (e) {
+        var t = document.getElementById('ai-typing');
+        if (t) t.remove();
+        var errDiv = document.createElement('div');
+        errDiv.style.cssText = 'background:var(--bg-tertiary);border-radius:12px;padding:12px 16px;max-width:85%;align-self:flex-start;font-size:13px;color:var(--danger);';
+        errDiv.textContent = '⚠️ ' + e.message;
+        messages.appendChild(errDiv);
+        if (statusEl) statusEl.textContent = 'Error';
+    }
+
+    messages.scrollTop = messages.scrollHeight;
+}
+
+// Basic markdown formatting for AI responses
+function formatAiResponse(text) {
+    var html = escapeHtml(text);
+    // Bold: **text**
+    html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    // Italic: *text*
+    html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+    // Code blocks: ```code```
+    html = html.replace(/```([\s\S]*?)```/g, '<pre style="background:var(--bg-primary);padding:8px 12px;border-radius:8px;overflow-x:auto;margin:8px 0;font-size:12px;"><code>$1</code></pre>');
+    // Inline code: `code`
+    html = html.replace(/`([^`]+)`/g, '<code style="background:var(--bg-primary);padding:2px 6px;border-radius:4px;font-size:12px;">$1</code>');
+    // Newlines
+    html = html.replace(/\n/g, '<br>');
+    // Lists: - item
+    html = html.replace(/<br>- (.*?)(?=<br>|$)/g, '<br>• $1');
+    return html;
+}
+
+function openAiSettings() {
+    if (aiChatOpen) toggleAiChat();
+    selectView('ai-settings');
+}
+
+async function loadAiConfig() {
+    try {
+        var resp = await fetch(apiUrl('/api/ai/config'));
+        var cfg = await resp.json();
+        var el;
+        if ((el = document.getElementById('ai-provider'))) el.value = cfg.provider || 'claude';
+        if ((el = document.getElementById('ai-claude-key'))) el.value = cfg.has_claude_key ? cfg.claude_api_key : '';
+        if ((el = document.getElementById('ai-gemini-key'))) el.value = cfg.has_gemini_key ? cfg.gemini_api_key : '';
+        if ((el = document.getElementById('ai-model'))) el.value = cfg.model || 'claude-sonnet-4-20250514';
+        if ((el = document.getElementById('ai-email-enabled'))) el.checked = cfg.email_enabled || false;
+        if ((el = document.getElementById('ai-email-to'))) el.value = cfg.email_to || '';
+        if ((el = document.getElementById('ai-smtp-host'))) el.value = cfg.smtp_host || '';
+        if ((el = document.getElementById('ai-smtp-port'))) el.value = cfg.smtp_port || 587;
+        if ((el = document.getElementById('ai-smtp-user'))) el.value = cfg.smtp_user || '';
+        if ((el = document.getElementById('ai-smtp-pass'))) el.value = cfg.has_smtp_pass ? cfg.smtp_pass : '';
+        if ((el = document.getElementById('ai-check-interval'))) el.value = cfg.check_interval_minutes || 60;
+    } catch (e) {
+        console.error('Failed to load AI config:', e);
+    }
+}
+
+async function saveAiConfig() {
+    var config = {
+        provider: (document.getElementById('ai-provider') || {}).value || 'claude',
+        claude_api_key: (document.getElementById('ai-claude-key') || {}).value || '',
+        gemini_api_key: (document.getElementById('ai-gemini-key') || {}).value || '',
+        model: (document.getElementById('ai-model') || {}).value || '',
+        email_enabled: (document.getElementById('ai-email-enabled') || {}).checked || false,
+        email_to: (document.getElementById('ai-email-to') || {}).value || '',
+        smtp_host: (document.getElementById('ai-smtp-host') || {}).value || '',
+        smtp_port: parseInt((document.getElementById('ai-smtp-port') || {}).value) || 587,
+        smtp_user: (document.getElementById('ai-smtp-user') || {}).value || '',
+        smtp_pass: (document.getElementById('ai-smtp-pass') || {}).value || '',
+        check_interval_minutes: parseInt((document.getElementById('ai-check-interval') || {}).value) || 60,
+    };
+    try {
+        var resp = await fetch(apiUrl('/api/ai/config'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        });
+        var data = await resp.json();
+        if (data.status === 'saved') {
+            showToast('AI settings saved', 'success');
+            loadAiStatus();
+        } else {
+            showToast(data.error || 'Failed to save', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function loadAiStatus() {
+    try {
+        var resp = await fetch(apiUrl('/api/ai/status'));
+        var status = await resp.json();
+        var textEl = document.getElementById('ai-status-text');
+        var detailEl = document.getElementById('ai-status-detail');
+        if (textEl) {
+            if (status.configured) {
+                textEl.textContent = '✅ AI Agent Active — ' + status.provider + ' (' + status.model + ')';
+            } else {
+                textEl.textContent = '⚠️ Not Configured — add an API key to enable';
+            }
+        }
+        if (detailEl) {
+            var parts = [];
+            parts.push('Knowledge: ' + Math.round(status.knowledge_base_size / 1024) + 'KB');
+            parts.push('Alerts: ' + status.alert_count);
+            parts.push('Messages: ' + status.chat_message_count);
+            if (status.last_health_check) {
+                parts.push('Last check: ' + (status.last_health_check === 'ALL_OK' ? '✅ OK' : '⚠️ Issues found'));
+            }
+            detailEl.textContent = parts.join(' • ');
+        }
+    } catch (e) {
+        console.error('AI status error:', e);
+    }
+}
+
+async function loadAiAlerts() {
+    try {
+        var resp = await fetch(apiUrl('/api/ai/alerts'));
+        var alerts = await resp.json();
+        var container = document.getElementById('ai-alerts-list');
+        if (!container) return;
+        if (!alerts.length) {
+            container.innerHTML = '<div style="color:var(--text-muted);padding:12px;">No alerts yet — the AI will check your servers periodically</div>';
+            return;
+        }
+        container.innerHTML = alerts.slice(-20).reverse().map(function (a) {
+            var icon = a.severity === 'critical' ? '🔴' : a.severity === 'warning' ? '🟡' : '🔵';
+            var time = new Date(a.timestamp * 1000).toLocaleString();
+            return '<div style="padding:8px;border-bottom:1px solid var(--border);">' +
+                '<div style="display:flex;justify-content:space-between;">' +
+                '<span>' + icon + ' ' + a.severity.toUpperCase() + '</span>' +
+                '<span style="color:var(--text-muted);">' + time + '</span></div>' +
+                '<div style="margin-top:4px;color:var(--text-secondary);">' + escapeHtml(a.message).substring(0, 200) + '</div></div>';
+        }).join('');
+    } catch (e) {
+        console.error('AI alerts error:', e);
+    }
+}
+
+async function testAiConnection() {
+    showToast('Testing AI connection...', 'info');
+    try {
+        var resp = await fetch(apiUrl('/api/ai/chat'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: 'Say "Hello! AI Agent is working." in one short sentence.' })
+        });
+        var data = await resp.json();
+        if (data.error) {
+            showToast('AI Error: ' + data.error, 'error');
+        } else {
+            showToast('✅ AI responded: ' + (data.response || '').substring(0, 100), 'success');
+        }
+    } catch (e) {
+        showToast('Connection failed: ' + e.message, 'error');
+    }
+}
+
+function onAiProviderChange() {
+    // Could highlight relevant key field, but both are always shown
 }

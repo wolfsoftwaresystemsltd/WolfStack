@@ -48,7 +48,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v6.1.8</span>
+                <span class="version">v6.4.0</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -62,6 +62,13 @@
                 <div id="server-tree">
                     <div style="padding: 8px 16px; color: var(--text-muted); font-size: 12px;">Loading...</div>
                 </div>
+            </div>
+        </nav>
+        <nav class="sidebar-nav" style="padding: 0 12px; margin-bottom: 8px;">
+            <div class="nav-section">
+                <a class="nav-item" data-page="ai-settings" onclick="selectView('ai-settings')">
+                    <span class="icon">🤖</span> AI Agent
+                </a>
             </div>
         </nav>
         <div class="sidebar-footer">
@@ -1032,6 +1039,123 @@
                     <p id="vms-empty" style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
                         No virtual machines found. Click <strong>+ Create VM</strong> to start one.
                     </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ AI Agent Settings ═══ -->
+        <div id="page-ai-settings" class="page-view" style="display:none;">
+            <div class="card">
+                <div class="card-header">
+                    <h3>🤖 AI Agent Settings</h3>
+                    <div style="font-size: 12px; color: var(--text-muted);">Configure your AI monitoring assistant</div>
+                </div>
+                <div class="card-body" style="padding:24px;">
+                    <!-- Status Banner -->
+                    <div id="ai-status-banner" style="padding:16px;border-radius:12px;margin-bottom:20px;
+                         background:var(--bg-tertiary);border:1px solid var(--border);">
+                        <div style="display:flex;align-items:center;gap:12px;">
+                            <span style="font-size:32px;">🐺</span>
+                            <div>
+                                <div style="font-weight:600;font-size:14px;" id="ai-status-text">Checking status...
+                                </div>
+                                <div style="font-size:12px;color:var(--text-muted);" id="ai-status-detail">Loading...
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">
+                        <!-- Left Column: Provider & Keys -->
+                        <div>
+                            <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);">🔑 LLM Provider</h4>
+                            <div class="form-group" style="margin-bottom:16px;">
+                                <label>Provider</label>
+                                <select id="ai-provider" class="form-control" onchange="onAiProviderChange()">
+                                    <option value="claude">Claude (Anthropic)</option>
+                                    <option value="gemini">Gemini (Google)</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="margin-bottom:16px;">
+                                <label>Claude API Key</label>
+                                <input type="password" id="ai-claude-key" class="form-control" placeholder="sk-ant-...">
+                            </div>
+                            <div class="form-group" style="margin-bottom:16px;">
+                                <label>Gemini API Key</label>
+                                <input type="password" id="ai-gemini-key" class="form-control" placeholder="AIza...">
+                            </div>
+                            <div class="form-group" style="margin-bottom:16px;">
+                                <label>Model</label>
+                                <select id="ai-model" class="form-control">
+                                    <optgroup label="Claude Models">
+                                        <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
+                                        <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
+                                        <option value="claude-3-haiku-20240307">Claude 3 Haiku (fast)</option>
+                                    </optgroup>
+                                    <optgroup label="Gemini Models">
+                                        <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                                        <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash Lite</option>
+                                        <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                                    </optgroup>
+                                </select>
+                            </div>
+                            <div class="form-group" style="margin-bottom:16px;">
+                                <label>Health Check Interval</label>
+                                <select id="ai-check-interval" class="form-control">
+                                    <option value="15">Every 15 minutes</option>
+                                    <option value="30">Every 30 minutes</option>
+                                    <option value="60" selected>Every hour</option>
+                                    <option value="360">Every 6 hours</option>
+                                    <option value="1440">Daily</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Right Column: Email & Alerts -->
+                        <div>
+                            <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);">📧 Email Alerts</h4>
+                            <div class="form-group" style="margin-bottom:16px;">
+                                <label style="display:flex;align-items:center;gap:8px;">
+                                    <input type="checkbox" id="ai-email-enabled"> Enable email alerts
+                                </label>
+                            </div>
+                            <div id="ai-email-fields">
+                                <div class="form-group" style="margin-bottom:12px;">
+                                    <label>Send alerts to</label>
+                                    <input type="email" id="ai-email-to" class="form-control"
+                                        placeholder="admin@example.com">
+                                </div>
+                                <div class="form-group" style="margin-bottom:12px;">
+                                    <label>SMTP Host</label>
+                                    <input type="text" id="ai-smtp-host" class="form-control"
+                                        placeholder="smtp.gmail.com">
+                                </div>
+                                <div class="form-group" style="margin-bottom:12px;">
+                                    <label>SMTP Port</label>
+                                    <input type="number" id="ai-smtp-port" class="form-control" value="587">
+                                </div>
+                                <div class="form-group" style="margin-bottom:12px;">
+                                    <label>SMTP User</label>
+                                    <input type="text" id="ai-smtp-user" class="form-control">
+                                </div>
+                                <div class="form-group" style="margin-bottom:12px;">
+                                    <label>SMTP Password</label>
+                                    <input type="password" id="ai-smtp-pass" class="form-control">
+                                </div>
+                            </div>
+
+                            <h4 style="margin:20px 0 12px 0;font-size:14px;color:var(--accent-light);">📊 Recent Alerts
+                            </h4>
+                            <div id="ai-alerts-list" style="max-height:200px;overflow-y:auto;font-size:12px;">
+                                <div style="color:var(--text-muted);padding:12px;">No alerts yet</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style="margin-top:20px;display:flex;gap:12px;">
+                        <button class="btn btn-primary" onclick="saveAiConfig()">💾 Save Settings</button>
+                        <button class="btn btn-sm" onclick="testAiConnection()">🧪 Test Connection</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -2149,6 +2273,59 @@ region = us-east-1"></textarea>
                 window.location.href = '/login.html';
             }
         </script>
+        <!-- AI Chat Bubble -->
+        <div id="ai-chat-bubble" onclick="toggleAiChat()" title="Chat with AI Assistant" style="position:fixed;bottom:24px;right:24px;width:56px;height:56px;border-radius:50%;
+                background:linear-gradient(135deg,var(--accent),var(--accent-light));color:#fff;
+                display:flex;align-items:center;justify-content:center;font-size:28px;
+                cursor:pointer;z-index:9999;box-shadow:0 4px 20px rgba(0,0,0,0.4);
+                transition:transform 0.2s,box-shadow 0.2s;">
+            🐺
+        </div>
+
+        <!-- AI Chat Panel -->
+        <div id="ai-chat-panel" style="display:none;position:fixed;bottom:90px;right:24px;width:420px;height:540px;
+         background:var(--bg-secondary);border:1px solid var(--border);border-radius:16px;
+         box-shadow:0 8px 40px rgba(0,0,0,0.5);z-index:9998;overflow:hidden;
+         display:none;flex-direction:column;">
+            <!-- Header -->
+            <div style="padding:16px 20px;background:linear-gradient(135deg,var(--accent),var(--accent-light));
+             display:flex;justify-content:space-between;align-items:center;">
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <span style="font-size:24px;">🐺</span>
+                    <div>
+                        <div style="font-weight:600;color:#fff;font-size:14px;">WolfStack AI</div>
+                        <div id="ai-chat-status" style="font-size:11px;color:rgba(255,255,255,0.7);">Ready</div>
+                    </div>
+                </div>
+                <div style="display:flex;gap:6px;">
+                    <button onclick="openAiSettings()"
+                        style="background:rgba(255,255,255,0.2);border:none;color:#fff;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:12px;"
+                        title="AI Settings">⚙️</button>
+                    <button onclick="toggleAiChat()"
+                        style="background:rgba(255,255,255,0.2);border:none;color:#fff;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:16px;"
+                        title="Close">✕</button>
+                </div>
+            </div>
+            <!-- Messages -->
+            <div id="ai-chat-messages"
+                style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;">
+                <div class="ai-msg ai-msg-assistant"
+                    style="background:var(--bg-tertiary);border-radius:12px;padding:12px 16px;max-width:85%;align-self:flex-start;font-size:13px;line-height:1.5;color:var(--text);">
+                    👋 Hi! I'm your WolfStack AI assistant. I know everything about WolfStack, WolfNet, WolfDisk,
+                    WolfProxy, and WolfServe. Ask me anything about your servers or need help troubleshooting?
+                </div>
+            </div>
+            <!-- Input -->
+            <div style="padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px;">
+                <input type="text" id="ai-chat-input" placeholder="Ask something..."
+                    onkeydown="if(event.key==='Enter')sendAiMessage()" style="flex:1;padding:10px 14px;border-radius:10px;border:1px solid var(--border);
+                          background:var(--bg-primary);color:var(--text);font-size:13px;outline:none;">
+                <button onclick="sendAiMessage()" id="ai-send-btn" style="padding:10px 16px;border-radius:10px;border:none;
+                           background:var(--accent);color:#fff;cursor:pointer;font-size:13px;font-weight:600;
+                           transition:opacity 0.2s;">Send</button>
+            </div>
+        </div>
+
 </body>
 
 </html>

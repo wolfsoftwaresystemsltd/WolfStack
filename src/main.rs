@@ -9,6 +9,7 @@
 
 mod api;
 mod agent;
+mod ai;
 mod auth;
 mod monitoring;
 mod installer;
@@ -144,6 +145,9 @@ async fn main() -> std::io::Result<()> {
         let vm_count = vms_manager.list_vms().len() as u32;
         cluster.update_self(metrics, components, docker_count, lxc_count, vm_count, public_ip.clone());
 
+        // Initialize AI agent
+        let ai_agent = Arc::new(ai::AiAgent::new());
+
         // Create app state
         let app_state = web::Data::new(api::AppState {
             monitor: Mutex::new(mon),
@@ -153,6 +157,7 @@ async fn main() -> std::io::Result<()> {
             vms: Mutex::new(vms_manager),
             cluster_secret: cluster_secret.clone(),
             pbs_restore_progress: Mutex::new(Default::default()),
+            ai_agent: ai_agent.clone(),
         });
 
         // Background: periodic self-monitoring update
@@ -208,6 +213,42 @@ async fn main() -> std::io::Result<()> {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 backup::check_schedules();
+            }
+        });
+
+        // Background: AI health check loop
+        let ai_state = app_state.clone();
+        let ai_agent_bg = ai_agent.clone();
+        tokio::spawn(async move {
+            // Wait 30 seconds after startup before first check
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            loop {
+                let (is_configured, interval) = {
+                    let config = ai_agent_bg.config.lock().unwrap();
+                    let configured = config.is_configured();
+                    let mins = if configured { config.check_interval_minutes as u64 * 60 } else { 300u64 };
+                    (configured, mins)
+                };
+
+                if is_configured {
+                    // Build metrics summary (all locks dropped before await)
+                    let summary = {
+                        let _monitor = ai_state.monitor.lock().unwrap();
+                        let hostname = hostname::get()
+                            .map(|h| h.to_string_lossy().to_string())
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        let docker_count = containers::docker_list_all().len() as u32;
+                        let lxc_count = containers::lxc_list_all().len() as u32;
+                        let vm_count = ai_state.vms.lock().unwrap().list_vms().len() as u32;
+                        ai::build_metrics_summary(
+                            &hostname, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            docker_count, lxc_count, vm_count, 0,
+                        )
+                    };
+                    let _ = ai_agent_bg.health_check(&summary).await;
+                }
+
+                tokio::time::sleep(Duration::from_secs(interval)).await;
             }
         });
 

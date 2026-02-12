@@ -40,6 +40,7 @@ pub struct AppState {
     pub vms: std::sync::Mutex<crate::vms::manager::VmManager>,
     pub cluster_secret: String,
     pub pbs_restore_progress: std::sync::Mutex<PbsRestoreProgress>,
+    pub ai_agent: Arc<crate::ai::AiAgent>,
 }
 
 // ─── Auth helpers ───
@@ -1213,6 +1214,158 @@ async fn list_running_containers(
     HttpResponse::Ok().json(list)
 }
 
+// ─── AI Agent API ───
+
+/// GET /api/ai/config — get AI configuration (keys masked)
+pub async fn ai_get_config(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let config = state.ai_agent.config.lock().unwrap();
+    HttpResponse::Ok().json(config.masked())
+}
+
+/// POST /api/ai/config — save AI configuration
+pub async fn ai_save_config(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let mut config = state.ai_agent.config.lock().unwrap();
+
+    // Update fields — only update keys if not masked values
+    if let Some(v) = body.get("provider").and_then(|v| v.as_str()) {
+        config.provider = v.to_string();
+    }
+    if let Some(v) = body.get("claude_api_key").and_then(|v| v.as_str()) {
+        if !v.contains("••••") && !v.is_empty() {
+            config.claude_api_key = v.to_string();
+        }
+    }
+    if let Some(v) = body.get("gemini_api_key").and_then(|v| v.as_str()) {
+        if !v.contains("••••") && !v.is_empty() {
+            config.gemini_api_key = v.to_string();
+        }
+    }
+    if let Some(v) = body.get("model").and_then(|v| v.as_str()) {
+        config.model = v.to_string();
+    }
+    if let Some(v) = body.get("email_enabled").and_then(|v| v.as_bool()) {
+        config.email_enabled = v;
+    }
+    if let Some(v) = body.get("email_to").and_then(|v| v.as_str()) {
+        config.email_to = v.to_string();
+    }
+    if let Some(v) = body.get("smtp_host").and_then(|v| v.as_str()) {
+        config.smtp_host = v.to_string();
+    }
+    if let Some(v) = body.get("smtp_port").and_then(|v| v.as_u64()) {
+        config.smtp_port = v as u16;
+    }
+    if let Some(v) = body.get("smtp_user").and_then(|v| v.as_str()) {
+        config.smtp_user = v.to_string();
+    }
+    if let Some(v) = body.get("smtp_pass").and_then(|v| v.as_str()) {
+        if !v.contains("••••") && !v.is_empty() {
+            config.smtp_pass = v.to_string();
+        }
+    }
+    if let Some(v) = body.get("check_interval_minutes").and_then(|v| v.as_u64()) {
+        config.check_interval_minutes = v as u32;
+    }
+
+    match config.save() {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({"status": "saved"})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+    }
+}
+
+/// POST /api/ai/chat — send a message to the AI agent
+#[derive(Deserialize)]
+pub struct AiChatRequest {
+    pub message: String,
+}
+
+pub async fn ai_chat(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<AiChatRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    // Build server context for the AI
+    let server_context = {
+        let hostname = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        let _metrics = {
+            let _mon = state.monitor.lock().unwrap();
+            serde_json::json!({
+                "hostname": hostname,
+            })
+        };
+
+        let docker_count = crate::containers::docker_list_all().len();
+        let lxc_count = crate::containers::lxc_list_all().len();
+        let vm_count = state.vms.lock().unwrap().list_vms().len();
+        let components = crate::installer::get_all_status();
+
+        let node_info = {
+            let cluster = &state.cluster;
+            let nodes = cluster.get_all_nodes();
+            let node_names: Vec<String> = nodes.iter().map(|n| format!("{} ({})", n.hostname, if n.online { "online" } else { "offline" })).collect();
+            node_names.join(", ")
+        };
+
+        format!(
+            "Hostname: {}\nDocker containers: {}\nLXC containers: {}\nVirtual machines: {}\n\
+             Components: {}\nCluster nodes: {}",
+            hostname, docker_count, lxc_count, vm_count,
+            components.iter().map(|c| format!("{:?}: {}", c.component, if c.running { "running" } else { "stopped" })).collect::<Vec<_>>().join(", "),
+            node_info,
+        )
+    };
+
+    match state.ai_agent.chat(&body.message, &server_context).await {
+        Ok(response) => HttpResponse::Ok().json(serde_json::json!({
+            "response": response,
+        })),
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({
+            "error": e,
+        })),
+    }
+}
+
+/// GET /api/ai/status — agent status and last health check
+pub async fn ai_status(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let config = state.ai_agent.config.lock().unwrap();
+    let last_check = state.ai_agent.last_health_check.lock().unwrap().clone();
+    let alert_count = state.ai_agent.alerts.lock().unwrap().len();
+    let history_count = state.ai_agent.chat_history.lock().unwrap().len();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "configured": config.is_configured(),
+        "provider": config.provider,
+        "model": config.model,
+        "last_health_check": last_check,
+        "alert_count": alert_count,
+        "chat_message_count": history_count,
+        "knowledge_base_size": state.ai_agent.knowledge_base.len(),
+    }))
+}
+
+/// GET /api/ai/alerts — historical alerts
+pub async fn ai_alerts(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let alerts = state.ai_agent.alerts.lock().unwrap().clone();
+    HttpResponse::Ok().json(alerts)
+}
+
 // ─── Networking API ───
 
 /// GET /api/networking/interfaces — list all network interfaces
@@ -2248,6 +2401,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // WolfNet
         .route("/api/wolfnet/status", web::get().to(wolfnet_network_status))
         .route("/api/wolfnet/next-ip", web::get().to(wolfnet_next_ip))
+        // AI Agent
+        .route("/api/ai/config", web::get().to(ai_get_config))
+        .route("/api/ai/config", web::post().to(ai_save_config))
+        .route("/api/ai/chat", web::post().to(ai_chat))
+        .route("/api/ai/status", web::get().to(ai_status))
+        .route("/api/ai/alerts", web::get().to(ai_alerts))
         // Storage Manager
         .route("/api/storage/mounts", web::get().to(storage_list_mounts))
         .route("/api/storage/mounts", web::post().to(storage_create_mount))
