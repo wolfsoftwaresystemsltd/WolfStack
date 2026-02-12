@@ -12,6 +12,37 @@ let diskHistory = {}; // mount_point -> array of {timestamp, usage_percent}
 const MAX_HISTORY = 300; // 10 minutes at 2s intervals
 let displayRange = 150; // default 5 minutes (150 samples at 2s)
 
+// ─── Modal Dialog (replaces alert()) ───
+function showModal(message, title) {
+    title = title || 'WolfStack';
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
+    var modal = document.createElement('div');
+    modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:480px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit';
+    var h = document.createElement('div');
+    h.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:14px;color:var(--accent-light,#60a5fa);display:flex;align-items:center;gap:8px';
+    h.textContent = title;
+    var body = document.createElement('div');
+    body.style.cssText = 'font-size:13px;line-height:1.6;color:var(--text-secondary,#a1a1aa);white-space:pre-wrap;word-break:break-word;max-height:300px;overflow-y:auto';
+    body.textContent = message;
+    var btnWrap = document.createElement('div');
+    btnWrap.style.cssText = 'margin-top:18px;text-align:right';
+    var btn = document.createElement('button');
+    btn.textContent = 'OK';
+    btn.style.cssText = 'background:var(--accent,#3b82f6);color:#fff;border:none;border-radius:6px;padding:8px 24px;cursor:pointer;font-size:13px;font-weight:500;transition:background 0.2s';
+    btn.onmouseenter = function () { btn.style.background = 'var(--accent-light,#60a5fa)'; };
+    btn.onmouseleave = function () { btn.style.background = 'var(--accent,#3b82f6)'; };
+    btn.onclick = function () { overlay.remove(); };
+    overlay.onclick = function (e) { if (e.target === overlay) overlay.remove(); };
+    btnWrap.appendChild(btn);
+    modal.appendChild(h);
+    modal.appendChild(body);
+    modal.appendChild(btnWrap);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    btn.focus();
+}
+
 // ─── API URL helper — route through proxy for remote nodes ───
 function apiUrl(path) {
     if (!currentNodeId) return path; // datacenter view
@@ -1605,7 +1636,7 @@ async function createStorageMount() {
     const global = document.getElementById('mount-global').checked;
     const auto_mount = document.getElementById('mount-auto').checked;
 
-    if (!name) return alert('Name is required');
+    if (!name) return showModal('Name is required');
 
     let source = '';
     let s3_config = null;
@@ -1615,7 +1646,7 @@ async function createStorageMount() {
         const bucket = document.getElementById('s3-bucket').value.trim();
         const access_key_id = document.getElementById('s3-access-key').value.trim();
         const secret_access_key = document.getElementById('s3-secret-key').value.trim();
-        if (!access_key_id || !secret_access_key) return alert('S3 Access Key and Secret Key are required');
+        if (!access_key_id || !secret_access_key) return showModal('S3 Access Key and Secret Key are required');
         s3_config = {
             access_key_id,
             secret_access_key,
@@ -1628,13 +1659,13 @@ async function createStorageMount() {
     } else if (type === 'nfs') {
         source = document.getElementById('nfs-source').value.trim();
         nfs_options = document.getElementById('nfs-options').value.trim() || null;
-        if (!source) return alert('NFS source is required (e.g. 192.168.1.100:/data)');
+        if (!source) return showModal('NFS source is required (e.g. 192.168.1.100:/data)');
     } else if (type === 'directory') {
         source = document.getElementById('dir-source').value.trim();
-        if (!source) return alert('Source directory is required');
+        if (!source) return showModal('Source directory is required');
     } else if (type === 'wolfdisk') {
         source = document.getElementById('wolfdisk-source').value.trim();
-        if (!source) return alert('WolfDisk path is required');
+        if (!source) return showModal('WolfDisk path is required');
     }
 
     const payload = { name, type, source, mount_point, global, auto_mount, s3_config, nfs_options, do_mount: true };
@@ -1650,7 +1681,7 @@ async function createStorageMount() {
         closeMountModal();
         loadStorageMounts();
     } catch (e) {
-        alert('Error creating mount: ' + e.message);
+        showModal('Error creating mount: ' + e.message);
     }
 }
 
@@ -1722,7 +1753,7 @@ async function deleteStorageMount(id, name) {
         if (!resp.ok) throw new Error(data.error || 'Delete failed');
         loadStorageMounts();
     } catch (e) {
-        alert('Delete error: ' + e.message);
+        showModal('Delete error: ' + e.message);
     }
 }
 
@@ -1733,10 +1764,10 @@ async function syncStorageMount(id) {
         if (!resp.ok) throw new Error(data.error || 'Sync failed');
         const results = data.results || [];
         const summary = results.map(r => `${r.node}: ${r.status}`).join('\n');
-        alert(`Sync complete:\n${summary || 'No remote nodes'}`);
+        showModal('Sync complete:\n' + (summary || 'No remote nodes'), 'Storage Sync');
         loadStorageMounts();
     } catch (e) {
-        alert('Sync error: ' + e.message);
+        showModal('Sync error: ' + e.message);
     }
 }
 
@@ -1750,7 +1781,7 @@ async function duplicateStorageMount(id) {
         // Open the edit modal for the newly created duplicate
         openEditMount(data.id);
     } catch (e) {
-        alert('Duplicate error: ' + e.message);
+        showModal('Duplicate error: ' + e.message);
     }
 }
 
@@ -1758,7 +1789,7 @@ async function duplicateStorageMount(id) {
 
 function openEditMount(id) {
     const m = allStorageMounts.find(x => x.id === id);
-    if (!m) return alert('Mount not found');
+    if (!m) return showModal('Mount not found');
 
     document.getElementById('edit-mount-id').value = m.id;
     document.getElementById('edit-mount-name').value = m.name;
@@ -1811,7 +1842,7 @@ async function saveStorageMountEdit() {
     const global = document.getElementById('edit-mount-global').checked;
     const auto_mount = document.getElementById('edit-mount-auto').checked;
 
-    if (!name) return alert('Name is required');
+    if (!name) return showModal('Name is required');
 
     const payload = { name, mount_point, global, auto_mount };
 
@@ -1856,13 +1887,13 @@ async function saveStorageMountEdit() {
             }
         }
     } catch (e) {
-        alert('Error saving mount: ' + e.message);
+        showModal('Error saving mount: ' + e.message);
     }
 }
 
 async function importRcloneConfig() {
     const config = document.getElementById('rclone-config-paste').value.trim();
-    if (!config) return alert('Please paste your rclone.conf contents');
+    if (!config) return showModal('Please paste your rclone.conf contents');
 
     try {
         const resp = await fetch(apiUrl('/api/storage/import-rclone'), {
@@ -1873,10 +1904,10 @@ async function importRcloneConfig() {
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Import failed');
         closeImportRcloneModal();
-        alert(data.message || 'Import complete');
+        showModal(data.message || 'Import complete', 'Import');
         loadStorageMounts();
     } catch (e) {
-        alert('Import error: ' + e.message);
+        showModal('Import error: ' + e.message);
     }
 }
 
@@ -2643,7 +2674,7 @@ async function saveDns(nameservers, searchDomains) {
         showToast(data.message || 'DNS updated', 'success');
         loadNetworking();
     } catch (e) {
-        alert('DNS update failed: ' + e.message);
+        showModal('DNS update failed: ' + e.message);
     }
 }
 
@@ -2652,8 +2683,8 @@ function addDnsNameserver() {
     const ns = input.value.trim();
     if (!ns) return;
     // Basic IP validation
-    if (!/^[\d.:a-fA-F]+$/.test(ns)) { alert('Invalid IP address'); return; }
-    if (currentDns.nameservers.includes(ns)) { alert('Already exists'); return; }
+    if (!/^[\d.:a-fA-F]+$/.test(ns)) { showModal('Invalid IP address'); return; }
+    if (currentDns.nameservers.includes(ns)) { showModal('Already exists'); return; }
     const updated = [...currentDns.nameservers, ns];
     saveDns(updated, currentDns.search_domains);
 }
@@ -2669,8 +2700,8 @@ function addDnsSearchDomain() {
     const input = document.getElementById('dns-new-domain');
     const domain = input.value.trim();
     if (!domain) return;
-    if (!/^[a-zA-Z0-9.-]+$/.test(domain)) { alert('Invalid domain'); return; }
-    if (currentDns.search_domains.includes(domain)) { alert('Already exists'); return; }
+    if (!/^[a-zA-Z0-9.-]+$/.test(domain)) { showModal('Invalid domain'); return; }
+    if (currentDns.search_domains.includes(domain)) { showModal('Already exists'); return; }
     const updated = [...currentDns.search_domains, domain];
     saveDns(currentDns.nameservers, updated);
 }
@@ -2695,7 +2726,7 @@ async function toggleInterface(name, up) {
         showToast(data.message, 'success');
         loadNetworking();
     } catch (e) {
-        alert('Error: ' + e.message);
+        showModal('Error: ' + e.message);
     }
 }
 
@@ -2714,7 +2745,7 @@ async function addIpAddress() {
     const iface = document.getElementById('add-ip-interface').value;
     const address = document.getElementById('add-ip-address').value.trim();
     const prefix = parseInt(document.getElementById('add-ip-prefix').value);
-    if (!address) { alert('Please enter an IP address'); return; }
+    if (!address) { showModal('Please enter an IP address'); return; }
 
     try {
         const resp = await fetch(apiUrl(`/api/networking/interfaces/${iface}/ip`), {
@@ -2728,7 +2759,7 @@ async function addIpAddress() {
         showToast(data.message, 'success');
         loadNetworking();
     } catch (e) {
-        alert('Error: ' + e.message);
+        showModal('Error: ' + e.message);
     }
 }
 
@@ -2745,7 +2776,7 @@ async function removeIpAddress(iface, address, prefix) {
         showToast(data.message, 'success');
         loadNetworking();
     } catch (e) {
-        alert('Error: ' + e.message);
+        showModal('Error: ' + e.message);
     }
 }
 
@@ -2769,7 +2800,7 @@ async function createVlan() {
     const parent = document.getElementById('vlan-parent').value;
     const vlan_id = parseInt(document.getElementById('vlan-id').value);
     const name = document.getElementById('vlan-name').value.trim() || null;
-    if (!parent || !vlan_id || vlan_id < 1 || vlan_id > 4094) { alert('Please select a parent and enter a valid VLAN ID (1-4094)'); return; }
+    if (!parent || !vlan_id || vlan_id < 1 || vlan_id > 4094) { showModal('Please select a parent and enter a valid VLAN ID (1-4094)'); return; }
 
     try {
         const resp = await fetch(apiUrl('/api/networking/vlans'), {
@@ -2783,7 +2814,7 @@ async function createVlan() {
         showToast(data.message, 'success');
         loadNetworking();
     } catch (e) {
-        alert('Error: ' + e.message);
+        showModal('Error: ' + e.message);
     }
 }
 
@@ -2796,7 +2827,7 @@ async function deleteVlan(name) {
         showToast(data.message, 'success');
         loadNetworking();
     } catch (e) {
-        alert('Error: ' + e.message);
+        showModal('Error: ' + e.message);
     }
 }
 
@@ -2812,7 +2843,7 @@ async function wolfnetAction(action) {
         showToast(`WolfNet ${action}: ${data.message}`, 'success');
         setTimeout(loadNetworking, 2000);
     } catch (e) {
-        alert('WolfNet error: ' + e.message);
+        showModal('WolfNet error: ' + e.message);
     }
 }
 
@@ -2909,8 +2940,8 @@ async function createIpMapping() {
     const protocol = document.getElementById('mapping-protocol').value;
     const label = document.getElementById('mapping-label').value.trim() || null;
 
-    if (!public_ip) { alert('Please enter a public IP address'); return; }
-    if (!wolfnet_ip) { alert('Please enter a WolfNet IP address'); return; }
+    if (!public_ip) { showModal('Please enter a public IP address'); return; }
+    if (!wolfnet_ip) { showModal('Please enter a WolfNet IP address'); return; }
 
     try {
         const resp = await fetch(apiUrl('/api/networking/ip-mappings'), {
@@ -2924,7 +2955,7 @@ async function createIpMapping() {
         showToast(data.message, 'success');
         loadNetworking();
     } catch (e) {
-        alert('Error: ' + e.message);
+        showModal('Error: ' + e.message);
     }
 }
 
@@ -2937,7 +2968,7 @@ async function removeIpMapping(id, publicIp, wolfnetIp) {
         showToast(data.message, 'success');
         loadNetworking();
     } catch (e) {
-        alert('Error: ' + e.message);
+        showModal('Error: ' + e.message);
     }
 }
 
@@ -3231,8 +3262,8 @@ async function addWolfNetPeer() {
     const endpoint = document.getElementById('peer-endpoint').value.trim();
     const public_key = document.getElementById('peer-public-key').value.trim();
 
-    if (!name) { alert('Please enter a peer name'); return; }
-    if (!ip) { alert('Please enter the peer\'s WolfNet IP address'); return; }
+    if (!name) { showModal('Please enter a peer name'); return; }
+    if (!ip) { showModal('Please enter the peer\'s WolfNet IP address'); return; }
 
     try {
         const resp = await fetch(apiUrl('/api/networking/wolfnet/peers'), {
@@ -3258,7 +3289,7 @@ async function addWolfNetPeer() {
         }
         setTimeout(loadWolfNet, 2000);
     } catch (e) {
-        alert('Error: ' + e.message);
+        showModal('Error: ' + e.message);
     }
 }
 
@@ -3288,7 +3319,7 @@ async function removeWolfNetPeer(name) {
         showToast(data.message || 'Peer removed', 'success');
         setTimeout(loadWolfNet, 2000);
     } catch (e) {
-        alert('Error: ' + e.message);
+        showModal('Error: ' + e.message);
     }
 }
 
@@ -3337,7 +3368,7 @@ async function saveWolfNetSettings() {
         showToast('WolfNet restarted', 'success');
         setTimeout(loadWolfNet, 2000);
     } catch (e) {
-        alert('Error: ' + e.message);
+        showModal('Error: ' + e.message);
     }
 }
 
@@ -3362,7 +3393,7 @@ async function saveWolfNetConfig() {
         showToast('WolfNet restarted', 'success');
         setTimeout(loadWolfNet, 2000);
     } catch (e) {
-        alert('Error: ' + e.message);
+        showModal('Error: ' + e.message);
     }
 }
 
@@ -3378,7 +3409,7 @@ async function wolfnetServiceAction(action) {
         showToast(`WolfNet ${action}: success`, 'success');
         setTimeout(loadWolfNet, 2000);
     } catch (e) {
-        alert('WolfNet error: ' + e.message);
+        showModal('WolfNet error: ' + e.message);
     }
 }
 
@@ -6750,15 +6781,15 @@ async function saveAiConfig() {
         });
         var data = await resp.json();
         if (data.status === 'saved') {
-            alert('Settings Saved');
+            showModal('Settings Saved');
             loadAiStatus();
             // Refresh models list after save (in case key changed)
             fetchAiModels(config.provider, config.model);
         } else {
-            alert('Error: ' + (data.error || 'Failed to save'));
+            showModal('Error: ' + (data.error || 'Failed to save'));
         }
     } catch (e) {
-        alert('Error: ' + e.message);
+        showModal('Error: ' + e.message);
     }
 }
 
@@ -6844,12 +6875,12 @@ async function testAiConnection() {
         });
         var data = await resp.json();
         if (data.error) {
-            alert('AI Error: ' + data.error);
+            showModal('AI Error: ' + data.error);
         } else {
-            alert('✅ AI responded: ' + (data.response || '').substring(0, 200));
+            showModal('✅ AI responded: ' + (data.response || '').substring(0, 200));
         }
     } catch (e) {
-        alert('Connection failed: ' + e.message);
+        showModal('Connection failed: ' + e.message);
     }
 }
 

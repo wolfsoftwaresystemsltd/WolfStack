@@ -1938,6 +1938,31 @@ pub fn lxc_set_network_link(container: &str, link: &str) -> Result<String, Strin
 pub fn next_available_wolfnet_ip() -> Option<String> {
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // Scan WolfNet config for node's own IP and all peer IPs
+    if let Ok(content) = std::fs::read_to_string("/etc/wolfnet/config.toml") {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            // Node's own address: address = "10.10.10.3"
+            if trimmed.starts_with("address") && trimmed.contains('=') {
+                if let Some(val) = trimmed.split('=').nth(1) {
+                    let ip = val.trim().trim_matches('"').trim().to_string();
+                    if !ip.is_empty() { used.insert(ip); }
+                }
+            }
+            // Peer allowed_ip: allowed_ip = "10.10.10.1"
+            if trimmed.starts_with("allowed_ip") && trimmed.contains('=') {
+                if let Some(val) = trimmed.split('=').nth(1) {
+                    let ip = val.trim().trim_matches('"').trim().to_string();
+                    if !ip.is_empty() { used.insert(ip); }
+                }
+            }
+        }
+    }
+
+    // Also reserve .1 (usually gateway) and .255 (broadcast)
+    used.insert("10.10.10.1".to_string());
+    used.insert("10.10.10.255".to_string());
+
     // Scan all LXC containers for WolfNet IPs
     if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
         for entry in entries.flatten() {
