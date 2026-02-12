@@ -105,6 +105,7 @@ function selectServerView(nodeId, view) {
         networking: 'Networking',
         wolfnet: 'WolfNet',
         certificates: 'Certificates',
+        'pve-resources': 'VMs & Containers',
     };
     document.getElementById('page-title').textContent = `${hostname} — ${viewTitles[view] || view}`;
     document.getElementById('hostname-display').textContent = `${hostname} (${node?.address}:${node?.port})`;
@@ -159,6 +160,7 @@ function selectServerView(nodeId, view) {
     if (view === 'networking') loadNetworking();
     if (view === 'backups') loadBackups();
     if (view === 'wolfnet') loadWolfNet();
+    if (view === 'pve-resources') renderPveResourcesView(nodeId);
 }
 
 // ─── Server Tree ───
@@ -191,15 +193,22 @@ function buildServerTree(nodes) {
 
     tree.innerHTML = sorted.map(node => {
         const shouldExpand = isFirstBuild ? node.is_self : expandedNodes.has(node.id);
-        return `
-        <div class="server-tree-node">
-            <div class="server-node-header" onclick="toggleServerNode('${node.id}')">
-                <span class="tree-toggle ${shouldExpand ? 'expanded' : ''}" id="toggle-${node.id}">▶</span>
-                <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
-                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">🖥️ ${node.hostname}</span>
-                ${node.is_self ? '<span class="self-badge">this</span>' : `<span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemoveServer('${node.id}', '${node.hostname}')" title="Remove server">🗑️</span>`}
-            </div>
-            <div class="server-node-children ${shouldExpand ? 'expanded' : ''}" id="children-${node.id}">
+        const isPve = node.node_type === 'proxmox';
+        const nodeIcon = isPve ? '🟠' : '🖥️';
+
+        // Build child items based on node type
+        let childItems = '';
+        if (isPve) {
+            childItems = `
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="dashboard" onclick="selectServerView('${node.id}', 'dashboard')">
+                    <span class="icon">📊</span> Dashboard
+                </a>
+                <a class="nav-item server-child-item" data-node="${node.id}" data-view="pve-resources" onclick="selectServerView('${node.id}', 'pve-resources')">
+                    <span class="icon">🖥️</span> VMs & Containers
+                    ${(node.vm_count || node.lxc_count) ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${(node.vm_count || 0) + (node.lxc_count || 0)}</span>` : ''}
+                </a>`;
+        } else {
+            childItems = `
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="dashboard" onclick="selectServerView('${node.id}', 'dashboard')">
                     <span class="icon">📊</span> Dashboard
                 </a>
@@ -240,7 +249,19 @@ function buildServerTree(nodes) {
 
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
                     <span class="icon">💻</span> Terminal
-                </a>
+                </a>`;
+        }
+
+        return `
+        <div class="server-tree-node">
+            <div class="server-node-header" onclick="toggleServerNode('${node.id}')">
+                <span class="tree-toggle ${shouldExpand ? 'expanded' : ''}" id="toggle-${node.id}">▶</span>
+                <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
+                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${nodeIcon} ${node.hostname}</span>
+                ${node.is_self ? '<span class="self-badge">this</span>' : `<span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemoveServer('${node.id}', '${node.hostname}')" title="Remove server">🗑️</span>`}
+            </div>
+            <div class="server-node-children ${shouldExpand ? 'expanded' : ''}" id="children-${node.id}">
+                ${childItems}
             </div>
         </div>
     `}).join('');
@@ -2236,15 +2257,17 @@ async function addServer() {
     var payload = { address, port, node_type: nodeType };
 
     if (nodeType === 'proxmox') {
-        var pveToken = (document.getElementById('new-pve-token') || {}).value.trim();
+        var pveTokenId = (document.getElementById('new-pve-token-id') || {}).value.trim();
+        var pveTokenSecret = (document.getElementById('new-pve-token-secret') || {}).value.trim();
         var pveName = (document.getElementById('new-pve-node-name') || {}).value.trim();
         var pveFingerprint = (document.getElementById('new-pve-fingerprint') || {}).value.trim();
 
-        if (!pveToken || !pveName) {
-            showToast('PVE Node Name and API Token are required', 'error');
+        if (!pveTokenId || !pveTokenSecret || !pveName) {
+            showToast('PVE Node Name, Token ID, and Token Secret are required', 'error');
             return;
         }
-        payload.pve_token = pveToken;
+        // Combine into PVE API token format: user@pam!tokenid=secret-uuid
+        payload.pve_token = pveTokenId + '=' + pveTokenSecret;
         payload.pve_node_name = pveName;
         if (pveFingerprint) payload.pve_fingerprint = pveFingerprint;
     }
@@ -2264,7 +2287,8 @@ async function addServer() {
         showToast(label + ' ' + address + ' added', 'success');
         closeModal();
         document.getElementById('new-server-address').value = '';
-        if (document.getElementById('new-pve-token')) document.getElementById('new-pve-token').value = '';
+        if (document.getElementById('new-pve-token-id')) document.getElementById('new-pve-token-id').value = '';
+        if (document.getElementById('new-pve-token-secret')) document.getElementById('new-pve-token-secret').value = '';
         if (document.getElementById('new-pve-node-name')) document.getElementById('new-pve-node-name').value = '';
         if (document.getElementById('new-pve-fingerprint')) document.getElementById('new-pve-fingerprint').value = '';
         fetchNodes();
@@ -2304,6 +2328,60 @@ async function loadPveResources(nodeId) {
         showToast('Failed to load PVE resources: ' + e.message, 'error');
         return [];
     }
+}
+
+async function renderPveResourcesView(nodeId) {
+    const container = document.getElementById('pve-resources-content');
+    if (!container) return;
+    container.innerHTML = '<div style="text-align:center; padding:40px; color:var(--text-muted);">Loading PVE resources...</div>';
+
+    const guests = await loadPveResources(nodeId);
+    if (!guests || guests.length === 0) {
+        container.innerHTML = '<div style="text-align:center; padding:40px; color:var(--text-muted);">No VMs or containers found on this Proxmox node.</div>';
+        return;
+    }
+
+    const vms = guests.filter(g => g.guest_type === 'qemu');
+    const cts = guests.filter(g => g.guest_type === 'lxc');
+
+    function guestRow(g) {
+        const statusColor = g.status === 'running' ? 'var(--success)' : 'var(--text-muted)';
+        const statusDot = g.status === 'running' ? '●' : '○';
+        const memMB = Math.round(g.maxmem / 1024 / 1024);
+        const memUsedMB = Math.round(g.mem / 1024 / 1024);
+        const diskGB = (g.maxdisk / 1024 / 1024 / 1024).toFixed(1);
+        const typeIcon = g.guest_type === 'qemu' ? '🖥️' : '📦';
+        const actions = g.status === 'running'
+            ? `<button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'shutdown')" style="font-size:11px; padding:2px 8px;">⏹ Stop</button>
+               <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'reboot')" style="font-size:11px; padding:2px 8px;">🔄 Reboot</button>`
+            : `<button class="btn btn-sm btn-primary" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'start')" style="font-size:11px; padding:2px 8px;">▶ Start</button>`;
+
+        return `<tr>
+            <td>${typeIcon} ${g.vmid}</td>
+            <td>${g.name || '—'}</td>
+            <td><span style="color:${statusColor};">${statusDot}</span> ${g.status}</td>
+            <td>${g.cpus}</td>
+            <td>${memUsedMB} / ${memMB} MB</td>
+            <td>${diskGB} GB</td>
+            <td>${actions}</td>
+        </tr>`;
+    }
+
+    let html = '';
+    if (vms.length > 0) {
+        html += `<h3 style="margin:0 0 12px;">🖥️ Virtual Machines (${vms.length})</h3>
+        <table class="table"><thead><tr>
+            <th>VMID</th><th>Name</th><th>Status</th><th>CPUs</th><th>Memory</th><th>Disk</th><th>Actions</th>
+        </tr></thead><tbody>${vms.map(guestRow).join('')}</tbody></table>`;
+    }
+    if (cts.length > 0) {
+        html += `<h3 style="margin:24px 0 12px;">📦 Containers (${cts.length})</h3>
+        <table class="table"><thead><tr>
+            <th>CTID</th><th>Name</th><th>Status</th><th>CPUs</th><th>Memory</th><th>Disk</th><th>Actions</th>
+        </tr></thead><tbody>${cts.map(guestRow).join('')}</tbody></table>`;
+    }
+
+    container.innerHTML = html;
 }
 
 async function pveGuestAction(nodeId, vmid, action) {

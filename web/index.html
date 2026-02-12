@@ -1199,6 +1199,19 @@
             </div>
         </div>
 
+        <!-- ═══ PVE Resources (Proxmox VMs & Containers) ═══ -->
+        <div id="page-pve-resources" class="page-view" style="display:none;">
+            <div class="card">
+                <div class="card-header">
+                    <h3>🟠 Proxmox VMs & Containers</h3>
+                </div>
+                <div class="card-body" id="pve-resources-content">
+                    <div style="text-align:center; padding:40px; color:var(--text-muted);">Select a Proxmox node to view
+                        resources.</div>
+                </div>
+            </div>
+        </div>
+
         <!-- ═══ WolfNet Management ═══ -->
         <div id="page-wolfnet" class="page-view" style="display:none;">
             <!-- WolfNet Status Banner -->
@@ -2238,22 +2251,25 @@ region = us-east-1"></textarea>
                     <div class="form-group">
                         <label>PVE Node Name</label>
                         <input type="text" class="form-control" id="new-pve-node-name"
-                            placeholder="pve1 (as shown in Proxmox UI)">
+                            placeholder="pve1 (as shown in Proxmox sidebar)">
                     </div>
                     <div class="form-group">
-                        <label>API Token</label>
-                        <input type="text" class="form-control" id="new-pve-token"
-                            placeholder="user@pam!tokenid=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                        <label>Token ID</label>
+                        <input type="text" class="form-control" id="new-pve-token-id" placeholder="root@pam!wolfstack">
+                        <small style="color: var(--text-muted);">From Proxmox: Datacenter → Permissions → API
+                            Tokens</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Token Secret</label>
+                        <input type="text" class="form-control" id="new-pve-token-secret"
+                            placeholder="a2e0dcfb-f3eb-4674-965d-0dda7974ba73">
+                        <small style="color: var(--text-muted);">Shown only once when creating the token</small>
                     </div>
                     <div class="form-group">
                         <label>TLS Fingerprint (optional)</label>
                         <input type="text" class="form-control" id="new-pve-fingerprint"
-                            placeholder="XX:XX:XX:... (leave blank to skip verification)">
+                            placeholder="Leave blank for self-signed certs">
                     </div>
-                    <p style="font-size: 12px; color: var(--text-muted);">
-                        Create an API token in Proxmox: Datacenter → Permissions → API Tokens.<br>
-                        Ensure the token has at least PVEAuditor + PVEVMUser roles.
-                    </p>
                 </div>
                 <p id="wolfstack-hint" style="font-size: 12px; color: var(--text-muted);">
                     If using WolfNet, enter the WolfNet IP (e.g. 10.10.10.x).
