@@ -1497,7 +1497,14 @@ function initCharts() {
 async function fetchNodes() {
     try {
         const resp = await fetch('/api/nodes');
-        const nodes = await resp.json();
+        const data = await resp.json();
+        // Support both new { version, nodes } format and legacy array format
+        const nodes = Array.isArray(data) ? data : (data.nodes || []);
+        // Update version display from backend
+        if (data.version) {
+            var versionEl = document.querySelector('.version');
+            if (versionEl) versionEl.textContent = 'v' + data.version;
+        }
 
         // Only rebuild sidebar tree if node list structure changed (NOT online status)
         var treeChanged = false;

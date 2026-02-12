@@ -178,7 +178,10 @@ pub async fn get_metrics_history(req: HttpRequest, state: web::Data<AppState>) -
 pub async fn get_nodes(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let nodes = state.cluster.get_all_nodes();
-    HttpResponse::Ok().json(nodes)
+    HttpResponse::Ok().json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "nodes": nodes,
+    }))
 }
 
 /// GET /api/nodes/{id} — single node details
