@@ -4,7 +4,7 @@ use actix_web::{web, HttpResponse, HttpRequest, cookie::Cookie};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::process::Command;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::monitoring::{SystemMonitor, MetricsHistory};
 use crate::installer;
@@ -1231,53 +1231,100 @@ pub async fn ai_save_config(
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let config_json;
+    {
+        let mut config = state.ai_agent.config.lock().unwrap();
+
+        // Update fields — only update keys if not masked values
+        if let Some(v) = body.get("provider").and_then(|v| v.as_str()) {
+            config.provider = v.to_string();
+        }
+        if let Some(v) = body.get("claude_api_key").and_then(|v| v.as_str()) {
+            if !v.contains("••••") && !v.is_empty() {
+                config.claude_api_key = v.to_string();
+            }
+        }
+        if let Some(v) = body.get("gemini_api_key").and_then(|v| v.as_str()) {
+            if !v.contains("••••") && !v.is_empty() {
+                config.gemini_api_key = v.to_string();
+            }
+        }
+        if let Some(v) = body.get("model").and_then(|v| v.as_str()) {
+            config.model = v.to_string();
+        }
+        if let Some(v) = body.get("email_enabled").and_then(|v| v.as_bool()) {
+            config.email_enabled = v;
+        }
+        if let Some(v) = body.get("email_to").and_then(|v| v.as_str()) {
+            config.email_to = v.to_string();
+        }
+        if let Some(v) = body.get("smtp_host").and_then(|v| v.as_str()) {
+            config.smtp_host = v.to_string();
+        }
+        if let Some(v) = body.get("smtp_port").and_then(|v| v.as_u64()) {
+            config.smtp_port = v as u16;
+        }
+        if let Some(v) = body.get("smtp_user").and_then(|v| v.as_str()) {
+            config.smtp_user = v.to_string();
+        }
+        if let Some(v) = body.get("smtp_pass").and_then(|v| v.as_str()) {
+            if !v.contains("••••") && !v.is_empty() {
+                config.smtp_pass = v.to_string();
+            }
+        }
+        if let Some(v) = body.get("check_interval_minutes").and_then(|v| v.as_u64()) {
+            config.check_interval_minutes = v as u32;
+        }
+
+        if let Err(e) = config.save() {
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": e}));
+        }
+
+        // Serialize full config (with real keys) for cluster sync
+        config_json = serde_json::to_value(&*config).unwrap_or_default();
+    }
+
+    // Broadcast to all online cluster nodes in the background
+    let cluster_secret = state.cluster_secret.clone();
+    let nodes = state.cluster.get_all_nodes();
+    let client = reqwest::Client::new();
+    for node in nodes.iter().filter(|n| !n.is_self && n.online) {
+        let url = format!("http://{}:{}/api/ai/config/sync", node.address, node.port);
+        let secret = cluster_secret.clone();
+        let cfg = config_json.clone();
+        let c = client.clone();
+        tokio::spawn(async move {
+            let _ = c.post(&url)
+                .header("X-WolfStack-Secret", secret)
+                .json(&cfg)
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await;
+        });
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({"status": "saved"}))
+}
+
+/// POST /api/ai/config/sync — receive AI config from another cluster node
+pub async fn ai_sync_config(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<crate::ai::AiConfig>,
+) -> HttpResponse {
+    if let Err(resp) = require_cluster_auth(&req, &state) { return resp; }
+
+    let new_config = body.into_inner();
+    if let Err(e) = new_config.save() {
+        warn!("Failed to save synced AI config: {}", e);
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": e}));
+    }
+
+    // Update in-memory config
     let mut config = state.ai_agent.config.lock().unwrap();
+    *config = new_config;
 
-    // Update fields — only update keys if not masked values
-    if let Some(v) = body.get("provider").and_then(|v| v.as_str()) {
-        config.provider = v.to_string();
-    }
-    if let Some(v) = body.get("claude_api_key").and_then(|v| v.as_str()) {
-        if !v.contains("••••") && !v.is_empty() {
-            config.claude_api_key = v.to_string();
-        }
-    }
-    if let Some(v) = body.get("gemini_api_key").and_then(|v| v.as_str()) {
-        if !v.contains("••••") && !v.is_empty() {
-            config.gemini_api_key = v.to_string();
-        }
-    }
-    if let Some(v) = body.get("model").and_then(|v| v.as_str()) {
-        config.model = v.to_string();
-    }
-    if let Some(v) = body.get("email_enabled").and_then(|v| v.as_bool()) {
-        config.email_enabled = v;
-    }
-    if let Some(v) = body.get("email_to").and_then(|v| v.as_str()) {
-        config.email_to = v.to_string();
-    }
-    if let Some(v) = body.get("smtp_host").and_then(|v| v.as_str()) {
-        config.smtp_host = v.to_string();
-    }
-    if let Some(v) = body.get("smtp_port").and_then(|v| v.as_u64()) {
-        config.smtp_port = v as u16;
-    }
-    if let Some(v) = body.get("smtp_user").and_then(|v| v.as_str()) {
-        config.smtp_user = v.to_string();
-    }
-    if let Some(v) = body.get("smtp_pass").and_then(|v| v.as_str()) {
-        if !v.contains("••••") && !v.is_empty() {
-            config.smtp_pass = v.to_string();
-        }
-    }
-    if let Some(v) = body.get("check_interval_minutes").and_then(|v| v.as_u64()) {
-        config.check_interval_minutes = v as u32;
-    }
-
-    match config.save() {
-        Ok(_) => HttpResponse::Ok().json(serde_json::json!({"status": "saved"})),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
-    }
+    info!("AI config synced from cluster node");
+    HttpResponse::Ok().json(serde_json::json!({"status": "synced"}))
 }
 
 /// POST /api/ai/chat — send a message to the AI agent
@@ -2456,6 +2503,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/ai/alerts", web::get().to(ai_alerts))
         .route("/api/ai/models", web::get().to(ai_models))
         .route("/api/ai/exec", web::post().to(ai_exec))
+        .route("/api/ai/config/sync", web::post().to(ai_sync_config))
         // Storage Manager
         .route("/api/storage/mounts", web::get().to(storage_list_mounts))
         .route("/api/storage/mounts", web::post().to(storage_create_mount))
