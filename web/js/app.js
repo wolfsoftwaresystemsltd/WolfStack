@@ -677,6 +677,10 @@ function updateMap(nodes) {
         if (!ipToGeolocate && node.address && !isPrivateIp(node.address)) {
             ipToGeolocate = node.address;
         }
+        if (!ipToGeolocate && node.hostname) {
+            // ip-api.com accepts hostnames too — try the hostname for DNS resolution
+            ipToGeolocate = node.hostname;
+        }
         if (!ipToGeolocate) {
             ipToGeolocate = selfPublicIp;
         }
