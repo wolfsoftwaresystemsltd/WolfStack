@@ -2509,42 +2509,90 @@ async function renderPveResourcesView(nodeId) {
     const vms = guests.filter(g => g.guest_type === 'qemu');
     const cts = guests.filter(g => g.guest_type === 'lxc');
 
+    function formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(1024));
+        return (bytes / Math.pow(1024, i)).toFixed(i > 1 ? 1 : 0) + ' ' + units[i];
+    }
+
+    function formatUptime(seconds) {
+        if (!seconds || seconds === 0) return '—';
+        const d = Math.floor(seconds / 86400);
+        const h = Math.floor((seconds % 86400) / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        if (d > 0) return d + 'd ' + h + 'h';
+        if (h > 0) return h + 'h ' + m + 'm';
+        return m + 'm';
+    }
+
+    function progressBar(used, total, label) {
+        const pct = total > 0 ? Math.round((used / total) * 100) : 0;
+        const color = pct > 90 ? 'var(--danger)' : pct > 70 ? 'var(--warning)' : 'var(--accent)';
+        return `<div style="display:flex;align-items:center;gap:8px;min-width:140px;">
+            <div style="flex:1;height:6px;background:var(--bg-tertiary);border-radius:3px;overflow:hidden;">
+                <div style="height:100%;width:${pct}%;background:${color};border-radius:3px;transition:width 0.3s;"></div>
+            </div>
+            <span style="font-size:11px;color:var(--text-muted);white-space:nowrap;">${label}</span>
+        </div>`;
+    }
+
+    function statusBadge(status) {
+        const isRunning = status === 'running';
+        const bg = isRunning ? 'rgba(34,197,94,0.15)' : 'rgba(156,163,175,0.15)';
+        const color = isRunning ? 'var(--success)' : 'var(--text-muted)';
+        const dot = isRunning ? '●' : '○';
+        return `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600;background:${bg};color:${color};text-transform:capitalize;">${dot} ${status}</span>`;
+    }
+
     function guestRow(g) {
-        const statusColor = g.status === 'running' ? 'var(--success)' : 'var(--text-muted)';
-        const statusDot = g.status === 'running' ? '●' : '○';
-        const memMB = Math.round(g.maxmem / 1024 / 1024);
-        const memUsedMB = Math.round(g.mem / 1024 / 1024);
-        const diskGB = (g.maxdisk / 1024 / 1024 / 1024).toFixed(1);
+        const memPct = g.maxmem > 0 ? Math.round((g.mem / g.maxmem) * 100) : 0;
+        const diskPct = g.maxdisk > 0 ? Math.round((g.disk / g.maxdisk) * 100) : 0;
         const typeIcon = g.guest_type === 'qemu' ? '🖥️' : '📦';
         const actions = g.status === 'running'
-            ? `<button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'shutdown')" style="font-size:11px; padding:2px 8px;">⏹ Stop</button>
-               <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'reboot')" style="font-size:11px; padding:2px 8px;">🔄 Reboot</button>`
-            : `<button class="btn btn-sm btn-primary" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'start')" style="font-size:11px; padding:2px 8px;">▶ Start</button>`;
+            ? `<div style="display:flex;gap:4px;flex-wrap:wrap;">
+                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'shutdown')" style="font-size:11px;padding:3px 10px;">⏹ Stop</button>
+                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'reboot')" style="font-size:11px;padding:3px 10px;">🔄 Reboot</button>
+               </div>`
+            : `<button class="btn btn-sm btn-primary" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'start')" style="font-size:11px;padding:3px 10px;">▶ Start</button>`;
 
         return `<tr>
-            <td>${typeIcon} ${g.vmid}</td>
-            <td>${g.name || '—'}</td>
-            <td><span style="color:${statusColor};">${statusDot}</span> ${g.status}</td>
-            <td>${g.cpus}</td>
-            <td>${memUsedMB} / ${memMB} MB</td>
-            <td>${diskGB} GB</td>
+            <td style="font-weight:600;">${typeIcon} ${g.vmid}</td>
+            <td style="font-weight:500;">${g.name || '—'}</td>
+            <td>${statusBadge(g.status)}</td>
+            <td style="text-align:center;">${g.cpus}</td>
+            <td>${progressBar(g.mem, g.maxmem, formatBytes(g.mem) + ' / ' + formatBytes(g.maxmem))}</td>
+            <td>${progressBar(g.disk, g.maxdisk, formatBytes(g.disk) + ' / ' + formatBytes(g.maxdisk))}</td>
+            <td style="text-align:center;color:var(--text-muted);font-size:12px;">${formatUptime(g.uptime)}</td>
             <td>${actions}</td>
         </tr>`;
     }
 
+    function buildTable(items, title, icon) {
+        const running = items.filter(g => g.status === 'running').length;
+        const stopped = items.length - running;
+        return `<div class="card" style="margin-bottom:16px;">
+            <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+                <h3>${icon} ${title} (${items.length})</h3>
+                <div style="font-size:12px;color:var(--text-muted);">
+                    <span style="color:var(--success);">● ${running} running</span>
+                    ${stopped > 0 ? `<span style="margin-left:12px;color:var(--text-muted);">○ ${stopped} stopped</span>` : ''}
+                </div>
+            </div>
+            <div class="card-body" style="padding:0;overflow-x:auto;">
+                <table class="data-table" style="margin:0;">
+                    <thead><tr>
+                        <th>ID</th><th>Name</th><th>Status</th><th style="text-align:center;">CPUs</th><th>Memory</th><th>Disk</th><th style="text-align:center;">Uptime</th><th>Actions</th>
+                    </tr></thead>
+                    <tbody>${items.map(guestRow).join('')}</tbody>
+                </table>
+            </div>
+        </div>`;
+    }
+
     let html = '';
-    if (vms.length > 0) {
-        html += `<h3 style="margin:0 0 12px;">🖥️ Virtual Machines (${vms.length})</h3>
-        <table class="table"><thead><tr>
-            <th>VMID</th><th>Name</th><th>Status</th><th>CPUs</th><th>Memory</th><th>Disk</th><th>Actions</th>
-        </tr></thead><tbody>${vms.map(guestRow).join('')}</tbody></table>`;
-    }
-    if (cts.length > 0) {
-        html += `<h3 style="margin:24px 0 12px;">📦 Containers (${cts.length})</h3>
-        <table class="table"><thead><tr>
-            <th>CTID</th><th>Name</th><th>Status</th><th>CPUs</th><th>Memory</th><th>Disk</th><th>Actions</th>
-        </tr></thead><tbody>${cts.map(guestRow).join('')}</tbody></table>`;
-    }
+    if (vms.length > 0) html += buildTable(vms, 'Virtual Machines', '🖥️');
+    if (cts.length > 0) html += buildTable(cts, 'LXC Containers', '📦');
 
     container.innerHTML = html;
 }
