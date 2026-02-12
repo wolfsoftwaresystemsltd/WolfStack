@@ -2700,6 +2700,33 @@ async fn sync_mount_to_cluster(
     Ok(results)
 }
 
+/// POST /api/upgrade — run the WolfStack upgrade script in the background
+pub async fn system_upgrade(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    info!("System upgrade triggered via API");
+
+    // Spawn the upgrade script as a detached background process
+    match std::process::Command::new("bash")
+        .args(["-c", "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+            "message": "Upgrade started — WolfStack will restart automatically when complete."
+        })),
+        Err(e) => {
+            error!("Failed to start upgrade: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to start upgrade: {}", e)
+            }))
+        }
+    }
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -2843,6 +2870,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/agent/status", web::get().to(agent_status))
         .route("/api/agent/storage/apply", web::post().to(agent_storage_apply))
         .route("/api/wolfnet/used-ips", web::get().to(wolfnet_used_ips_endpoint))
+        // System
+        .route("/api/upgrade", web::post().to(system_upgrade))
         // Node proxy — forward API calls to remote nodes (must be last — wildcard path)
         .route("/api/nodes/{id}/proxy/{path:.*}", web::get().to(node_proxy))
         .route("/api/nodes/{id}/proxy/{path:.*}", web::post().to(node_proxy))

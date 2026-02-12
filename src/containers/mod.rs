@@ -2166,8 +2166,7 @@ pub fn lxc_list_templates() -> Vec<LxcTemplate> {
 
             // Skip cloud variants - they require cloud-init and won't work with standard LXC
             let variant_str = if variant.is_empty() { "default" } else { variant };
-            if variant_str == "cloud" { continue; }
-            if arch == "amd64" && !dist.is_empty() && !rel.is_empty() {
+            if !dist.is_empty() && !rel.is_empty() && !arch.is_empty() {
                 let key = format!("{}-{}-{}-{}", dist, rel, arch, variant_str);
                 if seen.insert(key) {
                     templates.push(LxcTemplate {
@@ -2249,7 +2248,7 @@ pub struct DockerSearchResult {
 /// Search Docker Hub for images
 pub fn docker_search(query: &str) -> Vec<DockerSearchResult> {
     let output = Command::new("docker")
-        .args(["search", "--format", "{{.Name}}\\t{{.Description}}\\t{{.StarCount}}\\t{{.IsOfficial}}", "--limit", "25", query])
+        .args(["search", "--format", "{{.Name}}\\t{{.Description}}\\t{{.StarCount}}\\t{{.IsOfficial}}", "--limit", "100", query])
         .output();
 
     match output {

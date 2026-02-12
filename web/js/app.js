@@ -2485,7 +2485,7 @@ async function addServer() {
     const address = document.getElementById('new-server-address').value.trim();
     const port = parseInt(document.getElementById('new-server-port').value) || (nodeType === 'proxmox' ? 8006 : 8553);
 
-    const clusterName = (document.getElementById('add-server-cluster') || {}).value.trim();
+    const clusterName = (document.getElementById('new-server-cluster-name') || {}).value?.trim() || '';
 
     if (!address) { showToast('Enter a server address', 'error'); return; }
 
@@ -5646,7 +5646,7 @@ function variantDescription(variant) {
 }
 
 function renderLxcTemplateRows(templates) {
-    return templates.slice(0, 100).map(t => {
+    return templates.map(t => {
         const imagePath = `${t.distribution}/${t.release}/${t.architecture}/${t.variant || 'default'}`;
         return `<tr>
             <td><strong>${t.distribution}</strong></td>
@@ -7280,6 +7280,27 @@ function checkForUpdates() {
 // Check for updates on page load, then every 6 hours
 setTimeout(checkForUpdates, 5000);
 setInterval(checkForUpdates, 6 * 60 * 60 * 1000);
+
+function triggerUpgrade() {
+    var bannerText = document.getElementById('update-banner-text');
+    var msg = bannerText ? bannerText.textContent : 'Update available';
+    if (!confirm('⚡ ' + msg + '\n\nThis will run the WolfStack upgrade script on the server.\nWolfStack will restart automatically when complete.\n\nProceed?')) return;
+
+    fetch(apiUrl('/api/upgrade'), { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            if (data.error) {
+                showToast(data.error, 'error');
+            } else {
+                showToast(data.message || 'Upgrade started', 'success');
+                var banner = document.getElementById('update-banner');
+                if (banner) banner.style.display = 'none';
+            }
+        })
+        .catch(function (e) {
+            showToast('Upgrade failed: ' + e.message, 'error');
+        });
+}
 
 // ═══════════════════════════════════════════════════
 // AI Agent — Chat & Settings
