@@ -149,27 +149,33 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - **Automatic update check** — compares running version to GitHub
 
 ### 🟠 Proxmox VE Integration
-- **Unified datacenter** — manage Proxmox VE nodes alongside native WolfStack nodes in one dashboard
-- **API token authentication** — secure connection to your Proxmox cluster using PVE API tokens
-- **Live metrics** — CPU, memory, disk, and uptime polled from Proxmox nodes via REST API
-- **VM & container listing** — see all QEMU VMs and LXC containers running on your Proxmox hosts
+- **Unified datacenter** — manage Proxmox VE clusters alongside native WolfStack nodes in one dashboard
+- **Multi-node cluster support** — auto-discovers all nodes in a Proxmox cluster and groups them under a named header in the sidebar
+- **Cluster name** — give each Proxmox cluster a friendly name (e.g. "Production Cluster")
+- **API token authentication** — secure connection using PVE API tokens (Token ID + Secret)
+- **Live metrics** — CPU, memory, disk, and uptime polled from each Proxmox node via REST API
+- **VM & container listing** — see all QEMU VMs and LXC containers running on each Proxmox host
 - **Guest control** — start, stop, shutdown, and reboot Proxmox VMs and containers from WolfStack
-- **Connection testing** — verify API connectivity before adding a node
+- **Cluster settings** — ⚙️ button to edit cluster name, API token, and TLS fingerprint for all nodes at once
 - **TLS support** — works with self-signed certificates (common in Proxmox installations)
-- **Easy setup** — select "Proxmox VE" when adding a server, enter the address, node name, and API token
 
 #### Setting Up Proxmox Integration
 1. **Create an API Token** in Proxmox: `Datacenter → Permissions → API Tokens → Add`
    - User: `root@pam` (or a dedicated user with appropriate roles)
    - Token ID: choose any name (e.g. `wolfstack`)
    - Uncheck "Privilege Separation" for full access, or assign `PVEAuditor` + `PVEVMUser` roles
-2. **Copy the token** — format: `user@pam!tokenid=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+2. **Copy the Token ID and Secret** — Proxmox shows these once:
+   - Token ID: `root@pam!wolfstack`
+   - Secret: `a2e0dcfb-f3eb-4674-965d-0dda7974ba73`
 3. **Add to WolfStack** — click "+ Add Server", select "🟠 Proxmox VE", and enter:
-   - Server address (IP or hostname of Proxmox node)
-   - PVE Node Name (as shown in Proxmox sidebar, e.g. `pve1`)
-   - API Token (the full `user@pam!tokenid=uuid` string)
-   - TLS Fingerprint (optional, leave blank to accept self-signed certs)
-4. The Proxmox node appears in your datacenter with live metrics and VM/container badges
+   - **Cluster Name** — display name for the sidebar (e.g. "Production")
+   - **Server Address** — IP or hostname only, no `https://`
+   - **PVE Node Name** — as shown in Proxmox sidebar (e.g. `pve1`)
+   - **Token ID** — from step 2 (e.g. `root@pam!wolfstack`)
+   - **Token Secret** — from step 2
+   - **TLS Fingerprint** — optional, leave blank for self-signed certs
+4. WolfStack automatically discovers all nodes in the cluster and adds them
+5. The cluster appears grouped in the sidebar with live metrics and VM/container counts
 
 ## Architecture
 
