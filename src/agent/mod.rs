@@ -442,95 +442,111 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
         }
 
         // ── Poll WolfStack node via agent ──
-        let url = format!("http://{}:{}/api/agent/status", node.address, node.port);
-        debug!("Polling remote node {} at {}", node.id, url);
+        // When TLS is enabled, the main port serves HTTPS and inter-node HTTP is on port+1.
+        // Try port+1 first (works for HTTPS nodes), then fall back to the original port (HTTP-only nodes).
+        let urls = vec![
+            format!("http://{}:{}/api/agent/status", node.address, node.port + 1),
+            format!("http://{}:{}/api/agent/status", node.address, node.port),
+        ];
+        debug!("Polling remote node {} (trying ports {} and {})", node.id, node.port + 1, node.port);
 
-        match reqwest::Client::builder()
+        let client = match reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
         {
-            Ok(client) => {
-                match client.get(&url)
-                    .header("X-WolfStack-Secret", &cluster_secret)
-                    .send().await {
-                    Ok(resp) => {
-                        if let Ok(msg) = resp.json::<AgentMessage>().await {
-                            if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes } = msg {
-                                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-                                cluster.update_remote(Node {
-                                    id: node.id.clone(),
-                                    hostname,
-                                    address: node.address.clone(),
-                                    port: node.port,
-                                    last_seen: now,
-                                    metrics: Some(metrics),
-                                    components,
-                                    online: true,
-                                    is_self: false,
-                                    docker_count,
-                                    lxc_count,
-                                    vm_count,
-                                    public_ip: public_ip.clone(),
-                                    node_type: "wolfstack".to_string(),
-                                    pve_token: None,
-                                    pve_fingerprint: None,
-                                    pve_node_name: None,
-                                    pve_cluster_name: None,
-                                    cluster_name: node.cluster_name.clone(),
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to create HTTP client: {}", e);
+                continue;
+            }
+        };
+
+        let mut poll_ok = false;
+        for url in &urls {
+            match client.get(url)
+                .header("X-WolfStack-Secret", &cluster_secret)
+                .send().await
+            {
+                Ok(resp) => {
+                    if let Ok(msg) = resp.json::<AgentMessage>().await {
+                        if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes } = msg {
+                            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                            cluster.update_remote(Node {
+                                id: node.id.clone(),
+                                hostname,
+                                address: node.address.clone(),
+                                port: node.port,
+                                last_seen: now,
+                                metrics: Some(metrics),
+                                components,
+                                online: true,
+                                is_self: false,
+                                docker_count,
+                                lxc_count,
+                                vm_count,
+                                public_ip: public_ip.clone(),
+                                node_type: "wolfstack".to_string(),
+                                pve_token: None,
+                                pve_fingerprint: None,
+                                pve_node_name: None,
+                                pve_cluster_name: None,
+                                cluster_name: node.cluster_name.clone(),
+                            });
+
+                            // Reset fail count on success
+                            POLL_FAIL_COUNTS.lock().unwrap().remove(&node.id);
+
+                            // Merge known_nodes (gossip) — with dedup by address+port+hostname
+                            let current_nodes = cluster.get_all_nodes();
+                            let self_hostname = hostname::get()
+                                .map(|h| h.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            for known in known_nodes {
+                                if known.id == cluster.self_id {
+                                    continue; // Skip ourselves by ID
+                                }
+                                // Also skip if this is us by hostname+port (gossip may report different address)
+                                if known.node_type == "wolfstack" && known.hostname == self_hostname && known.port == cluster.port {
+                                    continue;
+                                }
+                                // Check both ID and address+port+hostname to prevent ghost re-addition
+                                let already_known = current_nodes.iter().any(|n| {
+                                    n.id == known.id 
+                                    || (n.address == known.address && n.port == known.port && n.pve_node_name == known.pve_node_name)
+                                    || (n.hostname == known.hostname && n.port == known.port && n.node_type == known.node_type)
                                 });
-
-                                // Reset fail count on success
-                                POLL_FAIL_COUNTS.lock().unwrap().remove(&node.id);
-
-                                // Merge known_nodes (gossip) — with dedup by address+port+hostname
-                                let current_nodes = cluster.get_all_nodes();
-                                let self_hostname = hostname::get()
-                                    .map(|h| h.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-                                for known in known_nodes {
-                                    if known.id == cluster.self_id {
-                                        continue; // Skip ourselves by ID
-                                    }
-                                    // Also skip if this is us by hostname+port (gossip may report different address)
-                                    if known.node_type == "wolfstack" && known.hostname == self_hostname && known.port == cluster.port {
-                                        continue;
-                                    }
-                                    // Check both ID and address+port+hostname to prevent ghost re-addition
-                                    let already_known = current_nodes.iter().any(|n| {
-                                        n.id == known.id 
-                                        || (n.address == known.address && n.port == known.port && n.pve_node_name == known.pve_node_name)
-                                        || (n.hostname == known.hostname && n.port == known.port && n.node_type == known.node_type)
-                                    });
-                                    if !already_known {
-                                        debug!("Discovered new node via gossip from {}: {} ({})", node.id, known.id, known.node_type);
-                                        let mut new_node = known.clone();
-                                        new_node.online = false; 
-                                        new_node.is_self = false;
-                                        cluster.update_remote(new_node);
-                                        cluster.save_nodes();
-                                    }
+                                if !already_known {
+                                    debug!("Discovered new node via gossip from {}: {} ({})", node.id, known.id, known.node_type);
+                                    let mut new_node = known.clone();
+                                    new_node.online = false; 
+                                    new_node.is_self = false;
+                                    cluster.update_remote(new_node);
+                                    cluster.save_nodes();
                                 }
                             }
                         }
                     }
-                    Err(e) => {
-                        debug!("Failed to poll {}: {}", node.id, e);
-                        // Increment fail count; keep node online until 2 consecutive failures
-                        let mut fails = POLL_FAIL_COUNTS.lock().unwrap();
-                        let count = fails.entry(node.id.clone()).or_insert(0);
-                        *count += 1;
-                        if *count < 2 {
-                            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-                            let mut nodes = cluster.nodes.write().unwrap();
-                            if let Some(n) = nodes.get_mut(&node.id) {
-                                n.last_seen = now;
-                            }
-                        }
-                    }
+                    poll_ok = true;
+                    break; // Success — no need to try the next URL
+                }
+                Err(_) => {
+                    continue; // Try next URL
                 }
             }
-            Err(e) => {
-                warn!("Failed to create HTTP client: {}", e);
+        }
+
+        if !poll_ok {
+            debug!("Failed to poll {} on both ports", node.id);
+            // Increment fail count; keep node online until 2 consecutive failures
+            let mut fails = POLL_FAIL_COUNTS.lock().unwrap();
+            let count = fails.entry(node.id.clone()).or_insert(0);
+            *count += 1;
+            if *count < 2 {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                let mut nodes = cluster.nodes.write().unwrap();
+                if let Some(n) = nodes.get_mut(&node.id) {
+                    n.last_seen = now;
+                }
             }
         }
     }
