@@ -2480,21 +2480,38 @@ async function loadCertificates() {
     if (!el) return;
     try {
         const resp = await fetch('/api/certificates/list');
-        const certs = await resp.json();
-        if (certs.length === 0) {
-            el.innerHTML = '<p style="color: var(--text-muted);">No certificates installed. Request one above.</p>';
-            return;
-        }
-        el.innerHTML = certs.map(c => `
-            <div style="padding: 10px; margin-bottom: 8px; background: var(--bg-tertiary); border-radius: 8px; display: flex; align-items: center; gap: 12px;">
-                <span style="font-size: 20px;">${c.valid ? '✅' : '⚠️'}</span>
-                <div style="flex:1;">
-                    <strong>${c.domain}</strong><br>
-                    <span style="font-size: 12px; color: var(--text-muted);">${c.cert_path}</span>
-                    ${c.expiry ? `<br><span style="font-size: 12px; color: var(--text-muted);">Expires: ${c.expiry}</span>` : ''}
+        const data = await resp.json();
+        const certs = data.certs || data; // handle both new {certs,diagnostics} and legacy array format
+        const diagnostics = data.diagnostics || [];
+
+        let html = '';
+        if (!certs || certs.length === 0) {
+            html += '<p style="color: var(--text-muted);">No certificates installed. Request one above.</p>';
+        } else {
+            html += certs.map(c => `
+                <div style="padding: 10px; margin-bottom: 8px; background: var(--bg-tertiary); border-radius: 8px; display: flex; align-items: center; gap: 12px;">
+                    <span style="font-size: 20px;">${c.valid ? '✅' : '⚠️'}</span>
+                    <div style="flex:1;">
+                        <strong>${c.domain}</strong><br>
+                        <span style="font-size: 12px; color: var(--text-muted);">${c.cert_path}</span>
+                        ${c.source ? `<br><span style="font-size: 11px; color: var(--text-muted);">Source: ${c.source}</span>` : ''}
+                        ${c.expiry ? `<br><span style="font-size: 12px; color: var(--text-muted);">Expires: ${c.expiry}</span>` : ''}
+                    </div>
                 </div>
-            </div>
-        `).join('');
+            `).join('');
+        }
+
+        if (diagnostics.length > 0) {
+            html += `
+                <details style="margin-top: 12px; font-size: 13px;">
+                    <summary style="cursor: pointer; color: var(--text-muted); user-select: none;">🔍 Discovery diagnostics</summary>
+                    <div style="margin-top: 8px; padding: 10px; background: var(--bg-tertiary); border-radius: 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.8;">
+                        ${diagnostics.map(d => `<div>${d}</div>`).join('')}
+                    </div>
+                </details>`;
+        }
+
+        el.innerHTML = html;
     } catch (e) {
         el.innerHTML = '<p style="color: var(--text-muted);">Could not load certificates.</p>';
     }
