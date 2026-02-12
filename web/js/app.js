@@ -233,8 +233,7 @@ function buildServerTree(nodes) {
             <div class="server-node-header" onclick="toggleServerNode('${clusterId}')" style="background: linear-gradient(90deg, rgba(99,102,241,0.05), transparent);">
                 <span class="tree-toggle ${shouldExpandCluster ? 'expanded' : ''}" id="toggle-${clusterId}">▶</span>
                 <span class="server-dot ${anyOnline ? 'online' : 'offline'}"></span>
-                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">☁️ ${clusterName}</span>
-                <span class="badge" style="font-size:10px; padding:1px 6px; background:rgba(99,102,241,0.2); color:var(--accent-light);">${clusterNodes.length} nodes</span>
+                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">☁️<span style="font-size:10px;color:var(--text-muted);margin-left:1px;">${clusterNodes.length}</span> ${clusterName}</span>
                 <span class="remove-server-btn" onclick="event.stopPropagation(); openWsClusterSettings('${escapedName}')" title="Cluster settings" style="margin-left:4px;">⚙️</span>
             </div>
             <div class="server-node-children ${shouldExpandCluster ? 'expanded' : ''}" id="children-${clusterId}">`;
@@ -316,8 +315,7 @@ function buildServerTree(nodes) {
             <div class="server-node-header" onclick="toggleServerNode('${clusterId}')" style="background: linear-gradient(90deg, rgba(99,102,241,0.05), transparent);">
                 <span class="tree-toggle ${shouldExpandCluster ? 'expanded' : ''}" id="toggle-${clusterId}">▶</span>
                 <span class="server-dot ${anyOnline ? 'online' : 'offline'}"></span>
-                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><span style="display:inline-block;width:15px;height:15px;vertical-align:middle;margin-right:3px;opacity:0.9;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="2" width="18" height="6" rx="1"/><rect x="3" y="10" width="18" height="6" rx="1"/><rect x="3" y="18" width="18" height="4" rx="1"/><circle cx="7" cy="5" r="1" fill="currentColor"/><circle cx="7" cy="13" r="1" fill="currentColor"/><circle cx="7" cy="20" r="1" fill="currentColor"/></svg></span> ${clusterName}</span>
-                <span class="badge" style="font-size:10px; padding:1px 6px; background:rgba(99,102,241,0.2); color:var(--accent-light);">${clusterNodes.length} nodes</span>
+                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><span style="display:inline-block;width:15px;height:15px;vertical-align:middle;margin-right:1px;opacity:0.9;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="2" width="18" height="6" rx="1"/><rect x="3" y="10" width="18" height="6" rx="1"/><rect x="3" y="18" width="18" height="4" rx="1"/><circle cx="7" cy="5" r="1" fill="currentColor"/><circle cx="7" cy="13" r="1" fill="currentColor"/><circle cx="7" cy="20" r="1" fill="currentColor"/></svg></span><span style="font-size:10px;color:var(--text-muted);">${clusterNodes.length}</span> ${clusterName}</span>
                 <span class="remove-server-btn" onclick="event.stopPropagation(); openPveClusterSettings('${clusterName}')" title="Cluster settings" style="margin-left:4px;">⚙️</span>
                 <span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemovePveCluster('${clusterName}', [${nodeIds}])" title="Remove cluster">🗑️</span>
             </div>
