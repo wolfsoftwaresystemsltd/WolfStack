@@ -533,9 +533,9 @@ function renderDatacenterOverview() {
 
     wsKeys.forEach(clusterName => {
         const clusterNodes = wsClusters[clusterName];
-        html += `<div style="grid-column:1/-1; margin-bottom:8px; display:flex; align-items:center; ${html ? 'border-top:1px solid var(--border); padding-top:24px; margin-top:24px;' : ''}">
-            <h3 style="margin:0;">${clusterName}</h3>
-            <span class="badge" style="margin-left:12px; font-size:11px;">${clusterNodes.length} nodes</span>
+        html += `<div style="grid-column:1/-1; margin-bottom:8px; display:flex; align-items:baseline; ${html ? 'border-top:1px solid var(--border); padding-top:24px; margin-top:24px;' : ''}">
+            <h3 style="margin:0; font-size:20px;">${clusterName}</h3>
+            <span style="margin-left:10px; font-size:12px; color:var(--text-muted); font-weight:400;">WolfStack cluster — ${clusterNodes.length} nodes</span>
         </div>`;
         html += clusterNodes.map(renderCard).join('');
     });
@@ -553,9 +553,9 @@ function renderDatacenterOverview() {
 
     pveKeys.forEach(clusterName => {
         const clusterNodes = pveClusters[clusterName];
-        html += `<div style="grid-column:1/-1; margin-bottom:8px; display:flex; align-items:center; ${html ? 'border-top:1px solid var(--border); padding-top:24px; margin-top:24px;' : ''}">
-            <h3 style="margin:0;"><span style="display:inline-block;width:20px;height:20px;vertical-align:middle;margin-right:4px;opacity:0.9;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="2" width="18" height="6" rx="1"/><rect x="3" y="10" width="18" height="6" rx="1"/><rect x="3" y="18" width="18" height="4" rx="1"/><circle cx="7" cy="5" r="1" fill="currentColor"/><circle cx="7" cy="13" r="1" fill="currentColor"/><circle cx="7" cy="20" r="1" fill="currentColor"/></svg></span> ${clusterName}</h3>
-            <span class="badge" style="margin-left:12px; font-size:11px;">${clusterNodes.length} nodes</span>
+        html += `<div style="grid-column:1/-1; margin-bottom:8px; display:flex; align-items:baseline; ${html ? 'border-top:1px solid var(--border); padding-top:24px; margin-top:24px;' : ''}">
+            <h3 style="margin:0; font-size:20px;"><span style="display:inline-block;width:20px;height:20px;vertical-align:middle;margin-right:4px;opacity:0.9;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="2" width="18" height="6" rx="1"/><rect x="3" y="10" width="18" height="6" rx="1"/><rect x="3" y="18" width="18" height="4" rx="1"/><circle cx="7" cy="5" r="1" fill="currentColor"/><circle cx="7" cy="13" r="1" fill="currentColor"/><circle cx="7" cy="20" r="1" fill="currentColor"/></svg></span> ${clusterName}</h3>
+            <span style="margin-left:10px; font-size:12px; color:var(--text-muted); font-weight:400;">Proxmox cluster — ${clusterNodes.length} nodes</span>
         </div>`;
         html += clusterNodes.map(renderCard).join('');
     });
