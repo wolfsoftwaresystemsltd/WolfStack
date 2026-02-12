@@ -181,11 +181,21 @@ impl ClusterState {
         nodes.insert(node.id.clone(), node);
     }
 
-    /// Get all nodes
+    /// Get all nodes (deduplicated: if a non-self WolfStack node has same hostname+port as self, skip it)
     pub fn get_all_nodes(&self) -> Vec<Node> {
         let nodes = self.nodes.read().unwrap();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        nodes.values().map(|n| {
+        // Find self node's hostname and port for dedup
+        let self_hostname = nodes.get(&self.self_id).map(|n| n.hostname.clone()).unwrap_or_default();
+        let self_port = self.port;
+        nodes.values().filter(|n| {
+            // Filter out non-self wolfstack nodes that are actually us (duplicate from gossip)
+            if !n.is_self && n.id != self.self_id && n.node_type == "wolfstack"
+                && n.hostname == self_hostname && n.port == self_port {
+                return false;
+            }
+            true
+        }).map(|n| {
             let mut node = n.clone();
             if !node.is_self {
                 node.online = now - node.last_seen < 60;
@@ -444,15 +454,24 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                     cluster_name: node.cluster_name.clone(),
                                 });
 
-                                // Merge known_nodes (gossip) — with dedup by address+port
+                                // Merge known_nodes (gossip) — with dedup by address+port+hostname
                                 let current_nodes = cluster.get_all_nodes();
+                                let self_hostname = hostname::get()
+                                    .map(|h| h.to_string_lossy().to_string())
+                                    .unwrap_or_default();
                                 for known in known_nodes {
                                     if known.id == cluster.self_id {
-                                        continue; // Skip ourselves
+                                        continue; // Skip ourselves by ID
                                     }
-                                    // Check both ID and address+port to prevent ghost re-addition
+                                    // Also skip if this is us by hostname+port (gossip may report different address)
+                                    if known.node_type == "wolfstack" && known.hostname == self_hostname && known.port == cluster.port {
+                                        continue;
+                                    }
+                                    // Check both ID and address+port+hostname to prevent ghost re-addition
                                     let already_known = current_nodes.iter().any(|n| {
-                                        n.id == known.id || (n.address == known.address && n.port == known.port && n.pve_node_name == known.pve_node_name)
+                                        n.id == known.id 
+                                        || (n.address == known.address && n.port == known.port && n.pve_node_name == known.pve_node_name)
+                                        || (n.hostname == known.hostname && n.port == known.port && n.node_type == known.node_type)
                                     });
                                     if !already_known {
                                         debug!("Discovered new node via gossip from {}: {} ({})", node.id, known.id, known.node_type);
