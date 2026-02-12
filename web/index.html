@@ -48,7 +48,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v6.4.3</span>
+                <span class="version">v6.5.0</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -2270,6 +2270,11 @@ region = us-east-1"></textarea>
             // Create AI Chat Bubble & Panel dynamically on document.body
             // to ensure they're not trapped inside any overflow:hidden ancestor
             (function () {
+                // Inject pulse animation
+                var styleEl = document.createElement('style');
+                styleEl.textContent = '@keyframes ai-pulse{0%,100%{box-shadow:0 0 8px rgba(220,38,38,0.4),0 4px 20px rgba(0,0,0,0.4);}50%{box-shadow:0 0 24px rgba(220,38,38,0.8),0 4px 20px rgba(0,0,0,0.4);}}';
+                document.head.appendChild(styleEl);
+
                 // Bubble
                 var bubble = document.createElement('div');
                 bubble.id = 'ai-chat-bubble';
@@ -2277,10 +2282,10 @@ region = us-east-1"></textarea>
                 bubble.onclick = function () { toggleAiChat(); };
                 bubble.style.cssText = 'position:fixed;bottom:24px;right:24px;width:56px;height:56px;border-radius:50%;' +
                     'background:linear-gradient(135deg,#dc2626,#f87171);color:#fff;' +
-                    'display:flex;align-items:center;justify-content:center;font-size:28px;' +
-                    'cursor:pointer;z-index:9999;box-shadow:0 4px 20px rgba(0,0,0,0.4);' +
-                    'transition:transform 0.2s,box-shadow 0.2s;';
-                bubble.textContent = '🐺';
+                    'display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;' +
+                    'cursor:pointer;z-index:9999;animation:ai-pulse 2s ease-in-out infinite;' +
+                    'transition:transform 0.2s;letter-spacing:1px;';
+                bubble.textContent = 'AI';
                 document.body.appendChild(bubble);
 
                 // Panel
@@ -2292,7 +2297,7 @@ region = us-east-1"></textarea>
                 panel.innerHTML =
                     '<div style="padding:16px 20px;background:linear-gradient(135deg,#dc2626,#f87171);display:flex;justify-content:space-between;align-items:center;">' +
                     '<div style="display:flex;align-items:center;gap:8px;">' +
-                    '<span style="font-size:24px;">🐺</span>' +
+                    '<span style="font-size:16px;font-weight:800;letter-spacing:1px;">AI</span>' +
                     '<div><div style="font-weight:600;color:#fff;font-size:14px;">WolfStack AI</div>' +
                     '<div id="ai-chat-status" style="font-size:11px;color:rgba(255,255,255,0.7);">Ready</div></div>' +
                     '</div>' +
@@ -2303,7 +2308,7 @@ region = us-east-1"></textarea>
                     '</div>' +
                     '<div id="ai-chat-messages" style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;">' +
                     '<div style="background:var(--bg-tertiary,#252540);border-radius:12px;padding:12px 16px;max-width:85%;align-self:flex-start;font-size:13px;line-height:1.5;color:var(--text,#eee);">' +
-                    '👋 Hi! I\'m your WolfStack AI assistant. I know everything about WolfStack, WolfNet, WolfDisk, WolfProxy, and WolfServe. Ask me anything about your servers or need help troubleshooting?' +
+                    '👋 Hi! I\'m your WolfStack AI assistant. I can answer questions about your servers AND run commands across your cluster. Ask me anything!' +
                     '</div>' +
                     '</div>' +
                     '<div style="padding:12px 16px;border-top:1px solid var(--border,#333);display:flex;gap:8px;">' +

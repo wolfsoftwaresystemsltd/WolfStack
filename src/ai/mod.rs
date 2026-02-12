@@ -5,10 +5,13 @@
 //! - Monitors server health hourly and alerts on issues
 //! - Coordinates with agents on other cluster nodes
 //! - Supports Claude and Gemini as LLM backends
+//! - Can execute read-only commands locally and across the cluster
 
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tracing::{info, warn};
+use std::process::Command as StdCommand;
+use std::time::Duration;
 
 const AI_CONFIG_PATH: &str = "/etc/wolfstack/ai-config.json";
 const KNOWLEDGE_DIR: &str = "/opt/wolfscale/web";
@@ -149,41 +152,160 @@ impl AiAgent {
         }
     }
 
-    /// Chat with the AI — sends user message, returns assistant response
-    pub async fn chat(&self, user_message: &str, system_context: &str) -> Result<String, String> {
+    /// Chat with the AI — multi-turn with command execution support
+    /// cluster_nodes is a list of (node_id, hostname, base_url) for remote execution
+    /// auth_cookie is the session cookie for proxying requests to remote nodes
+    pub async fn chat(
+        &self,
+        user_message: &str,
+        system_context: &str,
+        cluster_nodes: &[(String, String, String)],  // (id, hostname, base_url)
+        auth_cookie: &str,
+    ) -> Result<String, String> {
         let config = self.config.lock().unwrap().clone();
         if !config.is_configured() {
             return Err("AI not configured — please add an API key in AI Settings".to_string());
         }
 
         // Build conversation history
-        let history: Vec<ChatMessage> = {
+        let mut history: Vec<ChatMessage> = {
             let h = self.chat_history.lock().unwrap();
             h.iter().rev().take(20).cloned().collect::<Vec<_>>().into_iter().rev().collect()
         };
 
         let system_prompt = build_system_prompt(&self.knowledge_base, system_context);
 
-        let response = match config.provider.as_str() {
-            "gemini" => {
-                call_gemini(&self.client, &config.gemini_api_key, &config.model, &system_prompt, &history, user_message).await?
+        let mut current_msg = user_message.to_string();
+        let mut final_response = String::new();
+
+        // Multi-turn loop: AI can request commands, we execute and feed back
+        for round in 0..3 {
+            let response = match config.provider.as_str() {
+                "gemini" => {
+                    call_gemini(&self.client, &config.gemini_api_key, &config.model, &system_prompt, &history, &current_msg).await?
+                }
+                _ => {
+                    call_claude(&self.client, &config.claude_api_key, &config.model, &system_prompt, &history, &current_msg).await?
+                }
+            };
+
+            // Check for [EXEC] or [EXEC_ALL] tags
+            let has_exec = response.contains("[EXEC]") && response.contains("[/EXEC]");
+            let has_exec_all = response.contains("[EXEC_ALL]") && response.contains("[/EXEC_ALL]");
+
+            if !has_exec && !has_exec_all {
+                // No commands requested — this is the final response
+                final_response = response;
+                break;
             }
-            _ => {
-                call_claude(&self.client, &config.claude_api_key, &config.model, &system_prompt, &history, user_message).await?
+
+            // Parse and execute commands
+            let mut command_results = String::new();
+            let hostname = hostname::get()
+                .map(|h| h.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "local".to_string());
+
+            // Handle [EXEC]command[/EXEC] — local execution
+            let mut search_from = 0;
+            while let Some(start) = response[search_from..].find("[EXEC]") {
+                let abs_start = search_from + start + 6;
+                if let Some(end) = response[abs_start..].find("[/EXEC]") {
+                    let cmd = response[abs_start..abs_start + end].trim();
+                    info!("AI executing local command (round {}): {}", round + 1, cmd);
+                    let result = execute_safe_command(cmd);
+                    command_results.push_str(&format!(
+                        "\n=== Command on {} ===\n$ {}\n{}\n",
+                        hostname, cmd,
+                        match &result {
+                            Ok(output) => output.clone(),
+                            Err(e) => format!("ERROR: {}", e),
+                        }
+                    ));
+                    search_from = abs_start + end + 7;
+                } else {
+                    break;
+                }
             }
-        };
+
+            // Handle [EXEC_ALL]command[/EXEC_ALL] — cluster-wide execution
+            search_from = 0;
+            while let Some(start) = response[search_from..].find("[EXEC_ALL]") {
+                let abs_start = search_from + start + 10;
+                if let Some(end) = response[abs_start..].find("[/EXEC_ALL]") {
+                    let cmd = response[abs_start..abs_start + end].trim();
+                    info!("AI executing cluster-wide command (round {}): {}", round + 1, cmd);
+
+                    // Run locally first
+                    let local_result = execute_safe_command(cmd);
+                    command_results.push_str(&format!(
+                        "\n=== {} (local) ===\n$ {}\n{}\n",
+                        hostname, cmd,
+                        match &local_result {
+                            Ok(output) => output.clone(),
+                            Err(e) => format!("ERROR: {}", e),
+                        }
+                    ));
+
+                    // Run on all remote cluster nodes
+                    for (node_id, node_hostname, base_url) in cluster_nodes {
+                        let remote_url = format!("{}/api/ai/exec", base_url);
+                        let remote_result = self.client
+                            .post(&remote_url)
+                            .header("Cookie", auth_cookie)
+                            .json(&serde_json::json!({ "command": cmd }))
+                            .timeout(Duration::from_secs(15))
+                            .send()
+                            .await;
+
+                        let output = match remote_result {
+                            Ok(resp) => {
+                                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                                    if let Some(err) = json["error"].as_str() {
+                                        format!("ERROR: {}", err)
+                                    } else {
+                                        json["output"].as_str().unwrap_or("(no output)").to_string()
+                                    }
+                                } else {
+                                    "ERROR: Failed to parse response".to_string()
+                                }
+                            }
+                            Err(e) => format!("ERROR: Connection failed — {}", e),
+                        };
+
+                        command_results.push_str(&format!(
+                            "\n=== {} ({}) ===\n$ {}\n{}\n",
+                            node_hostname, node_id, cmd, output
+                        ));
+                    }
+
+                    search_from = abs_start + end + 11;
+                } else {
+                    break;
+                }
+            }
+
+            // Add the AI's response and command results to history for next round
+            let now = chrono::Utc::now().timestamp();
+            history.push(ChatMessage { role: "assistant".to_string(), content: response.clone(), timestamp: now });
+            current_msg = format!(
+                "Here are the command results. Please analyze them and provide a clear summary for the user. \
+                 Do NOT request more commands unless absolutely necessary.\n\n{}",
+                command_results
+            );
+            history.push(ChatMessage { role: "user".to_string(), content: current_msg.clone(), timestamp: now });
+        }
 
         // Store messages in history
         {
             let mut h = self.chat_history.lock().unwrap();
             let now = chrono::Utc::now().timestamp();
             h.push(ChatMessage { role: "user".to_string(), content: user_message.to_string(), timestamp: now });
-            h.push(ChatMessage { role: "assistant".to_string(), content: response.clone(), timestamp: now });
+            h.push(ChatMessage { role: "assistant".to_string(), content: final_response.clone(), timestamp: now });
             // Keep last 100 messages
             if h.len() > 100 { let drain = h.len() - 100; h.drain(..drain); }
         }
 
-        Ok(response)
+        Ok(final_response)
     }
 
     /// List available models for the configured provider
@@ -455,6 +577,132 @@ fn strip_html_tags(html: &str) -> String {
         .replace("&ldquo;", "\u{201c}")
 }
 
+// ─── Safe Command Execution ───
+
+/// Whitelist of allowed command prefixes for read-only operations
+const ALLOWED_COMMANDS: &[&str] = &[
+    // System info
+    "uname", "hostname", "uptime", "whoami", "id", "lscpu", "lsblk", "lsmem", "lspci", "lsusb",
+    "free", "df", "du", "cat /proc/", "cat /etc/os-release", "cat /etc/hostname",
+    "cat /etc/hosts", "cat /etc/resolv.conf",
+    "arch", "nproc", "getconf", "sysctl",
+    // Process/service info
+    "ps", "top -bn1", "systemctl status", "systemctl list-units", "systemctl is-active",
+    "systemctl show", "journalctl",
+    // Network info
+    "ip addr", "ip route", "ip link", "ip neigh", "ss", "netstat",
+    "ping -c", "dig", "nslookup", "host ", "traceroute", "tracepath",
+    "curl -s", "curl --silent", "wget -qO-",
+    // Containers
+    "docker ps", "docker stats --no-stream", "docker inspect", "docker logs",
+    "docker images", "docker info", "docker version", "docker network",
+    "lxc-ls", "lxc-info", "lxc-config",
+    // Files (read-only)
+    "ls", "cat ", "head ", "tail ", "wc ", "file ", "stat ",
+    "find ", "locate ", "which ", "whereis ",
+    // Wolf suite status
+    "wolfnet", "wolfdisk", "wolfproxy", "wolfserve", "wolfscale",
+    // Misc read-only
+    "date", "cal", "env", "printenv", "timedatectl", "hostnamectl",
+    "dmidecode", "lshw", "sensors", "smartctl",
+];
+
+/// Commands/patterns that are explicitly blocked (destructive operations)
+const BLOCKED_PATTERNS: &[&str] = &[
+    "rm ", "rm -", "rmdir", "unlink",
+    "dd ", "mkfs", "fdisk", "parted", "gdisk", "cfdisk",
+    "shutdown", "reboot", "poweroff", "halt", "init ",
+    "kill ", "kill -", "killall", "pkill",
+    "mv ", "cp ", "install ",
+    "chmod", "chown", "chgrp", "chattr",
+    "useradd", "userdel", "usermod", "groupadd", "groupdel", "passwd",
+    "visudo", "sudoers",
+    "iptables -D", "iptables -F", "iptables -X", "iptables -A", "iptables -I",
+    "nft ", "firewall-cmd",
+    "systemctl start", "systemctl stop", "systemctl restart",
+    "systemctl enable", "systemctl disable", "systemctl mask",
+    "apt ", "apt-get", "dpkg -i", "dpkg -r", "dpkg -P",
+    "yum ", "dnf ", "rpm -i", "rpm -e", "rpm -U",
+    "pip ", "pip3 ", "npm ", "cargo ", "make ", "cmake",
+    "docker rm", "docker rmi", "docker stop", "docker kill", "docker exec",
+    "docker run", "docker pull", "docker push", "docker build",
+    "lxc-stop", "lxc-destroy", "lxc-create", "lxc-start", "lxc-execute",
+    "crontab", "at ",
+    "mount ", "umount", "swapon", "swapoff",
+    "insmod", "rmmod", "modprobe",
+    "nano", "vim", "vi ", "emacs", "ed ", "sed -i",
+    "tee ", "sponge",
+    "wget ", "curl -o", "curl -O", "curl --output",
+];
+
+/// Execute a command only if it passes safety checks
+pub fn execute_safe_command(cmd: &str) -> Result<String, String> {
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return Err("Empty command".to_string());
+    }
+
+    // Block output redirection
+    if cmd.contains(" > ") || cmd.contains(" >> ") || cmd.contains(" 2>") {
+        return Err("Output redirection is not allowed (read-only mode)".to_string());
+    }
+
+    // Block backtick/subshell command injection
+    if cmd.contains('`') || cmd.contains("$(") {
+        return Err("Command substitution is not allowed (read-only mode)".to_string());
+    }
+
+    // Check each piped segment for safety
+    let segments: Vec<&str> = cmd.split('|').collect();
+    for segment in &segments {
+        let seg = segment.trim();
+
+        // Check blocked patterns
+        for blocked in BLOCKED_PATTERNS {
+            if seg.starts_with(blocked) || seg.contains(&format!(" {}", blocked)) {
+                return Err(format!("Command '{}' is blocked (read-only mode — no destructive operations)", blocked.trim()));
+            }
+        }
+    }
+
+    // The first command must match an allowed prefix
+    let first_seg = segments[0].trim();
+    let allowed = ALLOWED_COMMANDS.iter().any(|prefix| first_seg.starts_with(prefix));
+    if !allowed {
+        return Err(format!(
+            "Command '{}' is not in the allowed list. I can only run read-only system commands like lscpu, df, ps, docker ps, etc.",
+            first_seg.split_whitespace().next().unwrap_or(first_seg)
+        ));
+    }
+
+    // Execute with timeout
+    let output = StdCommand::new("bash")
+        .arg("-c")
+        .arg(cmd)
+        .output();
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let mut result = stdout.to_string();
+            if !stderr.is_empty() {
+                result.push_str(&format!("\n[stderr]: {}", stderr));
+            }
+            // Truncate long output
+            if result.len() > 10_000 {
+                result.truncate(10_000);
+                result.push_str("\n[output truncated at 10000 chars]");
+            }
+            if result.trim().is_empty() {
+                result = "(no output)".to_string();
+            }
+            Ok(result)
+        }
+        Err(e) => Err(format!("Failed to execute command: {}", e)),
+    }
+}
+
 // ─── System Prompt Builder ───
 
 fn build_system_prompt(knowledge: &str, server_context: &str) -> String {
@@ -464,7 +712,21 @@ fn build_system_prompt(knowledge: &str, server_context: &str) -> String {
          - Answer questions about WolfStack, WolfNet, WolfDisk, WolfProxy, WolfServe, and WolfScale\n\
          - Help with server administration, container management, networking, and storage\n\
          - Explain technical concepts in plain language\n\
-         - Help troubleshoot issues based on the current server state\n\n\
+         - Help troubleshoot issues based on the current server state\n\
+         - **Run read-only commands** on this server and across the cluster\n\n\
+         ## Command Execution\n\
+         You can run commands on the server by using these special tags:\n\
+         - `[EXEC]command[/EXEC]` — runs the command on this server only\n\
+         - `[EXEC_ALL]command[/EXEC_ALL]` — runs the command on ALL servers in the cluster\n\n\
+         **Rules:**\n\
+         - Only read-only commands are allowed (ls, cat, lscpu, df, ps, docker ps, systemctl status, etc.)\n\
+         - Destructive commands (rm, kill, reboot, etc.) are blocked and will fail\n\
+         - Use [EXEC_ALL] when the user asks about the cluster or all servers\n\
+         - Use [EXEC] when the user asks about this specific server\n\
+         - You MUST use these tags when the user asks a question that requires live data\n\
+         - Do NOT just tell the user how to run a command — run it yourself and present the results\n\
+         - After receiving command output, summarize the results clearly for the user\n\
+         - Keep commands simple and focused\n\n\
          ## Current Server State\n{}\n\n\
          ## Wolf Software Knowledge Base\n\
          Below is comprehensive documentation about the Wolf software suite:\n{}",

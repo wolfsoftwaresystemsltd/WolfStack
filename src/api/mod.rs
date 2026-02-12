@@ -1292,18 +1292,18 @@ pub async fn ai_chat(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
 
+    // Extract auth cookie for proxying to remote nodes
+    let auth_cookie = req.headers()
+        .get("Cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
     // Build server context for the AI
     let server_context = {
         let hostname = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
-
-        let _metrics = {
-            let _mon = state.monitor.lock().unwrap();
-            serde_json::json!({
-                "hostname": hostname,
-            })
-        };
 
         let docker_count = crate::containers::docker_list_all().len();
         let lxc_count = crate::containers::lxc_list_all().len();
@@ -1311,8 +1311,7 @@ pub async fn ai_chat(
         let components = crate::installer::get_all_status();
 
         let node_info = {
-            let cluster = &state.cluster;
-            let nodes = cluster.get_all_nodes();
+            let nodes = state.cluster.get_all_nodes();
             let node_names: Vec<String> = nodes.iter().map(|n| format!("{} ({})", n.hostname, if n.online { "online" } else { "offline" })).collect();
             node_names.join(", ")
         };
@@ -1326,9 +1325,44 @@ pub async fn ai_chat(
         )
     };
 
-    match state.ai_agent.chat(&body.message, &server_context).await {
+    // Build cluster node list for remote command execution
+    let cluster_nodes: Vec<(String, String, String)> = {
+        let nodes = state.cluster.get_all_nodes();
+        nodes.iter()
+            .filter(|n| !n.is_self && n.online)
+            .map(|n| {
+                let base_url = format!("http://{}:{}", n.address, n.port);
+                (n.id.clone(), n.hostname.clone(), base_url)
+            })
+            .collect()
+    };
+
+    match state.ai_agent.chat(&body.message, &server_context, &cluster_nodes, &auth_cookie).await {
         Ok(response) => HttpResponse::Ok().json(serde_json::json!({
             "response": response,
+        })),
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({
+            "error": e,
+        })),
+    }
+}
+
+/// POST /api/ai/exec — execute a safe read-only command (used by cluster proxy)
+#[derive(Deserialize)]
+pub struct AiExecRequest {
+    pub command: String,
+}
+
+pub async fn ai_exec(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<AiExecRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    match crate::ai::execute_safe_command(&body.command) {
+        Ok(output) => HttpResponse::Ok().json(serde_json::json!({
+            "output": output,
+            "exit_code": 0,
         })),
         Err(e) => HttpResponse::Ok().json(serde_json::json!({
             "error": e,
@@ -2428,6 +2462,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/ai/status", web::get().to(ai_status))
         .route("/api/ai/alerts", web::get().to(ai_alerts))
         .route("/api/ai/models", web::get().to(ai_models))
+        .route("/api/ai/exec", web::post().to(ai_exec))
         // Storage Manager
         .route("/api/storage/mounts", web::get().to(storage_list_mounts))
         .route("/api/storage/mounts", web::post().to(storage_create_mount))
