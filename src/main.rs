@@ -89,6 +89,10 @@ async fn main() -> std::io::Result<()> {
 
     let cli = Cli::parse();
 
+    // Install rustls crypto provider BEFORE any TLS operations.
+    // Required because rustls 0.23 no longer auto-selects a provider.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Load or generate node ID
     let node_id_file = "/etc/wolfstack/node_id";
     let node_id = if let Ok(content) = std::fs::read_to_string(node_id_file) {
