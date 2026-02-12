@@ -3827,6 +3827,16 @@ async function openLxcSettings(name) {
         const cfg = await resp.json();
         _lxcParsedCfg = cfg;
 
+        // Auto-generate MAC if missing or invalid
+        var macRegex = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
+        if (!cfg.net_hwaddr || !macRegex.test(cfg.net_hwaddr.trim())) {
+            var hex = '0123456789ABCDEF';
+            cfg.net_hwaddr = '02';
+            for (var mi = 0; mi < 5; mi++) {
+                cfg.net_hwaddr += ':' + hex[Math.floor(Math.random() * 16)] + hex[Math.floor(Math.random() * 16)];
+            }
+        }
+
         var ipv4Mode = cfg.net_ipv4 ? 'static' : 'dhcp';
         var ipv6Mode = cfg.net_ipv6 ? 'static' : (cfg.net_ipv6_gw ? 'static' : 'none');
 
@@ -3948,6 +3958,21 @@ async function openLxcSettings(name) {
                         <label>MTU</label>
                         <input type="text" id="lxc-net-mtu" class="form-control" value="${escapeHtml(cfg.net_mtu)}"
                             placeholder="Same as bridge">
+                    </div>
+                </div>
+
+                <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">🐺 WolfNet</h4>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                        <div class="form-group" style="margin:0;">
+                            <label>WolfNet IP</label>
+                            <input type="text" id="lxc-wolfnet-ip" class="form-control" value="${escapeHtml(cfg.wolfnet_ip || '')}"
+                                placeholder="e.g. 10.10.10.50 (leave blank for none)">
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label>&nbsp;</label>
+                            <div style="font-size:11px;color:var(--text-muted);padding:8px 0;">Gateway is handled automatically by WolfNet — no need to configure it here.</div>
+                        </div>
                     </div>
                 </div>
 
