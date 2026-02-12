@@ -497,26 +497,22 @@ pub fn list_certificates() -> serde_json::Value {
     let mut seen_domains = std::collections::HashSet::new();
 
     // --- Certbot CLI discovery ---
-    let certbot_installed = binary_exists("certbot");
-    if !certbot_installed {
-        diagnostics.push("⚠️ certbot is not installed — cannot query certificates via CLI".to_string());
+    // Always try running certbot — don't rely on `which` which may fail in systemd PATH
+    let certbot_certs = parse_certbot_certificates();
+    if certbot_certs.is_empty() {
+        diagnostics.push("ℹ️ certbot found no managed certificates".to_string());
     } else {
-        let certbot_certs = parse_certbot_certificates();
-        if certbot_certs.is_empty() {
-            diagnostics.push("ℹ️ certbot found no managed certificates (ran: sudo certbot certificates)".to_string());
-        } else {
-            diagnostics.push(format!("✅ certbot CLI found {} certificate(s)", certbot_certs.len()));
-            for (domains, cert_path, key_path, expiry) in certbot_certs {
-                seen_domains.insert(cert_path.clone());
-                results.push(serde_json::json!({
-                    "domain": domains,
-                    "cert_path": cert_path,
-                    "key_path": key_path,
-                    "expiry": expiry,
-                    "source": "certbot",
-                    "valid": true,
-                }));
-            }
+        diagnostics.push(format!("✅ certbot CLI found {} certificate(s)", certbot_certs.len()));
+        for (domains, cert_path, key_path, expiry) in certbot_certs {
+            seen_domains.insert(cert_path.clone());
+            results.push(serde_json::json!({
+                "domain": domains,
+                "cert_path": cert_path,
+                "key_path": key_path,
+                "expiry": expiry,
+                "source": "certbot",
+                "valid": true,
+            }));
         }
     }
 
