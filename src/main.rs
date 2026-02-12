@@ -354,12 +354,14 @@ async fn main() -> std::io::Result<()> {
             info!("     Key:  {}", key_path);
             info!("     HTTPS: https://{}:{}", cli.bind, cli.port);
             info!("     HTTP (inter-node): http://{}:{}", cli.bind, cli.port + 1);
+            info!("");
 
             // Clone web_dir for second closure
             let web_dir2 = web_dir.clone();
             let app_state2 = app_state.clone();
 
             // Start HTTPS server on main port + HTTP server on port+1 for inter-node
+            let https_bind = format!("{}:{}", cli.bind, cli.port);
             let https_server = HttpServer::new(move || {
                 App::new()
                     .app_data(app_state.clone())
@@ -368,9 +370,14 @@ async fn main() -> std::io::Result<()> {
                     .route("/", web::get().to(index_handler))
                     .service(actix_files::Files::new("/", &web_dir).index_file("login.html"))
             })
-            .bind_rustls_0_23(format!("{}:{}", cli.bind, cli.port), tls_config)?
+            .bind_rustls_0_23(&https_bind, tls_config)
+            .map_err(|e| {
+                tracing::error!("❌ Failed to bind HTTPS on {}: {}", https_bind, e);
+                e
+            })?
             .run();
 
+            let http_bind = format!("{}:{}", cli.bind, cli.port + 1);
             let http_server = HttpServer::new(move || {
                 App::new()
                     .app_data(app_state2.clone())
@@ -379,10 +386,13 @@ async fn main() -> std::io::Result<()> {
                     .route("/", web::get().to(index_handler))
                     .service(actix_files::Files::new("/", &web_dir2).index_file("login.html"))
             })
-            .bind(format!("{}:{}", cli.bind, cli.port + 1))?
+            .bind(&http_bind)
+            .map_err(|e| {
+                tracing::error!("❌ Failed to bind HTTP on {}: {}", http_bind, e);
+                e
+            })?
             .run();
 
-            info!("");
             let (r1, r2) = tokio::join!(https_server, http_server);
             r1?;
             r2?;
