@@ -92,7 +92,7 @@ impl ClusterState {
                     return false;
                 }
                 // Ghost: same hostname + same port + wolfstack type
-                (n.hostname == hostname && n.port == self.port && n.node_type == "wolfstack")
+                n.hostname == hostname && n.port == self.port && n.node_type == "wolfstack"
             })
             .map(|n| n.id.clone())
             .collect();

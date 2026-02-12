@@ -118,9 +118,58 @@ impl PveClient {
     }
 
     /// Get node status (CPU, RAM, uptime, etc.)
+    /// Tries /nodes/{node}/status first, falls back to /cluster/resources?type=node
     pub async fn get_node_status(&self) -> Result<PveNodeStatus, String> {
-        let data = self.get(&format!("/nodes/{}/status", self.node_name)).await?;
+        // Try direct node status endpoint first
+        match self.get(&format!("/nodes/{}/status", self.node_name)).await {
+            Ok(data) => return self.parse_node_status_direct(&data),
+            Err(e) => {
+                if e.contains("403") || e.contains("Permission") {
+                    debug!("Direct node status failed (403), trying /cluster/resources fallback for {}", self.node_name);
+                } else {
+                    return Err(e); // Non-permission error, don't fallback
+                }
+            }
+        }
 
+        // Fallback: use /cluster/resources?type=node
+        let data = self.get("/cluster/resources?type=node").await
+            .map_err(|e| format!("Fallback /cluster/resources also failed for {}: {}", self.node_name, e))?;
+        
+        let arr = data.as_array().ok_or("Expected array from /cluster/resources")?;
+        
+        // Find our node in the cluster resources
+        for item in arr {
+            let node = item.get("node").and_then(|n| n.as_str()).unwrap_or("");
+            if node == self.node_name {
+                let cpu = item.get("cpu").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                let maxcpu = item.get("maxcpu").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+                let mem_used = item.get("mem").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mem_total = item.get("maxmem").and_then(|v| v.as_u64()).unwrap_or(1);
+                let disk_used = item.get("disk").and_then(|v| v.as_u64()).unwrap_or(0);
+                let disk_total = item.get("maxdisk").and_then(|v| v.as_u64()).unwrap_or(1);
+                let uptime = item.get("uptime").and_then(|v| v.as_u64()).unwrap_or(0);
+                let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+                
+                return Ok(PveNodeStatus {
+                    hostname: self.node_name.clone(),
+                    cpu,
+                    maxcpu,
+                    mem_used,
+                    mem_total,
+                    disk_used,
+                    disk_total,
+                    uptime,
+                    online: status == "online",
+                });
+            }
+        }
+        
+        Err(format!("Node '{}' not found in /cluster/resources", self.node_name))
+    }
+
+    /// Parse node status from direct /nodes/{node}/status response
+    fn parse_node_status_direct(&self, data: &serde_json::Value) -> Result<PveNodeStatus, String> {
         let cpu = data.get("cpu").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
         let maxcpu = data.get("cpuinfo").and_then(|v| v.get("cpus")).and_then(|v| v.as_u64()).unwrap_or(1) as u32;
         let mem_used = data.get("memory").and_then(|v| v.get("used")).and_then(|v| v.as_u64()).unwrap_or(0);
