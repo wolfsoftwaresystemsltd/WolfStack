@@ -234,7 +234,7 @@ function buildServerTree(nodes) {
                 <span class="tree-toggle ${shouldExpandCluster ? 'expanded' : ''}" id="toggle-${clusterId}">▶</span>
                 <span class="server-dot ${anyOnline ? 'online' : 'offline'}"></span>
                 <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">☁️ ${clusterName}</span>
-                <span class="badge" style="font-size:10px; padding:1px 6px;">${clusterNodes.length} nodes</span>
+                <span class="badge" style="font-size:10px; padding:1px 6px; background:rgba(99,102,241,0.2); color:var(--accent-light);">${clusterNodes.length} nodes</span>
                 <span class="remove-server-btn" onclick="event.stopPropagation(); openWsClusterSettings('${escapedName}')" title="Cluster settings" style="margin-left:4px;">⚙️</span>
             </div>
             <div class="server-node-children ${shouldExpandCluster ? 'expanded' : ''}" id="children-${clusterId}">`;
