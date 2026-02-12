@@ -226,8 +226,7 @@ function buildServerTree(nodes) {
         const shouldExpandCluster = isFirstBuild ? true : (expandedNodes.has(clusterId) || clusterNodes.some(n => n.id === currentNodeId || expandedNodes.has(n.id)));
         const anyOnline = clusterNodes.some(n => n.online);
         const nodeIds = clusterNodes.map(n => `'${n.id}'`).join(',');
-
-        // Settings/Delete for non-default clusters? Maybe later. For now just view.
+        const escapedName = clusterName.replace(/'/g, "\\'");
 
         html += `
         <div class="server-tree-node">
@@ -236,6 +235,7 @@ function buildServerTree(nodes) {
                 <span class="server-dot ${anyOnline ? 'online' : 'offline'}"></span>
                 <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">☁️ ${clusterName}</span>
                 <span class="badge" style="font-size:10px; padding:1px 6px;">${clusterNodes.length} nodes</span>
+                <span class="remove-server-btn" onclick="event.stopPropagation(); openWsClusterSettings('${escapedName}')" title="Cluster settings" style="margin-left:4px;">⚙️</span>
             </div>
             <div class="server-node-children ${shouldExpandCluster ? 'expanded' : ''}" id="children-${clusterId}">`;
 
@@ -2690,7 +2690,7 @@ async function confirmRemovePveCluster(clusterName, nodeIds) {
 
 function openPveClusterSettings(clusterName) {
     // Find all PVE nodes in this cluster
-    const clusterNodes = allNodes.filter(n => n.node_type === 'proxmox' && (n.pve_cluster_name || n.address) === clusterName);
+    const clusterNodes = allNodes.filter(n => n.node_type === 'proxmox' && (n.cluster_name || n.pve_cluster_name || n.address) === clusterName);
     if (clusterNodes.length === 0) return;
 
     const first = clusterNodes[0];
@@ -2756,7 +2756,7 @@ async function savePveClusterSettings() {
 
     // Build update payload
     const updates = {};
-    if (newName && newName !== originalClusterName) updates.pve_cluster_name = newName;
+    if (newName && newName !== originalClusterName) updates.cluster_name = newName;
     if (tokenId && tokenSecret) updates.pve_token = tokenId + '=' + tokenSecret;
     if (fingerprint !== undefined) updates.pve_fingerprint = fingerprint || null;
 
@@ -2778,6 +2778,71 @@ async function savePveClusterSettings() {
 
     modal.remove();
     showToast('Cluster settings updated', 'success');
+    fetchNodes();
+}
+
+// ─── WolfStack Cluster Settings ───
+function openWsClusterSettings(clusterName) {
+    const clusterNodes = allNodes.filter(n => n.node_type !== 'proxmox' && (n.cluster_name || 'WolfStack') === clusterName);
+    if (clusterNodes.length === 0) return;
+
+    const nodeNames = clusterNodes.map(n => n.hostname).join(', ');
+
+    let existing = document.getElementById('ws-settings-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'ws-settings-modal';
+    modal.className = 'modal-overlay active';
+    modal.innerHTML = `
+        <div class="modal">
+            <div class="modal-header">
+                <h3>⚙️ ${clusterName} — Cluster Settings</h3>
+                <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
+            </div>
+            <div class="modal-body">
+                <p style="color: var(--text-muted); margin-bottom:16px;">
+                    <strong>Nodes:</strong> ${nodeNames}
+                </p>
+                <div class="form-group">
+                    <label>Cluster Name</label>
+                    <input type="text" class="form-control" id="ws-settings-cluster-name" value="${clusterName}">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveWsClusterSettings()">Save Changes</button>
+            </div>
+        </div>`;
+    modal._nodeIds = clusterNodes.map(n => n.id);
+    modal._originalName = clusterName;
+    document.body.appendChild(modal);
+}
+
+async function saveWsClusterSettings() {
+    const modal = document.getElementById('ws-settings-modal');
+    if (!modal) return;
+    const nodeIds = modal._nodeIds || [];
+    const originalName = modal._originalName || '';
+    const newName = document.getElementById('ws-settings-cluster-name')?.value.trim();
+
+    if (!newName || newName === originalName) {
+        showToast('No changes to save', 'info');
+        return;
+    }
+
+    for (const id of nodeIds) {
+        try {
+            await fetch(`/api/nodes/${id}/settings`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cluster_name: newName })
+            });
+        } catch (e) { /* continue */ }
+    }
+
+    modal.remove();
+    showToast('Cluster renamed to "' + newName + '"', 'success');
     fetchNodes();
 }
 

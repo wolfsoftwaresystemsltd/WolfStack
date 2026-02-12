@@ -274,13 +274,19 @@ impl ClusterState {
         removed
     }
 
-    /// Update PVE node settings (token, fingerprint, cluster name)
-    pub fn update_node_settings(&self, id: &str, pve_token: Option<String>, pve_fingerprint: Option<Option<String>>, pve_cluster_name: Option<String>) -> bool {
+    /// Update node settings (token, fingerprint, cluster name)
+    pub fn update_node_settings(&self, id: &str, pve_token: Option<String>, pve_fingerprint: Option<Option<String>>, cluster_name: Option<String>) -> bool {
         let mut nodes = self.nodes.write().unwrap();
         if let Some(node) = nodes.get_mut(id) {
             if let Some(token) = pve_token { node.pve_token = Some(token); }
             if let Some(fp) = pve_fingerprint { node.pve_fingerprint = fp; }
-            if let Some(name) = pve_cluster_name { node.pve_cluster_name = Some(name); }
+            if let Some(ref name) = cluster_name {
+                // Update both cluster_name fields so sidebar grouping works
+                node.cluster_name = Some(name.clone());
+                if node.node_type == "proxmox" {
+                    node.pve_cluster_name = Some(name.clone());
+                }
+            }
             drop(nodes);
             self.save_nodes();
             true
