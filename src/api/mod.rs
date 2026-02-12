@@ -1069,6 +1069,41 @@ pub async fn lxc_set_network_link(
     }
 }
 
+/// GET /api/containers/lxc/{name}/parsed-config — get structured config
+pub async fn lxc_parsed_config(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match containers::lxc_parse_config(&name) {
+        Some(cfg) => HttpResponse::Ok().json(cfg),
+        None => HttpResponse::NotFound().json(serde_json::json!({ "error": "Config not found" })),
+    }
+}
+
+/// POST /api/containers/lxc/{name}/settings — update structured settings
+pub async fn lxc_update_settings(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<containers::LxcSettingsUpdate>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match containers::lxc_update_settings(&name, &body.into_inner()) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/network/conflicts — detect duplicate MACs/IPs across LXC containers
+pub async fn network_conflicts(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let conflicts = containers::detect_network_conflicts();
+    HttpResponse::Ok().json(conflicts)
+}
+
 /// POST /api/containers/docker/import — receive a migrated container image
 /// Accepts the tar file as raw body bytes, container name via query param
 pub async fn docker_import(
@@ -1727,6 +1762,7 @@ pub async fn pbs_restore(
         }) {
             Ok(msg) => {
                 if let Ok(mut progress) = state_clone.pbs_restore_progress.lock() {
+                    progress.active = false;
                     progress.finished = true;
                     progress.success = Some(true);
                     progress.message = msg;
@@ -1736,6 +1772,7 @@ pub async fn pbs_restore(
             }
             Err(e) => {
                 if let Ok(mut progress) = state_clone.pbs_restore_progress.lock() {
+                    progress.active = false;
                     progress.finished = true;
                     progress.success = Some(false);
                     progress.message = e;
@@ -2193,6 +2230,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/lxc/{name}/mounts", web::delete().to(lxc_remove_mount))
         .route("/api/containers/lxc/{name}/autostart", web::post().to(lxc_set_autostart))
         .route("/api/containers/lxc/{name}/network-link", web::post().to(lxc_set_network_link))
+        .route("/api/containers/lxc/{name}/parsed-config", web::get().to(lxc_parsed_config))
+        .route("/api/containers/lxc/{name}/settings", web::post().to(lxc_update_settings))
+        // Network Conflicts
+        .route("/api/network/conflicts", web::get().to(network_conflicts))
         // WolfNet
         .route("/api/wolfnet/status", web::get().to(wolfnet_network_status))
         // Storage Manager

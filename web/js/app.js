@@ -3771,7 +3771,45 @@ function closeContainerDetail() {
     document.getElementById('container-detail-modal').classList.remove('active');
 }
 
-// ─── LXC Settings Editor ───
+// ─── LXC Settings Editor (Tabbed) ───
+
+var _lxcSettingsTab = 1;
+var _lxcParsedCfg = null;
+
+function switchLxcTab(tab) {
+    _lxcSettingsTab = tab;
+    document.querySelectorAll('.lxc-tab-page').forEach(p => p.style.display = 'none');
+    document.querySelectorAll('.lxc-tab-btn').forEach(b => {
+        b.style.borderBottomColor = 'transparent';
+        b.style.color = 'var(--text-muted)';
+    });
+    var page = document.getElementById('lxc-tab-' + tab);
+    var btn = document.querySelector('.lxc-tab-btn[data-ltab="' + tab + '"]');
+    if (page) page.style.display = 'block';
+    if (btn) { btn.style.borderBottomColor = 'var(--accent)'; btn.style.color = 'var(--text-primary)'; }
+}
+
+function generateMac() {
+    var hex = '0123456789ABCDEF';
+    var mac = '02';
+    for (var i = 0; i < 5; i++) {
+        mac += ':' + hex[Math.floor(Math.random() * 16)] + hex[Math.floor(Math.random() * 16)];
+    }
+    var el = document.getElementById('lxc-net-hwaddr');
+    if (el) el.value = mac;
+}
+
+function toggleIpv4Mode() {
+    var mode = document.querySelector('input[name="lxc-ipv4-mode"]:checked');
+    var staticFields = document.getElementById('lxc-ipv4-static-fields');
+    if (staticFields) staticFields.style.display = (mode && mode.value === 'static') ? 'block' : 'none';
+}
+
+function toggleIpv6Mode() {
+    var mode = document.querySelector('input[name="lxc-ipv6-mode"]:checked');
+    var staticFields = document.getElementById('lxc-ipv6-static-fields');
+    if (staticFields) staticFields.style.display = (mode && mode.value === 'static') ? 'block' : 'none';
+}
 
 async function openLxcSettings(name) {
     const modal = document.getElementById('container-detail-modal');
@@ -3779,93 +3817,318 @@ async function openLxcSettings(name) {
     const body = document.getElementById('container-detail-body');
 
     title.textContent = `${name} — Settings`;
-    body.innerHTML = '<p style="color:var(--text-muted);">Loading config...</p>';
+    body.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:40px;">Loading config...</p>';
     modal.classList.add('active');
+    _lxcSettingsTab = 1;
 
     try {
-        const resp = await fetch(apiUrl(`/api/containers/lxc/${name}/config`));
-        const data = await resp.json();
-        const config = data.config || '';
+        const resp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/parsed-config`));
+        if (!resp.ok) throw new Error('Failed to load config');
+        const cfg = await resp.json();
+        _lxcParsedCfg = cfg;
 
-        // Parse current settings
-        const currentLink = (config.match(/^lxc\.net\.0\.link\s*=\s*(.*)$/m) || [])[1]?.trim() || '';
-        const currentAutostart = (config.match(/^lxc\.start\.auto\s*=\s*1$/m) || [])[0] ? true : false;
-        const currentDelay = (config.match(/^lxc\.start\.delay\s*=\s*(\d+)$/m) || [])[1] || '0';
+        var ipv4Mode = cfg.net_ipv4 ? 'static' : 'dhcp';
+        var ipv6Mode = cfg.net_ipv6 ? 'static' : (cfg.net_ipv6_gw ? 'static' : 'none');
 
-        // Also fetch current mounts
-        let mountsHtml = '';
+        // Fetch mounts
+        var mounts = [];
         try {
-            const mountResp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`));
-            const mounts = await mountResp.json();
-            if (mounts.length > 0) {
-                mountsHtml = `
-                    <div style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
-                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
-                            <span>📁</span>
-                            <strong style="font-size:13px;">Bind Mounts (${mounts.length})</strong>
-                        </div>
-                        ${mounts.map(m => `
-                            <div style="display:flex; align-items:center; gap:8px; padding:6px 8px; margin-bottom:4px; background:var(--bg-primary); border-radius:6px; border:1px solid var(--border);">
-                                <code style="flex:1; font-size:12px; color:var(--accent);">${m.host_path}</code>
-                                <span style="color:var(--text-muted); font-size:12px;">→</span>
-                                <code style="flex:1; font-size:12px; color:var(--text-primary);">${m.container_path}</code>
-                                ${m.read_only ? '<span class="badge" style="font-size:10px;">RO</span>' : ''}
-                                <button class="btn btn-sm" style="font-size:11px; padding:2px 6px; color:var(--danger);"
-                                    onclick="removeLxcMount('${name}', '${m.host_path.replace(/'/g, "\\'")}')" title="Remove mount">✕</button>
-                            </div>
-                        `).join('')}
-                    </div>
-                `;
-            }
-        } catch (e) { /* ignore mount fetch errors */ }
+            const mr = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`));
+            mounts = await mr.json();
+        } catch (e) { }
+
+        var mountRows = mounts.length > 0 ? mounts.map(m => `
+            <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;margin-bottom:4px;background:var(--bg-primary);border-radius:6px;border:1px solid var(--border);">
+                <code style="flex:1;font-size:12px;color:var(--accent);">${escapeHtml(m.host_path)}</code>
+                <span style="color:var(--text-muted);font-size:12px;">→</span>
+                <code style="flex:1;font-size:12px;color:var(--text-primary);">${escapeHtml(m.container_path)}</code>
+                ${m.read_only ? '<span class="badge" style="font-size:10px;">RO</span>' : ''}
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 6px;color:var(--danger);"
+                    onclick="removeLxcMount('${name}','${m.host_path.replace(/'/g, "\\'")}')" title="Remove">✕</button>
+            </div>
+        `).join('') : '<div style="color:var(--text-muted);font-size:12px;padding:8px;">No bind mounts configured</div>';
+
+        var tabBtnStyle = 'flex:1;padding:10px 12px;border:none;background:none;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;';
 
         body.innerHTML = `
-            ${mountsHtml}
-            
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px;">
-                <div class="card" style="padding:12px; background:var(--bg-tertiary);">
-                    <h4 style="margin-top:0; font-size:14px;">General</h4>
+            <!-- Tab Bar -->
+            <div style="display:flex;border-bottom:1px solid var(--border);background:var(--bg-secondary);margin:-24px -24px 16px -24px;">
+                <button class="lxc-tab-btn" data-ltab="1" onclick="switchLxcTab(1)"
+                    style="${tabBtnStyle}border-bottom:2px solid var(--accent);color:var(--text-primary);">
+                    ⚙️ General
+                </button>
+                <button class="lxc-tab-btn" data-ltab="2" onclick="switchLxcTab(2)"
+                    style="${tabBtnStyle}border-bottom:2px solid transparent;color:var(--text-muted);">
+                    🌐 Network
+                </button>
+                <button class="lxc-tab-btn" data-ltab="3" onclick="switchLxcTab(3)"
+                    style="${tabBtnStyle}border-bottom:2px solid transparent;color:var(--text-muted);">
+                    💻 Resources
+                </button>
+                <button class="lxc-tab-btn" data-ltab="4" onclick="switchLxcTab(4)"
+                    style="${tabBtnStyle}border-bottom:2px solid transparent;color:var(--text-muted);">
+                    🔧 Features
+                </button>
+            </div>
+
+            <!-- ═══ Tab 1: General ═══ -->
+            <div class="lxc-tab-page" id="lxc-tab-1">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
                     <div class="form-group">
-                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-                            <input type="checkbox" id="lxc-autostart" ${currentAutostart ? 'checked' : ''}>
-                            Autostart on Boot
-                        </label>
+                        <label>Container Name</label>
+                        <input type="text" class="form-control" value="${escapeHtml(name)}" readonly
+                            style="opacity:0.7;cursor:not-allowed;">
                     </div>
-                    <div class="form-group" style="margin-top:8px;">
-                         <label>Start Delay (s)</label>
-                         <input type="number" id="lxc-start-delay" class="form-control" value="${currentDelay}" min="0">
+                    <div class="form-group">
+                        <label>Hostname</label>
+                        <input type="text" id="lxc-hostname" class="form-control" value="${escapeHtml(cfg.hostname)}"
+                            placeholder="Same as container name">
+                    </div>
+                    <div class="form-group">
+                        <label>Architecture</label>
+                        <input type="text" class="form-control" value="${escapeHtml(cfg.arch || 'auto')}" readonly
+                            style="opacity:0.7;cursor:not-allowed;">
+                    </div>
+                    <div class="form-group">
+                        <label>Privilege Mode</label>
+                        <input type="text" class="form-control" value="${cfg.unprivileged ? 'Unprivileged' : 'Privileged'}" readonly
+                            style="opacity:0.7;cursor:not-allowed;">
                     </div>
                 </div>
-                
-                <div class="card" style="padding:12px; background:var(--bg-tertiary);">
-                    <h4 style="margin-top:0; font-size:14px;">Network</h4>
-                    <div class="form-group">
-                        <label>Network Link (Interface/Bridge)</label>
-                        <input type="text" id="lxc-network-link" class="form-control" value="${currentLink}" placeholder="e.g. lxcbr0, br0, vlan10">
-                        <small style="color:var(--text-muted); display:block; margin-top:4px;">Enter a host interface or bridge name.</small>
+                <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
+                    <h4 style="margin:0 0 8px 0;font-size:13px;color:var(--text-primary);">🚀 Boot Options</h4>
+                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+                        <div class="form-group" style="margin:0;">
+                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                                <input type="checkbox" id="lxc-autostart" ${cfg.autostart ? 'checked' : ''}>
+                                Autostart on Boot
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label>Start Delay (s)</label>
+                            <input type="number" id="lxc-start-delay" class="form-control" value="${cfg.start_delay}" min="0">
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label>Start Order</label>
+                            <input type="number" id="lxc-start-order" class="form-control" value="${cfg.start_order}" min="0"
+                                placeholder="Higher = starts first">
+                        </div>
                     </div>
                 </div>
             </div>
 
-            <div style="margin-bottom: 12px;">
-                <div style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
-                    <button class="btn btn-sm" onclick="addMountPoint('${name}')">📁 Add Mount Point</button>
-                    <button class="btn btn-sm" onclick="addWolfDiskMount('${name}')">🐺 Mount WolfDisk</button>
-                    <button class="btn btn-sm" onclick="addMemoryLimit('${name}')">💾 Set Memory Limit</button>
-                    <button class="btn btn-sm" onclick="addCpuLimit('${name}')">⚡ Set CPU Limit</button>
-                </div>
-                <details>
-                    <summary style="cursor:pointer; color:var(--accent); font-size:12px; margin-bottom:8px;">Advanced: Raw Config Editor</summary>
-                    <div style="font-size:11px; color:var(--text-muted); margin-bottom:8px;">
-                        Edit the raw LXC config below. Changes take effect after container restart.
+            <!-- ═══ Tab 2: Network ═══ -->
+            <div class="lxc-tab-page" id="lxc-tab-2" style="display:none;">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div class="form-group">
+                        <label>Interface Name</label>
+                        <input type="text" id="lxc-net-name" class="form-control" value="${escapeHtml(cfg.net_name || 'eth0')}"
+                            placeholder="eth0">
                     </div>
-                    <textarea id="lxc-config-editor" style="width:100%; height:200px; background:var(--bg-primary); color:var(--text-primary);
-                        border:1px solid var(--border); border-radius:8px; padding:12px; font-family:'JetBrains Mono', monospace;
-                        font-size:12px; resize:vertical; line-height:1.5;">${escapeHtml(config)}</textarea>
+                    <div class="form-group">
+                        <label>Bridge / Link</label>
+                        <input type="text" id="lxc-net-link" class="form-control" value="${escapeHtml(cfg.net_link)}"
+                            placeholder="e.g. lxcbr0, vmbr0">
+                    </div>
+                    <div class="form-group">
+                        <label>MAC Address</label>
+                        <div style="display:flex;gap:4px;">
+                            <input type="text" id="lxc-net-hwaddr" class="form-control" value="${escapeHtml(cfg.net_hwaddr)}"
+                                placeholder="AA:BB:CC:DD:EE:FF" style="flex:1;">
+                            <button class="btn btn-sm" onclick="generateMac()" title="Generate random MAC"
+                                style="padding:4px 8px;font-size:11px;">🎲</button>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>VLAN Tag</label>
+                        <input type="text" id="lxc-net-vlan" class="form-control" value="${escapeHtml(cfg.net_vlan)}"
+                            placeholder="No VLAN">
+                    </div>
+                    <div class="form-group">
+                        <label>MTU</label>
+                        <input type="text" id="lxc-net-mtu" class="form-control" value="${escapeHtml(cfg.net_mtu)}"
+                            placeholder="Same as bridge">
+                    </div>
+                </div>
+
+                <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">IPv4</h4>
+                    <div style="display:flex;gap:16px;margin-bottom:8px;">
+                        <label style="cursor:pointer;display:flex;align-items:center;gap:4px;">
+                            <input type="radio" name="lxc-ipv4-mode" value="static" onchange="toggleIpv4Mode()"
+                                ${ipv4Mode === 'static' ? 'checked' : ''}> Static
+                        </label>
+                        <label style="cursor:pointer;display:flex;align-items:center;gap:4px;">
+                            <input type="radio" name="lxc-ipv4-mode" value="dhcp" onchange="toggleIpv4Mode()"
+                                ${ipv4Mode === 'dhcp' ? 'checked' : ''}> DHCP
+                        </label>
+                    </div>
+                    <div id="lxc-ipv4-static-fields" style="display:${ipv4Mode === 'static' ? 'block' : 'none'};">
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                            <div class="form-group" style="margin:0;">
+                                <label>IPv4/CIDR</label>
+                                <input type="text" id="lxc-net-ipv4" class="form-control" value="${escapeHtml(cfg.net_ipv4)}"
+                                    placeholder="192.168.1.100/24">
+                            </div>
+                            <div class="form-group" style="margin:0;">
+                                <label>Gateway</label>
+                                <input type="text" id="lxc-net-ipv4-gw" class="form-control" value="${escapeHtml(cfg.net_ipv4_gw)}"
+                                    placeholder="192.168.1.1">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin-top:8px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">IPv6</h4>
+                    <div style="display:flex;gap:16px;margin-bottom:8px;">
+                        <label style="cursor:pointer;display:flex;align-items:center;gap:4px;">
+                            <input type="radio" name="lxc-ipv6-mode" value="static" onchange="toggleIpv6Mode()"
+                                ${ipv6Mode === 'static' ? 'checked' : ''}> Static
+                        </label>
+                        <label style="cursor:pointer;display:flex;align-items:center;gap:4px;">
+                            <input type="radio" name="lxc-ipv6-mode" value="dhcp" onchange="toggleIpv6Mode()"
+                                ${ipv6Mode === 'dhcp' ? 'checked' : ''}> DHCP
+                        </label>
+                        <label style="cursor:pointer;display:flex;align-items:center;gap:4px;">
+                            <input type="radio" name="lxc-ipv6-mode" value="none" onchange="toggleIpv6Mode()"
+                                ${ipv6Mode === 'none' ? 'checked' : ''}> None
+                        </label>
+                    </div>
+                    <div id="lxc-ipv6-static-fields" style="display:${ipv6Mode === 'static' ? 'block' : 'none'};">
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                            <div class="form-group" style="margin:0;">
+                                <label>IPv6/CIDR</label>
+                                <input type="text" id="lxc-net-ipv6" class="form-control" value="${escapeHtml(cfg.net_ipv6)}"
+                                    placeholder="fd00::100/64">
+                            </div>
+                            <div class="form-group" style="margin:0;">
+                                <label>Gateway</label>
+                                <input type="text" id="lxc-net-ipv6-gw" class="form-control" value="${escapeHtml(cfg.net_ipv6_gw)}"
+                                    placeholder="fd00::1">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ Tab 3: Resources ═══ -->
+            <div class="lxc-tab-page" id="lxc-tab-3" style="display:none;">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div class="form-group">
+                        <label>Memory Limit</label>
+                        <select id="lxc-memory" class="form-control">
+                            <option value="">Unlimited</option>
+                            ${['256M', '512M', '1G', '2G', '4G', '8G', '16G', '32G'].map(v =>
+            '<option value="' + v + '" ' + (cfg.memory_limit === v ? 'selected' : '') + '>' + v + '</option>'
+        ).join('')}
+                        </select>
+                        ${cfg.memory_limit && !['256M', '512M', '1G', '2G', '4G', '8G', '16G', '32G'].includes(cfg.memory_limit)
+                ? '<small style="color:var(--accent);margin-top:4px;display:block;">Current: ' + escapeHtml(cfg.memory_limit) + '</small>' : ''}
+                    </div>
+                    <div class="form-group">
+                        <label>Swap Limit</label>
+                        <select id="lxc-swap" class="form-control">
+                            <option value="">Unlimited</option>
+                            ${['0', '256M', '512M', '1G', '2G', '4G'].map(v =>
+                    '<option value="' + v + '" ' + (cfg.swap_limit === v ? 'selected' : '') + '>' + (v === '0' ? 'Disabled' : v) + '</option>'
+                ).join('')}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>CPU Cores (cpuset)</label>
+                        <input type="text" id="lxc-cpus" class="form-control" value="${escapeHtml(cfg.cpus)}"
+                            placeholder="e.g. 0-3 for 4 cores, or 0,2 for specific">
+                        <small style="color:var(--text-muted);margin-top:4px;display:block;">Leave blank for unlimited</small>
+                    </div>
+                </div>
+
+                <div style="margin-top:16px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                        <h4 style="margin:0;font-size:13px;">📁 Bind Mounts (${mounts.length})</h4>
+                        <div style="display:flex;gap:4px;">
+                            <button class="btn btn-sm" onclick="addMountPoint('${name}')"
+                                style="font-size:11px;padding:4px 8px;">+ Mount</button>
+                            <button class="btn btn-sm" onclick="addWolfDiskMount('${name}')"
+                                style="font-size:11px;padding:4px 8px;">🐺 WolfDisk</button>
+                        </div>
+                    </div>
+                    ${mountRows}
+                </div>
+            </div>
+
+            <!-- ═══ Tab 4: Features & Advanced ═══ -->
+            <div class="lxc-tab-page" id="lxc-tab-4" style="display:none;">
+                <div style="padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);margin-bottom:12px;">
+                    <h4 style="margin:0 0 12px 0;font-size:13px;color:var(--text-primary);">🔌 Device & Feature Toggles</h4>
+                    <div style="display:grid;gap:10px;">
+                        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:8px;border-radius:6px;background:var(--bg-primary);border:1px solid var(--border);">
+                            <input type="checkbox" id="lxc-feat-tun" ${cfg.tun_enabled ? 'checked' : ''} style="margin-top:2px;">
+                            <div>
+                                <strong style="font-size:13px;">TUN/TAP Device</strong>
+                                <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+                                    Required for Tailscale, WireGuard, OpenVPN, and other VPN software.
+                                    Enables <code>/dev/net/tun</code> inside the container.
+                                </div>
+                            </div>
+                        </label>
+                        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:8px;border-radius:6px;background:var(--bg-primary);border:1px solid var(--border);">
+                            <input type="checkbox" id="lxc-feat-fuse" ${cfg.fuse_enabled ? 'checked' : ''} style="margin-top:2px;">
+                            <div>
+                                <strong style="font-size:13px;">FUSE</strong>
+                                <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+                                    Required for AppImage, sshfs, rclone mount, and other FUSE-based filesystems.
+                                </div>
+                            </div>
+                        </label>
+                        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:8px;border-radius:6px;background:var(--bg-primary);border:1px solid var(--border);">
+                            <input type="checkbox" id="lxc-feat-nesting" ${cfg.nesting_enabled ? 'checked' : ''} style="margin-top:2px;">
+                            <div>
+                                <strong style="font-size:13px;">Nesting (LXC/Docker inside container)</strong>
+                                <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+                                    Allows running Docker or LXC containers inside this container.
+                                    Required for Docker-in-LXC setups.
+                                </div>
+                            </div>
+                        </label>
+                        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:8px;border-radius:6px;background:var(--bg-primary);border:1px solid var(--border);">
+                            <input type="checkbox" id="lxc-feat-nfs" ${cfg.nfs_enabled ? 'checked' : ''} style="margin-top:2px;">
+                            <div>
+                                <strong style="font-size:13px;">NFS</strong>
+                                <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+                                    Allow mounting NFS shares inside the container.
+                                </div>
+                            </div>
+                        </label>
+                        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:8px;border-radius:6px;background:var(--bg-primary);border:1px solid var(--border);">
+                            <input type="checkbox" id="lxc-feat-keyctl" ${cfg.keyctl_enabled ? 'checked' : ''} style="margin-top:2px;">
+                            <div>
+                                <strong style="font-size:13px;">Keyctl (systemd support)</strong>
+                                <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+                                    Required for full systemd functionality in unprivileged containers.
+                                    Enables proc and sys read-write mounts.
+                                </div>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+
+                <details>
+                    <summary style="cursor:pointer;color:var(--accent);font-size:12px;margin-bottom:8px;">
+                        📝 Raw Config Editor
+                    </summary>
+                    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">
+                        Advanced: Edit the raw LXC config. Changes here override the structured settings above.
+                        A backup is created automatically before saving.
+                    </div>
+                    <textarea id="lxc-config-editor" style="width:100%;height:250px;background:var(--bg-primary);color:var(--text-primary);
+                        border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'JetBrains Mono',monospace;
+                        font-size:12px;resize:vertical;line-height:1.5;">${escapeHtml(cfg.raw_config)}</textarea>
                 </details>
             </div>
-            
-            <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:12px;">
+
+            <!-- Save/Cancel Bar -->
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;padding-top:12px;border-top:1px solid var(--border);">
                 <button class="btn btn-sm" onclick="closeContainerDetail()">Cancel</button>
                 <button class="btn btn-sm btn-primary" onclick="saveLxcSettings('${name}')">💾 Save Settings</button>
             </div>
@@ -3875,138 +4138,130 @@ async function openLxcSettings(name) {
     }
 }
 
-async function addMountPoint(name) {
-    const src = prompt('Host path (e.g. /mnt/data):');
-    if (!src) return;
-    const dest = prompt('Container path (e.g. /mnt/data):', src);
-    if (!dest) return;
-    // Use the API to add the mount properly
+async function saveLxcSettings(name) {
+    // Check if raw config editor was used (tab 4, details open)
+    var rawEditor = document.getElementById('lxc-config-editor');
+    var rawDetails = rawEditor ? rawEditor.closest('details') : null;
+    var useRaw = rawDetails && rawDetails.open && rawEditor.value !== _lxcParsedCfg?.raw_config;
+
+    if (useRaw) {
+        try {
+            const resp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/config`), {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: rawEditor.value })
+            });
+            if (!resp.ok) throw new Error('Failed to save raw config');
+            showToast('Raw config saved (restart container to apply)', 'success');
+            closeContainerDetail();
+            return;
+        } catch (e) {
+            showToast('Error: ' + e.message, 'error');
+            return;
+        }
+    }
+
+    // Build structured settings from all tabs
+    var ipv4Mode = document.querySelector('input[name="lxc-ipv4-mode"]:checked');
+    var ipv6Mode = document.querySelector('input[name="lxc-ipv6-mode"]:checked');
+
+    var settings = {
+        hostname: (document.getElementById('lxc-hostname') || {}).value || '',
+        autostart: (document.getElementById('lxc-autostart') || {}).checked || false,
+        start_delay: parseInt((document.getElementById('lxc-start-delay') || {}).value) || 0,
+        start_order: parseInt((document.getElementById('lxc-start-order') || {}).value) || 0,
+        net_link: (document.getElementById('lxc-net-link') || {}).value || '',
+        net_name: (document.getElementById('lxc-net-name') || {}).value || '',
+        net_hwaddr: (document.getElementById('lxc-net-hwaddr') || {}).value || '',
+        net_ipv4: (ipv4Mode && ipv4Mode.value === 'static') ? ((document.getElementById('lxc-net-ipv4') || {}).value || '') : '',
+        net_ipv4_gw: (ipv4Mode && ipv4Mode.value === 'static') ? ((document.getElementById('lxc-net-ipv4-gw') || {}).value || '') : '',
+        net_ipv6: (ipv6Mode && ipv6Mode.value === 'static') ? ((document.getElementById('lxc-net-ipv6') || {}).value || '') : '',
+        net_ipv6_gw: (ipv6Mode && ipv6Mode.value === 'static') ? ((document.getElementById('lxc-net-ipv6-gw') || {}).value || '') : '',
+        net_mtu: (document.getElementById('lxc-net-mtu') || {}).value || '',
+        net_vlan: (document.getElementById('lxc-net-vlan') || {}).value || '',
+        memory_limit: (document.getElementById('lxc-memory') || {}).value || '',
+        swap_limit: (document.getElementById('lxc-swap') || {}).value || '',
+        cpus: (document.getElementById('lxc-cpus') || {}).value || '',
+        tun_enabled: (document.getElementById('lxc-feat-tun') || {}).checked || false,
+        fuse_enabled: (document.getElementById('lxc-feat-fuse') || {}).checked || false,
+        nesting_enabled: (document.getElementById('lxc-feat-nesting') || {}).checked || false,
+        nfs_enabled: (document.getElementById('lxc-feat-nfs') || {}).checked || false,
+        keyctl_enabled: (document.getElementById('lxc-feat-keyctl') || {}).checked || false,
+    };
+
     try {
-        const resp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`), {
+        const resp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/settings`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ host_path: src, container_path: dest, read_only: false }),
+            body: JSON.stringify(settings)
         });
         const data = await resp.json();
         if (resp.ok) {
-            showToast(data.message || 'Mount added', 'success');
-            // Refresh the config editor
-            openLxcSettings(name);
+            showToast('Settings saved — restart container to apply changes', 'success');
+            closeContainerDetail();
+            // Check for network conflicts
+            try {
+                var cr = await fetch(apiUrl('/api/network/conflicts'));
+                var conflicts = await cr.json();
+                conflicts.forEach(function (c) {
+                    if (c.severity === 'error') {
+                        showToast('⛔ Duplicate MAC ' + c.value + ' on: ' + c.containers.join(', '), 'error');
+                    } else {
+                        showToast('⚠️ Duplicate IP ' + c.value + ' on: ' + c.containers.join(', '), 'warning');
+                    }
+                });
+            } catch (e) { /* ignore conflict check errors */ }
         } else {
-            showToast(data.error || 'Failed to add mount', 'error');
+            showToast(data.error || 'Failed to save settings', 'error');
         }
     } catch (e) {
-        // Fallback to raw config
-        const editor = document.getElementById('lxc-config-editor');
-        editor.value += `\nlxc.mount.entry = ${src} ${dest.replace(/^\//, '')} none bind,create=dir 0 0\n`;
-        showToast('Added to config (save to apply)', 'info');
+        showToast('Error saving settings: ' + e.message, 'error');
     }
 }
 
-async function addWolfDiskMount(name) {
-    const src = prompt('WolfDisk mount path on host (e.g. /mnt/wolfdisk):', '/mnt/wolfdisk');
+async function addMountPoint(name) {
+    var src = prompt('Host path (e.g. /mnt/data):');
     if (!src) return;
-    const dest = prompt('Mount path inside container:', '/mnt/shared');
+    var dest = prompt('Container path (e.g. /mnt/data):', src);
     if (!dest) return;
     try {
-        const resp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+        var resp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ host_path: src, container_path: dest, read_only: false }),
         });
-        const data = await resp.json();
-        if (resp.ok) {
-            showToast(data.message || 'WolfDisk mount added', 'success');
-            openLxcSettings(name);
-        } else {
-            showToast(data.error || 'Failed to add mount', 'error');
-        }
-    } catch (e) {
-        const editor = document.getElementById('lxc-config-editor');
-        editor.value += `\n# WolfDisk shared folder\nlxc.mount.entry = ${src} ${dest.replace(/^\//, '')} none bind,create=dir 0 0\n`;
-        showToast('Added to config (save to apply)', 'info');
-    }
+        var data = await resp.json();
+        if (resp.ok) { showToast(data.message || 'Mount added', 'success'); openLxcSettings(name); }
+        else { showToast(data.error || 'Failed', 'error'); }
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+async function addWolfDiskMount(name) {
+    var src = prompt('WolfDisk mount path on host:', '/mnt/wolfdisk');
+    if (!src) return;
+    var dest = prompt('Mount path inside container:', '/mnt/shared');
+    if (!dest) return;
+    try {
+        var resp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host_path: src, container_path: dest, read_only: false }),
+        });
+        var data = await resp.json();
+        if (resp.ok) { showToast(data.message || 'WolfDisk mount added', 'success'); openLxcSettings(name); }
+        else { showToast(data.error || 'Failed', 'error'); }
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 async function removeLxcMount(name, hostPath) {
     if (!confirm(`Remove mount ${hostPath}?`)) return;
     try {
-        const resp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`), {
-            method: 'DELETE',
-            headers: { 'Content-Type': 'application/json' },
+        var resp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`), {
+            method: 'DELETE', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ host_path: hostPath }),
         });
-        const data = await resp.json();
-        if (resp.ok) {
-            showToast(data.message || 'Mount removed', 'success');
-            openLxcSettings(name);
-        } else {
-            showToast(data.error || 'Failed to remove mount', 'error');
-        }
-    } catch (e) {
-        showToast(`Remove failed: ${e.message}`, 'error');
-    }
-}
-
-function addMemoryLimit(name) {
-    const mem = prompt('Memory limit (e.g. 512M, 1G, 2G):', '1G');
-    if (!mem) return;
-    const editor = document.getElementById('lxc-config-editor');
-    // Remove existing memory limit if present
-    editor.value = editor.value.replace(/\nlxc\.cgroup.*memory.*\n/g, '\n');
-    editor.value += `\nlxc.cgroup2.memory.max = ${mem}\n`;
-}
-
-function addCpuLimit(name) {
-    const cpus = prompt('CPU cores (e.g. 1, 2, 4):', '2');
-    if (!cpus) return;
-    const editor = document.getElementById('lxc-config-editor');
-    editor.value = editor.value.replace(/\nlxc\.cgroup.*cpu.*\n/g, '\n');
-    // cpuset: 0 = 1 core, 0-1 = 2 cores, etc.
-    const max = parseInt(cpus) - 1;
-    const cpuset = max <= 0 ? '0' : `0-${max}`;
-    editor.value += `\nlxc.cgroup2.cpuset.cpus = ${cpuset}\n`;
-}
-
-async function saveLxcSettings(name) {
-    const editor = document.getElementById('lxc-config-editor');
-    const config = editor.value;
-    const autostartEl = document.getElementById('lxc-autostart');
-    const networkLinkEl = document.getElementById('lxc-network-link');
-
-    try {
-        // 1. Save raw config first
-        await fetch(apiUrl(`/api/containers/lxc/${name}/config`), {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content: config })
-        });
-
-        // 2. Apply UI settings (overriding if needed)
-        if (autostartEl) {
-            await fetch(apiUrl(`/api/containers/lxc/${name}/autostart`), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ enabled: autostartEl.checked })
-            });
-        }
-
-        if (networkLinkEl) {
-            const link = networkLinkEl.value.trim();
-            if (link) {
-                await fetch(apiUrl(`/api/containers/lxc/${name}/network-link`), {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ link })
-                });
-            }
-        }
-
-        showToast('Settings saved successfully', 'success');
-        closeContainerDetail();
-    } catch (e) {
-        showToast('Error saving settings: ' + e.message, 'error');
-    }
+        var data = await resp.json();
+        if (resp.ok) { showToast(data.message || 'Mount removed', 'success'); openLxcSettings(name); }
+        else { showToast(data.error || 'Failed', 'error'); }
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 function escapeHtml(text) {

@@ -1495,6 +1495,360 @@ pub fn lxc_save_config(container: &str, content: &str) -> Result<String, String>
         .map_err(|e| format!("Failed to save config: {}", e))
 }
 
+/// Structured representation of an LXC config
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LxcParsedConfig {
+    // General
+    pub hostname: String,
+    pub arch: String,
+    pub autostart: bool,
+    pub start_delay: u32,
+    pub start_order: u32,
+    pub unprivileged: bool,
+
+    // Network
+    pub net_type: String,      // veth, etc.
+    pub net_link: String,      // bridge name
+    pub net_name: String,      // interface name inside container (eth0)
+    pub net_hwaddr: String,    // MAC address
+    pub net_ipv4: String,      // e.g. "192.168.1.100/24" or "" for DHCP
+    pub net_ipv4_gw: String,   // gateway
+    pub net_ipv6: String,
+    pub net_ipv6_gw: String,
+    pub net_firewall: bool,
+    pub net_mtu: String,
+    pub net_vlan: String,
+
+    // Resources
+    pub memory_limit: String,  // e.g. "1G", "512M"
+    pub swap_limit: String,
+    pub cpus: String,          // cpuset e.g. "0-3"
+    pub cpu_shares: String,
+
+    // Features
+    pub tun_enabled: bool,
+    pub fuse_enabled: bool,
+    pub nesting_enabled: bool,
+    pub nfs_enabled: bool,
+    pub keyctl_enabled: bool,
+
+    // Raw config for advanced editing
+    pub raw_config: String,
+}
+
+/// Parse an LXC container config into structured form
+pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
+    let path = format!("/var/lib/lxc/{}/config", container);
+    let content = std::fs::read_to_string(&path).ok()?;
+
+    let mut cfg = LxcParsedConfig {
+        raw_config: content.clone(),
+        ..Default::default()
+    };
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() { continue; }
+
+        let parts: Vec<&str> = line.splitn(2, '=').collect();
+        if parts.len() != 2 { continue; }
+        let key = parts[0].trim();
+        let val = parts[1].trim();
+
+        match key {
+            "lxc.uts.name" => cfg.hostname = val.to_string(),
+            "lxc.arch" => cfg.arch = val.to_string(),
+            "lxc.start.auto" => cfg.autostart = val == "1",
+            "lxc.start.delay" => cfg.start_delay = val.parse().unwrap_or(0),
+            "lxc.start.order" => cfg.start_order = val.parse().unwrap_or(0),
+            "lxc.idmap" => cfg.unprivileged = true, // presence of idmap means unprivileged
+            "lxc.net.0.type" => cfg.net_type = val.to_string(),
+            "lxc.net.0.link" => cfg.net_link = val.to_string(),
+            "lxc.net.0.name" => cfg.net_name = val.to_string(),
+            "lxc.net.0.hwaddr" => cfg.net_hwaddr = val.to_string(),
+            "lxc.net.0.ipv4.address" => cfg.net_ipv4 = val.to_string(),
+            "lxc.net.0.ipv4.gateway" => cfg.net_ipv4_gw = val.to_string(),
+            "lxc.net.0.ipv6.address" => cfg.net_ipv6 = val.to_string(),
+            "lxc.net.0.ipv6.gateway" => cfg.net_ipv6_gw = val.to_string(),
+            "lxc.net.0.flags" => {} // "up" — we'll always include it
+            "lxc.net.0.mtu" => cfg.net_mtu = val.to_string(),
+            "lxc.net.0.vlan.id" => cfg.net_vlan = val.to_string(),
+            _ => {
+                // Feature detection
+                if key == "lxc.mount.entry" && val.contains("/dev/net/tun") {
+                    cfg.tun_enabled = true;
+                }
+                if key == "lxc.mount.entry" && val.contains("/dev/fuse") {
+                    cfg.fuse_enabled = true;
+                }
+                if key == "lxc.include" && val.contains("nesting.conf") {
+                    cfg.nesting_enabled = true;
+                }
+                if key == "lxc.mount.auto" && val.contains("cgroup") {
+                    cfg.nesting_enabled = true;
+                }
+                if key == "lxc.mount.entry" && val.contains("nfsd") {
+                    cfg.nfs_enabled = true;
+                }
+
+                // Resource limits (cgroup v1 and v2)
+                if key.contains("memory.limit") || key.contains("memory.max") {
+                    cfg.memory_limit = val.to_string();
+                }
+                if key.contains("memory.memsw") || key.contains("swap") {
+                    cfg.swap_limit = val.to_string();
+                }
+                if key.contains("cpuset.cpus") {
+                    cfg.cpus = val.to_string();
+                }
+                if key.contains("cpu.shares") {
+                    cfg.cpu_shares = val.to_string();
+                }
+            }
+        }
+
+        // keyctl detection
+        if key == "lxc.mount.auto" && val.contains("proc:rw") {
+            cfg.keyctl_enabled = true;
+        }
+    }
+
+    // Default interface name
+    if cfg.net_name.is_empty() && !cfg.net_type.is_empty() {
+        cfg.net_name = "eth0".to_string();
+    }
+
+    // Check firewall from net config
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with("lxc.net.0.firewall") {
+            cfg.net_firewall = line.contains("1");
+        }
+    }
+
+    Some(cfg)
+}
+
+/// Update settings for an LXC container with structured data
+/// Preserves existing config lines that aren't being modified
+#[derive(Debug, Deserialize)]
+pub struct LxcSettingsUpdate {
+    // General
+    pub hostname: Option<String>,
+    pub autostart: Option<bool>,
+    pub start_delay: Option<u32>,
+    pub start_order: Option<u32>,
+
+    // Network
+    pub net_link: Option<String>,
+    pub net_name: Option<String>,
+    pub net_hwaddr: Option<String>,
+    pub net_ipv4: Option<String>,
+    pub net_ipv4_gw: Option<String>,
+    pub net_ipv6: Option<String>,
+    pub net_ipv6_gw: Option<String>,
+    pub net_mtu: Option<String>,
+    pub net_vlan: Option<String>,
+
+    // Resources
+    pub memory_limit: Option<String>,
+    pub swap_limit: Option<String>,
+    pub cpus: Option<String>,
+
+    // Features
+    pub tun_enabled: Option<bool>,
+    pub fuse_enabled: Option<bool>,
+    pub nesting_enabled: Option<bool>,
+    pub nfs_enabled: Option<bool>,
+    pub keyctl_enabled: Option<bool>,
+}
+
+pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<String, String> {
+    let path = format!("/var/lib/lxc/{}/config", container);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Config not found: {}", e))?;
+
+    // Backup
+    let _ = std::fs::copy(&path, format!("{}.bak", path));
+
+    // Keys we manage — we'll remove these and re-add them with new values
+    let managed_keys = [
+        "lxc.uts.name", "lxc.start.auto", "lxc.start.delay", "lxc.start.order",
+        "lxc.net.0.link", "lxc.net.0.name", "lxc.net.0.hwaddr",
+        "lxc.net.0.ipv4.address", "lxc.net.0.ipv4.gateway",
+        "lxc.net.0.ipv6.address", "lxc.net.0.ipv6.gateway",
+        "lxc.net.0.mtu", "lxc.net.0.vlan.id", "lxc.net.0.firewall",
+    ];
+
+    // Feature-related lines we'll manage
+    let feature_markers = [
+        "/dev/net/tun", "/dev/fuse", "nesting.conf",
+        "nfsd", "proc:rw sys:rw cgroup:rw",
+    ];
+
+    // Cgroup resource keys
+    let resource_patterns = [
+        "memory.limit", "memory.max", "memory.memsw", "swap",
+        "cpuset.cpus", "cpu.shares",
+    ];
+
+    let mut preserved: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            preserved.push(line.to_string());
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed.splitn(2, '=').collect();
+        if parts.len() != 2 {
+            preserved.push(line.to_string());
+            continue;
+        }
+        let key = parts[0].trim();
+        let val = parts[1].trim();
+
+        // Skip managed keys — we'll re-add them
+        if managed_keys.contains(&key) { continue; }
+
+        // Skip feature mount entries we manage
+        if key == "lxc.mount.entry" && feature_markers.iter().any(|m| val.contains(m)) { continue; }
+        if key == "lxc.include" && val.contains("nesting.conf") { continue; }
+        if key == "lxc.mount.auto" && val.contains("cgroup") { continue; }
+
+        // Skip cgroup2 device allows for TUN/FUSE that we manage
+        if (key == "lxc.cgroup2.devices.allow" || key == "lxc.cgroup.devices.allow")
+            && (val.contains("10:200") || val.contains("10:229")) { continue; }
+
+        // Skip resource keys we manage
+        if resource_patterns.iter().any(|p| key.contains(p)) { continue; }
+
+        // Keep everything else
+        preserved.push(line.to_string());
+    }
+
+    // Now re-add managed settings with new values
+    // Read current config to get defaults for values not being changed
+    let current = lxc_parse_config(container).unwrap_or_default();
+
+    // General
+    let hostname = settings.hostname.as_deref().unwrap_or(&current.hostname);
+    if !hostname.is_empty() {
+        preserved.push(format!("lxc.uts.name = {}", hostname));
+    }
+
+    let autostart = settings.autostart.unwrap_or(current.autostart);
+    if autostart {
+        preserved.push("lxc.start.auto = 1".to_string());
+        let delay = settings.start_delay.unwrap_or(current.start_delay);
+        if delay > 0 { preserved.push(format!("lxc.start.delay = {}", delay)); }
+        let order = settings.start_order.unwrap_or(current.start_order);
+        if order > 0 { preserved.push(format!("lxc.start.order = {}", order)); }
+    }
+
+    // Network
+    let link = settings.net_link.as_deref().unwrap_or(&current.net_link);
+    if !link.is_empty() {
+        preserved.push(format!("lxc.net.0.link = {}", link));
+    }
+
+    let net_name = settings.net_name.as_deref().unwrap_or(&current.net_name);
+    if !net_name.is_empty() {
+        preserved.push(format!("lxc.net.0.name = {}", net_name));
+    }
+
+    let hwaddr = settings.net_hwaddr.as_deref().unwrap_or(&current.net_hwaddr);
+    if !hwaddr.is_empty() {
+        preserved.push(format!("lxc.net.0.hwaddr = {}", hwaddr));
+    }
+
+    let ipv4 = settings.net_ipv4.as_deref().unwrap_or(&current.net_ipv4);
+    if !ipv4.is_empty() {
+        preserved.push(format!("lxc.net.0.ipv4.address = {}", ipv4));
+    }
+    let gw4 = settings.net_ipv4_gw.as_deref().unwrap_or(&current.net_ipv4_gw);
+    if !gw4.is_empty() {
+        preserved.push(format!("lxc.net.0.ipv4.gateway = {}", gw4));
+    }
+
+    let ipv6 = settings.net_ipv6.as_deref().unwrap_or(&current.net_ipv6);
+    if !ipv6.is_empty() {
+        preserved.push(format!("lxc.net.0.ipv6.address = {}", ipv6));
+    }
+    let gw6 = settings.net_ipv6_gw.as_deref().unwrap_or(&current.net_ipv6_gw);
+    if !gw6.is_empty() {
+        preserved.push(format!("lxc.net.0.ipv6.gateway = {}", gw6));
+    }
+
+    let mtu = settings.net_mtu.as_deref().unwrap_or(&current.net_mtu);
+    if !mtu.is_empty() {
+        preserved.push(format!("lxc.net.0.mtu = {}", mtu));
+    }
+
+    let vlan = settings.net_vlan.as_deref().unwrap_or(&current.net_vlan);
+    if !vlan.is_empty() {
+        preserved.push(format!("lxc.net.0.vlan.id = {}", vlan));
+    }
+
+    // Resources
+    let mem = settings.memory_limit.as_deref().unwrap_or(&current.memory_limit);
+    if !mem.is_empty() {
+        preserved.push(format!("lxc.cgroup2.memory.max = {}", mem));
+    }
+
+    let swap = settings.swap_limit.as_deref().unwrap_or(&current.swap_limit);
+    if !swap.is_empty() {
+        preserved.push(format!("lxc.cgroup2.memory.swap.max = {}", swap));
+    }
+
+    let cpus = settings.cpus.as_deref().unwrap_or(&current.cpus);
+    if !cpus.is_empty() {
+        preserved.push(format!("lxc.cgroup2.cpuset.cpus = {}", cpus));
+    }
+
+    // Features
+    let tun = settings.tun_enabled.unwrap_or(current.tun_enabled);
+    if tun {
+        preserved.push("lxc.mount.entry = /dev/net/tun dev/net/tun none bind,create=file 0 0".to_string());
+        preserved.push("lxc.cgroup2.devices.allow = c 10:200 rwm".to_string());
+    }
+
+    let fuse = settings.fuse_enabled.unwrap_or(current.fuse_enabled);
+    if fuse {
+        preserved.push("lxc.mount.entry = /dev/fuse dev/fuse none bind,create=file 0 0".to_string());
+        preserved.push("lxc.cgroup2.devices.allow = c 10:229 rwm".to_string());
+    }
+
+    let nesting = settings.nesting_enabled.unwrap_or(current.nesting_enabled);
+    if nesting {
+        preserved.push("lxc.include = /usr/share/lxc/config/nesting.conf".to_string());
+        preserved.push("lxc.mount.auto = proc:rw sys:rw cgroup:rw".to_string());
+    }
+
+    let nfs = settings.nfs_enabled.unwrap_or(current.nfs_enabled);
+    if nfs {
+        preserved.push("lxc.mount.entry = nfsd nfsd nfsd defaults 0 0".to_string());
+    }
+
+    let keyctl = settings.keyctl_enabled.unwrap_or(current.keyctl_enabled);
+    if keyctl && !nesting {
+        // Only add if not already covered by nesting
+        preserved.push("lxc.mount.auto = proc:rw sys:rw".to_string());
+    }
+
+    // Write final config
+    let mut output = preserved.join("\n");
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    std::fs::write(&path, &output)
+        .map_err(|e| format!("Failed to write config: {}", e))?;
+
+    Ok(format!("Settings updated for '{}'", container))
+}
+
 /// Update LXC container autostart specifically
 pub fn lxc_set_autostart(container: &str, enabled: bool) -> Result<String, String> {
     let path = format!("/var/lib/lxc/{}/config", container);
@@ -1539,6 +1893,74 @@ pub fn lxc_set_network_link(container: &str, link: &str) -> Result<String, Strin
 
     std::fs::write(&path, new_lines.join("\n")).map_err(|e| e.to_string())?;
     Ok(format!("Network link set to {}", link))
+}
+
+/// Detect duplicate MAC addresses and IP addresses across all LXC containers
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConflict {
+    pub conflict_type: String, // "mac" or "ip"
+    pub severity: String,      // "error" or "warning"
+    pub value: String,         // the duplicate MAC or IP
+    pub containers: Vec<String>, // container names that share this value
+}
+
+pub fn detect_network_conflicts() -> Vec<NetworkConflict> {
+    let mut mac_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut ip_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+
+    // Scan all LXC containers
+    if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let config_path = format!("/var/lib/lxc/{}/config", name);
+            if let Ok(content) = std::fs::read_to_string(&config_path) {
+                for line in content.lines() {
+                    let line = line.trim();
+                    let parts: Vec<&str> = line.splitn(2, '=').collect();
+                    if parts.len() != 2 { continue; }
+                    let key = parts[0].trim();
+                    let val = parts[1].trim().to_lowercase();
+
+                    if key == "lxc.net.0.hwaddr" && !val.is_empty() {
+                        mac_map.entry(val.clone()).or_default().push(name.clone());
+                    }
+                    if key == "lxc.net.0.ipv4.address" && !val.is_empty() {
+                        // Strip CIDR notation for comparison
+                        let ip = val.split('/').next().unwrap_or("").to_string();
+                        if !ip.is_empty() {
+                            ip_map.entry(ip).or_default().push(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut conflicts = Vec::new();
+
+    for (mac, containers) in &mac_map {
+        if containers.len() > 1 {
+            conflicts.push(NetworkConflict {
+                conflict_type: "mac".to_string(),
+                severity: "error".to_string(),
+                value: mac.clone(),
+                containers: containers.clone(),
+            });
+        }
+    }
+
+    for (ip, containers) in &ip_map {
+        if containers.len() > 1 {
+            conflicts.push(NetworkConflict {
+                conflict_type: "ip".to_string(),
+                severity: "warning".to_string(),
+                value: ip.clone(),
+                containers: containers.clone(),
+            });
+        }
+    }
+
+    conflicts
 }
 
 /// Autostart all enabled LXC containers
