@@ -297,33 +297,63 @@ async fn main() -> std::io::Result<()> {
             installer::find_tls_certificate(cli.tls_domain.as_deref())
         };
 
-        if let Some((ref cert_path, ref key_path)) = tls_paths {
+        // Try to load TLS config — fall back to HTTP if anything goes wrong
+        let tls_config = tls_paths.as_ref().and_then(|(cert_path, key_path)| {
+            let cert_file = match std::fs::File::open(cert_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("Cannot open TLS cert '{}': {} — falling back to HTTP", cert_path, e);
+                    return None;
+                }
+            };
+            let key_file_handle = match std::fs::File::open(key_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("Cannot open TLS key '{}': {} — falling back to HTTP", key_path, e);
+                    return None;
+                }
+            };
+
+            let cert_chain: Vec<rustls::pki_types::CertificateDer> =
+                rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+                    .filter_map(|c| c.ok())
+                    .collect();
+            if cert_chain.is_empty() {
+                tracing::warn!("No valid certificates found in '{}' — falling back to HTTP", cert_path);
+                return None;
+            }
+
+            let key_der = match rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file_handle)) {
+                Ok(Some(k)) => k,
+                Ok(None) => {
+                    tracing::warn!("No private key found in '{}' — falling back to HTTP", key_path);
+                    return None;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read private key '{}': {} — falling back to HTTP", key_path, e);
+                    return None;
+                }
+            };
+
+            match rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(cert_chain, key_der)
+            {
+                Ok(cfg) => Some(cfg),
+                Err(e) => {
+                    tracing::warn!("Failed to build TLS config: {} — falling back to HTTP", e);
+                    None
+                }
+            }
+        });
+
+        if let Some(tls_config) = tls_config {
+            let (ref cert_path, ref key_path) = tls_paths.as_ref().unwrap();
             info!("  🔒 TLS enabled");
             info!("     Cert: {}", cert_path);
             info!("     Key:  {}", key_path);
             info!("     HTTPS: https://{}:{}", cli.bind, cli.port);
             info!("     HTTP (inter-node): http://{}:{}", cli.bind, cli.port + 1);
-
-            // Load TLS config
-            let cert_file = &mut std::io::BufReader::new(
-                std::fs::File::open(cert_path).expect("Failed to open TLS cert"),
-            );
-            let key_file = &mut std::io::BufReader::new(
-                std::fs::File::open(key_path).expect("Failed to open TLS key"),
-            );
-
-            let cert_chain: Vec<rustls::pki_types::CertificateDer> =
-                rustls_pemfile::certs(cert_file)
-                    .filter_map(|c| c.ok())
-                    .collect();
-            let key_der = rustls_pemfile::private_key(key_file)
-                .expect("Failed to read private key")
-                .expect("No private key found in PEM file");
-
-            let tls_config = rustls::ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(cert_chain, key_der)
-                .expect("Failed to build TLS config");
 
             // Clone web_dir for second closure
             let web_dir2 = web_dir.clone();
@@ -358,7 +388,11 @@ async fn main() -> std::io::Result<()> {
             r2?;
             Ok(())
         } else {
-            info!("  ⚡ HTTP mode (no TLS certificates found)");
+            if tls_paths.is_some() {
+                info!("  ⚠️  TLS certificates found but failed to load — running HTTP only");
+            } else {
+                info!("  ⚡ HTTP mode (no TLS certificates found)");
+            }
             info!("     Dashboard: http://{}:{}", cli.bind, cli.port);
             info!("     Tip: Use the Certificates page to request a Let's Encrypt certificate");
             info!("");
