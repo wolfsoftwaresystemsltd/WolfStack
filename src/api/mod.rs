@@ -583,15 +583,23 @@ pub async fn service_action(
 #[derive(Deserialize)]
 pub struct CertRequest {
     pub domain: String,
+    pub email: String,
 }
 
 /// POST /api/certificates — request a certificate
 pub async fn request_certificate(req: HttpRequest, state: web::Data<AppState>, body: web::Json<CertRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    match installer::request_certificate(&body.domain) {
+    match installer::request_certificate(&body.domain, &body.email) {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
+}
+
+/// GET /api/certificates/list — list installed certificates
+pub async fn list_certificates(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let certs = installer::list_certificates();
+    HttpResponse::Ok().json(certs)
 }
 
 // ─── Agent API (server-to-server, no auth required) ───
@@ -643,7 +651,10 @@ pub async fn node_proxy(
     }
 
     // Forward to remote node
-    let url = format!("http://{}:{}/api/{}", node.address, node.port, api_path);
+    // Use HTTP for inter-node calls — WolfNet provides encryption at the transport layer.
+    // Internal HTTP API listens on port + 1 (8554 by default) when TLS is enabled.
+    let internal_port = node.port + 1;
+    let url = format!("http://{}:{}/api/{}", node.address, internal_port, api_path);
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -2757,6 +2768,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/services/{name}/action", web::post().to(service_action))
         // Certificates
         .route("/api/certificates", web::post().to(request_certificate))
+        .route("/api/certificates/list", web::get().to(list_certificates))
         // Containers
         .route("/api/containers/status", web::get().to(container_runtime_status))
         .route("/api/containers/install", web::post().to(install_container_runtime))

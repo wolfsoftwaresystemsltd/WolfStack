@@ -39,6 +39,18 @@ struct Cli {
     /// Bind address
     #[arg(short, long, default_value = "0.0.0.0")]
     bind: String,
+
+    /// TLS certificate path (PEM). Auto-detected from Let's Encrypt if not set.
+    #[arg(long)]
+    tls_cert: Option<String>,
+
+    /// TLS private key path (PEM). Auto-detected from Let's Encrypt if not set.
+    #[arg(long)]
+    tls_key: Option<String>,
+
+    /// Domain name for auto-detecting Let's Encrypt certificates
+    #[arg(long)]
+    tls_domain: Option<String>,
 }
 
 /// Serve the login page for unauthenticated requests to /
@@ -278,18 +290,92 @@ async fn main() -> std::io::Result<()> {
         info!("  Serving web UI from: {}", web_dir);
         info!("");
 
-        // Start HTTP server
-        HttpServer::new(move || {
-            App::new()
-                .app_data(app_state.clone())
-                .configure(api::configure)
-                .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
-                .route("/", web::get().to(index_handler))
-                .service(actix_files::Files::new("/", &web_dir).index_file("login.html"))
-        })
-        .bind(format!("{}:{}", cli.bind, cli.port))?
-        .run()
-        .await
+        // Resolve TLS certificate paths
+        let tls_paths = if let (Some(cert), Some(key)) = (&cli.tls_cert, &cli.tls_key) {
+            Some((cert.clone(), key.clone()))
+        } else {
+            installer::find_tls_certificate(cli.tls_domain.as_deref())
+        };
+
+        if let Some((ref cert_path, ref key_path)) = tls_paths {
+            info!("  🔒 TLS enabled");
+            info!("     Cert: {}", cert_path);
+            info!("     Key:  {}", key_path);
+            info!("     HTTPS: https://{}:{}", cli.bind, cli.port);
+            info!("     HTTP (inter-node): http://{}:{}", cli.bind, cli.port + 1);
+
+            // Load TLS config
+            let cert_file = &mut std::io::BufReader::new(
+                std::fs::File::open(cert_path).expect("Failed to open TLS cert"),
+            );
+            let key_file = &mut std::io::BufReader::new(
+                std::fs::File::open(key_path).expect("Failed to open TLS key"),
+            );
+
+            let cert_chain: Vec<rustls::pki_types::CertificateDer> =
+                rustls_pemfile::certs(cert_file)
+                    .filter_map(|c| c.ok())
+                    .collect();
+            let key_der = rustls_pemfile::private_key(key_file)
+                .expect("Failed to read private key")
+                .expect("No private key found in PEM file");
+
+            let tls_config = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(cert_chain, key_der)
+                .expect("Failed to build TLS config");
+
+            // Clone web_dir for second closure
+            let web_dir2 = web_dir.clone();
+            let app_state2 = app_state.clone();
+
+            // Start HTTPS server on main port + HTTP server on port+1 for inter-node
+            let https_server = HttpServer::new(move || {
+                App::new()
+                    .app_data(app_state.clone())
+                    .configure(api::configure)
+                    .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
+                    .route("/", web::get().to(index_handler))
+                    .service(actix_files::Files::new("/", &web_dir).index_file("login.html"))
+            })
+            .bind_rustls_0_23(format!("{}:{}", cli.bind, cli.port), tls_config)?
+            .run();
+
+            let http_server = HttpServer::new(move || {
+                App::new()
+                    .app_data(app_state2.clone())
+                    .configure(api::configure)
+                    .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
+                    .route("/", web::get().to(index_handler))
+                    .service(actix_files::Files::new("/", &web_dir2).index_file("login.html"))
+            })
+            .bind(format!("{}:{}", cli.bind, cli.port + 1))?
+            .run();
+
+            info!("");
+            let (r1, r2) = tokio::join!(https_server, http_server);
+            r1?;
+            r2?;
+            Ok(())
+        } else {
+            info!("  ⚡ HTTP mode (no TLS certificates found)");
+            info!("     Dashboard: http://{}:{}", cli.bind, cli.port);
+            info!("     Tip: Use the Certificates page to request a Let's Encrypt certificate");
+            info!("");
+
+            // Start HTTP server (same as before — no breaking changes)
+            HttpServer::new(move || {
+                App::new()
+                    .app_data(app_state.clone())
+                    .configure(api::configure)
+                    .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
+                    .route("/", web::get().to(index_handler))
+                    .service(actix_files::Files::new("/", &web_dir).index_file("login.html"))
+            })
+            .bind(format!("{}:{}", cli.bind, cli.port))?
+            .run()
+            .await
+        }
     }
 }
 

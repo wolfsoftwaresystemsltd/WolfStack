@@ -48,7 +48,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v7.7.4</span>
+                <span class="version">v7.7.5</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -883,13 +883,26 @@
                         <label>Domain Name</label>
                         <input type="text" class="form-control" id="cert-domain" placeholder="example.com">
                     </div>
-                    <button class="btn btn-primary" onclick="requestCertificate()">
+                    <div class="form-group" style="margin-top: 12px;">
+                        <label>Email Address</label>
+                        <input type="email" class="form-control" id="cert-email" placeholder="admin@example.com">
+                    </div>
+                    <button class="btn btn-primary" onclick="requestCertificate()" style="margin-top: 12px;">
                         🔒 Request Certificate (Let's Encrypt)
                     </button>
                     <p style="margin-top: 12px; font-size: 13px; color: var(--text-muted);">
                         Uses Certbot to obtain a free SSL certificate from Let's Encrypt.
-                        Port 80 must be accessible from the internet.
+                        Port 80 must be accessible from the internet. Certbot will be installed automatically if needed.
+                        After obtaining a certificate, restart WolfStack to enable HTTPS.
                     </p>
+                </div>
+            </div>
+            <div class="card" style="margin-top: 20px;">
+                <div class="card-header">
+                    <h3>Installed Certificates</h3>
+                </div>
+                <div class="card-body">
+                    <div id="cert-list" style="font-size: 14px; color: var(--text-muted);">Loading...</div>
                 </div>
             </div>
         </div>

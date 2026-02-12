@@ -160,6 +160,7 @@ function selectServerView(nodeId, view) {
     if (view === 'networking') loadNetworking();
     if (view === 'backups') loadBackups();
     if (view === 'wolfnet') loadWolfNet();
+    if (view === 'certificates') loadCertificates();
     if (view === 'pve-resources') renderPveResourcesView(nodeId);
 }
 
@@ -2451,23 +2452,50 @@ async function deleteVm(name) {
 // ─── Certificates ───
 async function requestCertificate() {
     const domain = document.getElementById('cert-domain').value.trim();
+    const email = document.getElementById('cert-email').value.trim();
     if (!domain) { showToast('Enter a domain name', 'error'); return; }
+    if (!email) { showToast('Enter an email address (required by Let\'s Encrypt)', 'error'); return; }
 
-    showToast(`Requesting certificate for ${domain}...`, 'info');
+    showToast(`Requesting certificate for ${domain}... This may take a moment.`, 'info');
     try {
         const resp = await fetch('/api/certificates', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ domain })
+            body: JSON.stringify({ domain, email })
         });
         const data = await resp.json();
         if (resp.ok) {
             showToast(data.message, 'success');
+            loadCertificates();
         } else {
             showToast(data.error || 'Certificate request failed', 'error');
         }
     } catch (e) {
         showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function loadCertificates() {
+    const el = document.getElementById('cert-list');
+    if (!el) return;
+    try {
+        const resp = await fetch('/api/certificates/list');
+        const certs = await resp.json();
+        if (certs.length === 0) {
+            el.innerHTML = '<p style="color: var(--text-muted);">No certificates installed. Request one above.</p>';
+            return;
+        }
+        el.innerHTML = certs.map(c => `
+            <div style="padding: 10px; margin-bottom: 8px; background: var(--bg-tertiary); border-radius: 8px; display: flex; align-items: center; gap: 12px;">
+                <span style="font-size: 20px;">${c.valid ? '✅' : '⚠️'}</span>
+                <div>
+                    <strong>${c.domain}</strong><br>
+                    <span style="font-size: 12px; color: var(--text-muted);">${c.cert_path}</span>
+                </div>
+            </div>
+        `).join('');
+    } catch (e) {
+        el.innerHTML = '<p style="color: var(--text-muted);">Could not load certificates.</p>';
     }
 }
 

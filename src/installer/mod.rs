@@ -321,19 +321,101 @@ pub fn restart_service(service: &str) -> Result<String, String> {
 }
 
 /// Request a certificate via certbot
-pub fn request_certificate(domain: &str) -> Result<String, String> {
+pub fn request_certificate(domain: &str, email: &str) -> Result<String, String> {
     if !binary_exists("certbot") {
-        return Err("Certbot is not installed. Install it first.".to_string());
+        info!("Certbot not found, installing automatically...");
+        install_certbot(detect_distro())?;
     }
 
     let output = Command::new("sudo")
-        .args(["certbot", "certonly", "--standalone", "-d", domain, "--agree-tos", "--non-interactive"])
+        .args([
+            "certbot", "certonly", "--standalone",
+            "-d", domain,
+            "--email", email,
+            "--agree-tos", "--non-interactive",
+        ])
         .output()
         .map_err(|e| format!("Failed to run certbot: {}", e))?;
 
     if output.status.success() {
-        Ok(format!("Certificate obtained for {}", domain))
+        Ok(format!("Certificate obtained for {}. Restart WolfStack to enable HTTPS.", domain))
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
+}
+
+/// Find TLS certificate files for a domain (Let's Encrypt or /etc/wolfstack/)
+/// Returns (cert_path, key_path) if both exist
+pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
+    // Check explicit /etc/wolfstack/ paths first
+    let ws_cert = "/etc/wolfstack/cert.pem";
+    let ws_key = "/etc/wolfstack/key.pem";
+    if std::path::Path::new(ws_cert).exists() && std::path::Path::new(ws_key).exists() {
+        return Some((ws_cert.to_string(), ws_key.to_string()));
+    }
+
+    // Check Let's Encrypt for specific domain
+    if let Some(d) = domain {
+        let le_cert = format!("/etc/letsencrypt/live/{}/fullchain.pem", d);
+        let le_key = format!("/etc/letsencrypt/live/{}/privkey.pem", d);
+        if std::path::Path::new(&le_cert).exists() && std::path::Path::new(&le_key).exists() {
+            return Some((le_cert, le_key));
+        }
+    }
+
+    // Auto-detect: scan /etc/letsencrypt/live/ for any domain
+    if let Ok(entries) = std::fs::read_dir("/etc/letsencrypt/live") {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                let dir = entry.path();
+                let cert = dir.join("fullchain.pem");
+                let key = dir.join("privkey.pem");
+                if cert.exists() && key.exists() {
+                    return Some((
+                        cert.to_string_lossy().to_string(),
+                        key.to_string_lossy().to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// List all domains with Let's Encrypt certificates
+pub fn list_certificates() -> Vec<serde_json::Value> {
+    let mut certs = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir("/etc/letsencrypt/live") {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name == "README" { continue; }
+                let dir = entry.path();
+                let cert_exists = dir.join("fullchain.pem").exists();
+                let key_exists = dir.join("privkey.pem").exists();
+                certs.push(serde_json::json!({
+                    "domain": name,
+                    "cert_path": dir.join("fullchain.pem").to_string_lossy(),
+                    "key_path": dir.join("privkey.pem").to_string_lossy(),
+                    "valid": cert_exists && key_exists,
+                }));
+            }
+        }
+    }
+
+    // Also check /etc/wolfstack/
+    let ws_cert = std::path::Path::new("/etc/wolfstack/cert.pem");
+    let ws_key = std::path::Path::new("/etc/wolfstack/key.pem");
+    if ws_cert.exists() && ws_key.exists() {
+        certs.push(serde_json::json!({
+            "domain": "wolfstack (custom)",
+            "cert_path": "/etc/wolfstack/cert.pem",
+            "key_path": "/etc/wolfstack/key.pem",
+            "valid": true,
+        }));
+    }
+
+    certs
 }
