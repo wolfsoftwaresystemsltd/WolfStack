@@ -1678,7 +1678,7 @@ function renderServices(components) {
 async function installComponent(name) {
     showToast(`Installing ${name}...`, 'info');
     try {
-        const resp = await fetch(`/api/components/${name}/install`, { method: 'POST' });
+        const resp = await fetch(apiUrl(`/api/components/${name}/install`), { method: 'POST' });
         const data = await resp.json();
         if (resp.ok) {
             showToast(data.message, 'success');
@@ -1693,7 +1693,7 @@ async function installComponent(name) {
 
 async function serviceAction(service, action) {
     try {
-        const resp = await fetch(`/api/services/${service}/action`, {
+        const resp = await fetch(apiUrl(`/api/services/${service}/action`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action })
@@ -6492,9 +6492,9 @@ function escapeHtml(text) {
 async function loadBackups() {
     try {
         const [backupsRes, schedulesRes, targetsRes] = await Promise.all([
-            fetch('/api/backups'),
-            fetch('/api/backups/schedules'),
-            fetch('/api/backups/targets'),
+            fetch(apiUrl('/api/backups')),
+            fetch(apiUrl('/api/backups/schedules')),
+            fetch(apiUrl('/api/backups/targets')),
         ]);
         const backups = await backupsRes.json();
         const schedules = await schedulesRes.json();
@@ -6792,7 +6792,7 @@ async function backupSelected() {
             // Mark all as in-progress
             targets.forEach((_, i) => updateBackupItemStatus(i, 'Backing up...', null));
 
-            const res = await fetch('/api/backups', {
+            const res = await fetch(apiUrl('/api/backups'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ storage }),
@@ -6830,7 +6830,7 @@ async function backupSelected() {
                 if (titleEl) titleEl.textContent = `Backing up ${name} (${i + 1}/${targets.length})...`;
 
                 try {
-                    const res = await fetch('/api/backups', {
+                    const res = await fetch(apiUrl('/api/backups'), {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ target: t, storage }),
@@ -6868,7 +6868,7 @@ async function backupSelected() {
 async function deleteBackup(id) {
     if (!confirm('Delete this backup? The backup file will be permanently removed.')) return;
     try {
-        const res = await fetch(`/api/backups/${id}`, { method: 'DELETE' });
+        const res = await fetch(apiUrl(`/api/backups/${id}`), { method: 'DELETE' });
         const data = await res.json();
         if (data.error) showToast(`Delete failed: ${data.error}`, 'error');
         else showToast('Backup deleted', 'success');
@@ -6886,7 +6886,7 @@ async function restoreBackup(id) {
     if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner" style="display:inline-block; width:12px; height:12px; border:2px solid var(--border); border-top-color:#fff; border-radius:50%; animation:spin 0.8s linear infinite; vertical-align:middle;"></span> Restoring...'; }
     showToast('🔄 Restore in progress... This may take a while.', 'info');
     try {
-        const res = await fetch(`/api/backups/${id}/restore`, { method: 'POST' });
+        const res = await fetch(apiUrl(`/api/backups/${id}/restore`), { method: 'POST' });
         const data = await res.json();
         if (data.error) showToast(`Restore failed: ${data.error}`, 'error');
         else showToast(data.message || '✅ Restore completed!', 'success');
@@ -6947,7 +6947,7 @@ async function createSchedule() {
 
     closeModal();
     try {
-        const res = await fetch('/api/backups/schedules', {
+        const res = await fetch(apiUrl('/api/backups/schedules'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -6964,7 +6964,7 @@ async function createSchedule() {
 async function deleteSchedule(id) {
     if (!confirm('Delete this backup schedule?')) return;
     try {
-        const res = await fetch(`/api/backups/schedules/${id}`, { method: 'DELETE' });
+        const res = await fetch(apiUrl(`/api/backups/schedules/${id}`), { method: 'DELETE' });
         const data = await res.json();
         if (data.error) showToast(`Delete failed: ${data.error}`, 'error');
         else showToast('Schedule deleted', 'success');

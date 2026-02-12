@@ -493,24 +493,51 @@ pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
     None
 }
 
-/// List all domains with TLS certificates
-/// Uses the same discovery as startup (find_tls_certificate)
+/// List ALL TLS certificates on this server
+/// Uses the same discovery methods as find_tls_certificate but collects everything
 pub fn list_certificates() -> serde_json::Value {
     let mut results = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
-    // Use the exact same discovery that startup uses
-    if let Some((cert_path, key_path)) = find_tls_certificate(None) {
-        // Extract domain from path, e.g. /etc/letsencrypt/live/example.com/fullchain.pem
-        let domain = std::path::Path::new(&cert_path)
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "custom".to_string());
+    // 1. Check /etc/wolfstack/ custom certs
+    let ws_cert = "/etc/wolfstack/cert.pem";
+    let ws_key = "/etc/wolfstack/key.pem";
+    if std::path::Path::new(ws_cert).exists() && std::path::Path::new(ws_key).exists() {
+        seen.insert(ws_cert.to_string());
+        results.push(serde_json::json!({
+            "domain": "wolfstack (custom)",
+            "cert_path": ws_cert,
+            "key_path": ws_key,
+            "source": "custom",
+            "valid": true,
+        }));
+    }
+
+    // 2. Certbot CLI
+    let certbot_certs = parse_certbot_certificates();
+    for (domains, cert_path, key_path, expiry) in &certbot_certs {
+        if seen.contains(cert_path) { continue; }
+        seen.insert(cert_path.clone());
+        results.push(serde_json::json!({
+            "domain": domains,
+            "cert_path": cert_path,
+            "key_path": key_path,
+            "expiry": expiry,
+            "source": "certbot",
+            "valid": true,
+        }));
+    }
+
+    // 3. Filesystem scan of /etc/letsencrypt/live/
+    let fs_certs = scan_letsencrypt_live();
+    for (domain, cert_path, key_path) in &fs_certs {
+        if seen.contains(cert_path) { continue; }
+        seen.insert(cert_path.clone());
         results.push(serde_json::json!({
             "domain": domain,
             "cert_path": cert_path,
             "key_path": key_path,
-            "source": "active",
+            "source": "filesystem",
             "valid": true,
         }));
     }
@@ -520,7 +547,7 @@ pub fn list_certificates() -> serde_json::Value {
         "diagnostics": if results.is_empty() {
             vec!["ℹ️ No TLS certificates found on this server".to_string()]
         } else {
-            vec!["✅ TLS certificate found".to_string()]
+            vec![format!("✅ Found {} certificate(s)", results.len())]
         },
     })
 }
