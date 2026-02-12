@@ -2459,6 +2459,24 @@ region = us-east-1"></textarea>
                             <input type="text" class="form-control" id="new-pve-fingerprint"
                                 placeholder="Leave blank for self-signed certs">
                         </div>
+                        <div
+                            style="grid-column: span 2; background:rgba(234,179,8,0.1); border:1px solid rgba(234,179,8,0.25); border-radius:8px; padding:14px; margin-top:4px;">
+                            <div style="font-weight:600; font-size:13px; color:var(--warning); margin-bottom:6px;">⚠️
+                                API Token Permissions Required</div>
+                            <p style="font-size:12px; color:var(--text-secondary); margin:0 0 8px;">Your token needs
+                                <strong>PVEAuditor</strong> role to read node status, VMs, and containers. Without it,
+                                nodes will show as offline.</p>
+                            <p style="font-size:12px; color:var(--text-secondary); margin:0 0 4px;"><strong>Web
+                                    UI:</strong> Datacenter → Permissions → Add → API Token Permission → Path: <code
+                                    style="background:var(--bg-tertiary);padding:1px 4px;border-radius:3px;font-size:11px;">/</code>
+                                → Role: <code
+                                    style="background:var(--bg-tertiary);padding:1px 4px;border-radius:3px;font-size:11px;">PVEAuditor</code>
+                                → Propagate ✅</p>
+                            <p style="font-size:12px; color:var(--text-secondary); margin:0;"><strong>CLI:</strong>
+                                <code
+                                    style="background:var(--bg-tertiary);padding:1px 4px;border-radius:3px;font-size:11px;">pveum aclmod / -token 'root@pam!wolfstack' -role PVEAuditor</code>
+                            </p>
+                        </div>
                     </div>
                 </div>
                 <p id="wolfstack-hint" style="font-size: 12px; color: var(--text-muted);">
