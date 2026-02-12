@@ -154,8 +154,9 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - **Cluster name** — give each Proxmox cluster a friendly name (e.g. "Production Cluster")
 - **API token authentication** — secure connection using PVE API tokens (Token ID + Secret)
 - **Live metrics** — CPU, memory, disk, and uptime polled from each Proxmox node via REST API
-- **VM & container listing** — see all QEMU VMs and LXC containers running on each Proxmox host
-- **Guest control** — start, stop, shutdown, and reboot Proxmox VMs and containers from WolfStack
+- **VM & container listing** — see all QEMU VMs and LXC containers with resource usage, progress bars, and status badges
+- **Guest control** — start, stop, shutdown, reboot, suspend, and resume Proxmox VMs and containers from WolfStack
+- **Console access** — one-click link to Proxmox noVNC console for running guests
 - **Cluster settings** — ⚙️ button to edit cluster name, API token, and TLS fingerprint for all nodes at once
 - **TLS support** — works with self-signed certificates (common in Proxmox installations)
 
@@ -180,14 +181,14 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
    
    **Option C: Minimal custom role**
    ```bash
-   pveum role add WolfStackMonitor -privs "Sys.Audit,VM.Audit,Datastore.Audit"
+   pveum role add WolfStackMonitor -privs "Sys.Audit,VM.Audit,VM.PowerMgmt,Datastore.Audit"
    pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor
    ```
 
 3. **Copy the Token ID and Secret** — Proxmox shows these once:
    - Token ID: `root@pam!wolfstack`
    - Secret: `a2e0dcfb-f3eb-4674-965d-0dda7974ba73`
-4. **Add to WolfStack** — click "+ Add Server", select "🟠 Proxmox VE", and enter:
+4. **Add to WolfStack** — click "+ Add Server", select "Proxmox VE", and enter:
    - **Cluster Name** — display name for the sidebar (e.g. "Production")
    - **Server Address** — IP or hostname only, no `https://`
    - **PVE Node Name** — as shown in Proxmox sidebar (e.g. `pve1`)
