@@ -493,87 +493,34 @@ pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
     None
 }
 
-/// List all domains with Let's Encrypt certificates
-/// Returns a JSON object with "certs" array and "diagnostics" array
+/// List all domains with TLS certificates
+/// Uses the same discovery as startup (find_tls_certificate)
 pub fn list_certificates() -> serde_json::Value {
     let mut results = Vec::new();
-    let mut diagnostics = Vec::new();
-    let mut seen_domains = std::collections::HashSet::new();
 
-    // --- Certbot CLI discovery ---
-    // Always try running certbot — don't rely on `which` which may fail in systemd PATH
-    let certbot_certs = parse_certbot_certificates();
-    if certbot_certs.is_empty() {
-        diagnostics.push("ℹ️ certbot found no managed certificates".to_string());
-    } else {
-        diagnostics.push(format!("✅ certbot CLI found {} certificate(s)", certbot_certs.len()));
-        for (domains, cert_path, key_path, expiry) in certbot_certs {
-            seen_domains.insert(cert_path.clone());
-            results.push(serde_json::json!({
-                "domain": domains,
-                "cert_path": cert_path,
-                "key_path": key_path,
-                "expiry": expiry,
-                "source": "certbot",
-                "valid": true,
-            }));
-        }
-    }
-
-    // --- Filesystem scan of /etc/letsencrypt/live/ ---
-    let live_dir = std::path::Path::new("/etc/letsencrypt/live");
-    if !live_dir.exists() {
-        diagnostics.push("ℹ️ /etc/letsencrypt/live/ does not exist — no Let's Encrypt certificates on disk".to_string());
-    } else {
-        match std::fs::read_dir(live_dir) {
-            Ok(_) => {
-                let fs_certs = scan_letsencrypt_live();
-                let new_count = fs_certs.iter().filter(|(_, cp, _)| !seen_domains.contains(cp)).count();
-                if fs_certs.is_empty() {
-                    diagnostics.push("ℹ️ /etc/letsencrypt/live/ exists but contains no certificate directories".to_string());
-                } else if new_count == 0 {
-                    diagnostics.push(format!("✅ filesystem scan found {} certificate(s) (all already known from certbot)", fs_certs.len()));
-                } else {
-                    diagnostics.push(format!("✅ filesystem scan found {} additional certificate(s)", new_count));
-                }
-                for (domain, cert_path, key_path) in fs_certs {
-                    if seen_domains.contains(&cert_path) {
-                        continue;
-                    }
-                    results.push(serde_json::json!({
-                        "domain": domain,
-                        "cert_path": cert_path,
-                        "key_path": key_path,
-                        "source": "filesystem",
-                        "valid": true,
-                    }));
-                }
-            }
-            Err(e) => {
-                diagnostics.push(format!("⚠️ Cannot read /etc/letsencrypt/live/: {} — check permissions", e));
-            }
-        }
-    }
-
-    // --- /etc/wolfstack/ custom certs ---
-    let ws_cert = std::path::Path::new("/etc/wolfstack/cert.pem");
-    let ws_key = std::path::Path::new("/etc/wolfstack/key.pem");
-    if ws_cert.exists() && ws_key.exists() {
-        diagnostics.push("✅ Found custom certificate in /etc/wolfstack/".to_string());
+    // Use the exact same discovery that startup uses
+    if let Some((cert_path, key_path)) = find_tls_certificate(None) {
+        // Extract domain from path, e.g. /etc/letsencrypt/live/example.com/fullchain.pem
+        let domain = std::path::Path::new(&cert_path)
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "custom".to_string());
         results.push(serde_json::json!({
-            "domain": "wolfstack (custom)",
-            "cert_path": "/etc/wolfstack/cert.pem",
-            "key_path": "/etc/wolfstack/key.pem",
-            "source": "custom",
+            "domain": domain,
+            "cert_path": cert_path,
+            "key_path": key_path,
+            "source": "active",
             "valid": true,
         }));
-    } else {
-        diagnostics.push("ℹ️ No custom certificate in /etc/wolfstack/".to_string());
     }
 
     serde_json::json!({
         "certs": results,
-        "diagnostics": diagnostics,
+        "diagnostics": if results.is_empty() {
+            vec!["ℹ️ No TLS certificates found on this server".to_string()]
+        } else {
+            vec!["✅ TLS certificate found".to_string()]
+        },
     })
 }
-

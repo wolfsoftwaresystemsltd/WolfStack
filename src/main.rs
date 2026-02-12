@@ -171,13 +171,6 @@ async fn main() -> std::io::Result<()> {
         // Initialize AI agent
         let ai_agent = Arc::new(ai::AiAgent::new());
 
-        // Resolve TLS certificate paths early so we can store them in AppState
-        let tls_paths = if let (Some(cert), Some(key)) = (&cli.tls_cert, &cli.tls_key) {
-            Some((cert.clone(), key.clone()))
-        } else {
-            installer::find_tls_certificate(cli.tls_domain.as_deref())
-        };
-
         // Create app state
         let app_state = web::Data::new(api::AppState {
             monitor: Mutex::new(mon),
@@ -188,7 +181,6 @@ async fn main() -> std::io::Result<()> {
             cluster_secret: cluster_secret.clone(),
             pbs_restore_progress: Mutex::new(Default::default()),
             ai_agent: ai_agent.clone(),
-            tls_paths: tls_paths.clone(),
         });
 
         // Background: periodic self-monitoring update
@@ -298,7 +290,12 @@ async fn main() -> std::io::Result<()> {
         info!("  Serving web UI from: {}", web_dir);
         info!("");
 
-        // tls_paths already resolved above and stored in AppState
+        // Resolve TLS certificate paths
+        let tls_paths = if let (Some(cert), Some(key)) = (&cli.tls_cert, &cli.tls_key) {
+            Some((cert.clone(), key.clone()))
+        } else {
+            installer::find_tls_certificate(cli.tls_domain.as_deref())
+        };
 
         // Try to load TLS config using OpenSSL — fall back to HTTP if anything goes wrong
         let ssl_builder = tls_paths.as_ref().and_then(|(cert_path, key_path)| {
