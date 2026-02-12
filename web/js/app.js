@@ -368,6 +368,58 @@ function toggleServerNode(nodeId) {
     }
 }
 
+function filterSidebarNodes() {
+    const query = (document.getElementById('sidebar-node-search')?.value || '').toLowerCase().trim();
+    const tree = document.getElementById('server-tree');
+    if (!tree) return;
+
+    // Get all top-level cluster/node groups
+    const topNodes = tree.querySelectorAll(':scope > .server-tree-node');
+
+    topNodes.forEach(clusterDiv => {
+        const header = clusterDiv.querySelector('.server-node-header');
+        const childContainer = clusterDiv.querySelector('.server-node-children');
+        if (!childContainer) return;
+
+        const childNodes = childContainer.querySelectorAll(':scope > .server-tree-node');
+
+        if (!query) {
+            // No filter — show everything, restore default collapse state
+            clusterDiv.style.display = '';
+            childNodes.forEach(cn => cn.style.display = '');
+            return;
+        }
+
+        // Check cluster name match
+        const clusterText = (header?.textContent || '').toLowerCase();
+        const clusterMatch = clusterText.includes(query);
+
+        // Check child node matches
+        let anyChildMatch = false;
+        childNodes.forEach(childNode => {
+            const childText = (childNode.textContent || '').toLowerCase();
+            if (childText.includes(query) || clusterMatch) {
+                childNode.style.display = '';
+                anyChildMatch = true;
+            } else {
+                childNode.style.display = 'none';
+            }
+        });
+
+        if (clusterMatch || anyChildMatch) {
+            clusterDiv.style.display = '';
+            // Auto-expand when filtering
+            if (childContainer && !childContainer.classList.contains('expanded')) {
+                childContainer.classList.add('expanded');
+                const toggle = clusterDiv.querySelector('.tree-toggle');
+                if (toggle) toggle.classList.add('expanded');
+            }
+        } else {
+            clusterDiv.style.display = 'none';
+        }
+    });
+}
+
 // ─── Datacenter Overview ───
 function renderDatacenterOverview() {
     const nodes = allNodes;
