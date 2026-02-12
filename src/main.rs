@@ -89,10 +89,6 @@ async fn main() -> std::io::Result<()> {
 
     let cli = Cli::parse();
 
-    // Install rustls crypto provider BEFORE any TLS operations.
-    // Required because rustls 0.23 no longer auto-selects a provider.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     // Load or generate node ID
     let node_id_file = "/etc/wolfstack/node_id";
     let node_id = if let Ok(content) = std::fs::read_to_string(node_id_file) {
@@ -301,57 +297,32 @@ async fn main() -> std::io::Result<()> {
             installer::find_tls_certificate(cli.tls_domain.as_deref())
         };
 
-        // Try to load TLS config — fall back to HTTP if anything goes wrong
-        let tls_config = tls_paths.as_ref().and_then(|(cert_path, key_path)| {
-            let cert_file = match std::fs::File::open(cert_path) {
-                Ok(f) => f,
+        // Try to load TLS config using OpenSSL — fall back to HTTP if anything goes wrong
+        let ssl_builder = tls_paths.as_ref().and_then(|(cert_path, key_path)| {
+            use openssl::ssl::{SslAcceptor, SslMethod, SslFiletype};
+
+            let mut builder = match SslAcceptor::mozilla_intermediate(SslMethod::tls()) {
+                Ok(b) => b,
                 Err(e) => {
-                    tracing::warn!("Cannot open TLS cert '{}': {} — falling back to HTTP", cert_path, e);
-                    return None;
-                }
-            };
-            let key_file = match std::fs::File::open(key_path) {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!("Cannot open TLS key '{}': {} — falling back to HTTP", key_path, e);
+                    tracing::warn!("Failed to create SSL acceptor: {} — falling back to HTTP", e);
                     return None;
                 }
             };
 
-            let cert_chain: Vec<rustls::pki_types::CertificateDer> =
-                rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
-                    .filter_map(|c| c.ok())
-                    .collect();
-            if cert_chain.is_empty() {
-                tracing::warn!("No valid certificates found in '{}' — falling back to HTTP", cert_path);
+            if let Err(e) = builder.set_certificate_chain_file(cert_path) {
+                tracing::warn!("Cannot load TLS cert '{}': {} — falling back to HTTP", cert_path, e);
                 return None;
             }
 
-            let key_der = match rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file)) {
-                Ok(Some(k)) => k,
-                Ok(None) => {
-                    tracing::warn!("No private key found in '{}' — falling back to HTTP", key_path);
-                    return None;
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to read private key '{}': {} — falling back to HTTP", key_path, e);
-                    return None;
-                }
-            };
-
-            match rustls::ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(cert_chain, key_der)
-            {
-                Ok(cfg) => Some(cfg),
-                Err(e) => {
-                    tracing::warn!("Failed to build TLS config: {} — falling back to HTTP", e);
-                    None
-                }
+            if let Err(e) = builder.set_private_key_file(key_path, SslFiletype::PEM) {
+                tracing::warn!("Cannot load TLS key '{}': {} — falling back to HTTP", key_path, e);
+                return None;
             }
+
+            Some(builder)
         });
 
-        if let Some(tls_config) = tls_config {
+        if let Some(ssl_builder) = ssl_builder {
             let (ref cert_path, ref key_path) = tls_paths.as_ref().unwrap();
             info!("  🔒 TLS enabled");
             info!("     Cert: {}", cert_path);
@@ -374,7 +345,7 @@ async fn main() -> std::io::Result<()> {
                     .route("/", web::get().to(index_handler))
                     .service(actix_files::Files::new("/", &web_dir).index_file("login.html"))
             })
-            .bind_rustls_0_23(&https_bind, tls_config)
+            .bind_openssl(&https_bind, ssl_builder)
             .map_err(|e| {
                 tracing::error!("❌ Failed to bind HTTPS on {}: {}", https_bind, e);
                 e

@@ -9,7 +9,7 @@ repository = "https://github.com/wolfsoftwaresystemsltd/WolfStack"
 
 [dependencies]
 # Web framework
-actix-web = { version = "4", features = ["rustls-0_23"] }
+actix-web = { version = "4", features = ["openssl"] }
 actix-files = "0.6"
 actix-rt = "2"
 actix-ws = "0.3"
@@ -27,9 +27,8 @@ tokio = { version = "1", features = ["full"] }
 # HTTP client for agent communication
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
-# TLS
-rustls = { version = "0.23", features = ["ring"] }
-rustls-pemfile = "2"
+# TLS (OpenSSL — system native, no CryptoProvider headaches)
+openssl = "0.10"
 
 # Logging
 tracing = "0.1"
