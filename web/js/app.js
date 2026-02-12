@@ -664,9 +664,22 @@ function updateMap(nodes) {
     const selfNode = nodes.find(n => n.is_self);
     const selfPublicIp = selfNode?.public_ip;
 
+    // Helper: check if an IP is a private/local address
+    const isPrivateIp = (ip) => {
+        if (!ip) return true;
+        return /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|fd[0-9a-f]{2}:|fe80:)/.test(ip);
+    };
+
     // Helper: resolve a node's location, then call placeMarker
     const resolveAndPlace = (node, placeMarker) => {
-        const ipToGeolocate = node.public_ip || selfPublicIp;
+        // Priority: public_ip > node.address (if public) > selfPublicIp > London fallback
+        let ipToGeolocate = node.public_ip;
+        if (!ipToGeolocate && node.address && !isPrivateIp(node.address)) {
+            ipToGeolocate = node.address;
+        }
+        if (!ipToGeolocate) {
+            ipToGeolocate = selfPublicIp;
+        }
 
         if (ipToGeolocate) {
             // Check cache first
