@@ -357,6 +357,9 @@ function buildServerTree(nodes) {
         const active = document.querySelector(`.server-child-item[data-node="${currentNodeId}"][data-view="${currentPage}"]`);
         if (active) active.classList.add('active');
     }
+
+    // Re-apply search filter if active
+    filterSidebarNodes();
 }
 
 function toggleServerNode(nodeId) {
