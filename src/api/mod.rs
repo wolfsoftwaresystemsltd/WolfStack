@@ -41,6 +41,8 @@ pub struct AppState {
     pub cluster_secret: String,
     pub pbs_restore_progress: std::sync::Mutex<PbsRestoreProgress>,
     pub ai_agent: Arc<crate::ai::AiAgent>,
+    /// Active TLS certificate paths (cert, key) found at startup
+    pub tls_paths: Option<(String, String)>,
 }
 
 // ─── Auth helpers ───
@@ -598,8 +600,31 @@ pub async fn request_certificate(req: HttpRequest, state: web::Data<AppState>, b
 /// GET /api/certificates/list — list installed certificates
 pub async fn list_certificates(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let certs = installer::list_certificates();
-    HttpResponse::Ok().json(certs)
+    // Return the active TLS paths discovered at startup
+    let mut certs = Vec::new();
+    if let Some((ref cert_path, ref key_path)) = state.tls_paths {
+        // Extract domain from cert path, e.g. /etc/letsencrypt/live/example.com/fullchain.pem
+        let domain = std::path::Path::new(cert_path)
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        certs.push(serde_json::json!({
+            "domain": domain,
+            "cert_path": cert_path,
+            "key_path": key_path,
+            "source": "active",
+            "valid": true,
+        }));
+    }
+    HttpResponse::Ok().json(serde_json::json!({
+        "certs": certs,
+        "diagnostics": if certs.is_empty() {
+            vec!["ℹ️ No TLS certificates were found at startup".to_string()]
+        } else {
+            vec!["✅ TLS certificate active".to_string()]
+        },
+    }))
 }
 
 // ─── Agent API (server-to-server, no auth required) ───
