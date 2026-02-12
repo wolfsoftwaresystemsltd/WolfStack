@@ -14,6 +14,10 @@ use tracing::{warn, debug};
 use crate::monitoring::SystemMetrics;
 use crate::installer::ComponentStatus;
 
+/// Track consecutive poll failures per node — only mark offline after 2+ failures
+static POLL_FAIL_COUNTS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, u32>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
 /// A node in the WolfStack cluster
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
@@ -414,9 +418,24 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         pve_cluster_name: final_cluster_name.clone(),
                         cluster_name: final_cluster_name,
                     });
+
+                    // Reset fail count on success
+                    POLL_FAIL_COUNTS.lock().unwrap().remove(&node.id);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to poll PVE node {} (pve_name={}, addr={}): {}", node.id, pve_name, node.address, e);
+                    // Increment fail count; keep node online until 2 consecutive failures
+                    let mut fails = POLL_FAIL_COUNTS.lock().unwrap();
+                    let count = fails.entry(node.id.clone()).or_insert(0);
+                    *count += 1;
+                    if *count < 2 {
+                        // First failure — refresh last_seen to keep node online
+                        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                        let mut nodes = cluster.nodes.write().unwrap();
+                        if let Some(n) = nodes.get_mut(&node.id) {
+                            n.last_seen = now;
+                        }
+                    }
                 }
             }
             continue;
@@ -460,6 +479,9 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                     cluster_name: node.cluster_name.clone(),
                                 });
 
+                                // Reset fail count on success
+                                POLL_FAIL_COUNTS.lock().unwrap().remove(&node.id);
+
                                 // Merge known_nodes (gossip) — with dedup by address+port+hostname
                                 let current_nodes = cluster.get_all_nodes();
                                 let self_hostname = hostname::get()
@@ -493,6 +515,17 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                     }
                     Err(e) => {
                         debug!("Failed to poll {}: {}", node.id, e);
+                        // Increment fail count; keep node online until 2 consecutive failures
+                        let mut fails = POLL_FAIL_COUNTS.lock().unwrap();
+                        let count = fails.entry(node.id.clone()).or_insert(0);
+                        *count += 1;
+                        if *count < 2 {
+                            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                            let mut nodes = cluster.nodes.write().unwrap();
+                            if let Some(n) = nodes.get_mut(&node.id) {
+                                n.last_seen = now;
+                            }
+                        }
                     }
                 }
             }
