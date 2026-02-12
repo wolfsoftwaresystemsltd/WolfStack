@@ -2488,9 +2488,10 @@ async function loadCertificates() {
         el.innerHTML = certs.map(c => `
             <div style="padding: 10px; margin-bottom: 8px; background: var(--bg-tertiary); border-radius: 8px; display: flex; align-items: center; gap: 12px;">
                 <span style="font-size: 20px;">${c.valid ? '✅' : '⚠️'}</span>
-                <div>
+                <div style="flex:1;">
                     <strong>${c.domain}</strong><br>
                     <span style="font-size: 12px; color: var(--text-muted);">${c.cert_path}</span>
+                    ${c.expiry ? `<br><span style="font-size: 12px; color: var(--text-muted);">Expires: ${c.expiry}</span>` : ''}
                 </div>
             </div>
         `).join('');

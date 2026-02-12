@@ -344,6 +344,64 @@ pub fn request_certificate(domain: &str, email: &str) -> Result<String, String> 
     }
 }
 
+/// Parse `sudo certbot certificates` output into structured cert info
+/// Returns Vec of (domains, cert_path, key_path, expiry)
+fn parse_certbot_certificates() -> Vec<(String, String, String, String)> {
+    let output = Command::new("sudo")
+        .args(["certbot", "certificates"])
+        .output()
+        .ok();
+
+    let stdout = match output {
+        Some(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Some(ref o) => {
+            // certbot might output to stderr too
+            let combined = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            combined
+        }
+        _ => return Vec::new(),
+    };
+
+    let mut results = Vec::new();
+    let mut current_domains = String::new();
+    let mut current_cert = String::new();
+    let mut current_key = String::new();
+    let mut current_expiry = String::new();
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Domains:") {
+            // Save previous entry if complete
+            if !current_domains.is_empty() && !current_cert.is_empty() && !current_key.is_empty() {
+                results.push((
+                    current_domains.clone(), current_cert.clone(),
+                    current_key.clone(), current_expiry.clone(),
+                ));
+            }
+            current_domains = trimmed.strip_prefix("Domains:").unwrap_or("").trim().to_string();
+            current_cert.clear();
+            current_key.clear();
+            current_expiry.clear();
+        } else if trimmed.starts_with("Certificate Path:") {
+            current_cert = trimmed.strip_prefix("Certificate Path:").unwrap_or("").trim().to_string();
+        } else if trimmed.starts_with("Private Key Path:") {
+            current_key = trimmed.strip_prefix("Private Key Path:").unwrap_or("").trim().to_string();
+        } else if trimmed.starts_with("Expiry Date:") {
+            current_expiry = trimmed.strip_prefix("Expiry Date:").unwrap_or("").trim().to_string();
+        }
+    }
+    // Don't forget the last entry
+    if !current_domains.is_empty() && !current_cert.is_empty() && !current_key.is_empty() {
+        results.push((current_domains, current_cert, current_key, current_expiry));
+    }
+
+    results
+}
+
 /// Find TLS certificate files for a domain (Let's Encrypt or /etc/wolfstack/)
 /// Returns (cert_path, key_path) if both exist
 pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
@@ -354,30 +412,21 @@ pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
         return Some((ws_cert.to_string(), ws_key.to_string()));
     }
 
-    // Check Let's Encrypt for specific domain
+    // Use certbot to find certificates
+    let certs = parse_certbot_certificates();
+
+    // If a specific domain was requested, look for it
     if let Some(d) = domain {
-        let le_cert = format!("/etc/letsencrypt/live/{}/fullchain.pem", d);
-        let le_key = format!("/etc/letsencrypt/live/{}/privkey.pem", d);
-        if std::path::Path::new(&le_cert).exists() && std::path::Path::new(&le_key).exists() {
-            return Some((le_cert, le_key));
+        if let Some((_domains, cert, key, _expiry)) = certs.iter().find(|(domains, _, _, _)| {
+            domains.split_whitespace().any(|dom| dom == d)
+        }) {
+            return Some((cert.clone(), key.clone()));
         }
     }
 
-    // Auto-detect: scan /etc/letsencrypt/live/ for any domain
-    if let Ok(entries) = std::fs::read_dir("/etc/letsencrypt/live") {
-        for entry in entries.flatten() {
-            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                let dir = entry.path();
-                let cert = dir.join("fullchain.pem");
-                let key = dir.join("privkey.pem");
-                if cert.exists() && key.exists() {
-                    return Some((
-                        cert.to_string_lossy().to_string(),
-                        key.to_string_lossy().to_string(),
-                    ));
-                }
-            }
-        }
+    // Otherwise return the first available certificate
+    if let Some((_domains, cert, key, _expiry)) = certs.first() {
+        return Some((cert.clone(), key.clone()));
     }
 
     None
@@ -385,31 +434,24 @@ pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
 
 /// List all domains with Let's Encrypt certificates
 pub fn list_certificates() -> Vec<serde_json::Value> {
-    let mut certs = Vec::new();
+    let mut results = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir("/etc/letsencrypt/live") {
-        for entry in entries.flatten() {
-            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name == "README" { continue; }
-                let dir = entry.path();
-                let cert_exists = dir.join("fullchain.pem").exists();
-                let key_exists = dir.join("privkey.pem").exists();
-                certs.push(serde_json::json!({
-                    "domain": name,
-                    "cert_path": dir.join("fullchain.pem").to_string_lossy(),
-                    "key_path": dir.join("privkey.pem").to_string_lossy(),
-                    "valid": cert_exists && key_exists,
-                }));
-            }
-        }
+    // Get certs from certbot
+    for (domains, cert_path, key_path, expiry) in parse_certbot_certificates() {
+        results.push(serde_json::json!({
+            "domain": domains,
+            "cert_path": cert_path,
+            "key_path": key_path,
+            "expiry": expiry,
+            "valid": true,
+        }));
     }
 
     // Also check /etc/wolfstack/
     let ws_cert = std::path::Path::new("/etc/wolfstack/cert.pem");
     let ws_key = std::path::Path::new("/etc/wolfstack/key.pem");
     if ws_cert.exists() && ws_key.exists() {
-        certs.push(serde_json::json!({
+        results.push(serde_json::json!({
             "domain": "wolfstack (custom)",
             "cert_path": "/etc/wolfstack/cert.pem",
             "key_path": "/etc/wolfstack/key.pem",
@@ -417,5 +459,6 @@ pub fn list_certificates() -> Vec<serde_json::Value> {
         }));
     }
 
-    certs
+    results
 }
+
