@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use tracing::{info, debug};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

@@ -148,6 +148,29 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - Configurable API keys, provider, model, email settings, and health check interval
 - **Automatic update check** — compares running version to GitHub
 
+### 🟠 Proxmox VE Integration
+- **Unified datacenter** — manage Proxmox VE nodes alongside native WolfStack nodes in one dashboard
+- **API token authentication** — secure connection to your Proxmox cluster using PVE API tokens
+- **Live metrics** — CPU, memory, disk, and uptime polled from Proxmox nodes via REST API
+- **VM & container listing** — see all QEMU VMs and LXC containers running on your Proxmox hosts
+- **Guest control** — start, stop, shutdown, and reboot Proxmox VMs and containers from WolfStack
+- **Connection testing** — verify API connectivity before adding a node
+- **TLS support** — works with self-signed certificates (common in Proxmox installations)
+- **Easy setup** — select "Proxmox VE" when adding a server, enter the address, node name, and API token
+
+#### Setting Up Proxmox Integration
+1. **Create an API Token** in Proxmox: `Datacenter → Permissions → API Tokens → Add`
+   - User: `root@pam` (or a dedicated user with appropriate roles)
+   - Token ID: choose any name (e.g. `wolfstack`)
+   - Uncheck "Privilege Separation" for full access, or assign `PVEAuditor` + `PVEVMUser` roles
+2. **Copy the token** — format: `user@pam!tokenid=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+3. **Add to WolfStack** — click "+ Add Server", select "🟠 Proxmox VE", and enter:
+   - Server address (IP or hostname of Proxmox node)
+   - PVE Node Name (as shown in Proxmox sidebar, e.g. `pve1`)
+   - API Token (the full `user@pam!tokenid=uuid` string)
+   - TLS Fingerprint (optional, leave blank to accept self-signed certs)
+4. The Proxmox node appears in your datacenter with live metrics and VM/container badges
+
 ## Architecture
 
 ```
@@ -163,6 +186,7 @@ wolfstack/
 │   ├── networking/mod.rs    # Network interfaces, VLANs, DNS, IP mapping
 │   ├── console.rs           # WebSocket PTY terminal for containers and host shells
 │   ├── containers/mod.rs    # Docker & LXC management
+│   ├── proxmox/mod.rs       # Proxmox VE API client & polling
 │   └── vms/                 # Virtual machine management
 │       ├── mod.rs            # Module exports
 │       ├── manager.rs        # KVM/QEMU VM lifecycle (create, start, stop, delete)
@@ -293,6 +317,14 @@ All endpoints require authentication (cookie-based session) except `/api/agent/s
 | GET | `/api/wolfnet/status` | WolfNet network status and peers |
 | GET | `/api/wolfnet/used-ips` | List all used WolfNet IPs |
 | WS | `/ws/console/{type}/{name}` | Interactive web terminal (Docker, LXC, or host) |
+
+### Proxmox VE
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/nodes/{id}/pve/resources` | List VMs and containers on a Proxmox node |
+| POST | `/api/nodes/{id}/pve/test` | Test Proxmox API connection |
+| POST | `/api/nodes/{id}/pve/{vmid}/{action}` | Start/stop/shutdown/reboot a Proxmox guest |
 
 ### Node Proxy
 

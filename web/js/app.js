@@ -1275,8 +1275,30 @@ async function fetchNodes() {
     try {
         const resp = await fetch('/api/nodes');
         const nodes = await resp.json();
+
+        // Only rebuild sidebar tree if node list structure changed
+        var treeChanged = false;
+        if (!allNodes || allNodes.length !== nodes.length) {
+            treeChanged = true;
+        } else {
+            for (var i = 0; i < nodes.length; i++) {
+                var old = allNodes.find(function (n) { return n.id === nodes[i].id; });
+                if (!old || old.online !== nodes[i].online ||
+                    old.docker_count !== nodes[i].docker_count ||
+                    old.lxc_count !== nodes[i].lxc_count ||
+                    old.vm_count !== nodes[i].vm_count ||
+                    (old.components || []).filter(function (c) { return c.installed; }).length !==
+                    (nodes[i].components || []).filter(function (c) { return c.installed; }).length) {
+                    treeChanged = true;
+                    break;
+                }
+            }
+        }
+
         allNodes = nodes;
-        buildServerTree(nodes);
+        if (treeChanged) {
+            buildServerTree(nodes);
+        }
 
         // Refresh datacenter overview if we're viewing it
         if (currentPage === 'datacenter') {

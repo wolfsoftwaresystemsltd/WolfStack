@@ -233,18 +233,27 @@ async fn main() -> std::io::Result<()> {
                 };
 
                 if is_configured {
-                    // Build metrics summary (all locks dropped before await)
+                    // Build metrics summary with real system data
                     let summary = {
-                        let _monitor = ai_state.monitor.lock().unwrap();
-                        let hostname = hostname::get()
-                            .map(|h| h.to_string_lossy().to_string())
-                            .unwrap_or_else(|_| "unknown".to_string());
+                        let mut monitor = ai_state.monitor.lock().unwrap();
+                        let m = monitor.collect();
                         let docker_count = containers::docker_list_all().len() as u32;
                         let lxc_count = containers::lxc_list_all().len() as u32;
                         let vm_count = ai_state.vms.lock().unwrap().list_vms().len() as u32;
+
+                        let mem_used_gb = m.memory_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                        let mem_total_gb = m.memory_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                        let root_disk = m.disks.iter().find(|d| d.mount_point == "/").or_else(|| m.disks.first());
+                        let disk_used_gb = root_disk.map(|d| d.used_bytes as f64 / (1024.0 * 1024.0 * 1024.0)).unwrap_or(0.0);
+                        let disk_total_gb = root_disk.map(|d| d.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)).unwrap_or(0.0);
+
                         ai::build_metrics_summary(
-                            &hostname, 0.0, 0.0, 0.0, 0.0, 0.0,
-                            docker_count, lxc_count, vm_count, 0,
+                            &m.hostname,
+                            m.cpu_usage_percent,
+                            mem_used_gb, mem_total_gb,
+                            disk_used_gb, disk_total_gb,
+                            docker_count, lxc_count, vm_count,
+                            m.uptime_secs,
                         )
                     };
                     let _ = ai_agent_bg.health_check(&summary).await;
