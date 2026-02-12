@@ -762,7 +762,7 @@ async fn call_claude(
 
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 2048,
+        "max_tokens": 4096,
         "system": system,
         "messages": messages,
     });
@@ -837,7 +837,7 @@ async fn call_gemini(
         },
         "contents": contents,
         "generationConfig": {
-            "maxOutputTokens": 2048,
+            "maxOutputTokens": 4096,
         }
     });
 
