@@ -729,57 +729,40 @@ function updateMap(nodes) {
     nodes.forEach(node => {
         if (mapMarkers[node.id]) return;
 
+        // Color by type: green for WolfStack, blue for Proxmox
+        const isPve = node.node_type === 'proxmox';
+        const markerColor = isPve ? '#3b82f6' : '#10b981';
+
         // Function to place marker
         const placeMarker = (lat, lon) => {
             const icon = L.divIcon({
                 className: 'custom-map-marker',
-                html: `<div style="width:12px; height:12px; background:${node.online ? '#10b981' : '#ef4444'}; border-radius:50%; border:2px solid #ffffff; box-shadow:0 0 10px ${node.online ? '#10b981' : '#ef4444'};"></div>`,
+                html: `<div style="width:12px; height:12px; background:${markerColor}; border-radius:50%; border:2px solid #ffffff; box-shadow:0 0 10px ${markerColor};"></div>`,
                 iconSize: [12, 12]
             });
             const marker = L.marker([lat, lon], { icon: icon }).addTo(worldMap);
             let popupContent = `<b>${node.hostname}</b><br>${node.address}`;
             if (node.public_ip) popupContent += `<br>Public: ${node.public_ip}`;
-            popupContent += `<br>${node.online ? 'Online' : 'Offline'}`;
+            popupContent += `<br><span style="color:${markerColor}">${isPve ? '● Proxmox' : '● WolfStack'}</span>`;
+            popupContent += ` — ${node.online ? 'Online' : 'Offline'}`;
             marker.bindPopup(popupContent);
             mapMarkers[node.id] = marker;
+
+            // Auto-fit map to show all markers
+            fitMapToMarkers();
         };
 
         resolveAndPlace(node, placeMarker);
     });
-
-    // Draw connection lines between online servers after markers settle
-    setTimeout(() => drawMapConnections(), 2000);
 }
 
-let mapConnectionLines = [];
-function drawMapConnections() {
+// Fit map bounds to show all placed markers
+function fitMapToMarkers() {
     if (!worldMap) return;
-    // Clear previous lines
-    mapConnectionLines.forEach(l => worldMap.removeLayer(l));
-    mapConnectionLines = [];
-
-    const markerIds = Object.keys(mapMarkers);
-    if (markerIds.length < 2) return;
-
-    // Draw lines between all pairs
-    for (let i = 0; i < markerIds.length; i++) {
-        for (let j = i + 1; j < markerIds.length; j++) {
-            const m1 = mapMarkers[markerIds[i]];
-            const m2 = mapMarkers[markerIds[j]];
-            if (!m1 || !m2) continue;
-            const line = L.polyline(
-                [m1.getLatLng(), m2.getLatLng()],
-                {
-                    color: '#6366f1',
-                    weight: 1.5,
-                    opacity: 0.4,
-                    dashArray: '6, 8',
-                    className: 'map-connection-line'
-                }
-            ).addTo(worldMap);
-            mapConnectionLines.push(line);
-        }
-    }
+    const markers = Object.values(mapMarkers);
+    if (markers.length === 0) return;
+    const group = L.featureGroup(markers);
+    worldMap.fitBounds(group.getBounds().pad(0.3), { maxZoom: 10 });
 }
 
 // Deterministic jitter based on hostname so co-located servers spread visually
