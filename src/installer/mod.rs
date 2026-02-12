@@ -140,18 +140,22 @@ fn pkg_install_cmd(distro: DistroFamily) -> (&'static str, &'static str) {
 pub fn check_service(service: &str) -> (bool, bool, bool) {
     let installed = Command::new("systemctl")
         .args(["cat", service])
-        .output()
-        .map(|o| o.status.success())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
         .unwrap_or(false);
 
     let running = Command::new("systemctl")
         .args(["is-active", "--quiet", service])
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
 
     let enabled = Command::new("systemctl")
         .args(["is-enabled", "--quiet", service])
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
