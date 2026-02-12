@@ -208,6 +208,8 @@ pub struct AddServerRequest {
     pub pve_node_name: Option<String>,
     #[serde(default)]
     pub pve_cluster_name: Option<String>, // User-friendly cluster name for sidebar
+    #[serde(default)]
+    pub cluster_name: Option<String>,     // Generic cluster name for WolfStack nodes
 }
 
 pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::Json<AddServerRequest>) -> HttpResponse {
@@ -267,13 +269,15 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
         }))
     } else {
         let port = body.port.unwrap_or(8553);
-        let id = state.cluster.add_server(body.address.clone(), port);
-        info!("Added server {} at {}:{}", id, body.address, port);
+        let cluster_name = body.cluster_name.clone();
+        let id = state.cluster.add_server(body.address.clone(), port, cluster_name.clone());
+        info!("Added server {} at {}:{} (cluster: {:?})", id, body.address, port, cluster_name);
         HttpResponse::Ok().json(serde_json::json!({
             "id": id,
             "address": body.address,
             "port": port,
-            "node_type": "wolfstack"
+            "node_type": "wolfstack",
+            "cluster_name": cluster_name,
         }))
     }
 }
@@ -295,6 +299,7 @@ pub struct UpdateNodeSettings {
     pub pve_token: Option<String>,
     pub pve_fingerprint: Option<String>,
     pub pve_cluster_name: Option<String>,
+    pub cluster_name: Option<String>,
 }
 
 pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<UpdateNodeSettings>) -> HttpResponse {
@@ -307,7 +312,12 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
         None
     };
 
-    if state.cluster.update_node_settings(&id, body.pve_token.clone(), fp, body.pve_cluster_name.clone()) {
+
+
+    // Support updating both pve_cluster_name (for compat) and generic cluster_name
+    let cluster_name = body.cluster_name.clone().or(body.pve_cluster_name.clone());
+
+    if state.cluster.update_node_settings(&id, body.pve_token.clone(), fp, cluster_name) {
         HttpResponse::Ok().json(serde_json::json!({ "updated": true }))
     } else {
         HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" }))
@@ -602,6 +612,7 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
         lxc_count,
         vm_count,
         public_ip,
+        known_nodes: state.cluster.get_all_nodes(),
     };
     HttpResponse::Ok().json(msg)
 }

@@ -44,6 +44,8 @@ pub struct Node {
     pub pve_node_name: Option<String>,  // Proxmox node name for API calls
     #[serde(default)]
     pub pve_cluster_name: Option<String>, // User-friendly cluster name for sidebar grouping
+    #[serde(default)]
+    pub cluster_name: Option<String>,     // Generic cluster name for WolfStack nodes
 }
 
 fn default_node_type() -> String { "wolfstack".to_string() }
@@ -103,6 +105,7 @@ impl ClusterState {
     /// Update this node's own status
     pub fn update_self(&self, metrics: SystemMetrics, components: Vec<ComponentStatus>, docker_count: u32, lxc_count: u32, vm_count: u32, public_ip: Option<String>) {
         let mut nodes = self.nodes.write().unwrap();
+        let cluster_name = nodes.get(&self.self_id).and_then(|n| n.cluster_name.clone());
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         nodes.insert(self.self_id.clone(), Node {
             id: self.self_id.clone(),
@@ -122,7 +125,9 @@ impl ClusterState {
             pve_token: None,
             pve_fingerprint: None,
             pve_node_name: None,
+
             pve_cluster_name: None,
+            cluster_name,
         });
     }
 
@@ -139,7 +144,7 @@ impl ClusterState {
         nodes.values().map(|n| {
             let mut node = n.clone();
             if !node.is_self {
-                node.online = now - node.last_seen < 30;
+                node.online = now - node.last_seen < 60;
             }
             node
         }).collect()
@@ -152,17 +157,18 @@ impl ClusterState {
     }
 
     /// Add a server by address — persists to disk
-    pub fn add_server(&self, address: String, port: u16) -> String {
-        self.add_server_full(address, port, "wolfstack".to_string(), None, None, None, None)
+    pub fn add_server(&self, address: String, port: u16, cluster_name: Option<String>) -> String {
+        self.add_server_full(address, port, "wolfstack".to_string(), None, None, None, None, cluster_name)
     }
 
     /// Add a Proxmox server
-    pub fn add_proxmox_server(&self, address: String, port: u16, token: String, fingerprint: Option<String>, node_name: String, cluster_name: Option<String>) -> String {
-        self.add_server_full(address, port, "proxmox".to_string(), Some(token), fingerprint, Some(node_name), cluster_name)
+    pub fn add_proxmox_server(&self, address: String, port: u16, token: String, fingerprint: Option<String>, node_name: String, pve_cluster_name: Option<String>) -> String {
+        // Use pve_cluster_name as the generic cluster_name too
+        self.add_server_full(address, port, "proxmox".to_string(), Some(token), fingerprint, Some(node_name), pve_cluster_name.clone(), pve_cluster_name)
     }
 
     /// Add a server with full options
-    fn add_server_full(&self, address: String, port: u16, node_type: String, pve_token: Option<String>, pve_fingerprint: Option<String>, pve_node_name: Option<String>, pve_cluster_name: Option<String>) -> String {
+    fn add_server_full(&self, address: String, port: u16, node_type: String, pve_token: Option<String>, pve_fingerprint: Option<String>, pve_node_name: Option<String>, pve_cluster_name: Option<String>, cluster_name: Option<String>) -> String {
         let id = format!("node-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let mut nodes = self.nodes.write().unwrap();
@@ -185,6 +191,7 @@ impl ClusterState {
             pve_fingerprint,
             pve_node_name,
             pve_cluster_name,
+            cluster_name,
         });
         drop(nodes);
         self.save_nodes();
@@ -235,6 +242,8 @@ pub enum AgentMessage {
         vm_count: u32,
         #[serde(default)]
         public_ip: Option<String>,
+        #[serde(default)]
+        known_nodes: Vec<Node>,
     },
     /// "Give me your status"
     StatusRequest,
@@ -254,7 +263,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         nodes.values()
             .filter(|n| !n.is_self)
-            .map(|n| (n.id.clone(), (now - n.last_seen < 30, n.hostname.clone())))
+            .map(|n| (n.id.clone(), (now - n.last_seen < 60, n.hostname.clone())))
             .collect()
     };
 
@@ -329,10 +338,11 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         pve_fingerprint: node.pve_fingerprint.clone(),
                         pve_node_name: node.pve_node_name.clone(),
                         pve_cluster_name: node.pve_cluster_name.clone(),
+                        cluster_name: node.pve_cluster_name.clone(),
                     });
                 }
                 Err(e) => {
-                    debug!("Failed to poll PVE node {}: {}", node.id, e);
+                    tracing::warn!("Failed to poll PVE node {} (pve_name={}, addr={}): {}", node.id, pve_name, node.address, e);
                 }
             }
             continue;
@@ -352,7 +362,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                     .send().await {
                     Ok(resp) => {
                         if let Ok(msg) = resp.json::<AgentMessage>().await {
-                            if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip } = msg {
+                            if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes } = msg {
                                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                                 cluster.update_remote(Node {
                                     id: node.id.clone(),
@@ -373,7 +383,26 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                     pve_fingerprint: None,
                                     pve_node_name: None,
                                     pve_cluster_name: None,
+                                    cluster_name: node.cluster_name.clone(),
                                 });
+
+                                // Merge known_nodes (gossip)
+                                let current_nodes = cluster.get_all_nodes();
+                                for known in known_nodes {
+                                    // Only add nodes we don't know about
+                                    // And specifically care about Proxmox nodes or other WolfStack nodes
+                                    if !current_nodes.iter().any(|n| n.id == known.id) && known.id != cluster.self_id {
+                                        debug!("Discovered new node via gossip from {}: {} ({})", node.id, known.id, known.node_type);
+                                        // We just add it as offline; it will be polled next cycle
+                                        let mut new_node = known.clone();
+                                        new_node.online = false; 
+                                        new_node.is_self = false;
+                                        cluster.update_remote(new_node);
+                                        // Persist immediately so we remember them
+                                        // The update_remote doesn't save automatically for performance, but adding a new node should
+                                        cluster.save_nodes();
+                                    }
+                                }
                             }
                         }
                     }

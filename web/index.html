@@ -2232,10 +2232,16 @@ region = us-east-1"></textarea>
             <div class="modal-body">
                 <div class="form-group">
                     <label>Node Type</label>
-                    <select class="form-control" id="new-server-type" onchange="togglePveFields()">
+                    <select class="form-control" id="new-server-type" onchange="updateServerForm()">
                         <option value="wolfstack">🐺 WolfStack</option>
                         <option value="proxmox">🟠 Proxmox VE</option>
                     </select>
+                </div>
+                <div class="form-group" id="ws-cluster-field">
+                    <label>Cluster Name</label>
+                    <input type="text" class="form-control" id="new-server-cluster-name"
+                        placeholder="WolfStack (default)">
+                    <small style="color: var(--text-muted);">Optional: Group nodes in the sidebar</small>
                 </div>
                 <div class="form-group">
                     <label>Server Address</label>

@@ -205,68 +205,107 @@ function buildServerTree(nodes) {
 
     let html = '';
 
-    // Render WolfStack nodes (unchanged)
-    wsNodes.forEach(node => {
-        const shouldExpand = isFirstBuild ? node.is_self : expandedNodes.has(node.id);
+    // 2. Render WolfStack Clusters
+    const wsClusters = {};
+    wsNodes.forEach(n => {
+        const key = n.cluster_name || "WolfStack";
+        if (!wsClusters[key]) wsClusters[key] = [];
+        wsClusters[key].push(n);
+    });
+
+    // Sort WolfStack clusters: "WolfStack" first, then alphabetical
+    const wsKeys = Object.keys(wsClusters).sort((a, b) => {
+        if (a === 'WolfStack') return -1;
+        if (b === 'WolfStack') return 1;
+        return a.localeCompare(b);
+    });
+
+    wsKeys.forEach(clusterName => {
+        const clusterNodes = wsClusters[clusterName];
+        const clusterId = 'cluster-' + clusterName.replace(/[^a-z0-9]/gi, '-');
+        const shouldExpandCluster = isFirstBuild ? true : (expandedNodes.has(clusterId) || clusterNodes.some(n => n.id === currentNodeId || expandedNodes.has(n.id)));
+        const anyOnline = clusterNodes.some(n => n.online);
+        const nodeIds = clusterNodes.map(n => `'${n.id}'`).join(',');
+
+        // Settings/Delete for non-default clusters? Maybe later. For now just view.
+
         html += `
         <div class="server-tree-node">
-            <div class="server-node-header" onclick="toggleServerNode('${node.id}')">
-                <span class="tree-toggle ${shouldExpand ? 'expanded' : ''}" id="toggle-${node.id}">▶</span>
-                <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
-                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">🖥️ ${node.hostname}</span>
-                ${node.is_self ? '<span class="self-badge">this</span>' : `<span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemoveServer('${node.id}', '${node.hostname}')" title="Remove server">🗑️</span>`}
+            <div class="server-node-header" onclick="toggleServerNode('${clusterId}')" style="background: linear-gradient(90deg, rgba(99,102,241,0.05), transparent);">
+                <span class="tree-toggle ${shouldExpandCluster ? 'expanded' : ''}" id="toggle-${clusterId}">▶</span>
+                <span class="server-dot ${anyOnline ? 'online' : 'offline'}"></span>
+                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">☁️ ${clusterName}</span>
+                <span class="badge" style="font-size:10px; padding:1px 6px;">${clusterNodes.length} nodes</span>
             </div>
-            <div class="server-node-children ${shouldExpand ? 'expanded' : ''}" id="children-${node.id}">
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="dashboard" onclick="selectServerView('${node.id}', 'dashboard')">
-                    <span class="icon">📊</span> Dashboard
-                </a>
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="components" onclick="selectServerView('${node.id}', 'components')">
-                    <span class="icon">📦</span> Components
-                    <span class="badge" style="font-size:10px; padding:1px 6px;">${node.components.filter(c => c.installed).length}</span>
-                </a>
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="services" onclick="selectServerView('${node.id}', 'services')">
-                    <span class="icon">⚡</span> Services
-                </a>
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="containers" onclick="selectServerView('${node.id}', 'containers')">
-                    <span class="icon">🐳</span> Docker
-                    ${node.docker_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.docker_count}</span>` : ''}
-                </a>
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="lxc" onclick="selectServerView('${node.id}', 'lxc')">
-                    <span class="icon">📦</span> LXC
-                    ${node.lxc_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.lxc_count}</span>` : ''}
-                </a>
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="vms" onclick="selectServerView('${node.id}', 'vms')">
-                    <span class="icon">🖥️</span> Virtual Machines
-                    ${node.vm_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.vm_count}</span>` : ''}
-                </a>
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="storage" onclick="selectServerView('${node.id}', 'storage')">
-                    <span class="icon">💾</span> Storage
-                </a>
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="networking" onclick="selectServerView('${node.id}', 'networking')">
-                    <span class="icon">🌐</span> Networking
-                </a>
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="backups" onclick="selectServerView('${node.id}', 'backups')">
-                    <span class="icon">🛡️</span> Backups
-                </a>
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="wolfnet" onclick="selectServerView('${node.id}', 'wolfnet')">
-                    <span class="icon">🔗</span> WolfNet
-                </a>
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="certificates" onclick="selectServerView('${node.id}', 'certificates')">
-                    <span class="icon">🔒</span> Certificates
-                </a>
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
-                    <span class="icon">💻</span> Terminal
-                </a>
+            <div class="server-node-children ${shouldExpandCluster ? 'expanded' : ''}" id="children-${clusterId}">`;
+
+        // Each node within the cluster
+        clusterNodes.forEach(node => {
+            const shouldExpandNode = expandedNodes.has(node.id);
+            html += `
+                <div class="server-tree-node" style="margin-left: 8px;">
+                    <div class="server-node-header" onclick="toggleServerNode('${node.id}')" style="padding-left: 8px;">
+                        <span class="tree-toggle ${shouldExpandNode ? 'expanded' : ''}" id="toggle-${node.id}">▶</span>
+                        <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
+                        <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${node.hostname}</span>
+                        ${node.is_self ? '<span class="self-badge">this</span>' : `<span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemoveServer('${node.id}', '${node.hostname}')" title="Remove server">🗑️</span>`}
+                    </div>
+                    <div class="server-node-children ${shouldExpandNode ? 'expanded' : ''}" id="children-${node.id}">
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="dashboard" onclick="selectServerView('${node.id}', 'dashboard')">
+                            <span class="icon">📊</span> Dashboard
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="components" onclick="selectServerView('${node.id}', 'components')">
+                            <span class="icon">📦</span> Components
+                            <span class="badge" style="font-size:10px; padding:1px 6px;">${node.components.filter(c => c.installed).length}</span>
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="services" onclick="selectServerView('${node.id}', 'services')">
+                            <span class="icon">⚡</span> Services
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="containers" onclick="selectServerView('${node.id}', 'containers')">
+                            <span class="icon">🐳</span> Docker
+                            ${node.docker_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.docker_count}</span>` : ''}
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="lxc" onclick="selectServerView('${node.id}', 'lxc')">
+                            <span class="icon">📦</span> LXC
+                            ${node.lxc_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.lxc_count}</span>` : ''}
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="vms" onclick="selectServerView('${node.id}', 'vms')">
+                            <span class="icon">🖥️</span> Virtual Machines
+                            ${node.vm_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.vm_count}</span>` : ''}
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="storage" onclick="selectServerView('${node.id}', 'storage')">
+                            <span class="icon">💾</span> Storage
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="networking" onclick="selectServerView('${node.id}', 'networking')">
+                            <span class="icon">🌐</span> Networking
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="backups" onclick="selectServerView('${node.id}', 'backups')">
+                            <span class="icon">🛡️</span> Backups
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="wolfnet" onclick="selectServerView('${node.id}', 'wolfnet')">
+                            <span class="icon">🔗</span> WolfNet
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="certificates" onclick="selectServerView('${node.id}', 'certificates')">
+                            <span class="icon">🔒</span> Certificates
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
+                            <span class="icon">💻</span> Terminal
+                        </a>
+                    </div>
+                </div>`;
+        });
+
+        html += `
             </div>
         </div>`;
     });
 
     // Render PVE clusters (grouped)
-    Object.entries(pveClusters).forEach(([clusterName, clusterNodes]) => {
-        const clusterId = 'pve-cluster-' + clusterName.replace(/[^a-zA-Z0-9]/g, '_');
-        const shouldExpandCluster = isFirstBuild ? false : expandedNodes.has(clusterId);
-        const anyOnline = clusterNodes.some(n => n.online);
-        const firstNodeId = clusterNodes[0].id;
+    // Sort PVE clusters alphabetically
+    const pveKeys = Object.keys(pveClusters).sort((a, b) => a.localeCompare(b));
+
+    pveKeys.forEach(clusterName => {
+        const clusterNodes = pveClusters[clusterName];
         const nodeIds = clusterNodes.map(n => `'${n.id}'`).join(',');
 
         html += `
@@ -343,17 +382,25 @@ function renderDatacenterOverview() {
         return;
     }
 
-    container.innerHTML = nodes.map(node => {
+    // Helper to render a single node card
+    const renderCard = (node) => {
         const m = node.metrics;
         const isPve = node.node_type === 'proxmox';
         const nodeIcon = isPve ? '🟠' : '🖥️';
         const pveBadge = isPve ? ' <span style="font-size:10px; padding:1px 6px; border-radius:3px; background:rgba(255,165,0,0.15); color:#f5a623; margin-left:6px;">PVE</span>' : '';
 
-        if (!m) {
-            return `<div class="card">
-                <div class="card-header"><h3>${nodeIcon} ${node.hostname}${pveBadge}${node.is_self ? ' <span style="color:var(--accent-light); font-size:12px;">(this)</span>' : ''}</h3></div>
+        // If offline or no metrics
+        if (!m || !node.online) {
+            return `<div class="card" style="cursor:pointer; opacity:0.8;" onclick="selectServerView('${node.id}', 'dashboard')">
+                <div class="card-header">
+                    <h3>
+                        <span class="server-dot offline" style="display:inline-block; vertical-align:middle; margin-right:8px;"></span>
+                        ${nodeIcon} ${node.hostname}${pveBadge}
+                    </h3>
+                    <div style="color:var(--text-muted); font-size:12px;">${node.address}:${node.port}</div>
+                </div>
                 <div class="card-body" style="text-align:center; color:var(--text-muted); padding:30px;">
-                    <span style="color:var(--danger);">● Offline</span>
+                    ● Offline / No Data
                 </div>
             </div>`;
         }
@@ -397,14 +444,69 @@ function renderDatacenterOverview() {
                     </div>
                 </div>
                 <div style="margin-top:12px; display:flex; gap:6px; flex-wrap:wrap;">
-                    ${isPve ? `<span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(255,165,0,0.1); color:#f5a623;">🟠 ${node.vm_count || 0} VMs</span><span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(99,102,241,0.1); color:var(--accent-light);">📦 ${node.lxc_count || 0} Containers</span>` : node.components.filter(c => c.installed).map(c =>
-            `<span style="font-size:11px; padding:2px 8px; border-radius:4px; background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'}; color:${c.running ? 'var(--success)' : 'var(--danger)'};">                            ${c.component}
-                        </span>`
-        ).join('')}
+                    ${isPve
+                ? `<span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(255,165,0,0.1); color:#f5a623;">🟠 ${node.vm_count || 0} VMs</span><span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(99,102,241,0.1); color:var(--accent-light);">📦 ${node.lxc_count || 0} Containers</span>`
+                : node.components.filter(c => c.installed).map(c =>
+                    `<span style="font-size:11px; padding:2px 8px; border-radius:4px; background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'}; color:${c.running ? 'var(--success)' : 'var(--danger)'};">${c.component}</span>`
+                ).join('')}
                 </div>
             </div>
         </div>`;
-    }).join('');
+    };
+
+    let html = '';
+
+    // 1. Group nodes
+    const wsNodes = nodes.filter(n => n.node_type !== 'proxmox');
+    const pveNodes = nodes.filter(n => n.node_type === 'proxmox');
+
+    // 2. Render WolfStack Clusters
+    const wsClusters = {};
+    wsNodes.forEach(n => {
+        const key = n.cluster_name || "WolfStack";
+        if (!wsClusters[key]) wsClusters[key] = [];
+        wsClusters[key].push(n);
+    });
+
+    // Sort WolfStack clusters: "WolfStack" first, then alphabetical
+    const wsKeys = Object.keys(wsClusters).sort((a, b) => {
+        if (a === 'WolfStack') return -1;
+        if (b === 'WolfStack') return 1;
+        return a.localeCompare(b);
+    });
+
+    wsKeys.forEach(clusterName => {
+        const clusterNodes = wsClusters[clusterName];
+        html += `<div style="grid-column:1/-1; margin-bottom:8px; display:flex; align-items:center; ${html ? 'border-top:1px solid var(--border); padding-top:24px; margin-top:24px;' : ''}">
+            <h3 style="margin:0;">${clusterName}</h3>
+            <span class="badge" style="margin-left:12px; font-size:11px;">${clusterNodes.length} nodes</span>
+        </div>`;
+        html += clusterNodes.map(renderCard).join('');
+    });
+
+    // 3. Render PVE Clusters
+    const pveClusters = {};
+    pveNodes.forEach(n => {
+        const key = n.pve_cluster_name || n.cluster_name || n.address; // Group by name or address
+        if (!pveClusters[key]) pveClusters[key] = [];
+        pveClusters[key].push(n);
+    });
+
+    // Sort PVE clusters alphabetically
+    const pveKeys = Object.keys(pveClusters).sort((a, b) => a.localeCompare(b));
+
+    pveKeys.forEach(clusterName => {
+        const clusterNodes = pveClusters[clusterName];
+        html += `<div style="grid-column:1/-1; margin-bottom:8px; display:flex; align-items:center; ${html ? 'border-top:1px solid var(--border); padding-top:24px; margin-top:24px;' : ''}">
+            <h3 style="margin:0;">🟠 ${clusterName}</h3>
+            <span class="badge" style="margin-left:12px; font-size:11px;">${clusterNodes.length} nodes</span>
+        </div>`;
+        html += clusterNodes.map(renderCard).join('');
+    });
+
+
+
+    container.innerHTML = html;
 
     // Add Patreon support card after server cards
     container.innerHTML += `<div class="card" style="cursor:pointer; border: 1px dashed var(--border-color); display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:180px;" onclick="window.open('https://www.patreon.com/15362110/join', '_blank')">
@@ -2316,6 +2418,11 @@ async function addServer() {
         payload.pve_node_name = pveName;
         if (pveFingerprint) payload.pve_fingerprint = pveFingerprint;
         if (pveClusterName) payload.pve_cluster_name = pveClusterName;
+    } else {
+        // Standard WolfStack node
+        var wsClusterName = (document.getElementById('new-server-cluster-name') || {}).value.trim();
+        // Default to "WolfStack" if empty, as requested
+        payload.cluster_name = wsClusterName || "WolfStack";
     }
 
     try {
@@ -2347,20 +2454,23 @@ async function addServer() {
     }
 }
 
-function togglePveFields() {
+function updateServerForm() {
     var sel = (document.getElementById('new-server-type') || {}).value;
     var pveFields = document.getElementById('pve-fields');
+    var wsClusterField = document.getElementById('ws-cluster-field');
     var wsHint = document.getElementById('wolfstack-hint');
     var portLabel = document.getElementById('new-server-port-label');
     var portInput = document.getElementById('new-server-port');
 
     if (sel === 'proxmox') {
         if (pveFields) pveFields.style.display = 'block';
+        if (wsClusterField) wsClusterField.style.display = 'none';
         if (wsHint) wsHint.style.display = 'none';
         if (portLabel) portLabel.textContent = 'Port (default: 8006)';
         if (portInput) portInput.value = '8006';
     } else {
         if (pveFields) pveFields.style.display = 'none';
+        if (wsClusterField) wsClusterField.style.display = 'block';
         if (wsHint) wsHint.style.display = 'block';
         if (portLabel) portLabel.textContent = 'Port (default: 8553)';
         if (portInput) portInput.value = '8553';
