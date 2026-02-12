@@ -4,7 +4,7 @@ use actix_web::{web, HttpResponse, HttpRequest, cookie::Cookie};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::process::Command;
-use tracing::{info, warn};
+use tracing::{info, warn, error};
 
 use crate::monitoring::{SystemMonitor, MetricsHistory};
 use crate::installer;
