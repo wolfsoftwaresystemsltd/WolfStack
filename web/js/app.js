@@ -2398,9 +2398,11 @@ async function addServer() {
     const address = document.getElementById('new-server-address').value.trim();
     const port = parseInt(document.getElementById('new-server-port').value) || (nodeType === 'proxmox' ? 8006 : 8553);
 
+    const clusterName = (document.getElementById('add-server-cluster') || {}).value.trim();
+
     if (!address) { showToast('Enter a server address', 'error'); return; }
 
-    var payload = { address, port, node_type: nodeType };
+    var payload = { address, port, node_type: nodeType, cluster_name: clusterName || null };
 
     if (nodeType === 'proxmox') {
         var pveTokenId = (document.getElementById('new-pve-token-id') || {}).value.trim();

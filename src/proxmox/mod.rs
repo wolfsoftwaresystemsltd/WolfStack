@@ -215,6 +215,22 @@ impl PveClient {
             .filter_map(|v| v.get("node").and_then(|n| n.as_str()).map(|s| s.to_string()))
             .collect())
     }
+
+
+    /// Get cluster name from /cluster/status
+    pub async fn get_cluster_name(&self) -> Result<String, String> {
+        let data = self.get("/cluster/status").await?;
+        let arr = data.as_array().ok_or("Expected array from /cluster/status")?;
+        // Find the entry with type "cluster"
+        for item in arr {
+            if let Some(type_) = item.get("type").and_then(|t| t.as_str()) {
+                if type_ == "cluster" {
+                    return Ok(item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown").to_string());
+                }
+            }
+        }
+        Ok("standalone".to_string())
+    }
 }
 
 /// Poll a Proxmox node and return metrics mapped to WolfStack format
@@ -223,14 +239,16 @@ pub async fn poll_pve_node(
     port: u16,
     token: &str,
     fingerprint: Option<&str>,
+
     node_name: &str,
-) -> Result<(PveNodeStatus, u32, u32), String> {
+) -> Result<(PveNodeStatus, u32, u32, Option<String>), String> {
     let client = PveClient::new(address, port, token, fingerprint, node_name);
     let status = client.get_node_status().await?;
     let guests = client.list_all_guests().await.unwrap_or_default();
+    let cluster_name = client.get_cluster_name().await.ok(); // Ignore error, optional
 
     let lxc_count = guests.iter().filter(|g| g.guest_type == "lxc").count() as u32;
     let vm_count = guests.iter().filter(|g| g.guest_type == "qemu").count() as u32;
 
-    Ok((status, lxc_count, vm_count))
+    Ok((status, lxc_count, vm_count, cluster_name))
 }

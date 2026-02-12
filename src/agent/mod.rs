@@ -281,7 +281,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
             let fp = node.pve_fingerprint.as_deref();
 
             match crate::proxmox::poll_pve_node(&node.address, node.port, &token, fp, &pve_name).await {
-                Ok((status, lxc_count, vm_count)) => {
+                Ok((status, lxc_count, vm_count, fetched_cluster_name)) => {
                     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                     let mem_pct = if status.mem_total > 0 {
                         (status.mem_used as f32 / status.mem_total as f32) * 100.0
@@ -319,6 +319,9 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         kernel_version: None,
                     };
 
+                    // Use fetched cluster name if available, otherwise fall back to existing
+                    let final_cluster_name = fetched_cluster_name.or(node.pve_cluster_name.clone());
+
                     cluster.update_remote(Node {
                         id: node.id.clone(),
                         hostname: status.hostname,
@@ -337,8 +340,8 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         pve_token: node.pve_token.clone(),
                         pve_fingerprint: node.pve_fingerprint.clone(),
                         pve_node_name: node.pve_node_name.clone(),
-                        pve_cluster_name: node.pve_cluster_name.clone(),
-                        cluster_name: node.pve_cluster_name.clone(),
+                        pve_cluster_name: final_cluster_name.clone(),
+                        cluster_name: final_cluster_name,
                     });
                 }
                 Err(e) => {
