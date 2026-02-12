@@ -290,62 +290,73 @@ async fn main() -> std::io::Result<()> {
         info!("  Serving web UI from: {}", web_dir);
         info!("");
 
-        // Resolve TLS certificate paths
+        // Resolve TLS certificate paths — wrapped in catch_unwind to prevent silent crashes
+        eprintln!("[wolfstack] Resolving TLS certificate paths...");
         let tls_paths = if let (Some(cert), Some(key)) = (&cli.tls_cert, &cli.tls_key) {
             Some((cert.clone(), key.clone()))
         } else {
             installer::find_tls_certificate(cli.tls_domain.as_deref())
         };
+        eprintln!("[wolfstack] TLS paths: {:?}", tls_paths);
 
         // Try to load TLS config — fall back to HTTP if anything goes wrong
-        let tls_config = tls_paths.as_ref().and_then(|(cert_path, key_path)| {
-            let cert_file = match std::fs::File::open(cert_path) {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!("Cannot open TLS cert '{}': {} — falling back to HTTP", cert_path, e);
-                    return None;
-                }
-            };
-            let key_file_handle = match std::fs::File::open(key_path) {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!("Cannot open TLS key '{}': {} — falling back to HTTP", key_path, e);
-                    return None;
-                }
-            };
+        let tls_config = match &tls_paths {
+            Some((cert_path, key_path)) => {
+                let cp = cert_path.clone();
+                let kp = key_path.clone();
+                match std::panic::catch_unwind(move || {
+                    eprintln!("[wolfstack] Opening cert: {}", cp);
+                    let cert_file = std::fs::File::open(&cp)
+                        .map_err(|e| format!("Cannot open cert '{}': {}", cp, e))?;
 
-            let cert_chain: Vec<rustls::pki_types::CertificateDer> =
-                rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
-                    .filter_map(|c| c.ok())
-                    .collect();
-            if cert_chain.is_empty() {
-                tracing::warn!("No valid certificates found in '{}' — falling back to HTTP", cert_path);
-                return None;
+                    eprintln!("[wolfstack] Opening key: {}", kp);
+                    let key_file = std::fs::File::open(&kp)
+                        .map_err(|e| format!("Cannot open key '{}': {}", kp, e))?;
+
+                    eprintln!("[wolfstack] Parsing cert chain...");
+                    let cert_chain: Vec<rustls::pki_types::CertificateDer> =
+                        rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+                            .filter_map(|c| c.ok())
+                            .collect();
+                    eprintln!("[wolfstack] Cert chain: {} cert(s)", cert_chain.len());
+                    if cert_chain.is_empty() {
+                        return Err(format!("No valid certs in '{}'", cp));
+                    }
+
+                    eprintln!("[wolfstack] Parsing private key...");
+                    let key_der = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))
+                        .map_err(|e| format!("Failed to read key '{}': {}", kp, e))?
+                        .ok_or_else(|| format!("No private key found in '{}'", kp))?;
+                    eprintln!("[wolfstack] Private key loaded OK");
+
+                    eprintln!("[wolfstack] Building ServerConfig...");
+                    let cfg = rustls::ServerConfig::builder()
+                        .with_no_client_auth()
+                        .with_single_cert(cert_chain, key_der)
+                        .map_err(|e| format!("ServerConfig error: {}", e))?;
+                    eprintln!("[wolfstack] ServerConfig built OK");
+                    Ok(cfg)
+                }) {
+                    Ok(Ok(cfg)) => Some(cfg),
+                    Ok(Err(msg)) => {
+                        tracing::warn!("{} — falling back to HTTP", msg);
+                        eprintln!("[wolfstack] TLS setup failed: {} — falling back to HTTP", msg);
+                        None
+                    }
+                    Err(panic) => {
+                        let msg = panic.downcast_ref::<String>()
+                            .map(|s| s.as_str())
+                            .or_else(|| panic.downcast_ref::<&str>().copied())
+                            .unwrap_or("unknown panic");
+                        tracing::error!("TLS setup PANICKED: {} — falling back to HTTP", msg);
+                        eprintln!("[wolfstack] TLS setup PANICKED: {} — falling back to HTTP", msg);
+                        None
+                    }
+                }
             }
-
-            let key_der = match rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file_handle)) {
-                Ok(Some(k)) => k,
-                Ok(None) => {
-                    tracing::warn!("No private key found in '{}' — falling back to HTTP", key_path);
-                    return None;
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to read private key '{}': {} — falling back to HTTP", key_path, e);
-                    return None;
-                }
-            };
-
-            match rustls::ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(cert_chain, key_der)
-            {
-                Ok(cfg) => Some(cfg),
-                Err(e) => {
-                    tracing::warn!("Failed to build TLS config: {} — falling back to HTTP", e);
-                    None
-                }
-            }
-        });
+            None => None,
+        };
+        eprintln!("[wolfstack] TLS config ready: {}", tls_config.is_some());
 
         if let Some(tls_config) = tls_config {
             let (ref cert_path, ref key_path) = tls_paths.as_ref().unwrap();
