@@ -2458,7 +2458,7 @@ async function requestCertificate() {
 
     showToast(`Requesting certificate for ${domain}... This may take a moment.`, 'info');
     try {
-        const resp = await fetch('/api/certificates', {
+        const resp = await fetch(apiUrl('/api/certificates'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ domain, email })
@@ -2479,7 +2479,7 @@ async function loadCertificates() {
     const el = document.getElementById('cert-list');
     if (!el) return;
     try {
-        const resp = await fetch('/api/certificates/list');
+        const resp = await fetch(apiUrl('/api/certificates/list'));
         const data = await resp.json();
         const certs = data.certs || data; // handle both new {certs,diagnostics} and legacy array format
         const diagnostics = data.diagnostics || [];
