@@ -230,7 +230,7 @@ function buildServerTree(nodes) {
 
         html += `
         <div class="server-tree-node">
-            <div class="server-node-header" onclick="toggleServerNode('${clusterId}')" style="background: linear-gradient(90deg, rgba(99,102,241,0.05), transparent);">
+            <div class="server-node-header" data-cluster-id="${clusterId}" onclick="toggleServerNode('${clusterId}')" style="background: linear-gradient(90deg, rgba(99,102,241,0.05), transparent);">
                 <span class="tree-toggle ${shouldExpandCluster ? 'expanded' : ''}" id="toggle-${clusterId}">▶</span>
                 <span class="server-dot ${anyOnline ? 'online' : 'offline'}"></span>
                 <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><span style="position:relative;display:inline-block;margin-right:6px;">☁️<span style="position:absolute;bottom:-4px;right:-6px;min-width:15px;height:15px;line-height:15px;text-align:center;font-size:9px;font-weight:700;color:#fff;background:#16a34a;border-radius:50%;">${clusterNodes.length}</span></span>${clusterName}</span>
@@ -243,7 +243,7 @@ function buildServerTree(nodes) {
             const shouldExpandNode = expandedNodes.has(node.id);
             html += `
                 <div class="server-tree-node" style="margin-left: 8px;">
-                    <div class="server-node-header" onclick="toggleServerNode('${node.id}')" style="padding-left: 8px;">
+                    <div class="server-node-header" data-node-id="${node.id}" onclick="toggleServerNode('${node.id}')" style="padding-left: 8px;">
                         <span class="tree-toggle ${shouldExpandNode ? 'expanded' : ''}" id="toggle-${node.id}">▶</span>
                         <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
                         <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${node.hostname}</span>
@@ -312,7 +312,7 @@ function buildServerTree(nodes) {
 
         html += `
         <div class="server-tree-node">
-            <div class="server-node-header" onclick="toggleServerNode('${clusterId}')" style="background: linear-gradient(90deg, rgba(99,102,241,0.05), transparent);">
+            <div class="server-node-header" data-cluster-id="${clusterId}" onclick="toggleServerNode('${clusterId}')" style="background: linear-gradient(90deg, rgba(99,102,241,0.05), transparent);">
                 <span class="tree-toggle ${shouldExpandCluster ? 'expanded' : ''}" id="toggle-${clusterId}">▶</span>
                 <span class="server-dot ${anyOnline ? 'online' : 'offline'}"></span>
                 <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><span style="position:relative;display:inline-block;width:20px;height:18px;vertical-align:middle;margin-right:6px;"><span style="display:inline-block;width:15px;height:15px;opacity:0.9;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="2" width="18" height="6" rx="1"/><rect x="3" y="10" width="18" height="6" rx="1"/><rect x="3" y="18" width="18" height="4" rx="1"/><circle cx="7" cy="5" r="1" fill="currentColor"/><circle cx="7" cy="13" r="1" fill="currentColor"/><circle cx="7" cy="20" r="1" fill="currentColor"/></svg></span><span style="position:absolute;bottom:-3px;right:-4px;min-width:15px;height:15px;line-height:15px;text-align:center;font-size:9px;font-weight:700;color:#fff;background:#16a34a;border-radius:50%;">${clusterNodes.length}</span></span>${clusterName}</span>
@@ -326,7 +326,7 @@ function buildServerTree(nodes) {
             const shouldExpandNode = expandedNodes.has(node.id);
             html += `
                 <div class="server-tree-node" style="margin-left: 8px;">
-                    <div class="server-node-header" onclick="toggleServerNode('${node.id}')" style="padding-left: 8px;">
+                    <div class="server-node-header" data-node-id="${node.id}" onclick="toggleServerNode('${node.id}')" style="padding-left: 8px;">
                         <span class="tree-toggle ${shouldExpandNode ? 'expanded' : ''}" id="toggle-${node.id}">▶</span>
                         <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
                         <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${node.pve_node_name || node.hostname}</span>
@@ -1499,17 +1499,19 @@ async function fetchNodes() {
         const resp = await fetch('/api/nodes');
         const nodes = await resp.json();
 
-        // Only rebuild sidebar tree if node list structure changed
+        // Only rebuild sidebar tree if node list structure changed (NOT online status)
         var treeChanged = false;
         if (!allNodes || allNodes.length !== nodes.length) {
             treeChanged = true;
         } else {
             for (var i = 0; i < nodes.length; i++) {
                 var old = allNodes.find(function (n) { return n.id === nodes[i].id; });
-                if (!old || old.online !== nodes[i].online ||
+                if (!old ||
                     old.docker_count !== nodes[i].docker_count ||
                     old.lxc_count !== nodes[i].lxc_count ||
                     old.vm_count !== nodes[i].vm_count ||
+                    old.hostname !== nodes[i].hostname ||
+                    old.cluster_name !== nodes[i].cluster_name ||
                     (old.components || []).filter(function (c) { return c.installed; }).length !==
                     (nodes[i].components || []).filter(function (c) { return c.installed; }).length) {
                     treeChanged = true;
@@ -1521,6 +1523,28 @@ async function fetchNodes() {
         allNodes = nodes;
         if (treeChanged) {
             buildServerTree(nodes);
+        } else {
+            // Update online/offline dots in-place without rebuilding the tree
+            nodes.forEach(function (n) {
+                // Update individual node dots (child items share the node header dot)
+                var nodeHeader = document.querySelector(`.server-node-header[data-node-id="${n.id}"]`);
+                if (nodeHeader) {
+                    var dot = nodeHeader.querySelector('.server-dot');
+                    if (dot) {
+                        dot.className = 'server-dot ' + (n.online ? 'online' : 'offline');
+                    }
+                }
+            });
+            // Update cluster-level dots (any online = green)
+            document.querySelectorAll('.server-node-header[data-cluster-id]').forEach(function (header) {
+                var dot = header.querySelector('.server-dot');
+                if (!dot) return;
+                var childContainer = header.nextElementSibling;
+                if (!childContainer) return;
+                var childDots = childContainer.querySelectorAll('.server-dot');
+                var anyOnline = Array.from(childDots).some(function (d) { return d.classList.contains('online'); });
+                dot.className = 'server-dot ' + (anyOnline ? 'online' : 'offline');
+            });
         }
 
         // Refresh datacenter overview if we're viewing it
