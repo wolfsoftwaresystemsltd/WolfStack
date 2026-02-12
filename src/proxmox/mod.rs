@@ -242,10 +242,26 @@ pub async fn poll_pve_node(
 
     node_name: &str,
 ) -> Result<(PveNodeStatus, u32, u32, Option<String>), String> {
+    // Enhanced logging for debugging offline status
     let client = PveClient::new(address, port, token, fingerprint, node_name);
-    let status = client.get_node_status().await?;
-    let guests = client.list_all_guests().await.unwrap_or_default();
-    let cluster_name = client.get_cluster_name().await.ok(); // Ignore error, optional
+    
+    let status = match client.get_node_status().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("Proxmox poll failed for {} ({}): get_node_status error: {}", node_name, address, e);
+            return Err(e);
+        }
+    };
+
+    let guests = match client.list_all_guests().await {
+        Ok(g) => g,
+        Err(e) => {
+             tracing::warn!("Proxmox poll warning for {} ({}): list_all_guests failed: {}", node_name, address, e);
+             Vec::new()
+        }
+    };
+
+    let cluster_name = client.get_cluster_name().await.ok(); 
 
     let lxc_count = guests.iter().filter(|g| g.guest_type == "lxc").count() as u32;
     let vm_count = guests.iter().filter(|g| g.guest_type == "qemu").count() as u32;

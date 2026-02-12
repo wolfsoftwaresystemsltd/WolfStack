@@ -77,8 +77,18 @@ async fn main() -> std::io::Result<()> {
 
     let cli = Cli::parse();
 
-    // Generate node ID
-    let node_id = format!("ws-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    // Load or generate node ID
+    let node_id_file = "/etc/wolfstack/node_id";
+    let node_id = if let Ok(content) = std::fs::read_to_string(node_id_file) {
+        content.trim().to_string()
+    } else {
+        let id = format!("ws-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let _ = std::fs::create_dir_all("/etc/wolfstack");
+        if let Err(e) = std::fs::write(node_id_file, &id) {
+            tracing::error!("Failed to persist node ID: {}", e);
+        }
+        id
+    };
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".to_string());

@@ -69,8 +69,31 @@ impl ClusterState {
             port,
         };
         // Load persisted remote nodes
+        // Load persisted remote nodes
         state.load_nodes();
+        // Remove ghost nodes (same IP/port but different ID)
+        state.cleanup_ghosts();
         state
+    }
+
+    /// Remove nodes that match our own address/port but have a different ID
+    fn cleanup_ghosts(&self) {
+        let mut nodes = self.nodes.write().unwrap();
+        let initial_count = nodes.len();
+        
+        // Collect IDs to remove
+        let ghost_ids: Vec<String> = nodes.values()
+            .filter(|n| !n.is_self && n.address == self.self_address && n.port == self.port)
+            .map(|n| n.id.clone())
+            .collect();
+
+        for id in &ghost_ids {
+            nodes.remove(id);
+        }
+
+        if !ghost_ids.is_empty() {
+            debug!("Cleaned up {} ghost nodes with same address ({}:{})", ghost_ids.len(), self.self_address, self.port);
+        }
     }
 
     /// Load saved remote nodes from disk
