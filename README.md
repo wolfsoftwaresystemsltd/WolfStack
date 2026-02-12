@@ -164,18 +164,51 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
    - User: `root@pam` (or a dedicated user with appropriate roles)
    - Token ID: choose any name (e.g. `wolfstack`)
    - Uncheck "Privilege Separation" for full access, or assign `PVEAuditor` + `PVEVMUser` roles
-2. **Copy the Token ID and Secret** — Proxmox shows these once:
+2. **Set API Token Permissions** — the token needs at least `Sys.Audit` to read node status:
+
+   **Option A: Via Proxmox Web UI**
+   - Go to `Datacenter → Permissions → Add → API Token Permission`
+   - Path: `/`
+   - API Token: `root@pam!wolfstack`
+   - Role: `PVEAuditor`
+   - Propagate: ✅
+   
+   **Option B: Via Command Line**
+   ```bash
+   pveum aclmod / -token 'root@pam!wolfstack' -role PVEAuditor
+   ```
+   
+   **Option C: Minimal custom role**
+   ```bash
+   pveum role add WolfStackMonitor -privs "Sys.Audit,VM.Audit,Datastore.Audit"
+   pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor
+   ```
+
+3. **Copy the Token ID and Secret** — Proxmox shows these once:
    - Token ID: `root@pam!wolfstack`
    - Secret: `a2e0dcfb-f3eb-4674-965d-0dda7974ba73`
-3. **Add to WolfStack** — click "+ Add Server", select "🟠 Proxmox VE", and enter:
+4. **Add to WolfStack** — click "+ Add Server", select "🟠 Proxmox VE", and enter:
    - **Cluster Name** — display name for the sidebar (e.g. "Production")
    - **Server Address** — IP or hostname only, no `https://`
    - **PVE Node Name** — as shown in Proxmox sidebar (e.g. `pve1`)
-   - **Token ID** — from step 2 (e.g. `root@pam!wolfstack`)
-   - **Token Secret** — from step 2
+   - **Token ID** — from step 3 (e.g. `root@pam!wolfstack`)
+   - **Token Secret** — from step 3
    - **TLS Fingerprint** — optional, leave blank for self-signed certs
-4. WolfStack automatically discovers all nodes in the cluster and adds them
-5. The cluster appears grouped in the sidebar with live metrics and VM/container counts
+5. WolfStack automatically discovers all nodes in the cluster and adds them
+6. The cluster appears grouped in the sidebar with live metrics and VM/container counts
+
+#### Proxmox Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Nodes show **offline** | API token lacks `Sys.Audit` | Follow Step 2 above to grant `PVEAuditor` role |
+| `403 Permission check failed` in logs | Token permissions not propagated | Set path to `/` with **Propagate** checked |
+| Wrong node name | PVE node name doesn't match | Check `Datacenter → Nodes` in Proxmox for exact name |
+
+Check logs for detailed errors:
+```bash
+sudo journalctl -u wolfstack -f | grep -i proxmox
+```
 
 ## Architecture
 

@@ -74,6 +74,9 @@
             <button class="btn btn-sm" onclick="selectView('ai-settings')" style="width: 100%; margin-bottom: 8px;">
                 🤖 AI Agent
             </button>
+            <button class="btn btn-sm" onclick="selectView('docs')" style="width: 100%; margin-bottom: 8px;">
+                📖 Help & Docs
+            </button>
             <button class="btn btn-sm" onclick="openAddServerModal()" style="width: 100%; margin-bottom: 8px;">
                 + Add Server
             </button>
@@ -1602,6 +1605,182 @@
                 </div>
                 <div class="card-body" id="dns-config-body">
                     <p style="color:var(--text-muted);">Loading DNS configuration...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Help & Documentation ═══ -->
+        <div id="page-docs" class="page-view" style="display:none;">
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-header">
+                    <h3>📖 WolfStack Documentation</h3>
+                    <div style="font-size: 12px; color: var(--text-muted);">Setup guides, troubleshooting, and reference
+                    </div>
+                </div>
+                <div class="card-body" style="padding:24px; line-height:1.7;">
+                    <h4 style="margin-bottom:12px; color:var(--accent-light);">Getting Started</h4>
+                    <p style="color:var(--text-secondary); margin-bottom:16px;">WolfStack is a unified server management
+                        dashboard. Use the sidebar to navigate between your servers and the Datacenter overview. Add
+                        servers via <strong>+ Add Server</strong> in the sidebar.</p>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Multi-Server Clustering</h4>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">WolfStack nodes discover each other and
+                        share status via a gossip protocol. To add a remote WolfStack node:</p>
+                    <ol style="color:var(--text-secondary); padding-left:20px; margin-bottom:16px;">
+                        <li>Install WolfStack on the remote server using <code
+                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash</code>
+                        </li>
+                        <li>Click <strong>+ Add Server</strong> and enter the remote server's IP/hostname</li>
+                        <li>The node will appear in the sidebar and begin reporting metrics</li>
+                    </ol>
+                </div>
+            </div>
+
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-header">
+                    <h3>🟠 Proxmox VE Integration</h3>
+                    <div style="font-size: 12px; color: var(--text-muted);">How to connect and monitor Proxmox clusters
+                    </div>
+                </div>
+                <div class="card-body" style="padding:24px; line-height:1.7;">
+                    <h4 style="margin-bottom:12px; color:var(--accent-light);">Step 1: Create an API Token in Proxmox
+                    </h4>
+                    <ol style="color:var(--text-secondary); padding-left:20px; margin-bottom:16px;">
+                        <li>Log into your Proxmox web UI (e.g. <code
+                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">https://your-pve-host:8006</code>)
+                        </li>
+                        <li>Navigate to <strong>Datacenter → Permissions → API Tokens → Add</strong></li>
+                        <li>Set <strong>User</strong> to <code
+                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">root@pam</code>
+                            (or a dedicated monitoring user)</li>
+                        <li>Choose a <strong>Token ID</strong> (e.g. <code
+                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">wolfstack</code>)
+                        </li>
+                        <li>Uncheck <strong>Privilege Separation</strong> for full access</li>
+                        <li><strong>Copy the Token ID and Secret</strong> — Proxmox only shows the secret once!</li>
+                    </ol>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Step 2: Set API Token Permissions</h4>
+                    <div
+                        style="background:var(--bg-tertiary); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:16px;">
+                        <p style="color:var(--warning); font-weight:600; margin-bottom:8px;">⚠️ Important: Your API
+                            token needs the correct permissions to read node status.</p>
+                        <p style="color:var(--text-secondary); margin-bottom:12px;">Without these permissions, Proxmox
+                            nodes will appear <strong>offline</strong> in WolfStack.</p>
+
+                        <p style="color:var(--text); font-weight:600; margin-bottom:8px;">Option A: Via Proxmox Web UI
+                        </p>
+                        <ol style="color:var(--text-secondary); padding-left:20px; margin-bottom:12px;">
+                            <li>Go to <strong>Datacenter → Permissions → Add → API Token Permission</strong></li>
+                            <li>Set <strong>Path</strong> to <code
+                                    style="background:var(--bg-secondary);padding:2px 6px;border-radius:4px;">/</code>
+                            </li>
+                            <li>Select your <strong>API Token</strong> (e.g. <code
+                                    style="background:var(--bg-secondary);padding:2px 6px;border-radius:4px;">root@pam!wolfstack</code>)
+                            </li>
+                            <li>Set <strong>Role</strong> to <code
+                                    style="background:var(--bg-secondary);padding:2px 6px;border-radius:4px;">PVEAuditor</code>
+                            </li>
+                            <li>Check <strong>Propagate</strong> and click <strong>Add</strong></li>
+                        </ol>
+
+                        <p style="color:var(--text); font-weight:600; margin-bottom:8px;">Option B: Via Command Line
+                            (SSH into Proxmox)</p>
+                        <pre
+                            style="background:var(--bg-secondary); padding:12px; border-radius:6px; overflow-x:auto; margin-bottom:12px; color:var(--text);"><code>pveum aclmod / -token 'root@pam!wolfstack' -role PVEAuditor</code></pre>
+
+                        <p style="color:var(--text); font-weight:600; margin-bottom:8px;">Custom Role (Minimal
+                            Permissions)</p>
+                        <pre
+                            style="background:var(--bg-secondary); padding:12px; border-radius:6px; overflow-x:auto; color:var(--text);"><code>pveum role add WolfStackMonitor -privs "Sys.Audit,VM.Audit,Datastore.Audit"
+pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
+                    </div>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Step 3: Add to WolfStack</h4>
+                    <ol style="color:var(--text-secondary); padding-left:20px; margin-bottom:16px;">
+                        <li>Click <strong>+ Add Server</strong> in the sidebar</li>
+                        <li>Select <strong>🟠 Proxmox VE</strong> tab</li>
+                        <li>Enter your <strong>Cluster Name</strong> (display name, e.g. "Production")</li>
+                        <li>Enter <strong>Server Address</strong> (IP or hostname only, no <code
+                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">https://</code>)
+                        </li>
+                        <li>Enter <strong>PVE Node Name</strong> (as shown in Proxmox sidebar, e.g. <code
+                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">pve1</code>)
+                        </li>
+                        <li>Paste your <strong>Token ID</strong> and <strong>Token Secret</strong></li>
+                        <li>Leave <strong>TLS Fingerprint</strong> blank (self-signed certs are accepted automatically)
+                        </li>
+                    </ol>
+                    <p style="color:var(--text-secondary);">WolfStack will auto-discover all nodes in the cluster and
+                        add them to the sidebar with live metrics.</p>
+                </div>
+            </div>
+
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-header">
+                    <h3>🔧 Troubleshooting</h3>
+                    <div style="font-size: 12px; color: var(--text-muted);">Common issues and solutions</div>
+                </div>
+                <div class="card-body" style="padding:24px; line-height:1.7;">
+                    <h4 style="margin-bottom:12px; color:var(--accent-light);">Proxmox nodes showing offline</h4>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">This usually means the API token lacks
+                        permissions. Check the logs:</p>
+                    <pre
+                        style="background:var(--bg-tertiary); padding:12px; border-radius:6px; overflow-x:auto; margin-bottom:12px; color:var(--text);"><code>sudo journalctl -u wolfstack -f | grep -i proxmox</code></pre>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">If you see <code
+                            style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">403 Permission check failed (Sys.Audit)</code>,
+                        follow the <strong>Proxmox VE Integration → Step 2</strong> above.</p>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Ghost / duplicate nodes in sidebar</h4>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">WolfStack auto-cleans ghost nodes on
+                        restart. If duplicates persist, restart the service:</p>
+                    <pre
+                        style="background:var(--bg-tertiary); padding:12px; border-radius:6px; overflow-x:auto; margin-bottom:12px; color:var(--text);"><code>sudo systemctl restart wolfstack</code></pre>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Remote WolfStack nodes not connecting
+                    </h4>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">Ensure port <code
+                            style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">8553</code> is
+                        accessible from this server and that both nodes run the same version. Check cluster secret
+                        matches.</p>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Update checker shows false positive</h4>
+                    <p style="color:var(--text-secondary);">Restart the service after updating to ensure the version
+                        string matches. The version is checked against the GitHub releases page.</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h3>🔗 Useful Links</h3>
+                </div>
+                <div class="card-body" style="padding:24px;">
+                    <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:12px;">
+                        <a href="https://github.com/wolfsoftwaresystemsltd/WolfStack" target="_blank" rel="noopener"
+                            style="display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;color:var(--text);text-decoration:none;transition:border-color 0.2s;">
+                            <span style="font-size:20px;">📦</span>
+                            <div>
+                                <div style="font-weight:600;font-size:13px;">GitHub Repository</div>
+                                <div style="font-size:11px;color:var(--text-muted);">Source code & releases</div>
+                            </div>
+                        </a>
+                        <a href="https://wolf.uk.com/" target="_blank" rel="noopener"
+                            style="display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;color:var(--text);text-decoration:none;transition:border-color 0.2s;">
+                            <span style="font-size:20px;">🐺</span>
+                            <div>
+                                <div style="font-weight:600;font-size:13px;">Wolf Software Systems</div>
+                                <div style="font-size:11px;color:var(--text-muted);">Company website</div>
+                            </div>
+                        </a>
+                        <a href="https://pve.proxmox.com/pve-docs/api-viewer/" target="_blank" rel="noopener"
+                            style="display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;color:var(--text);text-decoration:none;transition:border-color 0.2s;">
+                            <span style="font-size:20px;">🟠</span>
+                            <div>
+                                <div style="font-weight:600;font-size:13px;">Proxmox API Docs</div>
+                                <div style="font-size:11px;color:var(--text-muted);">PVE REST API reference</div>
+                            </div>
+                        </a>
+                    </div>
                 </div>
             </div>
         </div>

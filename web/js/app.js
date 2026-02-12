@@ -67,7 +67,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', 'ai-settings': 'AI Agent' };
+    const titles = { datacenter: 'Datacenter', 'ai-settings': 'AI Agent', docs: 'Help & Documentation' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
