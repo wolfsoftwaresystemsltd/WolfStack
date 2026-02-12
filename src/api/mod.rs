@@ -1590,18 +1590,48 @@ pub async fn ai_chat(
         let vm_count = state.vms.lock().unwrap().list_vms().len();
         let components = crate::installer::get_all_status();
 
-        let node_info = {
-            let nodes = state.cluster.get_all_nodes();
-            let node_names: Vec<String> = nodes.iter().map(|n| format!("{} ({})", n.hostname, if n.online { "online" } else { "offline" })).collect();
-            node_names.join(", ")
+        let nodes = state.cluster.get_all_nodes();
+
+        // WolfStack nodes summary
+        let ws_nodes: Vec<&crate::agent::Node> = nodes.iter().filter(|n| n.node_type != "proxmox").collect();
+        let pve_nodes: Vec<&crate::agent::Node> = nodes.iter().filter(|n| n.node_type == "proxmox").collect();
+
+        let node_info = ws_nodes.iter().map(|n| {
+            format!("  - {} ({}) [{}]", n.hostname, n.address,
+                if n.online { "online" } else { "offline" })
+        }).collect::<Vec<_>>().join("\n");
+
+        // Group PVE nodes by cluster
+        let mut pve_clusters: std::collections::HashMap<String, Vec<&crate::agent::Node>> = std::collections::HashMap::new();
+        for n in &pve_nodes {
+            let key = n.pve_cluster_name.clone()
+                .or_else(|| n.cluster_name.clone())
+                .unwrap_or_else(|| n.address.clone());
+            pve_clusters.entry(key).or_default().push(n);
+        }
+
+        let pve_info = if pve_clusters.is_empty() {
+            "None".to_string()
+        } else {
+            pve_clusters.iter().map(|(cluster_name, cnodes)| {
+                let node_details = cnodes.iter().map(|n| {
+                    format!("    - {} (pve_node: {}, {}) [{}] — {} VMs, {} CTs",
+                        n.hostname, n.pve_node_name.as_deref().unwrap_or("?"),
+                        n.address,
+                        if n.online { "online" } else { "offline" },
+                        n.vm_count, n.lxc_count)
+                }).collect::<Vec<_>>().join("\n");
+                format!("  Cluster '{}' ({} nodes):\n{}", cluster_name, cnodes.len(), node_details)
+            }).collect::<Vec<_>>().join("\n")
         };
 
         format!(
-            "Hostname: {}\nDocker containers: {}\nLXC containers: {}\nVirtual machines: {}\n\
-             Components: {}\nCluster nodes: {}",
+            "Hostname: {}\nLocal Docker containers: {}\nLocal LXC containers: {}\nLocal VMs: {}\n\
+             Components: {}\n\nWolfStack Nodes ({}):\n{}\n\nProxmox Clusters:\n{}",
             hostname, docker_count, lxc_count, vm_count,
             components.iter().map(|c| format!("{:?}: {}", c.component, if c.running { "running" } else { "stopped" })).collect::<Vec<_>>().join(", "),
-            node_info,
+            ws_nodes.len(), node_info,
+            pve_info,
         )
     };
 

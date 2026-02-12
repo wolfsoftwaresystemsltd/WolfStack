@@ -173,7 +173,7 @@ impl AiAgent {
         // Build conversation history
         let mut history: Vec<ChatMessage> = {
             let h = self.chat_history.lock().unwrap();
-            h.iter().rev().take(20).cloned().collect::<Vec<_>>().into_iter().rev().collect()
+            h.iter().rev().take(10).cloned().collect::<Vec<_>>().into_iter().rev().collect()
         };
 
         let system_prompt = build_system_prompt(&self.knowledge_base, system_context);
@@ -493,9 +493,9 @@ fn load_knowledge_base() -> String {
     if knowledge.is_empty() {
         "WolfStack is a server management platform by Wolf Software Systems Ltd.".to_string()
     } else {
-        // Truncate to ~80KB to stay within context limits
-        if knowledge.len() > 80_000 {
-            knowledge.truncate(80_000);
+        // Truncate to ~30KB to keep context lean and responses fast
+        if knowledge.len() > 30_000 {
+            knowledge.truncate(30_000);
         }
         knowledge
     }
