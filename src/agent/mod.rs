@@ -390,8 +390,8 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         kernel_version: None,
                     };
 
-                    // Use fetched cluster name if available, otherwise fall back to existing
-                    let final_cluster_name = fetched_cluster_name.or(node.pve_cluster_name.clone());
+                    // Prefer user's saved cluster name; only use API-fetched name as initial fallback
+                    let final_cluster_name = node.pve_cluster_name.clone().or(fetched_cluster_name);
 
                     cluster.update_remote(Node {
                         id: node.id.clone(),
