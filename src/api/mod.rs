@@ -363,8 +363,8 @@ pub async fn pve_guest_action(req: HttpRequest, state: web::Data<AppState>, path
     };
 
     // Validate action
-    if !["start", "stop", "shutdown", "reboot"].contains(&action.as_str()) {
-        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid action. Use: start, stop, shutdown, reboot" }));
+    if !["start", "stop", "shutdown", "reboot", "suspend", "resume"].contains(&action.as_str()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid action. Use: start, stop, shutdown, reboot, suspend, resume" }));
     }
 
     let token = node.pve_token.unwrap_or_default();

@@ -1633,7 +1633,16 @@
 
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header">
-                    <h3>🟠 Proxmox VE Integration</h3>
+                    <h3><span
+                            style="display:inline-block;width:20px;height:20px;vertical-align:middle;margin-right:4px;"><svg
+                                viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                <rect x="3" y="2" width="18" height="6" rx="1" />
+                                <rect x="3" y="10" width="18" height="6" rx="1" />
+                                <rect x="3" y="18" width="18" height="4" rx="1" />
+                                <circle cx="7" cy="5" r="1" fill="currentColor" />
+                                <circle cx="7" cy="13" r="1" fill="currentColor" />
+                                <circle cx="7" cy="20" r="1" fill="currentColor" />
+                            </svg></span> Proxmox VE Integration</h3>
                     <div style="font-size: 12px; color: var(--text-muted);">How to connect and monitor Proxmox clusters
                     </div>
                 </div>
@@ -1694,7 +1703,7 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                     <h4 style="margin:24px 0 12px; color:var(--accent-light);">Step 3: Add to WolfStack</h4>
                     <ol style="color:var(--text-secondary); padding-left:20px; margin-bottom:16px;">
                         <li>Click <strong>+ Add Server</strong> in the sidebar</li>
-                        <li>Select <strong>🟠 Proxmox VE</strong> tab</li>
+                        <li>Select <strong>Proxmox VE</strong> tab</li>
                         <li>Enter your <strong>Cluster Name</strong> (display name, e.g. "Production")</li>
                         <li>Enter <strong>Server Address</strong> (IP or hostname only, no <code
                                 style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">https://</code>)
@@ -1769,7 +1778,16 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                         </a>
                         <a href="https://pve.proxmox.com/pve-docs/api-viewer/" target="_blank" rel="noopener"
                             style="display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;color:var(--text);text-decoration:none;transition:border-color 0.2s;">
-                            <span style="font-size:20px;">🟠</span>
+                            <span style="font-size:20px;"><span
+                                    style="display:inline-block;width:20px;height:20px;"><svg viewBox="0 0 24 24"
+                                        fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <rect x="3" y="2" width="18" height="6" rx="1" />
+                                        <rect x="3" y="10" width="18" height="6" rx="1" />
+                                        <rect x="3" y="18" width="18" height="4" rx="1" />
+                                        <circle cx="7" cy="5" r="1" fill="currentColor" />
+                                        <circle cx="7" cy="13" r="1" fill="currentColor" />
+                                        <circle cx="7" cy="20" r="1" fill="currentColor" />
+                                    </svg></span></span>
                             <div>
                                 <div style="font-weight:600;font-size:13px;">Proxmox API Docs</div>
                                 <div style="font-size:11px;color:var(--text-muted);">PVE REST API reference</div>
@@ -2408,7 +2426,7 @@ region = us-east-1"></textarea>
                     <label>Node Type</label>
                     <select class="form-control" id="new-server-type" onchange="updateServerForm()">
                         <option value="wolfstack">🐺 WolfStack</option>
-                        <option value="proxmox">🟠 Proxmox VE</option>
+                        <option value="proxmox">&#x1F5A5; Proxmox VE</option>
                     </select>
                 </div>
                 <div class="form-group" id="ws-cluster-field">
@@ -2465,7 +2483,8 @@ region = us-east-1"></textarea>
                                 API Token Permissions Required</div>
                             <p style="font-size:12px; color:var(--text-secondary); margin:0 0 8px;">Your token needs
                                 <strong>PVEAuditor</strong> role to read node status, VMs, and containers. Without it,
-                                nodes will show as offline.</p>
+                                nodes will show as offline.
+                            </p>
                             <p style="font-size:12px; color:var(--text-secondary); margin:0 0 4px;"><strong>Web
                                     UI:</strong> Datacenter → Permissions → Add → API Token Permission → Path: <code
                                     style="background:var(--bg-tertiary);padding:1px 4px;border-radius:3px;font-size:11px;">/</code>

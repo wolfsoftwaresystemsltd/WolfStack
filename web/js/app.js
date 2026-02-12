@@ -313,11 +313,11 @@ function buildServerTree(nodes) {
 
         html += `
         <div class="server-tree-node">
-            <div class="server-node-header" onclick="toggleServerNode('${clusterId}')" style="background: linear-gradient(90deg, rgba(255,165,0,0.05), transparent);">
+            <div class="server-node-header" onclick="toggleServerNode('${clusterId}')" style="background: linear-gradient(90deg, rgba(99,102,241,0.05), transparent);">
                 <span class="tree-toggle ${shouldExpandCluster ? 'expanded' : ''}" id="toggle-${clusterId}">▶</span>
                 <span class="server-dot ${anyOnline ? 'online' : 'offline'}"></span>
-                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">🟠 ${clusterName}</span>
-                <span class="badge" style="font-size:10px; padding:1px 6px; background:rgba(255,165,0,0.2); color:orange;">${clusterNodes.length} nodes</span>
+                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><span style="display:inline-block;width:15px;height:15px;vertical-align:middle;margin-right:3px;opacity:0.9;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="2" width="18" height="6" rx="1"/><rect x="3" y="10" width="18" height="6" rx="1"/><rect x="3" y="18" width="18" height="4" rx="1"/><circle cx="7" cy="5" r="1" fill="currentColor"/><circle cx="7" cy="13" r="1" fill="currentColor"/><circle cx="7" cy="20" r="1" fill="currentColor"/></svg></span> ${clusterName}</span>
+                <span class="badge" style="font-size:10px; padding:1px 6px; background:rgba(99,102,241,0.2); color:var(--accent-light);">${clusterNodes.length} nodes</span>
                 <span class="remove-server-btn" onclick="event.stopPropagation(); openPveClusterSettings('${clusterName}')" title="Cluster settings" style="margin-left:4px;">⚙️</span>
                 <span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemovePveCluster('${clusterName}', [${nodeIds}])" title="Remove cluster">🗑️</span>
             </div>
@@ -389,8 +389,8 @@ function renderDatacenterOverview() {
     const renderCard = (node) => {
         const m = node.metrics;
         const isPve = node.node_type === 'proxmox';
-        const nodeIcon = isPve ? '🟠' : '🖥️';
-        const pveBadge = isPve ? ' <span style="font-size:10px; padding:1px 6px; border-radius:3px; background:rgba(255,165,0,0.15); color:#f5a623; margin-left:6px;">PVE</span>' : '';
+        const nodeIcon = isPve ? '<span style="display:inline-block;width:14px;height:14px;vertical-align:middle;opacity:0.9;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><circle cx="12" cy="10" r="1" fill="currentColor"/></svg></span>' : '🖥️';
+        const pveBadge = isPve ? ' <span style="font-size:10px; padding:1px 6px; border-radius:3px; background:rgba(99,102,241,0.15); color:var(--accent-light); margin-left:6px;">PVE</span>' : '';
 
         // If offline or no metrics
         if (!m || !node.online) {
@@ -448,7 +448,7 @@ function renderDatacenterOverview() {
                 </div>
                 <div style="margin-top:12px; display:flex; gap:6px; flex-wrap:wrap;">
                     ${isPve
-                ? `<span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(255,165,0,0.1); color:#f5a623;">🟠 ${node.vm_count || 0} VMs</span><span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(99,102,241,0.1); color:var(--accent-light);">📦 ${node.lxc_count || 0} Containers</span>`
+                ? `<span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(99,102,241,0.1); color:var(--accent-light);">🖥️ ${node.vm_count || 0} VMs</span><span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(99,102,241,0.1); color:var(--accent-light);">📦 ${node.lxc_count || 0} CTs</span>`
                 : node.components.filter(c => c.installed).map(c =>
                     `<span style="font-size:11px; padding:2px 8px; border-radius:4px; background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'}; color:${c.running ? 'var(--success)' : 'var(--danger)'};">${c.component}</span>`
                 ).join('')}
@@ -501,7 +501,7 @@ function renderDatacenterOverview() {
     pveKeys.forEach(clusterName => {
         const clusterNodes = pveClusters[clusterName];
         html += `<div style="grid-column:1/-1; margin-bottom:8px; display:flex; align-items:center; ${html ? 'border-top:1px solid var(--border); padding-top:24px; margin-top:24px;' : ''}">
-            <h3 style="margin:0;">🟠 ${clusterName}</h3>
+            <h3 style="margin:0;"><span style="display:inline-block;width:20px;height:20px;vertical-align:middle;margin-right:4px;opacity:0.9;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="2" width="18" height="6" rx="1"/><rect x="3" y="10" width="18" height="6" rx="1"/><rect x="3" y="18" width="18" height="4" rx="1"/><circle cx="7" cy="5" r="1" fill="currentColor"/><circle cx="7" cy="13" r="1" fill="currentColor"/><circle cx="7" cy="20" r="1" fill="currentColor"/></svg></span> ${clusterName}</h3>
             <span class="badge" style="margin-left:12px; font-size:11px;">${clusterNodes.length} nodes</span>
         </div>`;
         html += clusterNodes.map(renderCard).join('');
@@ -2500,9 +2500,17 @@ async function renderPveResourcesView(nodeId) {
     if (!container) return;
     container.innerHTML = '<div style="text-align:center; padding:40px; color:var(--text-muted);">Loading PVE resources...</div>';
 
+    // Find the node to get address for console links
+    const node = allNodes.find(n => n.id === nodeId);
+    const pveHost = node ? node.address : '';
+    const pvePort = node ? node.port : 8006;
+
     const guests = await loadPveResources(nodeId);
     if (!guests || guests.length === 0) {
-        container.innerHTML = '<div style="text-align:center; padding:40px; color:var(--text-muted);">No VMs or containers found on this Proxmox node.</div>';
+        container.innerHTML = `<div class="card"><div class="card-body" style="text-align:center; padding:60px;">
+            <div style="font-size:48px;margin-bottom:16px;">📭</div>
+            <div style="color:var(--text-muted);font-size:14px;">No VMs or containers found on this Proxmox node.</div>
+        </div></div>`;
         return;
     }
 
@@ -2526,49 +2534,94 @@ async function renderPveResourcesView(nodeId) {
         return m + 'm';
     }
 
-    function progressBar(used, total, label) {
+    function progressBar(used, total) {
         const pct = total > 0 ? Math.round((used / total) * 100) : 0;
         const color = pct > 90 ? 'var(--danger)' : pct > 70 ? 'var(--warning)' : 'var(--accent)';
-        return `<div style="display:flex;align-items:center;gap:8px;min-width:140px;">
-            <div style="flex:1;height:6px;background:var(--bg-tertiary);border-radius:3px;overflow:hidden;">
+        return `<div style="display:flex;align-items:center;gap:6px;">
+            <div style="flex:1;height:6px;background:var(--bg-tertiary);border-radius:3px;overflow:hidden;min-width:50px;">
                 <div style="height:100%;width:${pct}%;background:${color};border-radius:3px;transition:width 0.3s;"></div>
             </div>
-            <span style="font-size:11px;color:var(--text-muted);white-space:nowrap;">${label}</span>
+            <span style="font-size:11px;color:var(--text-muted);min-width:32px;text-align:right;">${pct}%</span>
         </div>`;
     }
 
     function statusBadge(status) {
-        const isRunning = status === 'running';
-        const bg = isRunning ? 'rgba(34,197,94,0.15)' : 'rgba(156,163,175,0.15)';
-        const color = isRunning ? 'var(--success)' : 'var(--text-muted)';
-        const dot = isRunning ? '●' : '○';
-        return `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600;background:${bg};color:${color};text-transform:capitalize;">${dot} ${status}</span>`;
+        const colors = {
+            running: { bg: 'rgba(34,197,94,0.15)', color: 'var(--success)', dot: '●' },
+            stopped: { bg: 'rgba(156,163,175,0.15)', color: 'var(--text-muted)', dot: '○' },
+            paused: { bg: 'rgba(234,179,8,0.15)', color: 'var(--warning)', dot: '⏸' },
+        };
+        const s = colors[status] || colors.stopped;
+        return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;background:${s.bg};color:${s.color};text-transform:capitalize;">${s.dot} ${status}</span>`;
     }
 
-    function guestRow(g) {
-        const memPct = g.maxmem > 0 ? Math.round((g.mem / g.maxmem) * 100) : 0;
-        const diskPct = g.maxdisk > 0 ? Math.round((g.disk / g.maxdisk) * 100) : 0;
+    function consoleLink(g) {
+        if (g.status !== 'running') return '';
+        const vncType = g.guest_type === 'qemu' ? 'kvm' : 'lxc';
+        const url = `https://${pveHost}:${pvePort}/?console=${vncType}&vmid=${g.vmid}&node=${g.node}`;
+        return `<a href="${url}" target="_blank" rel="noopener" class="btn btn-sm" style="font-size:11px;padding:3px 10px;text-decoration:none;">🖥 Console</a>`;
+    }
+
+    function guestCard(g) {
         const typeIcon = g.guest_type === 'qemu' ? '🖥️' : '📦';
-        const actions = g.status === 'running'
-            ? `<div style="display:flex;gap:4px;flex-wrap:wrap;">
-                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'shutdown')" style="font-size:11px;padding:3px 10px;">⏹ Stop</button>
-                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'reboot')" style="font-size:11px;padding:3px 10px;">🔄 Reboot</button>
-               </div>`
-            : `<button class="btn btn-sm btn-primary" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'start')" style="font-size:11px;padding:3px 10px;">▶ Start</button>`;
+        const typeLabel = g.guest_type === 'qemu' ? 'VM' : 'CT';
+        const isRunning = g.status === 'running';
+        const isPaused = g.status === 'paused';
 
-        return `<tr>
-            <td style="font-weight:600;">${typeIcon} ${g.vmid}</td>
-            <td style="font-weight:500;">${g.name || '—'}</td>
-            <td>${statusBadge(g.status)}</td>
-            <td style="text-align:center;">${g.cpus}</td>
-            <td>${progressBar(g.mem, g.maxmem, formatBytes(g.mem) + ' / ' + formatBytes(g.maxmem))}</td>
-            <td>${progressBar(g.disk, g.maxdisk, formatBytes(g.disk) + ' / ' + formatBytes(g.maxdisk))}</td>
-            <td style="text-align:center;color:var(--text-muted);font-size:12px;">${formatUptime(g.uptime)}</td>
-            <td>${actions}</td>
-        </tr>`;
+        let actionBtns = '';
+        if (isRunning) {
+            actionBtns = `
+                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'reboot')" title="Reboot" style="font-size:11px;padding:3px 10px;">🔄 Restart</button>
+                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'shutdown')" title="Graceful shutdown" style="font-size:11px;padding:3px 10px;">⏹ Shutdown</button>
+                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'stop')" title="Force stop" style="font-size:11px;padding:3px 10px;">⛔ Stop</button>
+                ${g.guest_type === 'qemu' ? `<button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'suspend')" title="Suspend" style="font-size:11px;padding:3px 10px;">⏸ Suspend</button>` : ''}
+                ${consoleLink(g)}`;
+        } else if (isPaused) {
+            actionBtns = `
+                <button class="btn btn-sm btn-primary" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'resume')" style="font-size:11px;padding:3px 10px;">▶ Resume</button>
+                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'stop')" title="Force stop" style="font-size:11px;padding:3px 10px;">⛔ Stop</button>`;
+        } else {
+            actionBtns = `<button class="btn btn-sm btn-primary" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'start')" style="font-size:11px;padding:3px 10px;">▶ Start</button>`;
+        }
+
+        return `<div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <span style="font-size:20px;">${typeIcon}</span>
+                    <div>
+                        <div style="font-weight:600;font-size:14px;">${g.name || 'Unnamed'}</div>
+                        <div style="font-size:11px;color:var(--text-muted);">${typeLabel} ${g.vmid} · ${g.node}</div>
+                    </div>
+                </div>
+                ${statusBadge(g.status)}
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(120px, 1fr));gap:12px;">
+                <div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">CPU</div>
+                    <div style="font-size:13px;font-weight:500;">${g.cpus} vCPU${g.cpus > 1 ? 's' : ''}</div>
+                </div>
+                <div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Memory</div>
+                    ${progressBar(g.mem, g.maxmem)}
+                    <div style="font-size:10px;color:var(--text-muted);margin-top:2px;">${formatBytes(g.mem)} / ${formatBytes(g.maxmem)}</div>
+                </div>
+                <div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Disk</div>
+                    ${progressBar(g.disk, g.maxdisk)}
+                    <div style="font-size:10px;color:var(--text-muted);margin-top:2px;">${formatBytes(g.disk)} / ${formatBytes(g.maxdisk)}</div>
+                </div>
+                <div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Uptime</div>
+                    <div style="font-size:13px;font-weight:500;">${formatUptime(g.uptime)}</div>
+                </div>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:10px;">
+                ${actionBtns}
+            </div>
+        </div>`;
     }
 
-    function buildTable(items, title, icon) {
+    function buildSection(items, title, icon) {
         const running = items.filter(g => g.status === 'running').length;
         const stopped = items.length - running;
         return `<div class="card" style="margin-bottom:16px;">
@@ -2579,20 +2632,17 @@ async function renderPveResourcesView(nodeId) {
                     ${stopped > 0 ? `<span style="margin-left:12px;color:var(--text-muted);">○ ${stopped} stopped</span>` : ''}
                 </div>
             </div>
-            <div class="card-body" style="padding:0;overflow-x:auto;">
-                <table class="data-table" style="margin:0;">
-                    <thead><tr>
-                        <th>ID</th><th>Name</th><th>Status</th><th style="text-align:center;">CPUs</th><th>Memory</th><th>Disk</th><th style="text-align:center;">Uptime</th><th>Actions</th>
-                    </tr></thead>
-                    <tbody>${items.map(guestRow).join('')}</tbody>
-                </table>
+            <div class="card-body">
+                <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(320px, 1fr));gap:12px;">
+                    ${items.map(guestCard).join('')}
+                </div>
             </div>
         </div>`;
     }
 
     let html = '';
-    if (vms.length > 0) html += buildTable(vms, 'Virtual Machines', '🖥️');
-    if (cts.length > 0) html += buildTable(cts, 'LXC Containers', '📦');
+    if (vms.length > 0) html += buildSection(vms, 'Virtual Machines', '🖥️');
+    if (cts.length > 0) html += buildSection(cts, 'LXC Containers', '📦');
 
     container.innerHTML = html;
 }
@@ -2656,7 +2706,7 @@ function openPveClusterSettings(clusterName) {
     modal.innerHTML = `
         <div class="modal">
             <div class="modal-header">
-                <h3>🟠 ${clusterName} — Cluster Settings</h3>
+                <h3>⚙️ ${clusterName} — Cluster Settings</h3>
                 <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
             </div>
             <div class="modal-body">
@@ -2685,19 +2735,24 @@ function openPveClusterSettings(clusterName) {
             </div>
             <div class="modal-footer">
                 <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
-                <button class="btn btn-primary" onclick="savePveClusterSettings('${clusterName}')">Save Changes</button>
+                <button class="btn btn-primary" onclick="savePveClusterSettings()">Save Changes</button>
             </div>
         </div>`;
+    // Store node IDs on the modal so save doesn't need to re-query by name
+    modal._nodeIds = clusterNodes.map(n => n.id);
+    modal._originalName = clusterName;
     document.body.appendChild(modal);
 }
 
-async function savePveClusterSettings(originalClusterName) {
+async function savePveClusterSettings() {
+    const modal = document.getElementById('pve-settings-modal');
+    if (!modal) return;
+    const nodeIds = modal._nodeIds || [];
+    const originalClusterName = modal._originalName || '';
     const newName = document.getElementById('pve-settings-cluster-name')?.value.trim();
     const tokenId = document.getElementById('pve-settings-token-id')?.value.trim();
     const tokenSecret = document.getElementById('pve-settings-token-secret')?.value.trim();
     const fingerprint = document.getElementById('pve-settings-fingerprint')?.value.trim();
-
-    const clusterNodes = allNodes.filter(n => n.node_type === 'proxmox' && (n.pve_cluster_name || n.address) === originalClusterName);
 
     // Build update payload
     const updates = {};
@@ -2710,10 +2765,10 @@ async function savePveClusterSettings(originalClusterName) {
         return;
     }
 
-    // Update each node via PATCH
-    for (const node of clusterNodes) {
+    // Update each node by stored ID
+    for (const id of nodeIds) {
         try {
-            await fetch(`/api/nodes/${node.id}/settings`, {
+            await fetch(`/api/nodes/${id}/settings`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(updates)
@@ -2721,7 +2776,7 @@ async function savePveClusterSettings(originalClusterName) {
         } catch (e) { /* continue */ }
     }
 
-    document.getElementById('pve-settings-modal')?.remove();
+    modal.remove();
     showToast('Cluster settings updated', 'success');
     fetchNodes();
 }
