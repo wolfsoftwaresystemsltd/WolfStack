@@ -6710,6 +6710,7 @@ async function loadAiConfig() {
         if ((el = document.getElementById('ai-smtp-port'))) el.value = cfg.smtp_port || 587;
         if ((el = document.getElementById('ai-smtp-user'))) el.value = cfg.smtp_user || '';
         if ((el = document.getElementById('ai-smtp-pass'))) el.value = cfg.has_smtp_pass ? cfg.smtp_pass : '';
+        if ((el = document.getElementById('ai-smtp-tls'))) el.value = cfg.smtp_tls || 'starttls';
         if ((el = document.getElementById('ai-check-interval'))) el.value = cfg.check_interval_minutes || 60;
         // Fetch models for the current provider, then select the saved model
         await fetchAiModels(cfg.provider || 'claude', cfg.model || '');
@@ -6771,6 +6772,7 @@ async function saveAiConfig() {
         smtp_port: parseInt((document.getElementById('ai-smtp-port') || {}).value) || 587,
         smtp_user: (document.getElementById('ai-smtp-user') || {}).value || '',
         smtp_pass: (document.getElementById('ai-smtp-pass') || {}).value || '',
+        smtp_tls: (document.getElementById('ai-smtp-tls') || {}).value || 'starttls',
         check_interval_minutes: parseInt((document.getElementById('ai-check-interval') || {}).value) || 60,
     };
     try {
@@ -6858,6 +6860,7 @@ async function testAiConnection() {
         smtp_port: parseInt((document.getElementById('ai-smtp-port') || {}).value) || 587,
         smtp_user: (document.getElementById('ai-smtp-user') || {}).value || '',
         smtp_pass: (document.getElementById('ai-smtp-pass') || {}).value || '',
+        smtp_tls: (document.getElementById('ai-smtp-tls') || {}).value || 'starttls',
         check_interval_minutes: parseInt((document.getElementById('ai-check-interval') || {}).value) || 60,
     };
     try {
@@ -6889,12 +6892,12 @@ async function sendTestEmail() {
         var resp = await fetch('/api/ai/test-email', { method: 'POST' });
         var data = await resp.json();
         if (data.error) {
-            showToast('❌ ' + data.error, 'error');
+            showModal('❌ ' + data.error, 'Email Error');
         } else {
-            showToast('📧 ' + (data.message || 'Test email sent!'), 'success');
+            showModal('✅ ' + (data.message || 'Test email sent!'), 'Email Sent');
         }
     } catch (e) {
-        showToast('Failed to send test email: ' + e.message, 'error');
+        showModal('Failed to send test email: ' + e.message, 'Email Error');
     }
 }
 

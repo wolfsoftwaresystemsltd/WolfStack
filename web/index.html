@@ -1135,6 +1135,14 @@
                                     <label>SMTP Password</label>
                                     <input type="password" id="ai-smtp-pass" class="form-control">
                                 </div>
+                                <div class="form-group" style="margin-bottom:12px;">
+                                    <label>SMTP Encryption</label>
+                                    <select id="ai-smtp-tls" class="form-control">
+                                        <option value="starttls">STARTTLS (port 587)</option>
+                                        <option value="tls">SSL/TLS (port 465)</option>
+                                        <option value="none">None</option>
+                                    </select>
+                                </div>
                             </div>
 
                             <h4 style="margin:20px 0 12px 0;font-size:14px;color:var(--accent-light);">📊 Recent Alerts

@@ -1272,6 +1272,9 @@ pub async fn ai_save_config(
                 config.smtp_pass = v.to_string();
             }
         }
+        if let Some(v) = body.get("smtp_tls").and_then(|v| v.as_str()) {
+            config.smtp_tls = v.to_string();
+        }
         if let Some(v) = body.get("check_interval_minutes").and_then(|v| v.as_u64()) {
             config.check_interval_minutes = v as u32;
         }

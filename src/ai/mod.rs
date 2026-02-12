@@ -31,6 +31,8 @@ pub struct AiConfig {
     pub smtp_port: u16,
     pub smtp_user: String,
     pub smtp_pass: String,
+    #[serde(default)]
+    pub smtp_tls: String,         // "none", "starttls", or "tls"
     pub check_interval_minutes: u32,
 }
 
@@ -47,6 +49,7 @@ impl Default for AiConfig {
             smtp_port: 587,
             smtp_user: String::new(),
             smtp_pass: String::new(),
+            smtp_tls: "starttls".to_string(),
             check_interval_minutes: 60,
         }
     }
@@ -895,11 +898,31 @@ pub fn send_alert_email(config: &AiConfig, subject: &str, body: &str) -> Result<
 
     let creds = Credentials::new(config.smtp_user.clone(), config.smtp_pass.clone());
 
-    let mailer = SmtpTransport::relay(&config.smtp_host)
-        .map_err(|e| format!("SMTP relay: {}", e))?
-        .port(config.smtp_port)
-        .credentials(creds)
-        .build();
+    let mailer = match config.smtp_tls.as_str() {
+        "tls" => {
+            // Implicit TLS (port 465 typically)
+            SmtpTransport::relay(&config.smtp_host)
+                .map_err(|e| format!("SMTP relay: {}", e))?
+                .port(config.smtp_port)
+                .credentials(creds)
+                .build()
+        }
+        "none" => {
+            // No encryption
+            SmtpTransport::builder_dangerous(&config.smtp_host)
+                .port(config.smtp_port)
+                .credentials(creds)
+                .build()
+        }
+        _ => {
+            // STARTTLS (default, port 587 typically)
+            SmtpTransport::starttls_relay(&config.smtp_host)
+                .map_err(|e| format!("SMTP STARTTLS: {}", e))?
+                .port(config.smtp_port)
+                .credentials(creds)
+                .build()
+        }
+    };
 
     mailer.send(&email).map_err(|e| format!("SMTP send: {}", e))?;
     info!("Alert email sent to {}", config.email_to);

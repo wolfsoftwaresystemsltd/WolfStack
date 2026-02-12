@@ -797,15 +797,15 @@ fn store_pbs(local_path: &Path, storage: &BackupStorage, filename: &str) -> Resu
     let repo = pbs_repo_string(storage);
     info!("Uploading backup to PBS: {} ({})", repo, filename);
 
-    // For tar.gz archives, we upload the staging directory as a pxar archive
-    let backup_id = filename.split('.').next().unwrap_or(filename);
+    // Extract container/VM name from filename (e.g. "mycontainer-2026-02-12.tar.gz" -> "mycontainer")
+    let backup_id = filename.split('-').next().unwrap_or(filename.split('.').next().unwrap_or(filename));
 
     let mut cmd = Command::new("proxmox-backup-client");
     cmd.arg("backup")
        .arg(format!("{}.pxar:{}", backup_id, local_path.parent().unwrap_or(Path::new("/tmp")).display()))
        .arg("--repository").arg(&repo)
        .arg("--backup-id").arg(backup_id)
-       .arg("--backup-type").arg("host");
+       .arg("--backup-type").arg("ct");
 
     if !storage.pbs_fingerprint.is_empty() {
         cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
@@ -829,7 +829,7 @@ fn store_pbs(local_path: &Path, storage: &BackupStorage, filename: &str) -> Resu
             String::from_utf8_lossy(&output.stderr)));
     }
 
-    info!("Backup uploaded to PBS: {}", repo);
+    info!("Backup uploaded to PBS: {} (container: {})", repo, backup_id);
     Ok(())
 }
 
