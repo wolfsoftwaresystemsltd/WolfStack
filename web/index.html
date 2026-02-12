@@ -48,7 +48,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v6.4.2</span>
+                <span class="version">v6.4.3</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -2266,58 +2266,53 @@ region = us-east-1"></textarea>
                 window.location.href = '/login.html';
             }
         </script>
-        <!-- AI Chat Bubble -->
-        <div id="ai-chat-bubble" onclick="toggleAiChat()" title="Chat with AI Assistant" style="position:fixed;bottom:24px;right:24px;width:56px;height:56px;border-radius:50%;
-                background:linear-gradient(135deg,var(--accent),var(--accent-light));color:#fff;
-                display:flex;align-items:center;justify-content:center;font-size:28px;
-                cursor:pointer;z-index:9999;box-shadow:0 4px 20px rgba(0,0,0,0.4);
-                transition:transform 0.2s,box-shadow 0.2s;">
-            🐺
-        </div>
+        <script>
+            // Create AI Chat Bubble & Panel dynamically on document.body
+            // to ensure they're not trapped inside any overflow:hidden ancestor
+            (function () {
+                // Bubble
+                var bubble = document.createElement('div');
+                bubble.id = 'ai-chat-bubble';
+                bubble.title = 'Chat with AI Assistant';
+                bubble.onclick = function () { toggleAiChat(); };
+                bubble.style.cssText = 'position:fixed;bottom:24px;right:24px;width:56px;height:56px;border-radius:50%;' +
+                    'background:linear-gradient(135deg,#dc2626,#f87171);color:#fff;' +
+                    'display:flex;align-items:center;justify-content:center;font-size:28px;' +
+                    'cursor:pointer;z-index:9999;box-shadow:0 4px 20px rgba(0,0,0,0.4);' +
+                    'transition:transform 0.2s,box-shadow 0.2s;';
+                bubble.textContent = '🐺';
+                document.body.appendChild(bubble);
 
-        <!-- AI Chat Panel -->
-        <div id="ai-chat-panel" style="display:none;position:fixed;bottom:90px;right:24px;width:420px;height:540px;
-         background:var(--bg-secondary);border:1px solid var(--border);border-radius:16px;
-         box-shadow:0 8px 40px rgba(0,0,0,0.5);z-index:9998;overflow:hidden;
-         flex-direction:column;">
-            <!-- Header -->
-            <div style="padding:16px 20px;background:linear-gradient(135deg,var(--accent),var(--accent-light));
-             display:flex;justify-content:space-between;align-items:center;">
-                <div style="display:flex;align-items:center;gap:8px;">
-                    <span style="font-size:24px;">🐺</span>
-                    <div>
-                        <div style="font-weight:600;color:#fff;font-size:14px;">WolfStack AI</div>
-                        <div id="ai-chat-status" style="font-size:11px;color:rgba(255,255,255,0.7);">Ready</div>
-                    </div>
-                </div>
-                <div style="display:flex;gap:6px;">
-                    <button onclick="openAiSettings()"
-                        style="background:rgba(255,255,255,0.2);border:none;color:#fff;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:12px;"
-                        title="AI Settings">⚙️</button>
-                    <button onclick="toggleAiChat()"
-                        style="background:rgba(255,255,255,0.2);border:none;color:#fff;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:16px;"
-                        title="Close">✕</button>
-                </div>
-            </div>
-            <!-- Messages -->
-            <div id="ai-chat-messages"
-                style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;">
-                <div class="ai-msg ai-msg-assistant"
-                    style="background:var(--bg-tertiary);border-radius:12px;padding:12px 16px;max-width:85%;align-self:flex-start;font-size:13px;line-height:1.5;color:var(--text);">
-                    👋 Hi! I'm your WolfStack AI assistant. I know everything about WolfStack, WolfNet, WolfDisk,
-                    WolfProxy, and WolfServe. Ask me anything about your servers or need help troubleshooting?
-                </div>
-            </div>
-            <!-- Input -->
-            <div style="padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px;">
-                <input type="text" id="ai-chat-input" placeholder="Ask something..."
-                    onkeydown="if(event.key==='Enter')sendAiMessage()" style="flex:1;padding:10px 14px;border-radius:10px;border:1px solid var(--border);
-                          background:var(--bg-primary);color:var(--text);font-size:13px;outline:none;">
-                <button onclick="sendAiMessage()" id="ai-send-btn" style="padding:10px 16px;border-radius:10px;border:none;
-                           background:var(--accent);color:#fff;cursor:pointer;font-size:13px;font-weight:600;
-                           transition:opacity 0.2s;">Send</button>
-            </div>
-        </div>
+                // Panel
+                var panel = document.createElement('div');
+                panel.id = 'ai-chat-panel';
+                panel.style.cssText = 'display:none;position:fixed;bottom:90px;right:24px;width:420px;height:540px;' +
+                    'background:var(--bg-secondary,#1a1a2e);border:1px solid var(--border,#333);border-radius:16px;' +
+                    'box-shadow:0 8px 40px rgba(0,0,0,0.5);z-index:9998;overflow:hidden;flex-direction:column;';
+                panel.innerHTML =
+                    '<div style="padding:16px 20px;background:linear-gradient(135deg,#dc2626,#f87171);display:flex;justify-content:space-between;align-items:center;">' +
+                    '<div style="display:flex;align-items:center;gap:8px;">' +
+                    '<span style="font-size:24px;">🐺</span>' +
+                    '<div><div style="font-weight:600;color:#fff;font-size:14px;">WolfStack AI</div>' +
+                    '<div id="ai-chat-status" style="font-size:11px;color:rgba(255,255,255,0.7);">Ready</div></div>' +
+                    '</div>' +
+                    '<div style="display:flex;gap:6px;">' +
+                    '<button onclick="openAiSettings()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:12px;" title="AI Settings">⚙️</button>' +
+                    '<button onclick="toggleAiChat()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:16px;" title="Close">✕</button>' +
+                    '</div>' +
+                    '</div>' +
+                    '<div id="ai-chat-messages" style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;">' +
+                    '<div style="background:var(--bg-tertiary,#252540);border-radius:12px;padding:12px 16px;max-width:85%;align-self:flex-start;font-size:13px;line-height:1.5;color:var(--text,#eee);">' +
+                    '👋 Hi! I\'m your WolfStack AI assistant. I know everything about WolfStack, WolfNet, WolfDisk, WolfProxy, and WolfServe. Ask me anything about your servers or need help troubleshooting?' +
+                    '</div>' +
+                    '</div>' +
+                    '<div style="padding:12px 16px;border-top:1px solid var(--border,#333);display:flex;gap:8px;">' +
+                    '<input type="text" id="ai-chat-input" placeholder="Ask something..." onkeydown="if(event.key===\'Enter\')sendAiMessage()" style="flex:1;padding:10px 14px;border-radius:10px;border:1px solid var(--border,#333);background:var(--bg-primary,#0f0f1a);color:var(--text,#eee);font-size:13px;outline:none;">' +
+                    '<button onclick="sendAiMessage()" id="ai-send-btn" style="padding:10px 16px;border-radius:10px;border:none;background:#dc2626;color:#fff;cursor:pointer;font-size:13px;font-weight:600;transition:opacity 0.2s;">Send</button>' +
+                    '</div>';
+                document.body.appendChild(panel);
+            })();
+        </script>
 
 </body>
 
