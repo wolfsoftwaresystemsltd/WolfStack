@@ -306,6 +306,9 @@ function buildServerTree(nodes) {
 
     pveKeys.forEach(clusterName => {
         const clusterNodes = pveClusters[clusterName];
+        const clusterId = 'pve-cluster-' + clusterName.replace(/[^a-zA-Z0-9]/g, '_');
+        const shouldExpandCluster = isFirstBuild ? false : expandedNodes.has(clusterId);
+        const anyOnline = clusterNodes.some(n => n.online);
         const nodeIds = clusterNodes.map(n => `'${n.id}'`).join(',');
 
         html += `
@@ -7004,7 +7007,7 @@ function checkForUpdates() {
     if (versionEl) currentVersion = versionEl.textContent.replace(/^v/i, '').trim();
     if (!currentVersion) return;
 
-    fetch('https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/main/Cargo.toml')
+    fetch('https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/Cargo.toml')
         .then(function (r) { return r.text(); })
         .then(function (text) {
             var match = text.match(/^version\s*=\s*"([^"]+)"/m);

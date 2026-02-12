@@ -81,6 +81,10 @@ impl ClusterState {
                 for mut node in saved {
                     node.online = false; // Will be updated by polling
                     node.is_self = false;
+                    // Default to WolfStack if no cluster name
+                    if node.cluster_name.is_none() {
+                         node.cluster_name = Some("WolfStack".to_string());
+                    }
                     nodes.insert(node.id.clone(), node);
                 }
                 debug!("Loaded {} saved nodes from {}", nodes.len(), Self::NODES_FILE);
@@ -105,7 +109,11 @@ impl ClusterState {
     /// Update this node's own status
     pub fn update_self(&self, metrics: SystemMetrics, components: Vec<ComponentStatus>, docker_count: u32, lxc_count: u32, vm_count: u32, public_ip: Option<String>) {
         let mut nodes = self.nodes.write().unwrap();
-        let cluster_name = nodes.get(&self.self_id).and_then(|n| n.cluster_name.clone());
+        // Fetch existing cluster_name to preserve it, or default to "WolfStack" if missing
+        let cluster_name = nodes.get(&self.self_id)
+            .and_then(|n| n.cluster_name.clone())
+            .or_else(|| Some("WolfStack".to_string()));
+
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         nodes.insert(self.self_id.clone(), Node {
             id: self.self_id.clone(),
