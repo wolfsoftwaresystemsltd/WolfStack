@@ -946,8 +946,46 @@ pub fn restore_lxc(entry: &BackupEntry) -> Result<String, String> {
         return Err(format!("LXC extract failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
-    info!("LXC restore complete: {}", entry.target.name);
-    Ok(format!("LXC container '{}' restored", entry.target.name))
+    let container_name = &entry.target.name;
+    let container_dir = format!("/var/lib/lxc/{}", container_name);
+    let config_path = format!("{}/config", container_dir);
+    let rootfs_path = format!("{}/rootfs", container_dir);
+
+    // Ensure rootfs directory exists
+    if !std::path::Path::new(&rootfs_path).exists() {
+        warn!("Restored LXC container '{}' has no rootfs directory", container_name);
+    }
+
+    // Fix config: ensure lxc.rootfs.path is set correctly
+    if let Ok(config) = std::fs::read_to_string(&config_path) {
+        let mut lines: Vec<String> = config.lines()
+            .filter(|l| !l.trim().starts_with("lxc.rootfs.path"))
+            .map(|l| l.to_string())
+            .collect();
+        // Add correct rootfs path at the beginning
+        lines.insert(0, format!("lxc.rootfs.path = dir:{}", rootfs_path));
+
+        // Ensure apparmor profile is set (unconfined for restored containers)
+        if !lines.iter().any(|l| l.contains("lxc.apparmor.profile")) {
+            lines.push("lxc.apparmor.profile = unconfined".to_string());
+        }
+
+        let new_config = lines.join("\n") + "\n";
+        let _ = std::fs::write(&config_path, &new_config);
+    }
+
+    // Fix ownership — root should own the container dir
+    let _ = Command::new("chown")
+        .args(["-R", "root:root", &container_dir])
+        .output();
+
+    // Fix rootfs permissions
+    let _ = Command::new("chmod")
+        .args(["755", &container_dir])
+        .output();
+
+    info!("LXC restore complete: {}", container_name);
+    Ok(format!("LXC container '{}' restored — you can now start it from the Containers page", container_name))
 }
 
 /// Restore a VM from backup

@@ -1647,6 +1647,7 @@ pub struct LxcSettingsUpdate {
     pub autostart: Option<bool>,
     pub start_delay: Option<u32>,
     pub start_order: Option<u32>,
+    pub unprivileged: Option<bool>,
 
     // Network
     pub net_link: Option<String>,
@@ -1726,8 +1727,11 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
 
         // Skip feature mount entries we manage
         if key == "lxc.mount.entry" && feature_markers.iter().any(|m| val.contains(m)) { continue; }
-        if key == "lxc.include" && val.contains("nesting.conf") { continue; }
+        if key == "lxc.include" && (val.contains("nesting.conf") || val.contains("userns.conf")) { continue; }
         if key == "lxc.mount.auto" && val.contains("cgroup") { continue; }
+
+        // Skip idmap lines (managed by privilege toggle)
+        if key == "lxc.idmap" { continue; }
 
         // Skip cgroup2 device allows for TUN/FUSE that we manage
         if (key == "lxc.cgroup2.devices.allow" || key == "lxc.cgroup.devices.allow")
@@ -1847,6 +1851,14 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
     if keyctl && !nesting {
         // Only add if not already covered by nesting
         preserved.push("lxc.mount.auto = proc:rw sys:rw".to_string());
+    }
+
+    // Privilege mode (unprivileged = uses idmap for uid/gid remapping)
+    let unprivileged = settings.unprivileged.unwrap_or(current.unprivileged);
+    if unprivileged {
+        preserved.push("lxc.idmap = u 0 100000 65536".to_string());
+        preserved.push("lxc.idmap = g 0 100000 65536".to_string());
+        preserved.push("lxc.include = /usr/share/lxc/config/userns.conf".to_string());
     }
 
     // Write final config

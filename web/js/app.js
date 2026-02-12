@@ -3921,8 +3921,10 @@ async function openLxcSettings(name) {
                     </div>
                     <div class="form-group">
                         <label>Privilege Mode</label>
-                        <input type="text" class="form-control" value="${cfg.unprivileged ? 'Unprivileged' : 'Privileged'}" readonly
-                            style="opacity:0.7;cursor:not-allowed;">
+                        <select id="lxc-unprivileged" class="form-control">
+                            <option value="false" ${cfg.unprivileged ? '' : 'selected'}>Privileged</option>
+                            <option value="true" ${cfg.unprivileged ? 'selected' : ''}>Unprivileged</option>
+                        </select>
                     </div>
                 </div>
                 <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
@@ -4217,6 +4219,7 @@ async function saveLxcSettings(name) {
         autostart: (document.getElementById('lxc-autostart') || {}).checked || false,
         start_delay: parseInt((document.getElementById('lxc-start-delay') || {}).value) || 0,
         start_order: parseInt((document.getElementById('lxc-start-order') || {}).value) || 0,
+        unprivileged: (document.getElementById('lxc-unprivileged') || {}).value === 'true',
         net_link: (document.getElementById('lxc-net-link') || {}).value || '',
         net_name: (document.getElementById('lxc-net-name') || {}).value || '',
         net_hwaddr: (document.getElementById('lxc-net-hwaddr') || {}).value || '',
