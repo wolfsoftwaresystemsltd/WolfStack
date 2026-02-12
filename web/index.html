@@ -48,7 +48,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v7.7.2</span>
+                <span class="version">v7.7.3</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -79,19 +79,13 @@
                 onclick="window.open('https://wolfstack.org','_blank')">
                 🔔 <span id="update-banner-text">Update available</span>
             </div>
-            <button class="btn btn-sm" onclick="selectView('ai-settings')" style="width: 100%; margin-bottom: 8px;">
-                🤖 AI Agent
-            </button>
-            <button class="btn btn-sm" onclick="window.open('https://wolfscale.org', '_blank')"
-                style="width: 100%; margin-bottom: 8px;">
-                📖 Help & Docs
-            </button>
-            <button class="btn btn-sm" onclick="openAddServerModal()" style="width: 100%; margin-bottom: 8px;">
-                + Add Server
-            </button>
-            <button class="btn btn-sm" onclick="handleLogout()" style="width: 100%; margin-bottom: 12px;">
-                🚪 Sign Out
-            </button>
+            <div class="sidebar-icon-buttons">
+                <button class="btn btn-icon" onclick="selectView('ai-settings')" title="AI Settings">⚙️</button>
+                <button class="btn btn-icon" onclick="window.open('https://wolfscale.org', '_blank')"
+                    title="Help & Docs">❓</button>
+                <button class="btn btn-icon" onclick="openAddServerModal()" title="Add Server">➕</button>
+                <button class="btn btn-icon" onclick="handleLogout()" title="Sign Out">🚪</button>
+            </div>
             <div class="copyright">
                 &copy; 2026 <a href="https://wolf.uk.com/" target="_blank" rel="noopener">Wolf Software Systems Ltd</a>
             </div>
