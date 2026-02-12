@@ -191,24 +191,32 @@ function buildServerTree(nodes) {
     // On first build (no expanded state saved yet), expand self node
     const isFirstBuild = expandedNodes.size === 0;
 
-    tree.innerHTML = sorted.map(node => {
-        const shouldExpand = isFirstBuild ? node.is_self : expandedNodes.has(node.id);
-        const isPve = node.node_type === 'proxmox';
-        const nodeIcon = isPve ? '🟠' : '🖥️';
+    // Separate WolfStack and PVE nodes
+    const wsNodes = sorted.filter(n => n.node_type !== 'proxmox');
+    const pveNodes = sorted.filter(n => n.node_type === 'proxmox');
 
-        // Build child items based on node type
-        let childItems = '';
-        if (isPve) {
-            childItems = `
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="dashboard" onclick="selectServerView('${node.id}', 'dashboard')">
-                    <span class="icon">📊</span> Dashboard
-                </a>
-                <a class="nav-item server-child-item" data-node="${node.id}" data-view="pve-resources" onclick="selectServerView('${node.id}', 'pve-resources')">
-                    <span class="icon">🖥️</span> VMs & Containers
-                    ${(node.vm_count || node.lxc_count) ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${(node.vm_count || 0) + (node.lxc_count || 0)}</span>` : ''}
-                </a>`;
-        } else {
-            childItems = `
+    // Group PVE nodes by cluster name (or address as fallback)
+    const pveClusters = {};
+    pveNodes.forEach(n => {
+        const key = n.pve_cluster_name || n.address;
+        if (!pveClusters[key]) pveClusters[key] = [];
+        pveClusters[key].push(n);
+    });
+
+    let html = '';
+
+    // Render WolfStack nodes (unchanged)
+    wsNodes.forEach(node => {
+        const shouldExpand = isFirstBuild ? node.is_self : expandedNodes.has(node.id);
+        html += `
+        <div class="server-tree-node">
+            <div class="server-node-header" onclick="toggleServerNode('${node.id}')">
+                <span class="tree-toggle ${shouldExpand ? 'expanded' : ''}" id="toggle-${node.id}">▶</span>
+                <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
+                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">🖥️ ${node.hostname}</span>
+                ${node.is_self ? '<span class="self-badge">this</span>' : `<span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemoveServer('${node.id}', '${node.hostname}')" title="Remove server">🗑️</span>`}
+            </div>
+            <div class="server-node-children ${shouldExpand ? 'expanded' : ''}" id="children-${node.id}">
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="dashboard" onclick="selectServerView('${node.id}', 'dashboard')">
                     <span class="icon">📊</span> Dashboard
                 </a>
@@ -246,25 +254,61 @@ function buildServerTree(nodes) {
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="certificates" onclick="selectServerView('${node.id}', 'certificates')">
                     <span class="icon">🔒</span> Certificates
                 </a>
-
                 <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
                     <span class="icon">💻</span> Terminal
-                </a>`;
-        }
+                </a>
+            </div>
+        </div>`;
+    });
 
-        return `
+    // Render PVE clusters (grouped)
+    Object.entries(pveClusters).forEach(([clusterName, clusterNodes]) => {
+        const clusterId = 'pve-cluster-' + clusterName.replace(/[^a-zA-Z0-9]/g, '_');
+        const shouldExpandCluster = isFirstBuild ? false : expandedNodes.has(clusterId);
+        const anyOnline = clusterNodes.some(n => n.online);
+        const firstNodeId = clusterNodes[0].id;
+        const nodeIds = clusterNodes.map(n => `'${n.id}'`).join(',');
+
+        html += `
         <div class="server-tree-node">
-            <div class="server-node-header" onclick="toggleServerNode('${node.id}')">
-                <span class="tree-toggle ${shouldExpand ? 'expanded' : ''}" id="toggle-${node.id}">▶</span>
-                <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
-                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${nodeIcon} ${node.hostname}</span>
-                ${node.is_self ? '<span class="self-badge">this</span>' : `<span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemoveServer('${node.id}', '${node.hostname}')" title="Remove server">🗑️</span>`}
+            <div class="server-node-header" onclick="toggleServerNode('${clusterId}')" style="background: linear-gradient(90deg, rgba(255,165,0,0.05), transparent);">
+                <span class="tree-toggle ${shouldExpandCluster ? 'expanded' : ''}" id="toggle-${clusterId}">▶</span>
+                <span class="server-dot ${anyOnline ? 'online' : 'offline'}"></span>
+                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">🟠 ${clusterName}</span>
+                <span class="badge" style="font-size:10px; padding:1px 6px; background:rgba(255,165,0,0.2); color:orange;">${clusterNodes.length} nodes</span>
+                <span class="remove-server-btn" onclick="event.stopPropagation(); openPveClusterSettings('${clusterName}')" title="Cluster settings" style="margin-left:4px;">⚙️</span>
+                <span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemovePveCluster('${clusterName}', [${nodeIds}])" title="Remove cluster">🗑️</span>
             </div>
-            <div class="server-node-children ${shouldExpand ? 'expanded' : ''}" id="children-${node.id}">
-                ${childItems}
+            <div class="server-node-children ${shouldExpandCluster ? 'expanded' : ''}" id="children-${clusterId}">`;
+
+        // Each node within the cluster
+        clusterNodes.forEach(node => {
+            const shouldExpandNode = expandedNodes.has(node.id);
+            html += `
+                <div class="server-tree-node" style="margin-left: 8px;">
+                    <div class="server-node-header" onclick="toggleServerNode('${node.id}')" style="padding-left: 8px;">
+                        <span class="tree-toggle ${shouldExpandNode ? 'expanded' : ''}" id="toggle-${node.id}">▶</span>
+                        <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
+                        <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${node.pve_node_name || node.hostname}</span>
+                    </div>
+                    <div class="server-node-children ${shouldExpandNode ? 'expanded' : ''}" id="children-${node.id}">
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="dashboard" onclick="selectServerView('${node.id}', 'dashboard')">
+                            <span class="icon">📊</span> Dashboard
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="pve-resources" onclick="selectServerView('${node.id}', 'pve-resources')">
+                            <span class="icon">🖥️</span> VMs & Containers
+                            ${(node.vm_count || node.lxc_count) ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${(node.vm_count || 0) + (node.lxc_count || 0)}</span>` : ''}
+                        </a>
+                    </div>
+                </div>`;
+        });
+
+        html += `
             </div>
-        </div>
-    `}).join('');
+        </div>`;
+    });
+
+    tree.innerHTML = html;
 
     // Restore active highlight
     if (currentNodeId && currentPage) {
@@ -2261,6 +2305,7 @@ async function addServer() {
         var pveTokenSecret = (document.getElementById('new-pve-token-secret') || {}).value.trim();
         var pveName = (document.getElementById('new-pve-node-name') || {}).value.trim();
         var pveFingerprint = (document.getElementById('new-pve-fingerprint') || {}).value.trim();
+        var pveClusterName = (document.getElementById('new-pve-cluster-name') || {}).value.trim();
 
         if (!pveTokenId || !pveTokenSecret || !pveName) {
             showToast('PVE Node Name, Token ID, and Token Secret are required', 'error');
@@ -2270,6 +2315,7 @@ async function addServer() {
         payload.pve_token = pveTokenId + '=' + pveTokenSecret;
         payload.pve_node_name = pveName;
         if (pveFingerprint) payload.pve_fingerprint = pveFingerprint;
+        if (pveClusterName) payload.pve_cluster_name = pveClusterName;
     }
 
     try {
@@ -2283,14 +2329,18 @@ async function addServer() {
             showToast(data.error, 'error');
             return;
         }
-        var label = nodeType === 'proxmox' ? 'Proxmox node' : 'Server';
-        showToast(label + ' ' + address + ' added', 'success');
+        if (nodeType === 'proxmox' && data.nodes_discovered) {
+            showToast('Proxmox cluster added — ' + data.nodes_discovered.length + ' node(s) discovered: ' + data.nodes_discovered.join(', '), 'success');
+        } else {
+            showToast('Server ' + address + ' added', 'success');
+        }
         closeModal();
         document.getElementById('new-server-address').value = '';
         if (document.getElementById('new-pve-token-id')) document.getElementById('new-pve-token-id').value = '';
         if (document.getElementById('new-pve-token-secret')) document.getElementById('new-pve-token-secret').value = '';
         if (document.getElementById('new-pve-node-name')) document.getElementById('new-pve-node-name').value = '';
         if (document.getElementById('new-pve-fingerprint')) document.getElementById('new-pve-fingerprint').value = '';
+        if (document.getElementById('new-pve-cluster-name')) document.getElementById('new-pve-cluster-name').value = '';
         fetchNodes();
     } catch (e) {
         showToast('Failed: ' + e.message, 'error');
@@ -2412,6 +2462,105 @@ function confirmRemoveServer(id, hostname) {
     if (confirm(`Remove server "${hostname}" from the cluster?`)) {
         removeServer(id);
     }
+}
+
+async function confirmRemovePveCluster(clusterName, nodeIds) {
+    if (!confirm(`Remove Proxmox cluster "${clusterName}" and all ${nodeIds.length} node(s)?`)) return;
+    for (const id of nodeIds) {
+        try {
+            await fetch(`/api/nodes/${id}`, { method: 'DELETE' });
+        } catch (e) { /* continue */ }
+    }
+    showToast(`Proxmox cluster "${clusterName}" removed`, 'success');
+    fetchNodes();
+}
+
+function openPveClusterSettings(clusterName) {
+    // Find all PVE nodes in this cluster
+    const clusterNodes = allNodes.filter(n => n.node_type === 'proxmox' && (n.pve_cluster_name || n.address) === clusterName);
+    if (clusterNodes.length === 0) return;
+
+    const first = clusterNodes[0];
+    const nodeNames = clusterNodes.map(n => n.pve_node_name || n.hostname).join(', ');
+
+    // Build a settings modal dynamically
+    let existing = document.getElementById('pve-settings-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'pve-settings-modal';
+    modal.className = 'modal-overlay active';
+    modal.innerHTML = `
+        <div class="modal">
+            <div class="modal-header">
+                <h3>🟠 ${clusterName} — Cluster Settings</h3>
+                <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
+            </div>
+            <div class="modal-body">
+                <p style="color: var(--text-muted); margin-bottom:16px;">
+                    <strong>Nodes:</strong> ${nodeNames}<br>
+                    <strong>Address:</strong> ${first.address}:${first.port}
+                </p>
+                <div class="form-group">
+                    <label>Cluster Name</label>
+                    <input type="text" class="form-control" id="pve-settings-cluster-name" value="${clusterName}">
+                </div>
+                <div class="form-group">
+                    <label>Token ID</label>
+                    <input type="text" class="form-control" id="pve-settings-token-id"
+                        placeholder="root@pam!wolfstack" value="${first.pve_token ? first.pve_token.split('=')[0] + '!' + first.pve_token.split('!')[1]?.split('=')[0] : ''}">
+                    <small style="color: var(--text-muted);">Leave blank to keep current</small>
+                </div>
+                <div class="form-group">
+                    <label>Token Secret</label>
+                    <input type="text" class="form-control" id="pve-settings-token-secret" placeholder="Leave blank to keep current">
+                </div>
+                <div class="form-group">
+                    <label>TLS Fingerprint</label>
+                    <input type="text" class="form-control" id="pve-settings-fingerprint" value="${first.pve_fingerprint || ''}">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+                <button class="btn btn-primary" onclick="savePveClusterSettings('${clusterName}')">Save Changes</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+}
+
+async function savePveClusterSettings(originalClusterName) {
+    const newName = document.getElementById('pve-settings-cluster-name')?.value.trim();
+    const tokenId = document.getElementById('pve-settings-token-id')?.value.trim();
+    const tokenSecret = document.getElementById('pve-settings-token-secret')?.value.trim();
+    const fingerprint = document.getElementById('pve-settings-fingerprint')?.value.trim();
+
+    const clusterNodes = allNodes.filter(n => n.node_type === 'proxmox' && (n.pve_cluster_name || n.address) === originalClusterName);
+
+    // Build update payload
+    const updates = {};
+    if (newName && newName !== originalClusterName) updates.pve_cluster_name = newName;
+    if (tokenId && tokenSecret) updates.pve_token = tokenId + '=' + tokenSecret;
+    if (fingerprint !== undefined) updates.pve_fingerprint = fingerprint || null;
+
+    if (Object.keys(updates).length === 0) {
+        showToast('No changes to save', 'info');
+        return;
+    }
+
+    // Update each node via PATCH
+    for (const node of clusterNodes) {
+        try {
+            await fetch(`/api/nodes/${node.id}/settings`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(updates)
+            });
+        } catch (e) { /* continue */ }
+    }
+
+    document.getElementById('pve-settings-modal')?.remove();
+    showToast('Cluster settings updated', 'success');
+    fetchNodes();
 }
 
 // ─── Toast Notifications ───

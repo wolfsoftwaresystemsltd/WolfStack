@@ -42,6 +42,8 @@ pub struct Node {
     pub pve_fingerprint: Option<String>,
     #[serde(default)]
     pub pve_node_name: Option<String>,  // Proxmox node name for API calls
+    #[serde(default)]
+    pub pve_cluster_name: Option<String>, // User-friendly cluster name for sidebar grouping
 }
 
 fn default_node_type() -> String { "wolfstack".to_string() }
@@ -120,6 +122,7 @@ impl ClusterState {
             pve_token: None,
             pve_fingerprint: None,
             pve_node_name: None,
+            pve_cluster_name: None,
         });
     }
 
@@ -150,16 +153,16 @@ impl ClusterState {
 
     /// Add a server by address — persists to disk
     pub fn add_server(&self, address: String, port: u16) -> String {
-        self.add_server_full(address, port, "wolfstack".to_string(), None, None, None)
+        self.add_server_full(address, port, "wolfstack".to_string(), None, None, None, None)
     }
 
     /// Add a Proxmox server
-    pub fn add_proxmox_server(&self, address: String, port: u16, token: String, fingerprint: Option<String>, node_name: String) -> String {
-        self.add_server_full(address, port, "proxmox".to_string(), Some(token), fingerprint, Some(node_name))
+    pub fn add_proxmox_server(&self, address: String, port: u16, token: String, fingerprint: Option<String>, node_name: String, cluster_name: Option<String>) -> String {
+        self.add_server_full(address, port, "proxmox".to_string(), Some(token), fingerprint, Some(node_name), cluster_name)
     }
 
     /// Add a server with full options
-    fn add_server_full(&self, address: String, port: u16, node_type: String, pve_token: Option<String>, pve_fingerprint: Option<String>, pve_node_name: Option<String>) -> String {
+    fn add_server_full(&self, address: String, port: u16, node_type: String, pve_token: Option<String>, pve_fingerprint: Option<String>, pve_node_name: Option<String>, pve_cluster_name: Option<String>) -> String {
         let id = format!("node-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let mut nodes = self.nodes.write().unwrap();
@@ -181,6 +184,7 @@ impl ClusterState {
             pve_token,
             pve_fingerprint,
             pve_node_name,
+            pve_cluster_name,
         });
         drop(nodes);
         self.save_nodes();
@@ -196,6 +200,21 @@ impl ClusterState {
             self.save_nodes();
         }
         removed
+    }
+
+    /// Update PVE node settings (token, fingerprint, cluster name)
+    pub fn update_node_settings(&self, id: &str, pve_token: Option<String>, pve_fingerprint: Option<Option<String>>, pve_cluster_name: Option<String>) -> bool {
+        let mut nodes = self.nodes.write().unwrap();
+        if let Some(node) = nodes.get_mut(id) {
+            if let Some(token) = pve_token { node.pve_token = Some(token); }
+            if let Some(fp) = pve_fingerprint { node.pve_fingerprint = fp; }
+            if let Some(name) = pve_cluster_name { node.pve_cluster_name = Some(name); }
+            drop(nodes);
+            self.save_nodes();
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -309,6 +328,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         pve_token: node.pve_token.clone(),
                         pve_fingerprint: node.pve_fingerprint.clone(),
                         pve_node_name: node.pve_node_name.clone(),
+                        pve_cluster_name: node.pve_cluster_name.clone(),
                     });
                 }
                 Err(e) => {
@@ -352,6 +372,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                     pve_token: None,
                                     pve_fingerprint: None,
                                     pve_node_name: None,
+                                    pve_cluster_name: None,
                                 });
                             }
                         }

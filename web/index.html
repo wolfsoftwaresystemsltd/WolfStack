@@ -2249,9 +2249,17 @@ region = us-east-1"></textarea>
                 <!-- Proxmox-specific fields -->
                 <div id="pve-fields" style="display:none;">
                     <div class="form-group">
+                        <label>Cluster Name</label>
+                        <input type="text" class="form-control" id="new-pve-cluster-name"
+                            placeholder="My Proxmox Cluster">
+                        <small style="color: var(--text-muted);">Display name for the sidebar</small>
+                    </div>
+                    <div class="form-group">
                         <label>PVE Node Name</label>
                         <input type="text" class="form-control" id="new-pve-node-name"
                             placeholder="pve1 (as shown in Proxmox sidebar)">
+                        <small style="color: var(--text-muted);">Other cluster nodes will be discovered
+                            automatically</small>
                     </div>
                     <div class="form-group">
                         <label>Token ID</label>

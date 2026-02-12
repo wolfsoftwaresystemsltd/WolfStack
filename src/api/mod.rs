@@ -206,6 +206,8 @@ pub struct AddServerRequest {
     pub pve_fingerprint: Option<String>,
     #[serde(default)]
     pub pve_node_name: Option<String>,
+    #[serde(default)]
+    pub pve_cluster_name: Option<String>, // User-friendly cluster name for sidebar
 }
 
 pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::Json<AddServerRequest>) -> HttpResponse {
@@ -218,6 +220,7 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
         let token = body.pve_token.clone().unwrap_or_default();
         let fingerprint = body.pve_fingerprint.clone();
         let pve_node_name = body.pve_node_name.clone().unwrap_or_default();
+        let cluster_name = body.pve_cluster_name.clone();
 
         if token.is_empty() || pve_node_name.is_empty() {
             return HttpResponse::BadRequest().json(serde_json::json!({
@@ -225,14 +228,42 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
             }));
         }
 
-        let id = state.cluster.add_proxmox_server(body.address.clone(), port, token, fingerprint, pve_node_name.clone());
-        info!("Added Proxmox node {} at {}:{} (node: {})", id, body.address, port, pve_node_name);
+        // Try to discover all nodes in the cluster
+        let client = crate::proxmox::PveClient::new(&body.address, port, &token, fingerprint.as_deref(), &pve_node_name);
+        let discovered = client.discover_nodes().await.unwrap_or_default();
+
+        let mut added_ids = Vec::new();
+        let mut added_nodes = Vec::new();
+
+        if discovered.len() > 1 {
+            // Multi-node cluster — add each discovered node
+            for node_name in &discovered {
+                let id = state.cluster.add_proxmox_server(
+                    body.address.clone(), port, token.clone(),
+                    fingerprint.clone(), node_name.clone(), cluster_name.clone(),
+                );
+                info!("Added Proxmox cluster node {} at {}:{} (node: {})", id, body.address, port, node_name);
+                added_ids.push(id);
+                added_nodes.push(node_name.clone());
+            }
+        } else {
+            // Single node or discovery failed — add just the specified node
+            let id = state.cluster.add_proxmox_server(
+                body.address.clone(), port, token, fingerprint,
+                pve_node_name.clone(), cluster_name.clone(),
+            );
+            info!("Added Proxmox node {} at {}:{} (node: {})", id, body.address, port, pve_node_name);
+            added_ids.push(id);
+            added_nodes.push(pve_node_name.clone());
+        }
+
         HttpResponse::Ok().json(serde_json::json!({
-            "id": id,
+            "ids": added_ids,
             "address": body.address,
             "port": port,
             "node_type": "proxmox",
-            "pve_node_name": pve_node_name
+            "nodes_discovered": added_nodes,
+            "cluster_name": cluster_name,
         }))
     } else {
         let port = body.port.unwrap_or(8553);
@@ -253,6 +284,31 @@ pub async fn remove_node(req: HttpRequest, state: web::Data<AppState>, path: web
     let id = path.into_inner();
     if state.cluster.remove_server(&id) {
         HttpResponse::Ok().json(serde_json::json!({ "removed": true }))
+    } else {
+        HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" }))
+    }
+}
+
+/// PATCH /api/nodes/{id}/settings — update PVE node settings
+#[derive(Deserialize)]
+pub struct UpdateNodeSettings {
+    pub pve_token: Option<String>,
+    pub pve_fingerprint: Option<String>,
+    pub pve_cluster_name: Option<String>,
+}
+
+pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<UpdateNodeSettings>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+
+    let fp = if body.pve_fingerprint.is_some() {
+        Some(body.pve_fingerprint.clone())
+    } else {
+        None
+    };
+
+    if state.cluster.update_node_settings(&id, body.pve_token.clone(), fp, body.pve_cluster_name.clone()) {
+        HttpResponse::Ok().json(serde_json::json!({ "updated": true }))
     } else {
         HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" }))
     }
@@ -2616,6 +2672,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/nodes", web::post().to(add_node))
         .route("/api/nodes/{id}", web::get().to(get_node))
         .route("/api/nodes/{id}", web::delete().to(remove_node))
+        .route("/api/nodes/{id}/settings", web::patch().to(update_node_settings))
         // Proxmox integration
         .route("/api/nodes/{id}/pve/resources", web::get().to(get_pve_resources))
         .route("/api/nodes/{id}/pve/test", web::post().to(pve_test_connection))
