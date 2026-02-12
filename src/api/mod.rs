@@ -1292,13 +1292,6 @@ pub async fn ai_chat(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
 
-    // Extract auth cookie for proxying to remote nodes
-    let auth_cookie = req.headers()
-        .get("Cookie")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
     // Build server context for the AI
     let server_context = {
         let hostname = hostname::get()
@@ -1337,7 +1330,7 @@ pub async fn ai_chat(
             .collect()
     };
 
-    match state.ai_agent.chat(&body.message, &server_context, &cluster_nodes, &auth_cookie).await {
+    match state.ai_agent.chat(&body.message, &server_context, &cluster_nodes, &state.cluster_secret).await {
         Ok(response) => HttpResponse::Ok().json(serde_json::json!({
             "response": response,
         })),

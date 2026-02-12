@@ -154,13 +154,13 @@ impl AiAgent {
 
     /// Chat with the AI — multi-turn with command execution support
     /// cluster_nodes is a list of (node_id, hostname, base_url) for remote execution
-    /// auth_cookie is the session cookie for proxying requests to remote nodes
+    /// cluster_secret is used to authenticate with remote nodes via X-WolfStack-Secret
     pub async fn chat(
         &self,
         user_message: &str,
         system_context: &str,
         cluster_nodes: &[(String, String, String)],  // (id, hostname, base_url)
-        auth_cookie: &str,
+        cluster_secret: &str,
     ) -> Result<String, String> {
         let config = self.config.lock().unwrap().clone();
         if !config.is_configured() {
@@ -251,7 +251,7 @@ impl AiAgent {
                         let remote_url = format!("{}/api/ai/exec", base_url);
                         let remote_result = self.client
                             .post(&remote_url)
-                            .header("Cookie", auth_cookie)
+                            .header("X-WolfStack-Secret", cluster_secret)
                             .json(&serde_json::json!({ "command": cmd }))
                             .timeout(Duration::from_secs(15))
                             .send()
@@ -781,6 +781,16 @@ async fn call_claude(
     let text = resp.text().await.map_err(|e| format!("Claude response error: {}", e))?;
 
     if !status.is_success() {
+        let lower = text.to_lowercase();
+        if status.as_u16() == 429 || lower.contains("rate_limit") || lower.contains("quota") || lower.contains("resource_exhausted") {
+            return Err("Claude API rate limit or quota exceeded. Try switching to Gemini in AI Settings.".to_string());
+        }
+        if lower.contains("credit") || lower.contains("billing") || lower.contains("insufficient") {
+            return Err("Claude API credits exhausted. Try switching to Gemini in AI Settings, or top up your Anthropic account.".to_string());
+        }
+        if lower.contains("token") && (lower.contains("limit") || lower.contains("exceeded") || lower.contains("too long")) {
+            return Err("Claude token limit exceeded — your conversation may be too long. Try starting a fresh chat or switching to Gemini in AI Settings.".to_string());
+        }
         return Err(format!("Claude API {} — {}", status, text));
     }
 
@@ -848,6 +858,16 @@ async fn call_gemini(
     let text = resp.text().await.map_err(|e| format!("Gemini response error: {}", e))?;
 
     if !status.is_success() {
+        let lower = text.to_lowercase();
+        if status.as_u16() == 429 || lower.contains("rate_limit") || lower.contains("quota") || lower.contains("resource_exhausted") {
+            return Err("Gemini API rate limit or quota exceeded. Try switching to Claude in AI Settings.".to_string());
+        }
+        if lower.contains("billing") || lower.contains("insufficient") {
+            return Err("Gemini API quota exhausted. Try switching to Claude in AI Settings, or check your Google Cloud billing.".to_string());
+        }
+        if lower.contains("token") && (lower.contains("limit") || lower.contains("exceeded") || lower.contains("too long")) {
+            return Err("Gemini token limit exceeded — your conversation may be too long. Try starting a fresh chat or switching to Claude in AI Settings.".to_string());
+        }
         return Err(format!("Gemini API {} — {}", status, text));
     }
 
