@@ -59,14 +59,19 @@ pub async fn console_ws(
             let mut c = CommandBuilder::new("/bin/bash");
             c.args(&["-c",
                 "echo '⚡ Starting WolfStack upgrade...'; echo ''; \
-                 curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash; \
-                 EXIT_CODE=$?; echo ''; \
+                 TMPSCRIPT=$(mktemp /tmp/wolfstack-upgrade.XXXXXX.sh); \
+                 curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh -o \"$TMPSCRIPT\"; \
+                 chmod +x \"$TMPSCRIPT\"; \
+                 sudo bash \"$TMPSCRIPT\"; \
+                 EXIT_CODE=$?; \
+                 rm -f \"$TMPSCRIPT\"; \
+                 echo ''; \
                  if [ $EXIT_CODE -eq 0 ]; then \
                    echo '✅ Upgrade completed successfully.'; \
                  else \
                    echo \"❌ Upgrade failed with exit code $EXIT_CODE\"; \
                  fi; \
-                 echo ''; echo 'You may close this window.'"]);
+                 echo ''; echo 'Press Enter to close this window.'; read"]);
             c.env("TERM", "xterm-256color");
             c
         } else {
