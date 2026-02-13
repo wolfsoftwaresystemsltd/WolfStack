@@ -186,7 +186,7 @@ impl ClusterState {
     }
 
     /// Save remote nodes to disk
-    fn save_nodes(&self) {
+    pub fn save_nodes(&self) {
         let nodes = self.nodes.read().unwrap();
         let remote_nodes: Vec<&Node> = nodes.values()
             .filter(|n| !n.is_self)

@@ -3105,6 +3105,213 @@ async fn sync_mount_to_cluster(
 }
 
 /// POST /api/upgrade — run the WolfStack upgrade script in the background
+// ─── Config Export / Import ───
+
+/// Export all WolfStack configuration as a JSON file
+pub async fn config_export(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    info!("Config export requested");
+
+    let mut bundle = serde_json::Map::new();
+
+    // Helper: read a JSON file and insert into bundle
+    fn read_json_file(path: &str) -> Option<serde_json::Value> {
+        std::fs::read_to_string(path).ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    }
+
+    // Nodes (cluster links)
+    if let Some(v) = read_json_file("/etc/wolfstack/nodes.json") {
+        bundle.insert("nodes".into(), v);
+    }
+    // AI config
+    if let Some(v) = read_json_file("/etc/wolfstack/ai-config.json") {
+        bundle.insert("ai_config".into(), v);
+    }
+    // Storage config
+    if let Some(v) = read_json_file("/etc/wolfstack/storage.json") {
+        bundle.insert("storage_config".into(), v);
+    }
+    // Backup config (schedules only — strip entries to keep it small)
+    if let Some(v) = read_json_file("/etc/wolfstack/backups.json") {
+        if let Some(obj) = v.as_object() {
+            let mut cleaned = serde_json::Map::new();
+            if let Some(schedules) = obj.get("schedules") {
+                cleaned.insert("schedules".into(), schedules.clone());
+            }
+            bundle.insert("backup_config".into(), serde_json::Value::Object(cleaned));
+        }
+    }
+    // IP mappings
+    if let Some(v) = read_json_file("/etc/wolfstack/ip-mappings.json") {
+        bundle.insert("ip_mappings".into(), v);
+    }
+    // PBS config
+    if let Some(v) = read_json_file("/etc/wolfstack/pbs/config.json") {
+        bundle.insert("pbs_config".into(), v);
+    }
+
+    // Add metadata
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "unknown".into());
+    bundle.insert("exported_from".into(), serde_json::Value::String(hostname));
+    bundle.insert("exported_at".into(), serde_json::Value::String(
+        chrono::Utc::now().to_rfc3339()
+    ));
+    bundle.insert("version".into(), serde_json::Value::String(
+        env!("CARGO_PKG_VERSION").to_string()
+    ));
+
+    HttpResponse::Ok()
+        .insert_header(("Content-Type", "application/json"))
+        .insert_header(("Content-Disposition", "attachment; filename=\"wolfstack-config.json\""))
+        .json(serde_json::Value::Object(bundle))
+}
+
+/// Import WolfStack configuration from a JSON bundle
+pub async fn config_import(
+    req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    info!("Config import requested");
+
+    let bundle = body.into_inner();
+    let obj = match bundle.as_object() {
+        Some(o) => o,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Invalid config bundle — expected JSON object"
+        })),
+    };
+
+    let mut imported = Vec::new();
+    let mut errors = Vec::new();
+
+    // Ensure config dir exists
+    let _ = std::fs::create_dir_all("/etc/wolfstack");
+
+    // Import nodes — merge with existing, skip self
+    if let Some(nodes_val) = obj.get("nodes") {
+        match import_nodes(nodes_val, &state) {
+            Ok(count) => imported.push(format!("{} nodes", count)),
+            Err(e) => errors.push(format!("nodes: {}", e)),
+        }
+    }
+
+    // Simple file imports
+    let file_imports = [
+        ("ai_config", "/etc/wolfstack/ai-config.json", "AI config"),
+        ("storage_config", "/etc/wolfstack/storage.json", "storage config"),
+        ("ip_mappings", "/etc/wolfstack/ip-mappings.json", "IP mappings"),
+    ];
+
+    for (key, path, label) in &file_imports {
+        if let Some(val) = obj.get(*key) {
+            match write_json_file(path, val) {
+                Ok(_) => imported.push(label.to_string()),
+                Err(e) => errors.push(format!("{}: {}", label, e)),
+            }
+        }
+    }
+
+    // Backup config (schedules only)
+    if let Some(val) = obj.get("backup_config") {
+        // Merge schedules into existing config, keeping existing entries
+        let mut config = backup::load_config();
+        if let Some(schedules) = val.get("schedules").and_then(|v| v.as_array()) {
+            if let Ok(imported_schedules) = serde_json::from_value::<Vec<backup::BackupSchedule>>(
+                serde_json::Value::Array(schedules.clone())
+            ) {
+                let existing_ids: std::collections::HashSet<String> =
+                    config.schedules.iter().map(|s| s.id.clone()).collect();
+                let mut added = 0;
+                for schedule in imported_schedules {
+                    if !existing_ids.contains(&schedule.id) {
+                        config.schedules.push(schedule);
+                        added += 1;
+                    }
+                }
+                if let Err(e) = backup::save_config(&config) {
+                    errors.push(format!("backup schedules: {}", e));
+                } else {
+                    imported.push(format!("{} backup schedules", added));
+                }
+            }
+        }
+    }
+
+    // PBS config
+    if let Some(val) = obj.get("pbs_config") {
+        let _ = std::fs::create_dir_all("/etc/wolfstack/pbs");
+        match write_json_file("/etc/wolfstack/pbs/config.json", val) {
+            Ok(_) => imported.push("PBS config".into()),
+            Err(e) => errors.push(format!("PBS config: {}", e)),
+        }
+    }
+
+    let summary = if errors.is_empty() {
+        format!("Successfully imported: {}", imported.join(", "))
+    } else {
+        format!("Imported: {}. Errors: {}", imported.join(", "), errors.join(", "))
+    };
+
+    info!("Config import result: {}", summary);
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": summary,
+        "imported": imported,
+        "errors": errors,
+    }))
+}
+
+/// Write a serde_json::Value to a file as pretty JSON
+fn write_json_file(path: &str, val: &serde_json::Value) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create dir: {}", e))?;
+    }
+    let json = serde_json::to_string_pretty(val)
+        .map_err(|e| format!("Failed to serialize: {}", e))?;
+    std::fs::write(path, json)
+        .map_err(|e| format!("Failed to write {}: {}", path, e))
+}
+
+/// Import nodes into the cluster, merging with existing. Returns count of added nodes.
+fn import_nodes(nodes_val: &serde_json::Value, state: &web::Data<AppState>) -> Result<usize, String> {
+    // Parse as HashMap<String, Node> (same format as nodes.json)
+    let import_nodes: std::collections::HashMap<String, crate::agent::Node> =
+        serde_json::from_value(nodes_val.clone())
+            .map_err(|e| format!("Invalid nodes format: {}", e))?;
+
+    let self_id = &state.cluster.self_id;
+    let mut added = 0;
+
+    {
+        let mut nodes = state.cluster.nodes.write()
+            .map_err(|_| "Failed to acquire lock".to_string())?;
+        for (id, mut node) in import_nodes {
+            // Skip self
+            if id == *self_id {
+                continue;
+            }
+            // Only add if not already present
+            if !nodes.contains_key(&id) {
+                node.is_self = false;
+                node.online = false; // Will be updated on next poll
+                nodes.insert(id, node);
+                added += 1;
+            }
+        }
+    }
+
+    // Persist
+    state.cluster.save_nodes();
+
+    Ok(added)
+}
+
+/// POST /api/upgrade — run the WolfStack upgrade script in the background
 pub async fn system_upgrade(
     req: HttpRequest, state: web::Data<AppState>,
 ) -> HttpResponse {
@@ -3284,6 +3491,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/agent/storage/apply", web::post().to(agent_storage_apply))
         .route("/api/wolfnet/used-ips", web::get().to(wolfnet_used_ips_endpoint))
         // System
+        .route("/api/config/export", web::get().to(config_export))
+        .route("/api/config/import", web::post().to(config_import))
         .route("/api/upgrade", web::post().to(system_upgrade))
         // Node proxy — forward API calls to remote nodes (must be last — wildcard path)
         .route("/api/nodes/{id}/proxy/{path:.*}", web::get().to(node_proxy))

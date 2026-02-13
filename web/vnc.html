@@ -155,9 +155,53 @@
         }
 
         function connectVNC(host, port) {
-            const url = `ws://${host}:${port}`;
             const container = document.getElementById('vnc-container');
+            const isRemote = host !== window.location.hostname;
 
+            if (isRemote) {
+                // Remote host — try wss first, fall back to ws
+                const wssUrl = `wss://${host}:${port}`;
+                const wsUrl = `ws://${host}:${port}`;
+                let settled = false;
+
+                // Try wss first
+                try {
+                    const testWs = new WebSocket(wssUrl);
+                    const fallbackTimeout = setTimeout(() => {
+                        if (!settled) {
+                            settled = true;
+                            try { testWs.close(); } catch (e) { }
+                            doConnectVNC(wsUrl, container);
+                        }
+                    }, 3000);
+
+                    testWs.onopen = () => {
+                        if (!settled) {
+                            settled = true;
+                            clearTimeout(fallbackTimeout);
+                            testWs.close();
+                            doConnectVNC(wssUrl, container);
+                        }
+                    };
+
+                    testWs.onerror = () => {
+                        if (!settled) {
+                            settled = true;
+                            clearTimeout(fallbackTimeout);
+                            doConnectVNC(wsUrl, container);
+                        }
+                    };
+                } catch (e) {
+                    doConnectVNC(wsUrl, container);
+                }
+            } else {
+                // Local — match page protocol
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+                doConnectVNC(`${wsProtocol}://${host}:${port}`, container);
+            }
+        }
+
+        function doConnectVNC(url, container) {
             try {
                 rfb = new RFB(container, url, {
                     scaleViewport: true,

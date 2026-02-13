@@ -51,7 +51,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v7.7.5</span>
+                <span class="version">v7.9.6</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -83,6 +83,7 @@
             </div>
             <div class="sidebar-icon-buttons">
                 <button class="btn btn-icon" onclick="selectView('ai-settings')" title="AI Settings">⚙️</button>
+                <button class="btn btn-icon" onclick="selectView('config-backup')" title="Config Backup">📦</button>
                 <button class="btn btn-icon" onclick="window.open('https://wolfscale.org', '_blank')"
                     title="Help & Docs">❓</button>
                 <button class="btn btn-icon" onclick="openAddServerModal()" title="Add Server">➕</button>
@@ -1307,6 +1308,64 @@
                         <button class="btn btn-primary" onclick="saveAiConfig()">💾 Save Settings</button>
                         <button class="btn btn-sm" onclick="testAiConnection()">🧪 Test Connection</button>
                         <button class="btn btn-sm" onclick="sendTestEmail()">📧 Send Test Email</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Config Backup & Restore ═══ -->
+        <div id="page-config-backup" class="page-view" style="display:none;">
+            <div class="card">
+                <div class="card-header">
+                    <h3>📦 Config Backup & Restore</h3>
+                    <div style="font-size: 12px; color: var(--text-muted);">Export your WolfStack configuration and
+                        import it on other servers</div>
+                </div>
+                <div class="card-body" style="padding:24px;">
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+                        <!-- Export -->
+                        <div
+                            style="background:var(--bg-tertiary);border-radius:12px;padding:20px;border:1px solid var(--border);">
+                            <h4 style="margin:0 0 8px 0;font-size:15px;">📤 Export Config</h4>
+                            <p style="font-size:13px;color:var(--text-muted);margin:0 0 16px 0;">
+                                Download all cluster nodes, AI settings, storage config, backup schedules,
+                                and IP mappings as a single JSON file.
+                            </p>
+                            <button class="btn btn-primary" onclick="exportConfig()" id="btn-export-config">
+                                📥 Download Config
+                            </button>
+                        </div>
+                        <!-- Import -->
+                        <div
+                            style="background:var(--bg-tertiary);border-radius:12px;padding:20px;border:1px solid var(--border);">
+                            <h4 style="margin:0 0 8px 0;font-size:15px;">📥 Import Config</h4>
+                            <p style="font-size:13px;color:var(--text-muted);margin:0 0 16px 0;">
+                                Upload a previously exported config file to restore cluster links,
+                                settings, and schedules on this server.
+                            </p>
+                            <input type="file" id="config-import-file" accept=".json" style="display:none;"
+                                onchange="importConfigFile(this)">
+                            <button class="btn btn-primary"
+                                onclick="document.getElementById('config-import-file').click()">
+                                📤 Upload & Import
+                            </button>
+                        </div>
+                    </div>
+
+                    <div
+                        style="margin-top:20px;padding:16px;background:var(--bg-secondary);border-radius:8px;border:1px solid var(--border);">
+                        <h4 style="margin:0 0 8px;font-size:14px;color:var(--text-muted);">ℹ️ What's included</h4>
+                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:13px;">
+                            <div>✅ Cluster node links</div>
+                            <div>✅ AI agent config</div>
+                            <div>✅ Storage config</div>
+                            <div>✅ Backup schedules</div>
+                            <div>✅ IP mappings</div>
+                            <div>✅ PBS config</div>
+                        </div>
+                        <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0;">
+                            ⚠️ Does not include: login credentials, join tokens, TLS certificates, or container/VM data.
+                        </p>
                     </div>
                 </div>
             </div>

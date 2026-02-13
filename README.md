@@ -119,6 +119,8 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - Add remote servers and monitor them from one dashboard
 - Works over WolfNet mesh VPN or direct IP
 - Polls remote WolfStack instances for metrics and component status
+- **Join token security** — servers must provide a valid token to join the cluster
+- **Auto-purge** — unverified nodes are automatically removed on restart
 - **Remote container management** — start, stop, restart, remove, clone, and migrate containers on any server in your cluster
 - **Container count badges** — sidebar shows how many Docker and LXC containers each server has
 - **Web terminal** — open an interactive shell on any server (local or remote) directly from the sidebar
@@ -149,16 +151,36 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - **Automatic update check** — compares running version to GitHub
 
 ### 🟠 Proxmox VE Integration
+
+WolfStack supports Proxmox in two ways:
+
+**Option 1: Install WolfStack on Proxmox** (recommended)
+```bash
+# SSH into your Proxmox node and run:
+curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash
+```
+Then add it to your cluster using a join token (see below). This gives you the full WolfStack dashboard on the Proxmox node.
+
+**Option 2: Connect via Proxmox API** (remote monitoring only)
 - **Unified datacenter** — manage Proxmox VE clusters alongside native WolfStack nodes in one dashboard
 - **Multi-node cluster support** — auto-discovers all nodes in a Proxmox cluster and groups them under a named header in the sidebar
-- **Cluster name** — give each Proxmox cluster a friendly name (e.g. "Production Cluster")
 - **API token authentication** — secure connection using PVE API tokens (Token ID + Secret)
 - **Live metrics** — CPU, memory, disk, and uptime polled from each Proxmox node via REST API
 - **VM & container listing** — see all QEMU VMs and LXC containers with resource usage, progress bars, and status badges
 - **Guest control** — start, stop, shutdown, reboot, suspend, and resume Proxmox VMs and containers from WolfStack
 - **Console access** — one-click link to Proxmox noVNC console for running guests
-- **Cluster settings** — ⚙️ button to edit cluster name, API token, and TLS fingerprint for all nodes at once
 - **TLS support** — works with self-signed certificates (common in Proxmox installations)
+
+### 🔐 Join Token Security
+
+WolfStack servers require a **join token** to be added to a cluster. This prevents unauthorized servers from joining.
+
+- Each server generates a unique token on first startup, stored at `/etc/wolfstack/join-token`
+- Get the token via CLI: `wolfstack --show-token`
+- Get the token from the dashboard: open the "Add Server" modal — the token is shown at the bottom
+- When adding a server, WolfStack calls the remote server's `/api/cluster/verify-token` endpoint
+- Invalid tokens are rejected; unverified nodes are auto-purged on restart
+- Proxmox nodes use their PVE API token instead (no join token needed)
 
 #### Setting Up Proxmox Integration
 1. **Create an API Token** in Proxmox: `Datacenter → Permissions → API Tokens → Add`
@@ -198,7 +220,7 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 5. WolfStack automatically discovers all nodes in the cluster and adds them
 6. The cluster appears grouped in the sidebar with live metrics and VM/container counts
 
-#### Proxmox Troubleshooting
+### Proxmox Troubleshooting
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
@@ -264,8 +286,10 @@ All endpoints require authentication (cookie-based session) except `/api/agent/s
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/nodes` | List all cluster nodes |
-| POST | `/api/nodes` | Add a server to cluster |
+| POST | `/api/nodes` | Add a server to cluster (requires `join_token` for WolfStack nodes) |
 | DELETE | `/api/nodes/{id}` | Remove a server |
+| GET | `/api/auth/join-token` | Get this server's join token |
+| GET | `/api/cluster/verify-token` | Verify a join token (unauthenticated, for inter-node use) |
 
 ### Component Management
 

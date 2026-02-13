@@ -8045,3 +8045,60 @@ function onAiProviderChange() {
     fetchAiModels(provider, '');
 }
 
+// ─── Config Export / Import ───
+
+async function exportConfig() {
+    try {
+        const res = await fetch(apiUrl('/api/config/export'), { credentials: 'include' });
+        if (!res.ok) throw new Error('Export failed: ' + res.status);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'wolfstack-config.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showToast('Config exported successfully', 'success');
+    } catch (e) {
+        showToast('Export failed: ' + e.message, 'error');
+    }
+}
+
+async function importConfigFile(input) {
+    const file = input.files[0];
+    if (!file) return;
+
+    try {
+        const text = await file.text();
+        const json = JSON.parse(text);
+
+        if (!confirm('Import config from "' + (json.exported_from || 'unknown') +
+            '" (exported ' + (json.exported_at || 'unknown') + ')?\n\n' +
+            'This will merge cluster nodes and overwrite settings.')) {
+            input.value = '';
+            return;
+        }
+
+        const res = await fetch(apiUrl('/api/config/import'), {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: text,
+        });
+
+        const result = await res.json();
+        if (res.ok) {
+            showToast(result.message || 'Config imported successfully', 'success');
+            // Refresh the node list
+            setTimeout(() => fetchNodes(), 1000);
+        } else {
+            showToast(result.error || 'Import failed', 'error');
+        }
+    } catch (e) {
+        showToast('Import failed: ' + e.message, 'error');
+    }
+
+    input.value = '';
+}

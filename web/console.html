@@ -122,58 +122,103 @@
         // WebSocket URL
         let wsUrl;
         if (isPve) {
-            // PVE console — connect through WolfStack's PVE WebSocket proxy
+            // PVE console — connect through WolfStack's PVE WebSocket proxy (always local)
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             wsUrl = protocol + '//' + window.location.host + '/ws/pve-console/' + pveNodeId + '/' + pveVmid;
+            connectWebSocket(wsUrl);
+        } else if (isRemote) {
+            // Remote console — try wss first, fall back to ws
+            const wsHost = remoteHost + ':' + remotePort;
+            const wsPath = '/ws/console/' + type + '/' + encodeURIComponent(name);
+            const wssUrl = 'wss://' + wsHost + wsPath;
+            const wsUrlFallback = 'ws://' + wsHost + wsPath;
+
+            term.writeln('\x1b[90mTrying secure connection (wss)...\x1b[0m');
+            const testWs = new WebSocket(wssUrl);
+            testWs.binaryType = 'arraybuffer';
+            let settled = false;
+
+            const fallbackTimeout = setTimeout(() => {
+                if (!settled) {
+                    settled = true;
+                    try { testWs.close(); } catch (e) { }
+                    term.writeln('\x1b[90mFalling back to ws...\x1b[0m');
+                    connectWebSocket(wsUrlFallback);
+                }
+            }, 3000);
+
+            testWs.onopen = () => {
+                if (!settled) {
+                    settled = true;
+                    clearTimeout(fallbackTimeout);
+                    // wss worked — use this connection directly
+                    attachWebSocket(testWs);
+                }
+            };
+
+            testWs.onerror = () => {
+                if (!settled) {
+                    settled = true;
+                    clearTimeout(fallbackTimeout);
+                    term.writeln('\x1b[90mFalling back to ws...\x1b[0m');
+                    connectWebSocket(wsUrlFallback);
+                }
+            };
         } else {
-            // Standard console — docker, lxc, host, vm, upgrade
-            const wsHost = isRemote ? remoteHost + ':' + remotePort : window.location.host;
-            const protocol = (isRemote ? 'ws:' : (window.location.protocol === 'https:' ? 'wss:' : 'ws:'));
-            wsUrl = protocol + '//' + wsHost + '/ws/console/' + type + '/' + encodeURIComponent(name);
+            // Local console — match page protocol
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            wsUrl = protocol + '//' + window.location.host + '/ws/console/' + type + '/' + encodeURIComponent(name);
+            connectWebSocket(wsUrl);
         }
-        const ws = new WebSocket(wsUrl);
-        ws.binaryType = 'arraybuffer';
 
-        ws.onopen = () => {
-            statusEl.textContent = 'Connected';
-            statusEl.className = 'status connected';
-            term.writeln('\x1b[32mConnected!\x1b[0m\r\n');
-            doFit();
-            term.focus();
-        };
+        function connectWebSocket(url) {
+            const ws = new WebSocket(url);
+            ws.binaryType = 'arraybuffer';
+            attachWebSocket(ws);
+        }
 
-        ws.onmessage = (event) => {
-            if (typeof event.data === 'string') {
-                term.write(event.data);
-            } else {
-                term.write(new Uint8Array(event.data));
-            }
-        };
+        function attachWebSocket(ws) {
+            ws.onopen = () => {
+                statusEl.textContent = 'Connected';
+                statusEl.className = 'status connected';
+                term.writeln('\x1b[32mConnected!\x1b[0m\r\n');
+                doFit();
+                term.focus();
+            };
 
-        ws.onclose = (e) => {
-            statusEl.textContent = 'Disconnected';
-            statusEl.className = 'status error';
-            if (type === 'upgrade') {
-                term.writeln('\r\n\x1b[33m─────────────────────────────────────────────\x1b[0m');
-                term.writeln('\r\n\x1b[32m✅ WolfStack service is restarting...\x1b[0m');
-                term.writeln('\r\n\x1b[36mPlease refresh your browser and log in again.\x1b[0m');
-                term.writeln('\r\n\x1b[33m─────────────────────────────────────────────\x1b[0m');
-            } else {
-                term.writeln('\r\n\x1b[31mConnection closed (code: ' + e.code + ').\x1b[0m');
-            }
-        };
+            ws.onmessage = (event) => {
+                if (typeof event.data === 'string') {
+                    term.write(event.data);
+                } else {
+                    term.write(new Uint8Array(event.data));
+                }
+            };
 
-        ws.onerror = () => {
-            statusEl.textContent = 'Error';
-            statusEl.className = 'status error';
-            term.writeln('\r\n\x1b[31mWebSocket connection failed.\x1b[0m');
-        };
+            ws.onclose = (e) => {
+                statusEl.textContent = 'Disconnected';
+                statusEl.className = 'status error';
+                if (type === 'upgrade') {
+                    term.writeln('\r\n\x1b[33m─────────────────────────────────────────────\x1b[0m');
+                    term.writeln('\r\n\x1b[32m✅ WolfStack service is restarting...\x1b[0m');
+                    term.writeln('\r\n\x1b[36mPlease refresh your browser and log in again.\x1b[0m');
+                    term.writeln('\r\n\x1b[33m─────────────────────────────────────────────\x1b[0m');
+                } else {
+                    term.writeln('\r\n\x1b[31mConnection closed (code: ' + e.code + ').\x1b[0m');
+                }
+            };
 
-        term.onData(data => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(data);
-            }
-        });
+            ws.onerror = () => {
+                statusEl.textContent = 'Error';
+                statusEl.className = 'status error';
+                term.writeln('\r\n\x1b[31mWebSocket connection failed.\x1b[0m');
+            };
+
+            term.onData(data => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(data);
+                }
+            });
+        }
     </script>
 </body>
 
