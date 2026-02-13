@@ -532,13 +532,10 @@ fi
 
 echo "✓ Build complete"
 
-# ─── Stop service if running (for upgrades) ─────────────────────────────────
+# ─── Flag restart if service is running (for upgrades) ───────────────────────
 if systemctl is-active --quiet wolfstack 2>/dev/null; then
     echo ""
-    echo "Stopping WolfStack service for upgrade..."
-    systemctl stop wolfstack
-    sleep 2
-    echo "✓ Service stopped"
+    echo "WolfStack service is running — will restart after upgrade."
     RESTART_SERVICE=true
 else
     RESTART_SERVICE=false
