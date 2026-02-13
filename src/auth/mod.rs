@@ -1,3 +1,7 @@
+// Written by Paul Clevett
+// (C)Copyright Wolf Software Systems Ltd
+// https://wolf.uk.com
+
 //! Authentication — Linux system user authentication via crypt()
 //!
 //! Authenticates against /etc/shadow using the system's crypt() function.

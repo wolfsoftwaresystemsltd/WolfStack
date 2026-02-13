@@ -1,3 +1,7 @@
+// Written by Paul Clevett
+// (C)Copyright Wolf Software Systems Ltd
+// https://wolf.uk.com
+
 //! WolfStack — Server Management Platform for the Wolf Software Suite
 //!
 //! A Proxmox-like management dashboard that:

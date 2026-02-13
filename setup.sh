@@ -1,4 +1,8 @@
 #!/bin/bash
+# Written by Paul Clevett
+# (C)Copyright Wolf Software Systems Ltd
+# https://wolf.uk.com
+#
 #
 # WolfStack Quick Install Script
 # Installs WolfStack server management dashboard

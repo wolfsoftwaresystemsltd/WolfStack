@@ -1,3 +1,7 @@
+// Written by Paul Clevett
+// (C)Copyright Wolf Software Systems Ltd
+// https://wolf.uk.com
+
 //! System monitoring — collects CPU, RAM, disk, and network stats
 
 use serde::{Deserialize, Serialize};

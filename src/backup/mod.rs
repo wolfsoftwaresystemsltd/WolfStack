@@ -1,3 +1,7 @@
+// Written by Paul Clevett
+// (C)Copyright Wolf Software Systems Ltd
+// https://wolf.uk.com
+
 //! Backup & Restore — Docker, LXC, VM, and config backup management
 //!
 //! Supports storage targets: local path, S3, remote WolfStack node, WolfDisk

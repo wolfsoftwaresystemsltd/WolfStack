@@ -1,3 +1,7 @@
+// Written by Paul Clevett
+// (C)Copyright Wolf Software Systems Ltd
+// https://wolf.uk.com
+
 //! Installer — manages installation and status of Wolf suite components
 
 use serde::{Deserialize, Serialize};

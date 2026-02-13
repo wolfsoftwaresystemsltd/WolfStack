@@ -1,3 +1,7 @@
+// Written by Paul Clevett
+// (C)Copyright Wolf Software Systems Ltd
+// https://wolf.uk.com
+
 use actix_web::{web, HttpRequest, HttpResponse, Error};
 use actix_ws::Message;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};

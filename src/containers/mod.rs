@@ -1,3 +1,7 @@
+// Written by Paul Clevett
+// (C)Copyright Wolf Software Systems Ltd
+// https://wolf.uk.com
+
 //! Container management — Docker and LXC support for WolfStack
 //!
 //! Docker: communicates via /var/run/docker.sock REST API

@@ -1,4 +1,8 @@
 #!/bin/bash
+# Written by Paul Clevett
+# (C)Copyright Wolf Software Systems Ltd
+# https://wolf.uk.com
+#
 # WolfNet Docker Networking Diagnostic Script
 # Run this ON THE SERVER where Docker containers are running
 

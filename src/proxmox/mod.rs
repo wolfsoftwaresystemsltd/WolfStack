@@ -1,3 +1,7 @@
+// Written by Paul Clevett
+// (C)Copyright Wolf Software Systems Ltd
+// https://wolf.uk.com
+
 #![allow(dead_code)]
 use tracing::{info, debug};
 use serde::{Deserialize, Serialize};

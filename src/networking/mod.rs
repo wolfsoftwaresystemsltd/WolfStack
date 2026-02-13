@@ -1,3 +1,7 @@
+// Written by Paul Clevett
+// (C)Copyright Wolf Software Systems Ltd
+// https://wolf.uk.com
+
 //! Networking — System network interface and VLAN management
 //!
 //! Provides read/write access to:

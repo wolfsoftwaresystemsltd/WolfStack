@@ -1,3 +1,7 @@
+// Written by Paul Clevett
+// (C)Copyright Wolf Software Systems Ltd
+// https://wolf.uk.com
+
 //! Storage Manager — mount and manage S3, NFS, directory, and WolfDisk storage
 //!
 //! Supports:

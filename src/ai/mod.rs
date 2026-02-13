@@ -1,3 +1,7 @@
+// Written by Paul Clevett
+// (C)Copyright Wolf Software Systems Ltd
+// https://wolf.uk.com
+
 //! AI Agent — LLM-powered monitoring and chat assistant
 //!
 //! Each WolfStack node runs an AI agent that:

@@ -1,3 +1,7 @@
+// Written by Paul Clevett
+// (C)Copyright Wolf Software Systems Ltd
+// https://wolf.uk.com
+
 //! REST API for WolfStack dashboard and agent communication
 
 use actix_web::{web, HttpResponse, HttpRequest, cookie::Cookie};

@@ -1,3 +1,7 @@
+// Written by Paul Clevett
+// (C)Copyright Wolf Software Systems Ltd
+// https://wolf.uk.com
+
 //! Agent — handles server-to-server communication
 //!
 //! Each WolfStack instance runs an agent that:

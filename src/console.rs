@@ -1,3 +1,7 @@
+// Written by Paul Clevett
+// (C)Copyright Wolf Software Systems Ltd
+// https://wolf.uk.com
+
 //! WebSocket console handler — provides interactive terminal sessions
 //! for Docker and LXC containers via docker exec / lxc-attach.
 
