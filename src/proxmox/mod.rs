@@ -225,13 +225,14 @@ impl PveClient {
     }
 
     /// List all LXC containers on this node
+    /// Fetches hostname from per-container config if not in the list response
     pub async fn list_containers(&self) -> Result<Vec<PveGuest>, String> {
         let data = self.get(&format!("/nodes/{}/lxc", self.node_name)).await?;
         let arr = data.as_array().ok_or("Expected array from /lxc")?;
 
-        Ok(arr.iter().map(|v| {
+        let mut guests: Vec<PveGuest> = arr.iter().map(|v| {
             let vmid = v.get("vmid").and_then(|v| v.as_u64()).unwrap_or(0);
-            // Name fallback: name -> hostname -> "" (frontend will show "CT {vmid}")
+            // Try name and hostname from the list response first
             let name = v.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
                 .or_else(|| v.get("hostname").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
                 .unwrap_or("").to_string();
@@ -249,7 +250,27 @@ impl PveClient {
                 uptime: v.get("uptime").and_then(|v| v.as_u64()).unwrap_or(0),
                 node: self.node_name.clone(),
             }
-        }).collect())
+        }).collect();
+
+        // For containers with no name, fetch hostname from their individual config
+        let unnamed: Vec<usize> = guests.iter().enumerate()
+            .filter(|(_, g)| g.name.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+
+        for idx in unnamed {
+            let vmid = guests[idx].vmid;
+            if let Ok(cfg) = self.get(&format!("/nodes/{}/lxc/{}/config", self.node_name, vmid)).await {
+                if let Some(hostname) = cfg.get("hostname").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    guests[idx].name = hostname.to_string();
+                } else if let Some(desc) = cfg.get("description").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    // Fall back to first line of description/notes
+                    guests[idx].name = desc.lines().next().unwrap_or("").to_string();
+                }
+            }
+        }
+
+        Ok(guests)
     }
 
     /// Get all guests (VMs + containers)
