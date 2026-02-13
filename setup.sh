@@ -668,10 +668,7 @@ fi
 # ─── Restart if upgrading ───────────────────────────────────────────────────
 if [ "$RESTART_SERVICE" = "true" ]; then
     echo ""
-    echo "Restarting WolfStack service in 3 seconds..."
-    # Defer restart so the upgrade console can show the completion message
-    nohup bash -c "sleep 3 && systemctl restart wolfstack" &>/dev/null &
-    echo "✓ Service restart scheduled"
+    echo "✓ Upgrade binaries replaced — service will use new version on next restart."
 fi
 
 # ─── Firewall ───────────────────────────────────────────────────────────────
@@ -750,3 +747,6 @@ echo "  Restart:    sudo systemctl restart wolfstack"
 echo "  Config:     /etc/wolfstack/config.toml"
 echo ""
 echo "**** UPGRADE COMPLETE ****"
+echo ""
+echo "Please Refresh your browser if upgrading..."
+echo "Run: sudo systemctl restart wolfstack"
