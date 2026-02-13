@@ -18,6 +18,28 @@ use tracing::{warn, debug};
 use crate::monitoring::SystemMetrics;
 use crate::installer::ComponentStatus;
 
+/// Check if an address is on a private/local network (RFC1918 + loopback + link-local)
+/// This is used to restrict gossip auto-discovery to local networks only.
+fn is_private_address(addr: &str) -> bool {
+    // Parse as IP address
+    if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_private()       // 10.x, 172.16-31.x, 192.168.x
+                || v4.is_loopback()   // 127.x
+                || v4.is_link_local() // 169.254.x
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback()      // ::1
+            }
+        }
+    } else {
+        // Not a valid IP (could be a hostname) — treat as local
+        // This handles things like "localhost" or hostnames on local DNS
+        true
+    }
+}
+
 /// Track consecutive poll failures per node — only mark offline after 2+ failures
 static POLL_FAIL_COUNTS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, u32>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
@@ -641,6 +663,14 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                         || (n.hostname == known.hostname && n.port == known.port && n.node_type == known.node_type)
                                     });
                                     if !already_known {
+                                        // Only auto-add nodes on private/local networks
+                                        // Public-IP nodes must be added manually to prevent
+                                        // machines from accidentally switching hosts
+                                        if !is_private_address(&known.address) {
+                                            debug!("Skipping gossip auto-add for {} ({}) — public address {} (must be added manually)",
+                                                known.id, known.hostname, known.address);
+                                            continue;
+                                        }
                                         debug!("Discovered new node via gossip from {}: {} ({}) at {}:{}",
                                             node.id, known.id, known.node_type, known.address, known.port);
                                         let mut new_node = known.clone();
