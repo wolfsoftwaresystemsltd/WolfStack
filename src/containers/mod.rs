@@ -1505,6 +1505,24 @@ pub fn lxc_save_config(container: &str, content: &str) -> Result<String, String>
         .map_err(|e| format!("Failed to save config: {}", e))
 }
 
+/// Structured representation of a single LXC network interface
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LxcNetInterface {
+    pub index: u32,
+    pub net_type: String,      // veth, etc.
+    pub link: String,          // bridge name
+    pub name: String,          // interface name inside container (eth0)
+    pub hwaddr: String,        // MAC address
+    pub ipv4: String,          // e.g. "192.168.1.100/24" or "" for DHCP
+    pub ipv4_gw: String,       // gateway
+    pub ipv6: String,
+    pub ipv6_gw: String,
+    pub firewall: bool,
+    pub mtu: String,
+    pub vlan: String,
+    pub flags: String,         // e.g. "up"
+}
+
 /// Structured representation of an LXC config
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LxcParsedConfig {
@@ -1516,18 +1534,21 @@ pub struct LxcParsedConfig {
     pub start_order: u32,
     pub unprivileged: bool,
 
-    // Network
-    pub net_type: String,      // veth, etc.
-    pub net_link: String,      // bridge name
-    pub net_name: String,      // interface name inside container (eth0)
-    pub net_hwaddr: String,    // MAC address
-    pub net_ipv4: String,      // e.g. "192.168.1.100/24" or "" for DHCP
-    pub net_ipv4_gw: String,   // gateway
+    // Network — flat fields kept for backward compat (populated from net.0)
+    pub net_type: String,
+    pub net_link: String,
+    pub net_name: String,
+    pub net_hwaddr: String,
+    pub net_ipv4: String,
+    pub net_ipv4_gw: String,
     pub net_ipv6: String,
     pub net_ipv6_gw: String,
     pub net_firewall: bool,
     pub net_mtu: String,
     pub net_vlan: String,
+
+    // All network interfaces
+    pub network_interfaces: Vec<LxcNetInterface>,
 
     // Resources
     pub memory_limit: String,  // e.g. "1G", "512M"
@@ -1559,6 +1580,9 @@ pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
         ..Default::default()
     };
 
+    // Collect network interfaces by index
+    let mut net_map: std::collections::BTreeMap<u32, LxcNetInterface> = std::collections::BTreeMap::new();
+
     for line in content.lines() {
         let line = line.trim();
         if line.starts_with('#') || line.is_empty() { continue; }
@@ -1568,24 +1592,43 @@ pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
         let key = parts[0].trim();
         let val = parts[1].trim();
 
+        // Parse lxc.net.N.* keys for all network interfaces
+        if key.starts_with("lxc.net.") {
+            let remainder = &key["lxc.net.".len()..];
+            if let Some(dot_pos) = remainder.find('.') {
+                if let Ok(idx) = remainder[..dot_pos].parse::<u32>() {
+                    let field = &remainder[dot_pos + 1..];
+                    let nic = net_map.entry(idx).or_insert_with(|| LxcNetInterface {
+                        index: idx,
+                        ..Default::default()
+                    });
+                    match field {
+                        "type" => nic.net_type = val.to_string(),
+                        "link" => nic.link = val.to_string(),
+                        "name" => nic.name = val.to_string(),
+                        "hwaddr" => nic.hwaddr = val.to_string(),
+                        "ipv4.address" => nic.ipv4 = val.to_string(),
+                        "ipv4.gateway" => nic.ipv4_gw = val.to_string(),
+                        "ipv6.address" => nic.ipv6 = val.to_string(),
+                        "ipv6.gateway" => nic.ipv6_gw = val.to_string(),
+                        "flags" => nic.flags = val.to_string(),
+                        "mtu" => nic.mtu = val.to_string(),
+                        "vlan.id" => nic.vlan = val.to_string(),
+                        "firewall" => nic.firewall = val == "1",
+                        _ => {}
+                    }
+                }
+            }
+            continue;
+        }
+
         match key {
             "lxc.uts.name" => cfg.hostname = val.to_string(),
             "lxc.arch" => cfg.arch = val.to_string(),
             "lxc.start.auto" => cfg.autostart = val == "1",
             "lxc.start.delay" => cfg.start_delay = val.parse().unwrap_or(0),
             "lxc.start.order" => cfg.start_order = val.parse().unwrap_or(0),
-            "lxc.idmap" => cfg.unprivileged = true, // presence of idmap means unprivileged
-            "lxc.net.0.type" => cfg.net_type = val.to_string(),
-            "lxc.net.0.link" => cfg.net_link = val.to_string(),
-            "lxc.net.0.name" => cfg.net_name = val.to_string(),
-            "lxc.net.0.hwaddr" => cfg.net_hwaddr = val.to_string(),
-            "lxc.net.0.ipv4.address" => cfg.net_ipv4 = val.to_string(),
-            "lxc.net.0.ipv4.gateway" => cfg.net_ipv4_gw = val.to_string(),
-            "lxc.net.0.ipv6.address" => cfg.net_ipv6 = val.to_string(),
-            "lxc.net.0.ipv6.gateway" => cfg.net_ipv6_gw = val.to_string(),
-            "lxc.net.0.flags" => {} // "up" — we'll always include it
-            "lxc.net.0.mtu" => cfg.net_mtu = val.to_string(),
-            "lxc.net.0.vlan.id" => cfg.net_vlan = val.to_string(),
+            "lxc.idmap" => cfg.unprivileged = true,
             _ => {
                 // Feature detection
                 if key == "lxc.mount.entry" && val.contains("/dev/net/tun") {
@@ -1626,18 +1669,30 @@ pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
         }
     }
 
-    // Default interface name
-    if cfg.net_name.is_empty() && !cfg.net_type.is_empty() {
-        cfg.net_name = "eth0".to_string();
-    }
-
-    // Check firewall from net config
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with("lxc.net.0.firewall") {
-            cfg.net_firewall = line.contains("1");
+    // Set default interface name for NICs missing one
+    for nic in net_map.values_mut() {
+        if nic.name.is_empty() && !nic.net_type.is_empty() {
+            nic.name = format!("eth{}", nic.index);
         }
     }
+
+    // Populate flat fields from NIC 0 for backward compatibility
+    if let Some(nic0) = net_map.get(&0) {
+        cfg.net_type = nic0.net_type.clone();
+        cfg.net_link = nic0.link.clone();
+        cfg.net_name = nic0.name.clone();
+        cfg.net_hwaddr = nic0.hwaddr.clone();
+        cfg.net_ipv4 = nic0.ipv4.clone();
+        cfg.net_ipv4_gw = nic0.ipv4_gw.clone();
+        cfg.net_ipv6 = nic0.ipv6.clone();
+        cfg.net_ipv6_gw = nic0.ipv6_gw.clone();
+        cfg.net_firewall = nic0.firewall;
+        cfg.net_mtu = nic0.mtu.clone();
+        cfg.net_vlan = nic0.vlan.clone();
+    }
+
+    // Store all NICs
+    cfg.network_interfaces = net_map.into_values().collect();
 
     // Read WolfNet IP from file
     let wolfnet_ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", container);
@@ -1659,7 +1714,7 @@ pub struct LxcSettingsUpdate {
     pub start_order: Option<u32>,
     pub unprivileged: Option<bool>,
 
-    // Network
+    // Network (flat fields for backward compat — net.0 only)
     pub net_link: Option<String>,
     pub net_name: Option<String>,
     pub net_hwaddr: Option<String>,
@@ -1669,6 +1724,9 @@ pub struct LxcSettingsUpdate {
     pub net_ipv6_gw: Option<String>,
     pub net_mtu: Option<String>,
     pub net_vlan: Option<String>,
+
+    // All network interfaces (overrides flat fields if present)
+    pub network_interfaces: Option<Vec<LxcNetInterface>>,
 
     // Resources
     pub memory_limit: Option<String>,
@@ -1697,10 +1755,6 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
     // Keys we manage — we'll remove these and re-add them with new values
     let managed_keys = [
         "lxc.uts.name", "lxc.start.auto", "lxc.start.delay", "lxc.start.order",
-        "lxc.net.0.link", "lxc.net.0.name", "lxc.net.0.hwaddr",
-        "lxc.net.0.ipv4.address", "lxc.net.0.ipv4.gateway",
-        "lxc.net.0.ipv6.address", "lxc.net.0.ipv6.gateway",
-        "lxc.net.0.mtu", "lxc.net.0.vlan.id", "lxc.net.0.firewall",
     ];
 
     // Feature-related lines we'll manage
@@ -1734,6 +1788,9 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
 
         // Skip managed keys — we'll re-add them
         if managed_keys.contains(&key) { continue; }
+
+        // Skip ALL lxc.net.N.* keys — we'll re-add them from network_interfaces
+        if key.starts_with("lxc.net.") { continue; }
 
         // Skip feature mount entries we manage
         if key == "lxc.mount.entry" && feature_markers.iter().any(|m| val.contains(m)) { continue; }
@@ -1773,48 +1830,65 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
         if order > 0 { preserved.push(format!("lxc.start.order = {}", order)); }
     }
 
-    // Network
-    let link = settings.net_link.as_deref().unwrap_or(&current.net_link);
-    if !link.is_empty() {
-        preserved.push(format!("lxc.net.0.link = {}", link));
-    }
+    // Network — build list of interfaces to write
+    let nics: Vec<LxcNetInterface> = if let Some(ref ifaces) = settings.network_interfaces {
+        // Use full multi-NIC data from frontend
+        ifaces.clone()
+    } else {
+        // Backward compat: build single NIC from flat fields + current config
+        let mut nic0 = current.network_interfaces.first().cloned().unwrap_or_default();
+        if let Some(ref v) = settings.net_link { nic0.link = v.clone(); }
+        if let Some(ref v) = settings.net_name { nic0.name = v.clone(); }
+        if let Some(ref v) = settings.net_hwaddr { nic0.hwaddr = v.clone(); }
+        if let Some(ref v) = settings.net_ipv4 { nic0.ipv4 = v.clone(); }
+        if let Some(ref v) = settings.net_ipv4_gw { nic0.ipv4_gw = v.clone(); }
+        if let Some(ref v) = settings.net_ipv6 { nic0.ipv6 = v.clone(); }
+        if let Some(ref v) = settings.net_ipv6_gw { nic0.ipv6_gw = v.clone(); }
+        if let Some(ref v) = settings.net_mtu { nic0.mtu = v.clone(); }
+        if let Some(ref v) = settings.net_vlan { nic0.vlan = v.clone(); }
+        // Include other existing NICs beyond index 0
+        let mut all = vec![nic0];
+        for nic in current.network_interfaces.iter().skip(1) {
+            all.push(nic.clone());
+        }
+        all
+    };
 
-    let net_name = settings.net_name.as_deref().unwrap_or(&current.net_name);
-    if !net_name.is_empty() {
-        preserved.push(format!("lxc.net.0.name = {}", net_name));
-    }
-
-    let hwaddr = settings.net_hwaddr.as_deref().unwrap_or(&current.net_hwaddr);
-    if !hwaddr.is_empty() {
-        preserved.push(format!("lxc.net.0.hwaddr = {}", hwaddr));
-    }
-
-    let ipv4 = settings.net_ipv4.as_deref().unwrap_or(&current.net_ipv4);
-    if !ipv4.is_empty() {
-        preserved.push(format!("lxc.net.0.ipv4.address = {}", ipv4));
-    }
-    let gw4 = settings.net_ipv4_gw.as_deref().unwrap_or(&current.net_ipv4_gw);
-    if !gw4.is_empty() {
-        preserved.push(format!("lxc.net.0.ipv4.gateway = {}", gw4));
-    }
-
-    let ipv6 = settings.net_ipv6.as_deref().unwrap_or(&current.net_ipv6);
-    if !ipv6.is_empty() {
-        preserved.push(format!("lxc.net.0.ipv6.address = {}", ipv6));
-    }
-    let gw6 = settings.net_ipv6_gw.as_deref().unwrap_or(&current.net_ipv6_gw);
-    if !gw6.is_empty() {
-        preserved.push(format!("lxc.net.0.ipv6.gateway = {}", gw6));
-    }
-
-    let mtu = settings.net_mtu.as_deref().unwrap_or(&current.net_mtu);
-    if !mtu.is_empty() {
-        preserved.push(format!("lxc.net.0.mtu = {}", mtu));
-    }
-
-    let vlan = settings.net_vlan.as_deref().unwrap_or(&current.net_vlan);
-    if !vlan.is_empty() {
-        preserved.push(format!("lxc.net.0.vlan.id = {}", vlan));
+    // Write all network interfaces
+    for nic in &nics {
+        let i = nic.index;
+        let net_type = if nic.net_type.is_empty() { "veth" } else { &nic.net_type };
+        preserved.push(format!("lxc.net.{}.type = {}", i, net_type));
+        preserved.push(format!("lxc.net.{}.flags = up", i));
+        if !nic.link.is_empty() {
+            preserved.push(format!("lxc.net.{}.link = {}", i, nic.link));
+        }
+        let iface_name = if nic.name.is_empty() { format!("eth{}", i) } else { nic.name.clone() };
+        preserved.push(format!("lxc.net.{}.name = {}", i, iface_name));
+        if !nic.hwaddr.is_empty() {
+            preserved.push(format!("lxc.net.{}.hwaddr = {}", i, nic.hwaddr));
+        }
+        if !nic.ipv4.is_empty() {
+            preserved.push(format!("lxc.net.{}.ipv4.address = {}", i, nic.ipv4));
+        }
+        if !nic.ipv4_gw.is_empty() {
+            preserved.push(format!("lxc.net.{}.ipv4.gateway = {}", i, nic.ipv4_gw));
+        }
+        if !nic.ipv6.is_empty() {
+            preserved.push(format!("lxc.net.{}.ipv6.address = {}", i, nic.ipv6));
+        }
+        if !nic.ipv6_gw.is_empty() {
+            preserved.push(format!("lxc.net.{}.ipv6.gateway = {}", i, nic.ipv6_gw));
+        }
+        if !nic.mtu.is_empty() {
+            preserved.push(format!("lxc.net.{}.mtu = {}", i, nic.mtu));
+        }
+        if !nic.vlan.is_empty() {
+            preserved.push(format!("lxc.net.{}.vlan.id = {}", i, nic.vlan));
+        }
+        if nic.firewall {
+            preserved.push(format!("lxc.net.{}.firewall = 1", i));
+        }
     }
 
     // Resources

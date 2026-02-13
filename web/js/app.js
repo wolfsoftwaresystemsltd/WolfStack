@@ -3089,6 +3089,26 @@ function openPveClusterSettings(clusterName) {
                     <label>TLS Fingerprint</label>
                     <input type="text" class="form-control" id="pve-settings-fingerprint" value="${first.pve_fingerprint || ''}">
                 </div>
+
+                <div style="margin-top:16px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                        <h4 style="margin:0;font-size:13px;">🌐 WolfNet Cluster Status</h4>
+                        <button class="btn btn-sm" onclick="checkClusterWolfnetStatus()" style="font-size:11px;padding:4px 10px;">🔍 Check Status</button>
+                    </div>
+                    <div id="pve-wolfnet-status" style="font-size:12px;color:var(--text-muted);">
+                        ${clusterNodes.map(n => `
+                            <div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);" data-wolfnet-node="${n.id}">
+                                <span style="font-size:14px;">❓</span>
+                                <strong>${n.pve_node_name || n.hostname}</strong>
+                                <span style="font-family:monospace;color:var(--text-muted);">${n.address}</span>
+                                <span class="wolfnet-badge" style="margin-left:auto;padding:2px 8px;border-radius:4px;font-size:11px;background:var(--bg-secondary);color:var(--text-muted);">Unknown</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+                        WolfNet connects your cluster nodes over a secure overlay network. Nodes need WolfNet installed and peered to communicate.
+                    </div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
@@ -3136,6 +3156,62 @@ async function savePveClusterSettings() {
     modal.remove();
     showToast('Cluster settings updated', 'success');
     fetchNodes();
+}
+
+async function checkClusterWolfnetStatus() {
+    const modal = document.getElementById('pve-settings-modal');
+    if (!modal) return;
+    const nodeRows = modal.querySelectorAll('[data-wolfnet-node]');
+
+    for (const row of nodeRows) {
+        const nodeId = row.getAttribute('data-wolfnet-node');
+        const node = allNodes.find(n => n.id === nodeId);
+        if (!node) continue;
+
+        const icon = row.querySelector('span:first-child');
+        const badge = row.querySelector('.wolfnet-badge');
+
+        // Show loading
+        icon.textContent = '⏳';
+        badge.textContent = 'Checking...';
+        badge.style.background = 'var(--bg-secondary)';
+        badge.style.color = 'var(--text-muted)';
+
+        try {
+            // Use the node's API to check network interfaces
+            const baseUrl = node.is_self ? '' : `http://${node.address}:${node.port}`;
+            const resp = await fetch(`${baseUrl}/api/networking/interfaces`, {
+                signal: AbortSignal.timeout(5000)
+            });
+            if (resp.ok) {
+                const ifaces = await resp.json();
+                const wolfnet = (Array.isArray(ifaces) ? ifaces : []).find(i =>
+                    i.name === 'wolfnet0' || (i.name && i.name.startsWith('wolfnet'))
+                );
+                if (wolfnet) {
+                    icon.textContent = '✅';
+                    badge.textContent = 'Connected';
+                    badge.style.background = '#10b98122';
+                    badge.style.color = '#10b981';
+                } else {
+                    icon.textContent = '❌';
+                    badge.textContent = 'Not Installed';
+                    badge.style.background = '#ef444422';
+                    badge.style.color = '#ef4444';
+                }
+            } else {
+                icon.textContent = '⚠️';
+                badge.textContent = 'Unreachable';
+                badge.style.background = '#f59e0b22';
+                badge.style.color = '#f59e0b';
+            }
+        } catch (e) {
+            icon.textContent = '⚠️';
+            badge.textContent = 'Offline';
+            badge.style.background = '#f59e0b22';
+            badge.style.color = '#f59e0b';
+        }
+    }
 }
 
 // ─── WolfStack Cluster Settings ───
@@ -4823,10 +4899,14 @@ function renderLxcContainers(containers, stats) {
     }
     empty.style.display = 'none';
 
+    const btnStyle = 'margin:2px;font-size:20px;line-height:1;padding:4px 6px;';
+    const disStyle = 'margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;opacity:0.4;cursor:not-allowed;pointer-events:none;';
+
     table.innerHTML = containers.map(c => {
         const s = stats[c.name] || {};
         const isRunning = c.state === 'running';
-        const stateColor = isRunning ? '#10b981' : '#6b7280';
+        const isFrozen = c.state === 'frozen';
+        const stateColor = isRunning ? '#10b981' : isFrozen ? '#f59e0b' : '#6b7280';
 
         return `<tr>
             <td><strong>${c.hostname || c.name}</strong>${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
@@ -4835,19 +4915,16 @@ function renderLxcContainers(containers, stats) {
             <td>${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
             <td>${s.memory_usage ? formatBytes(s.memory_usage) + (s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : '') : '-'}</td>
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleLxcAutostart('${c.name}', this.checked)"></td>
-            <td>
-                ${isRunning ? `
-                    <button class="btn btn-sm" style="margin:2px;" onclick="lxcAction('${c.name}', 'stop')" title="Stop">⏹</button>
-                    <button class="btn btn-sm" style="margin:2px;" onclick="lxcAction('${c.name}', 'restart')" title="Restart">🔄</button>
-                    <button class="btn btn-sm" style="margin:2px;" onclick="lxcAction('${c.name}', 'freeze')" title="Freeze">⏸</button>
-                    <button class="btn btn-sm" style="margin:2px;" onclick="openConsole('lxc', '${c.name}')" title="Console">💻</button>
-                ` : `
-                    <button class="btn btn-sm" style="margin:2px;" onclick="lxcAction('${c.name}', 'start')" title="Start">▶</button>
-                    <button class="btn btn-sm" style="margin:2px;color:#ef4444;" onclick="lxcAction('${c.name}', 'destroy')" title="Destroy">🗑</button>
-                `}
-                <button class="btn btn-sm" style="margin:2px;" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs">📜</button>
-                <button class="btn btn-sm" style="margin:2px;" onclick="openLxcSettings('${c.name}')" title="Settings">⚙️</button>
-                <button class="btn btn-sm" style="margin:2px;" onclick="cloneLxcContainer('${c.name}')" title="Clone">📋</button>
+            <td style="white-space:nowrap;">
+                <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'start')"` : ''} title="Start">▶️</button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'stop')"` : ''} title="Stop">⏹️</button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'restart')"` : ''} title="Restart">🔄</button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'freeze')"` : ''} title="Freeze">⏸️</button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openConsole('lxc', '${c.name}')"` : ''} title="Console">💻</button>
+                <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'destroy')"` : ''} title="Destroy">🗑️</button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs">📜</button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcSettings('${c.name}')" title="Settings">⚙️</button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="cloneLxcContainer('${c.name}')" title="Clone">📋</button>
             </td>
         </tr>`;
     }).join('');
@@ -5080,37 +5157,88 @@ async function openLxcSettings(name) {
 
             <!-- ═══ Tab 2: Network ═══ -->
             <div class="lxc-tab-page" id="lxc-tab-2" style="display:none;">
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-                    <div class="form-group">
-                        <label>Interface Name</label>
-                        <input type="text" id="lxc-net-name" class="form-control" value="${escapeHtml(cfg.net_name || 'eth0')}"
-                            placeholder="eth0">
-                    </div>
-                    <div class="form-group">
-                        <label>Bridge / Link</label>
-                        <input type="text" id="lxc-net-link" class="form-control" value="${escapeHtml(cfg.net_link)}"
-                            placeholder="e.g. lxcbr0, vmbr0">
-                    </div>
-                    <div class="form-group">
-                        <label>MAC Address</label>
-                        <div style="display:flex;gap:4px;">
-                            <input type="text" id="lxc-net-hwaddr" class="form-control" value="${escapeHtml(cfg.net_hwaddr)}"
-                                placeholder="AA:BB:CC:DD:EE:FF" style="flex:1;">
-                            <button class="btn btn-sm" onclick="generateMac()" title="Generate random MAC"
-                                style="padding:4px 8px;font-size:11px;">🎲</button>
+                ${(cfg.network_interfaces || []).map((nic, idx) => {
+            if (nic.index === 0) {
+                // Primary NIC — fully editable with existing IDs
+                return `
+                <div style="margin-bottom:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">🔌 net${nic.index} — ${escapeHtml(nic.name || 'eth0')} <span style="color:var(--text-muted);font-weight:normal;">(${escapeHtml(nic.net_type || 'veth')})</span></h4>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                        <div class="form-group" style="margin:0;">
+                            <label>Interface Name</label>
+                            <input type="text" id="lxc-net-name" class="form-control" value="${escapeHtml(nic.name || 'eth0')}" placeholder="eth0">
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label>Bridge / Link</label>
+                            <input type="text" id="lxc-net-link" class="form-control" value="${escapeHtml(nic.link)}" placeholder="e.g. lxcbr0, vmbr0">
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label>MAC Address</label>
+                            <div style="display:flex;gap:4px;">
+                                <input type="text" id="lxc-net-hwaddr" class="form-control" value="${escapeHtml(nic.hwaddr)}"
+                                    placeholder="AA:BB:CC:DD:EE:FF" style="flex:1;">
+                                <button class="btn btn-sm" onclick="generateMac()" title="Generate random MAC"
+                                    style="padding:4px 8px;font-size:11px;">🎲</button>
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label>VLAN Tag</label>
+                            <input type="text" id="lxc-net-vlan" class="form-control" value="${escapeHtml(nic.vlan)}" placeholder="No VLAN">
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label>MTU</label>
+                            <input type="text" id="lxc-net-mtu" class="form-control" value="${escapeHtml(nic.mtu)}" placeholder="Same as bridge">
                         </div>
                     </div>
-                    <div class="form-group">
-                        <label>VLAN Tag</label>
-                        <input type="text" id="lxc-net-vlan" class="form-control" value="${escapeHtml(cfg.net_vlan)}"
-                            placeholder="No VLAN">
+                </div>`;
+            } else {
+                // Additional NICs — read-only info cards
+                return `
+                <div style="margin-bottom:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);opacity:0.85;">
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">🔌 net${nic.index} — ${escapeHtml(nic.name || 'eth' + nic.index)} <span style="color:var(--text-muted);font-weight:normal;">(${escapeHtml(nic.net_type || 'veth')})</span></h4>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;">
+                        <div><strong>Bridge:</strong> ${escapeHtml(nic.link) || '-'}</div>
+                        <div><strong>MAC:</strong> <span style="font-family:monospace;">${escapeHtml(nic.hwaddr) || '-'}</span></div>
+                        <div><strong>IPv4:</strong> <span style="font-family:monospace;">${escapeHtml(nic.ipv4) || 'DHCP'}</span></div>
+                        <div><strong>Gateway:</strong> <span style="font-family:monospace;">${escapeHtml(nic.ipv4_gw) || '-'}</span></div>
+                        ${nic.ipv6 ? `<div><strong>IPv6:</strong> <span style="font-family:monospace;">${escapeHtml(nic.ipv6)}</span></div>` : ''}
+                        ${nic.mtu ? `<div><strong>MTU:</strong> ${escapeHtml(nic.mtu)}</div>` : ''}
+                        ${nic.vlan ? `<div><strong>VLAN:</strong> ${escapeHtml(nic.vlan)}</div>` : ''}
                     </div>
-                    <div class="form-group">
-                        <label>MTU</label>
-                        <input type="text" id="lxc-net-mtu" class="form-control" value="${escapeHtml(cfg.net_mtu)}"
-                            placeholder="Same as bridge">
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">Edit additional NICs via the Raw Config tab.</div>
+                </div>`;
+            }
+        }).join('')}
+
+                ${(cfg.network_interfaces || []).length === 0 ? `
+                <div style="margin-bottom:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">🔌 net0 — eth0</h4>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                        <div class="form-group" style="margin:0;">
+                            <label>Interface Name</label>
+                            <input type="text" id="lxc-net-name" class="form-control" value="eth0" placeholder="eth0">
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label>Bridge / Link</label>
+                            <input type="text" id="lxc-net-link" class="form-control" value="" placeholder="e.g. lxcbr0, vmbr0">
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label>MAC Address</label>
+                            <div style="display:flex;gap:4px;">
+                                <input type="text" id="lxc-net-hwaddr" class="form-control" value="" placeholder="AA:BB:CC:DD:EE:FF" style="flex:1;">
+                                <button class="btn btn-sm" onclick="generateMac()" title="Generate random MAC" style="padding:4px 8px;font-size:11px;">🎲</button>
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label>VLAN Tag</label>
+                            <input type="text" id="lxc-net-vlan" class="form-control" value="" placeholder="No VLAN">
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label>MTU</label>
+                            <input type="text" id="lxc-net-mtu" class="form-control" value="" placeholder="Same as bridge">
+                        </div>
                     </div>
-                </div>
+                </div>` : ''}
 
                     <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
                     <h4 style="margin:0 0 8px 0;font-size:13px;">🐺 WolfNet</h4>
