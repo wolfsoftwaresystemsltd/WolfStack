@@ -55,6 +55,10 @@ struct Cli {
     /// Domain name for auto-detecting Let's Encrypt certificates
     #[arg(long)]
     tls_domain: Option<String>,
+
+    /// Print this server's join token and exit
+    #[arg(long)]
+    show_token: bool,
 }
 
 /// Serve the login page for unauthenticated requests to /
@@ -92,6 +96,13 @@ async fn main() -> std::io::Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // --show-token: print join token and exit (for CLI access without web UI)
+    if cli.show_token {
+        let token = api::load_join_token();
+        println!("{}", token);
+        return Ok(());
+    }
 
     // Load or generate node ID
     let node_id_file = "/etc/wolfstack/node_id";
@@ -183,6 +194,7 @@ async fn main() -> std::io::Result<()> {
             sessions: sessions.clone(),
             vms: Mutex::new(vms_manager),
             cluster_secret: cluster_secret.clone(),
+            join_token: api::load_join_token(),
             pbs_restore_progress: Mutex::new(Default::default()),
             ai_agent: ai_agent.clone(),
         });

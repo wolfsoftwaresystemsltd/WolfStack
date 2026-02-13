@@ -44,8 +44,51 @@ pub struct AppState {
     pub sessions: Arc<SessionManager>,
     pub vms: std::sync::Mutex<crate::vms::manager::VmManager>,
     pub cluster_secret: String,
+    pub join_token: String,
     pub pbs_restore_progress: std::sync::Mutex<PbsRestoreProgress>,
     pub ai_agent: Arc<crate::ai::AiAgent>,
+}
+
+/// Load or generate the join token from /etc/wolfstack/join-token
+pub fn load_join_token() -> String {
+    let path = std::path::Path::new("/etc/wolfstack/join-token");
+    if let Ok(token) = std::fs::read_to_string(path) {
+        let token = token.trim().to_string();
+        if !token.is_empty() {
+            info!("Loaded join token from {}", path.display());
+            return token;
+        }
+    }
+    // Generate a new token
+    use std::fmt::Write;
+    let mut token = String::with_capacity(64);
+    let random_bytes: [u8; 32] = {
+        let mut buf = [0u8; 32];
+        // Use /dev/urandom for cryptographic randomness
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            use std::io::Read;
+            let _ = f.read_exact(&mut buf);
+        } else {
+            // Fallback: use system time + pid
+            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            let seed = t.as_nanos() ^ (std::process::id() as u128);
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = ((seed >> (i % 16 * 8)) & 0xFF) as u8 ^ (i as u8).wrapping_mul(37);
+            }
+        }
+        buf
+    };
+    for b in &random_bytes {
+        let _ = write!(token, "{:02x}", b);
+    }
+    // Save it
+    let _ = std::fs::create_dir_all("/etc/wolfstack");
+    if let Err(e) = std::fs::write(path, &token) {
+        warn!("Could not save join token to {}: {}", path.display(), e);
+    } else {
+        info!("Generated new join token and saved to {}", path.display());
+    }
+    token
 }
 
 // ─── Auth helpers ───
@@ -201,6 +244,33 @@ pub async fn get_node(req: HttpRequest, state: web::Data<AppState>, path: web::P
     }
 }
 
+/// GET /api/auth/join-token — display this server's join token (session-auth required)
+pub async fn get_join_token(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    HttpResponse::Ok().json(serde_json::json!({
+        "join_token": state.join_token,
+    }))
+}
+
+/// GET /api/cluster/verify-token?token=xxx — verify a join token (unauthenticated, called by remote servers)
+pub async fn verify_join_token(state: web::Data<AppState>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    let provided = query.get("token").map(|s| s.as_str()).unwrap_or("");
+    if provided.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing token parameter" }));
+    }
+    if provided == state.join_token {
+        HttpResponse::Ok().json(serde_json::json!({
+            "valid": true,
+            "hostname": hostname::get().map(|h| h.to_string_lossy().to_string()).unwrap_or_default(),
+        }))
+    } else {
+        HttpResponse::Forbidden().json(serde_json::json!({
+            "valid": false,
+            "error": "Invalid join token",
+        }))
+    }
+}
+
 /// POST /api/nodes — add a server to the cluster
 #[derive(Deserialize)]
 pub struct AddServerRequest {
@@ -208,6 +278,8 @@ pub struct AddServerRequest {
     pub port: Option<u16>,
     #[serde(default)]
     pub node_type: Option<String>,       // "wolfstack" (default) or "proxmox"
+    #[serde(default)]
+    pub join_token: Option<String>,      // Required for WolfStack nodes — validates against remote
     #[serde(default)]
     pub pve_token: Option<String>,       // PVEAPIToken=user@realm!tokenid=uuid
     #[serde(default)]
@@ -278,6 +350,49 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
     } else {
         let port = body.port.unwrap_or(8553);
         let cluster_name = body.cluster_name.clone();
+
+        // Validate join token against the remote server
+        let join_token = body.join_token.clone().unwrap_or_default();
+        if join_token.is_empty() {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Join token is required. Get it from the remote server's dashboard."
+            }));
+        }
+
+        // Call the remote server to verify the token
+        let verify_url = format!("http://{}:{}/api/cluster/verify-token?token={}", body.address, port, join_token);
+        match reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build() {
+            Ok(client) => {
+                match client.get(&verify_url).send().await {
+                    Ok(resp) => {
+                        if let Ok(data) = resp.json::<serde_json::Value>().await {
+                            if data.get("valid").and_then(|v| v.as_bool()) != Some(true) {
+                                let err_msg = data.get("error").and_then(|v| v.as_str()).unwrap_or("Invalid join token");
+                                return HttpResponse::Forbidden().json(serde_json::json!({
+                                    "error": err_msg
+                                }));
+                            }
+                            info!("Join token verified for {}:{}", body.address, port);
+                        } else {
+                            return HttpResponse::BadGateway().json(serde_json::json!({
+                                "error": "Could not parse response from remote server"
+                            }));
+                        }
+                    }
+                    Err(e) => {
+                        return HttpResponse::BadGateway().json(serde_json::json!({
+                            "error": format!("Cannot reach remote server at {}:{} — {}", body.address, port, e)
+                        }));
+                    }
+                }
+            }
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("HTTP client error: {}", e)
+                }));
+            }
+        }
+
         let id = state.cluster.add_server(body.address.clone(), port, cluster_name.clone());
         info!("Added server {} at {}:{} (cluster: {:?})", id, body.address, port, cluster_name);
         HttpResponse::Ok().json(serde_json::json!({
@@ -3007,7 +3122,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // Dashboard
         .route("/api/metrics", web::get().to(get_metrics))
         .route("/api/metrics/history", web::get().to(get_metrics_history))
+        .route("/api/auth/join-token", web::get().to(get_join_token))
         // Cluster
+        .route("/api/cluster/verify-token", web::get().to(verify_join_token))
         .route("/api/nodes", web::get().to(get_nodes))
         .route("/api/nodes", web::post().to(add_node))
         .route("/api/nodes/{id}", web::get().to(get_node))

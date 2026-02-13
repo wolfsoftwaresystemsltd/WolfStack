@@ -2716,6 +2716,7 @@ function toggleRawCrontab() {
 // ─── Modals ───
 function openAddServerModal() {
     document.getElementById('add-server-modal').classList.add('active');
+    fetchOwnJoinToken();
 }
 
 function closeModal() {
@@ -2752,8 +2753,14 @@ async function addServer() {
     } else {
         // Standard WolfStack node
         var wsClusterName = (document.getElementById('new-server-cluster-name') || {}).value.trim();
+        var joinToken = (document.getElementById('new-server-join-token') || {}).value.trim();
         // Default to "WolfStack" if empty, as requested
         payload.cluster_name = wsClusterName || "WolfStack";
+        if (!joinToken) {
+            showToast('Join token is required. Get it from the remote server.', 'error');
+            return;
+        }
+        payload.join_token = joinToken;
     }
 
     try {
@@ -2779,6 +2786,7 @@ async function addServer() {
         if (document.getElementById('new-pve-node-name')) document.getElementById('new-pve-node-name').value = '';
         if (document.getElementById('new-pve-fingerprint')) document.getElementById('new-pve-fingerprint').value = '';
         if (document.getElementById('new-pve-cluster-name')) document.getElementById('new-pve-cluster-name').value = '';
+        if (document.getElementById('new-server-join-token')) document.getElementById('new-server-join-token').value = '';
         fetchNodes();
     } catch (e) {
         showToast('Failed: ' + e.message, 'error');
@@ -2799,12 +2807,37 @@ function updateServerForm() {
         if (wsHint) wsHint.style.display = 'none';
         if (portLabel) portLabel.textContent = 'Port (default: 8006)';
         if (portInput) portInput.value = '8006';
+        var joinField = document.getElementById('ws-join-token-field');
+        var ownTokenDisplay = document.getElementById('ws-own-token-display');
+        if (joinField) joinField.style.display = 'none';
+        if (ownTokenDisplay) ownTokenDisplay.style.display = 'none';
     } else {
         if (pveFields) pveFields.style.display = 'none';
         if (wsClusterField) wsClusterField.style.display = 'block';
         if (wsHint) wsHint.style.display = 'block';
         if (portLabel) portLabel.textContent = 'Port (default: 8553)';
         if (portInput) portInput.value = '8553';
+        var joinField = document.getElementById('ws-join-token-field');
+        var ownTokenDisplay = document.getElementById('ws-own-token-display');
+        if (joinField) joinField.style.display = 'block';
+        if (ownTokenDisplay) ownTokenDisplay.style.display = 'block';
+    }
+}
+
+async function fetchOwnJoinToken() {
+    try {
+        var resp = await fetch('/api/auth/join-token');
+        var data = await resp.json();
+        var el = document.getElementById('own-join-token');
+        if (el && data.join_token) el.textContent = data.join_token;
+    } catch (e) { /* ignore */ }
+}
+
+function copyOwnJoinToken() {
+    var el = document.getElementById('own-join-token');
+    if (el && el.textContent && el.textContent !== 'Loading...') {
+        navigator.clipboard.writeText(el.textContent);
+        showToast('Join token copied to clipboard', 'success');
     }
 }
 

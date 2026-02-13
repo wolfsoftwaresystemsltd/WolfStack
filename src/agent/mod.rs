@@ -76,6 +76,8 @@ pub struct Node {
     pub pve_cluster_name: Option<String>, // User-friendly cluster name for sidebar grouping
     #[serde(default)]
     pub cluster_name: Option<String>,     // Generic cluster name for WolfStack nodes
+    #[serde(default)]
+    pub join_verified: bool,              // Whether this node was added with a valid join token
 }
 
 fn default_node_type() -> String { "wolfstack".to_string() }
@@ -107,6 +109,8 @@ impl ClusterState {
         state.load_nodes();
         // Remove ghost nodes (same IP/port but different ID)
         state.cleanup_ghosts();
+        // Purge unverified wolfstack nodes (except self)
+        state.purge_unverified();
         state
     }
 
@@ -138,6 +142,25 @@ impl ClusterState {
         if !ghost_ids.is_empty() {
             tracing::info!("Cleaned up {} ghost node(s) (hostname={}, port={})", ghost_ids.len(), hostname, self.port);
             // Persist the cleaned-up state
+            drop(nodes);
+            self.save_nodes();
+        }
+    }
+
+    /// Remove non-self WolfStack nodes that were not added with a verified join token
+    fn purge_unverified(&self) {
+        let mut nodes = self.nodes.write().unwrap();
+        let unverified: Vec<String> = nodes.values()
+            .filter(|n| !n.is_self && n.node_type == "wolfstack" && !n.join_verified)
+            .map(|n| n.id.clone())
+            .collect();
+
+        for id in &unverified {
+            nodes.remove(id);
+        }
+
+        if !unverified.is_empty() {
+            tracing::warn!("Purged {} unverified WolfStack node(s)", unverified.len());
             drop(nodes);
             self.save_nodes();
         }
@@ -206,6 +229,7 @@ impl ClusterState {
 
             pve_cluster_name: None,
             cluster_name,
+            join_verified: true, // self is always verified
         });
     }
 
@@ -244,15 +268,29 @@ impl ClusterState {
         nodes.get(id).cloned()
     }
 
-    /// Add a server by address — persists to disk
+    /// Add a server by address — persists to disk (join_verified=true because only called after token validation)
     pub fn add_server(&self, address: String, port: u16, cluster_name: Option<String>) -> String {
-        self.add_server_full(address, port, "wolfstack".to_string(), None, None, None, None, cluster_name)
+        let id = self.add_server_full(address, port, "wolfstack".to_string(), None, None, None, None, cluster_name);
+        self.mark_verified(&id);
+        id
     }
 
-    /// Add a Proxmox server
+    /// Add a Proxmox server (always verified — PVE API token is its own auth)
     pub fn add_proxmox_server(&self, address: String, port: u16, token: String, fingerprint: Option<String>, node_name: String, pve_cluster_name: Option<String>) -> String {
         // Use pve_cluster_name as the generic cluster_name too
-        self.add_server_full(address, port, "proxmox".to_string(), Some(token), fingerprint, Some(node_name), pve_cluster_name.clone(), pve_cluster_name)
+        let id = self.add_server_full(address, port, "proxmox".to_string(), Some(token), fingerprint, Some(node_name), pve_cluster_name.clone(), pve_cluster_name);
+        self.mark_verified(&id);
+        id
+    }
+
+    /// Mark a node as join-verified
+    pub fn mark_verified(&self, id: &str) {
+        let mut nodes = self.nodes.write().unwrap();
+        if let Some(node) = nodes.get_mut(id) {
+            node.join_verified = true;
+        }
+        drop(nodes);
+        self.save_nodes();
     }
 
     /// Add a server with full options (deduplicates by address+port+pve_node_name)
@@ -291,6 +329,7 @@ impl ClusterState {
             pve_node_name,
             pve_cluster_name,
             cluster_name,
+            join_verified: false, // will be set true by add_node after token validation
         });
         drop(nodes);
         self.save_nodes();
@@ -526,6 +565,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         pve_node_name: node.pve_node_name.clone(),
                         pve_cluster_name: final_cluster_name.clone(),
                         cluster_name: final_cluster_name,
+                        join_verified: node.join_verified,
                     });
 
                     // Reset fail count on success
@@ -600,6 +640,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                 pve_node_name: None,
                                 pve_cluster_name: None,
                                 cluster_name: node.cluster_name.clone(),
+                                join_verified: node.join_verified,
                             });
 
                             // Reset fail count on success

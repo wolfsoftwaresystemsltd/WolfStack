@@ -2582,6 +2582,14 @@ region = us-east-1"></textarea>
                         placeholder="WolfStack (default)">
                     <small style="color: var(--text-muted);">Optional: Group nodes in the sidebar</small>
                 </div>
+                <div class="form-group" id="ws-join-token-field">
+                    <label>Join Token</label>
+                    <input type="text" class="form-control" id="new-server-join-token"
+                        placeholder="Paste the remote server's join token"
+                        style="font-family: monospace; font-size: 13px;">
+                    <small style="color: var(--text-muted);">Get this from the remote server's dashboard → Settings →
+                        Join Token</small>
+                </div>
                 <div class="form-group">
                     <label>Server Address</label>
                     <input type="text" class="form-control" id="new-server-address"
@@ -2649,6 +2657,20 @@ region = us-east-1"></textarea>
                     If using WolfNet, enter the WolfNet IP (e.g. 10.10.10.x).
                     Otherwise, enter the server's regular IP or hostname.
                 </p>
+                <div id="ws-own-token-display"
+                    style="background:var(--bg-tertiary); border:1px solid var(--border); border-radius:8px; padding:12px; margin-top:8px;">
+                    <div style="font-size:12px; color:var(--text-muted); margin-bottom:6px;">🔑 This server's join
+                        token:</div>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <code id="own-join-token"
+                            style="flex:1; font-size:12px; word-break:break-all; color:var(--accent-primary);">Loading...</code>
+                        <button onclick="copyOwnJoinToken()" class="btn-sm"
+                            style="padding:4px 10px; background:var(--accent-primary); color:white; border:none; border-radius:4px; cursor:pointer; font-size:11px; white-space:nowrap;">📋
+                            Copy</button>
+                    </div>
+                    <small style="color: var(--text-muted); font-size:11px;">Share this token with other WolfStack
+                        admins so they can add this server.</small>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn" onclick="closeModal()">Cancel</button>
