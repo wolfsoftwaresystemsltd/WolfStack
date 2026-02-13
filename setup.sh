@@ -668,9 +668,10 @@ fi
 # ─── Restart if upgrading ───────────────────────────────────────────────────
 if [ "$RESTART_SERVICE" = "true" ]; then
     echo ""
-    echo "Restarting WolfStack service..."
-    systemctl start wolfstack
-    echo "✓ Service restarted"
+    echo "Restarting WolfStack service in 3 seconds..."
+    # Defer restart so the upgrade console can show the completion message
+    nohup bash -c "sleep 3 && systemctl restart wolfstack" &>/dev/null &
+    echo "✓ Service restart scheduled"
 fi
 
 # ─── Firewall ───────────────────────────────────────────────────────────────
