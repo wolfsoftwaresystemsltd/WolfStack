@@ -2610,7 +2610,7 @@ region = us-east-1"></textarea>
                 bubble.onclick = function () { toggleAiChat(); };
                 bubble.style.cssText = 'position:fixed;bottom:24px;right:24px;width:56px;height:56px;border-radius:50%;' +
                     'background:linear-gradient(135deg,#dc2626,#f87171);color:#fff;' +
-                    'display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;' +
+                    'display:none;align-items:center;justify-content:center;font-size:16px;font-weight:800;' +
                     'cursor:pointer;z-index:9999;animation:ai-pulse 2s ease-in-out infinite;' +
                     'transition:transform 0.2s;letter-spacing:1px;';
                 bubble.textContent = 'AI';
@@ -2644,6 +2644,13 @@ region = us-east-1"></textarea>
                     '<button onclick="sendAiMessage()" id="ai-send-btn" style="padding:10px 16px;border-radius:10px;border:none;background:#dc2626;color:#fff;cursor:pointer;font-size:13px;font-weight:600;transition:opacity 0.2s;">Send</button>' +
                     '</div>';
                 document.body.appendChild(panel);
+
+                // Show bubble only if AI is configured
+                fetch('/api/ai/config').then(function (r) { return r.json(); }).then(function (cfg) {
+                    if ((cfg.has_claude_key || cfg.has_gemini_key) && cfg.model) {
+                        bubble.style.display = 'flex';
+                    }
+                }).catch(function () { });
             })();
         </script>
 

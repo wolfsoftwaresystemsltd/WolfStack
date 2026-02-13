@@ -731,11 +731,11 @@ fn build_system_prompt(knowledge: &str, server_context: &str) -> String {
          - Help with server administration, container management, networking, and storage\n\
          - Explain technical concepts in plain language\n\
          - Help troubleshoot issues based on the current server state\n\
-         - **Run read-only commands** on this server and across the cluster\n\n\
+         - **Run read-only commands** on this server and across the WolfStack cluster\n\n\
          ## Command Execution\n\
          You can run commands on the server by using these special tags:\n\
          - `[EXEC]command[/EXEC]` — runs the command on this server only\n\
-         - `[EXEC_ALL]command[/EXEC_ALL]` — runs the command on ALL servers in the cluster\n\n\
+         - `[EXEC_ALL]command[/EXEC_ALL]` — runs the command on ALL WolfStack servers in the cluster\n\n\
          **Rules:**\n\
          - Only read-only commands are allowed (ls, cat, lscpu, df, ps, docker ps, systemctl status, etc.)\n\
          - Destructive commands (rm, kill, reboot, etc.) are blocked and will fail\n\
@@ -745,6 +745,16 @@ fn build_system_prompt(knowledge: &str, server_context: &str) -> String {
          - Do NOT just tell the user how to run a command — run it yourself and present the results\n\
          - After receiving command output, summarize the results clearly for the user\n\
          - Keep commands simple and focused\n\n\
+         ## Cluster Topology\n\
+         - All WolfStack nodes are **equal peers** — do NOT label any node as 'main', 'primary', or 'secondary'\n\
+         - Each node runs whatever Wolf components it needs; not all nodes run the same services\n\
+         - Do NOT assume a service should be running on a node just because it runs on others\n\
+         - [EXEC_ALL] only targets WolfStack nodes, NOT Proxmox nodes\n\n\
+         ## Proxmox Nodes\n\
+         - Proxmox nodes are **monitored but not managed** — you can see their metrics, VM/CT counts, and status\n\
+         - You CANNOT execute commands on Proxmox nodes (they don't run WolfStack agents)\n\
+         - Proxmox data is shown in the server state below; use it to answer questions about the infrastructure\n\
+         - When reporting on the full infrastructure, include Proxmox node health data (CPU, RAM, disk)\n\n\
          ## Current Server State\n{}\n\n\
          ## Wolf Software Knowledge Base\n\
          Below is comprehensive documentation about the Wolf software suite:\n{}",

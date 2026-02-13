@@ -7692,6 +7692,9 @@ async function saveAiConfig() {
         if (data.status === 'saved') {
             showModal('Settings Saved');
             loadAiStatus();
+            // Show the AI chat bubble now that it's configured
+            var bubble = document.getElementById('ai-chat-bubble');
+            if (bubble) bubble.style.display = 'flex';
             // Refresh models list after save (in case key changed)
             fetchAiModels(config.provider, config.model);
         } else {

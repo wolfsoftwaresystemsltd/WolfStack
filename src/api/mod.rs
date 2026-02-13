@@ -1644,11 +1644,25 @@ pub async fn ai_chat(
         } else {
             pve_clusters.iter().map(|(cluster_name, cnodes)| {
                 let node_details = cnodes.iter().map(|n| {
-                    format!("    - {} (pve_node: {}, {}) [{}] — {} VMs, {} CTs",
+                    let metrics_str = if let Some(ref m) = n.metrics {
+                        let mem_used_gb = m.memory_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                        let mem_total_gb = m.memory_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                        let root_disk = m.disks.iter().find(|d| d.mount_point == "/").or_else(|| m.disks.first());
+                        let disk_info = root_disk.map(|d| {
+                            let used_gb = d.used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                            let total_gb = d.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                            format!(", disk {:.1}/{:.1}GB", used_gb, total_gb)
+                        }).unwrap_or_default();
+                        format!(" — CPU {:.0}%, RAM {:.1}/{:.1}GB{}",
+                            m.cpu_usage_percent, mem_used_gb, mem_total_gb, disk_info)
+                    } else {
+                        String::new()
+                    };
+                    format!("    - {} (pve_node: {}, {}) [{}] — {} VMs, {} CTs{}",
                         n.hostname, n.pve_node_name.as_deref().unwrap_or("?"),
                         n.address,
                         if n.online { "online" } else { "offline" },
-                        n.vm_count, n.lxc_count)
+                        n.vm_count, n.lxc_count, metrics_str)
                 }).collect::<Vec<_>>().join("\n");
                 format!("  Cluster '{}' ({} nodes):\n{}", cluster_name, cnodes.len(), node_details)
             }).collect::<Vec<_>>().join("\n")
