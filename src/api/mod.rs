@@ -360,37 +360,57 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
         }
 
         // Call the remote server to verify the token
-        let verify_url = format!("http://{}:{}/api/cluster/verify-token?token={}", body.address, port, join_token);
-        match reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build() {
-            Ok(client) => {
-                match client.get(&verify_url).send().await {
-                    Ok(resp) => {
-                        if let Ok(data) = resp.json::<serde_json::Value>().await {
-                            if data.get("valid").and_then(|v| v.as_bool()) != Some(true) {
-                                let err_msg = data.get("error").and_then(|v| v.as_str()).unwrap_or("Invalid join token");
-                                return HttpResponse::Forbidden().json(serde_json::json!({
-                                    "error": err_msg
-                                }));
-                            }
-                            info!("Join token verified for {}:{}", body.address, port);
-                        } else {
-                            return HttpResponse::BadGateway().json(serde_json::json!({
-                                "error": "Could not parse response from remote server"
-                            }));
-                        }
-                    }
-                    Err(e) => {
-                        return HttpResponse::BadGateway().json(serde_json::json!({
-                            "error": format!("Cannot reach remote server at {}:{} — {}", body.address, port, e)
-                        }));
-                    }
-                }
-            }
+        // Try HTTPS on the given port first (accept self-signed certs), then HTTP on port+1 (inter-node port)
+        let verify_path = format!("/api/cluster/verify-token?token={}", join_token);
+        let urls = vec![
+            format!("https://{}:{}{}", body.address, port, verify_path),
+            format!("http://{}:{}{}", body.address, port + 1, verify_path),
+            format!("http://{}:{}{}", body.address, port, verify_path),
+        ];
+
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .danger_accept_invalid_certs(true)
+            .build() {
+            Ok(c) => c,
             Err(e) => {
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("HTTP client error: {}", e)
                 }));
             }
+        };
+
+        let mut last_error = String::new();
+        let mut verified = false;
+        for url in &urls {
+            match client.get(url).send().await {
+                Ok(resp) => {
+                    if let Ok(data) = resp.json::<serde_json::Value>().await {
+                        if data.get("valid").and_then(|v| v.as_bool()) == Some(true) {
+                            info!("Join token verified for {}:{} via {}", body.address, port, url);
+                            verified = true;
+                            break;
+                        } else {
+                            let err_msg = data.get("error").and_then(|v| v.as_str()).unwrap_or("Invalid join token");
+                            return HttpResponse::Forbidden().json(serde_json::json!({
+                                "error": err_msg
+                            }));
+                        }
+                    }
+                    // Got a response but couldn't parse — try next URL
+                    last_error = format!("Unparseable response from {}", url);
+                }
+                Err(e) => {
+                    last_error = format!("{}", e);
+                    // Connection failed — try next URL
+                }
+            }
+        }
+
+        if !verified {
+            return HttpResponse::BadGateway().json(serde_json::json!({
+                "error": format!("Cannot reach remote server at {}:{} — {}", body.address, port, last_error)
+            }));
         }
 
         let id = state.cluster.add_server(body.address.clone(), port, cluster_name.clone());
