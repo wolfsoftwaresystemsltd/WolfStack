@@ -13,6 +13,11 @@
 
 set -e
 
+# Allow git to operate on repos owned by other users (setup.sh runs as root
+# but repos may have been cloned by a regular user)
+git config --global --add safe.directory /opt/wolfstack-src 2>/dev/null || true
+git config --global --add safe.directory /opt/wolfnet-src 2>/dev/null || true
+
 echo ""
 echo "  🐺 WolfStack Installer"
 echo "  ─────────────────────────────────────"
