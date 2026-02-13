@@ -633,6 +633,7 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
         lxc_count,
         vm_count,
         public_ip,
+        // Gossip all known nodes — the remote machine should be a mirror
         known_nodes: state.cluster.get_all_nodes(),
     };
     HttpResponse::Ok().json(msg)

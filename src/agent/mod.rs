@@ -499,7 +499,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             // Reset fail count on success
                             POLL_FAIL_COUNTS.lock().unwrap().remove(&node.id);
 
-                            // Merge known_nodes (gossip) — with dedup by address+port+hostname
+                            // Merge known_nodes (gossip) — mirror node settings from remote
                             let current_nodes = cluster.get_all_nodes();
                             let self_hostname = hostname::get()
                                 .map(|h| h.to_string_lossy().to_string())
@@ -512,19 +512,51 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                 if known.node_type == "wolfstack" && known.hostname == self_hostname && known.port == cluster.port {
                                     continue;
                                 }
-                                // Check both ID and address+port+hostname to prevent ghost re-addition
-                                let already_known = current_nodes.iter().any(|n| {
-                                    n.id == known.id 
-                                    || (n.address == known.address && n.port == known.port && n.pve_node_name == known.pve_node_name)
-                                    || (n.hostname == known.hostname && n.port == known.port && n.node_type == known.node_type)
-                                });
-                                if !already_known {
-                                    debug!("Discovered new node via gossip from {}: {} ({})", node.id, known.id, known.node_type);
-                                    let mut new_node = known.clone();
-                                    new_node.online = false; 
-                                    new_node.is_self = false;
-                                    cluster.update_remote(new_node);
-                                    cluster.save_nodes();
+
+                                // Check if this node is already known by ID
+                                let existing_by_id = current_nodes.iter().find(|n| n.id == known.id);
+
+                                if let Some(existing) = existing_by_id {
+                                    // Node already known — update its settings to mirror the source
+                                    if existing.address != known.address
+                                        || existing.hostname != known.hostname
+                                        || existing.port != known.port
+                                        || existing.pve_token != known.pve_token
+                                        || existing.pve_fingerprint != known.pve_fingerprint
+                                        || existing.cluster_name != known.cluster_name
+                                    {
+                                        debug!("Gossip updating node {} settings: {}:{} -> {}:{}",
+                                            known.id, existing.address, existing.port,
+                                            known.address, known.port);
+                                        cluster.update_node_settings(
+                                            &known.id,
+                                            Some(known.hostname.clone()),
+                                            Some(known.address.clone()),
+                                            Some(known.port),
+                                            known.pve_token.clone(),
+                                            if known.pve_fingerprint.is_some() || existing.pve_fingerprint.is_some() {
+                                                Some(known.pve_fingerprint.clone())
+                                            } else {
+                                                None
+                                            },
+                                            known.cluster_name.clone(),
+                                        );
+                                    }
+                                } else {
+                                    // Check by address+port or hostname+port to prevent ghost duplicates
+                                    let already_known = current_nodes.iter().any(|n| {
+                                        (n.address == known.address && n.port == known.port && n.pve_node_name == known.pve_node_name)
+                                        || (n.hostname == known.hostname && n.port == known.port && n.node_type == known.node_type)
+                                    });
+                                    if !already_known {
+                                        debug!("Discovered new node via gossip from {}: {} ({}) at {}:{}",
+                                            node.id, known.id, known.node_type, known.address, known.port);
+                                        let mut new_node = known.clone();
+                                        new_node.online = false;
+                                        new_node.is_self = false;
+                                        cluster.update_remote(new_node);
+                                        cluster.save_nodes();
+                                    }
                                 }
                             }
                         }
