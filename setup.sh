@@ -662,14 +662,6 @@ else
     systemctl daemon-reload
 fi
 
-# ─── Restart if upgrading ───────────────────────────────────────────────────
-if [ "$RESTART_SERVICE" = "true" ]; then
-    echo ""
-    echo "Restarting WolfStack service in 5 seconds..."
-    nohup bash -c "sleep 5 && systemctl restart wolfstack" &>/dev/null &
-    echo "✓ Service restart scheduled"
-fi
-
 # ─── Firewall ───────────────────────────────────────────────────────────────
 echo ""
 if command -v ufw &> /dev/null; then
@@ -748,3 +740,8 @@ echo ""
 echo "**** UPGRADE COMPLETE ****"
 echo ""
 echo "Please Refresh your browser if upgrading..."
+
+# ─── Restart service if upgrading (must be last!) ────────────────────────────
+if [ "$RESTART_SERVICE" = "true" ]; then
+    nohup bash -c "sleep 3 && systemctl restart wolfstack" &>/dev/null &
+fi
