@@ -1755,17 +1755,11 @@ fn parse_proxmox_config(mut cfg: LxcParsedConfig, content: &str, container: &str
             }
             "cores" => cfg.cpus = val.to_string(),
             "memory" => {
-                // Proxmox uses MB
-                let mb: u64 = val.parse().unwrap_or(0);
-                if mb > 0 {
-                    cfg.memory_limit = format!("{}M", mb);
-                }
+                // Proxmox stores MB as plain number — pass through as-is
+                cfg.memory_limit = val.to_string();
             }
             "swap" => {
-                let mb: u64 = val.parse().unwrap_or(0);
-                if mb > 0 {
-                    cfg.swap_limit = format!("{}M", mb);
-                }
+                cfg.swap_limit = val.to_string();
             }
             "unprivileged" => cfg.unprivileged = val == "1",
             "features" => {

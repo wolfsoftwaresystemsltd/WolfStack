@@ -5394,24 +5394,16 @@ async function openLxcSettings(name) {
             <div class="lxc-tab-page" id="lxc-tab-3" style="display:none;">
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
                     <div class="form-group">
-                        <label>Memory Limit</label>
-                        <select id="lxc-memory" class="form-control">
-                            <option value="">Unlimited</option>
-                            ${['256M', '512M', '1G', '2G', '4G', '8G', '16G', '32G'].map(v =>
-            '<option value="' + v + '" ' + (cfg.memory_limit === v ? 'selected' : '') + '>' + v + '</option>'
-        ).join('')}
-                        </select>
-                        ${cfg.memory_limit && !['256M', '512M', '1G', '2G', '4G', '8G', '16G', '32G'].includes(cfg.memory_limit)
-                ? '<small style="color:var(--accent);margin-top:4px;display:block;">Current: ' + escapeHtml(cfg.memory_limit) + '</small>' : ''}
+                        <label>Memory Limit (MB)</label>
+                        <input type="text" id="lxc-memory" class="form-control" value="${escapeHtml(cfg.memory_limit)}"
+                            placeholder="e.g. 2048 (leave blank for unlimited)">
+                        <small style="color:var(--text-muted);margin-top:4px;display:block;">Enter value in MB. Leave blank for unlimited.</small>
                     </div>
                     <div class="form-group">
-                        <label>Swap Limit</label>
-                        <select id="lxc-swap" class="form-control">
-                            <option value="">Unlimited</option>
-                            ${['0', '256M', '512M', '1G', '2G', '4G'].map(v =>
-                    '<option value="' + v + '" ' + (cfg.swap_limit === v ? 'selected' : '') + '>' + (v === '0' ? 'Disabled' : v) + '</option>'
-                ).join('')}
-                        </select>
+                        <label>Swap Limit (MB)</label>
+                        <input type="text" id="lxc-swap" class="form-control" value="${escapeHtml(cfg.swap_limit)}"
+                            placeholder="e.g. 512 (0 to disable, blank for unlimited)">
+                        <small style="color:var(--text-muted);margin-top:4px;display:block;">Enter value in MB. 0 to disable, blank for unlimited.</small>
                     </div>
                     <div class="form-group">
                         <label>CPU Cores (cpuset)</label>
