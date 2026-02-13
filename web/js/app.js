@@ -157,8 +157,17 @@ function selectServerView(nodeId, view) {
     if (view === 'lxc') loadLxcContainers();
 
     if (view === 'terminal') {
-        // Open host terminal directly
-        openConsole('host', hostname);
+        // For Proxmox nodes, use PVE node shell proxy (vmid=0 = node shell)
+        if (currentNodeId) {
+            const node = allNodes.find(n => n.id === currentNodeId);
+            if (node && node.node_type === 'proxmox') {
+                openPveConsole(currentNodeId, 0, node.hostname || 'PVE Shell');
+            } else {
+                openConsole('host', hostname);
+            }
+        } else {
+            openConsole('host', hostname);
+        }
     }
     if (view === 'vms') loadVms();
     if (view === 'storage') loadStorageMounts();

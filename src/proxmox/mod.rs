@@ -269,6 +269,20 @@ impl PveClient {
         Ok((port, ticket, user))
     }
 
+    /// Get a termproxy ticket for the PVE node shell itself (not a guest)
+    /// Returns (port, ticket, user)
+    pub async fn node_termproxy(&self) -> Result<(u16, String, String), String> {
+        let path = format!("/nodes/{}/termproxy", self.node_name);
+        let data = self.post(&path).await?;
+        let port = data.get("port").and_then(|v| v.as_u64())
+            .ok_or("Missing port in node termproxy response")? as u16;
+        let ticket = data.get("ticket").and_then(|v| v.as_str())
+            .ok_or("Missing ticket in node termproxy response")?.to_string();
+        let user = data.get("user").and_then(|v| v.as_str()).unwrap_or("root@pam").to_string();
+        info!("PVE node termproxy for {}: port={}", self.node_name, port);
+        Ok((port, ticket, user))
+    }
+
     /// Get the base URL of this PVE host
     pub fn base_url(&self) -> &str {
         &self.base_url

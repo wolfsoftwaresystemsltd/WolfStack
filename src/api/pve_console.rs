@@ -14,7 +14,8 @@ use tracing::{info, error, debug};
 use super::AppState;
 
 /// WebSocket endpoint: /ws/pve-console/{node_id}/{vmid}
-/// Connects to a Proxmox VE guest terminal through the termproxy API.
+/// Connects to a Proxmox VE terminal through the termproxy API.
+/// vmid=0 means "node shell" (PVE host terminal), vmid>0 means guest console.
 pub async fn pve_console_ws(
     req: HttpRequest,
     stream: web::Payload,
@@ -41,25 +42,38 @@ pub async fn pve_console_ws(
     let address = node.address.clone();
     let port = node.port;
 
-    // Determine guest type
     let client = crate::proxmox::PveClient::new(&address, port, &token, fp.as_deref(), &pve_name);
-    let guests = client.list_all_guests().await.unwrap_or_default();
-    let guest_type = guests.iter()
-        .find(|g| g.vmid == vmid)
-        .map(|g| g.guest_type.clone())
-        .unwrap_or_else(|| "lxc".to_string());
 
-    // Get termproxy ticket
-    let (term_port, ticket, _user) = match client.termproxy(vmid, &guest_type).await {
-        Ok(t) => t,
-        Err(e) => {
-            error!("PVE termproxy failed for VMID {}: {}", vmid, e);
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })));
-        }
+    // Get termproxy ticket — node shell (vmid=0) or guest terminal (vmid>0)
+    let (term_port, ticket, guest_type) = if vmid == 0 {
+        // Node shell
+        let (tp, tk, _user) = match client.node_termproxy().await {
+            Ok(t) => t,
+            Err(e) => {
+                error!("PVE node termproxy failed: {}", e);
+                return Ok(HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })));
+            }
+        };
+        info!("PVE node console on {}:{} -> termproxy port {}", address, port, tp);
+        (tp, tk, "node".to_string())
+    } else {
+        // Guest terminal — determine type
+        let guests = client.list_all_guests().await.unwrap_or_default();
+        let gt = guests.iter()
+            .find(|g| g.vmid == vmid)
+            .map(|g| g.guest_type.clone())
+            .unwrap_or_else(|| "lxc".to_string());
+
+        let (tp, tk, _user) = match client.termproxy(vmid, &gt).await {
+            Ok(t) => t,
+            Err(e) => {
+                error!("PVE termproxy failed for VMID {}: {}", vmid, e);
+                return Ok(HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })));
+            }
+        };
+        info!("PVE console: {} VMID {} on {}:{} -> termproxy port {}", gt, vmid, address, port, tp);
+        (tp, tk, gt)
     };
-
-    info!("PVE console: {} VMID {} on {}:{} -> termproxy port {}",
-        guest_type, vmid, address, port, term_port);
 
     // Upgrade to WebSocket on the browser side
     let (res, session, msg_stream) = actix_ws::handle(&req, stream)?;
@@ -92,10 +106,18 @@ async fn pve_bridge(
             format!("%{:02X}", b)
         }
     }).collect();
-    let pve_ws_url = format!(
-        "wss://{}:{}/api2/json/nodes/{}/{}/{}/vncwebsocket?port={}&vncticket={}",
-        pve_host, pve_port, pve_node, guest_type, vmid, term_port, vncticket
-    );
+    // Node shell vs guest terminal have different WebSocket URLs
+    let pve_ws_url = if guest_type == "node" {
+        format!(
+            "wss://{}:{}/api2/json/nodes/{}/vncwebsocket?port={}&vncticket={}",
+            pve_host, pve_port, pve_node, term_port, vncticket
+        )
+    } else {
+        format!(
+            "wss://{}:{}/api2/json/nodes/{}/{}/{}/vncwebsocket?port={}&vncticket={}",
+            pve_host, pve_port, pve_node, guest_type, vmid, term_port, vncticket
+        )
+    };
     debug!("Connecting to PVE WebSocket: {}", pve_ws_url);
 
     // Build TLS connector that accepts self-signed certs (PVE default)
