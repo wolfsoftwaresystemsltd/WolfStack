@@ -455,6 +455,49 @@ fn scan_letsencrypt_live() -> Vec<(String, String, String)> {
     results
 }
 
+/// Scan Proxmox VE certificate paths
+/// Returns Vec of (label, cert_path, key_path)
+fn scan_pve_certificates() -> Vec<(String, String, String)> {
+    let mut results = Vec::new();
+
+    // Common Proxmox cert locations
+    let pve_pairs: &[(&str, &str, &str)] = &[
+        ("pveproxy-ssl (custom)", "/etc/pve/local/pveproxy-ssl.pem", "/etc/pve/local/pveproxy-ssl.key"),
+        ("pve-ssl (local)",      "/etc/pve/local/pve-ssl.pem",      "/etc/pve/local/pve-ssl.key"),
+    ];
+
+    for (label, cert, key) in pve_pairs {
+        if std::path::Path::new(cert).exists() && std::path::Path::new(key).exists() {
+            results.push((label.to_string(), cert.to_string(), key.to_string()));
+        }
+    }
+
+    // Per-node certs: /etc/pve/nodes/<hostname>/pve-ssl.pem
+    let nodes_dir = std::path::Path::new("/etc/pve/nodes");
+    if nodes_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(nodes_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() { continue; }
+                let node_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                for prefix in ["pve-ssl", "pveproxy-ssl"] {
+                    let cert = path.join(format!("{}.pem", prefix));
+                    let key = path.join(format!("{}.key", prefix));
+                    if cert.exists() && key.exists() {
+                        results.push((
+                            format!("{} ({})", prefix, node_name),
+                            cert.to_string_lossy().to_string(),
+                            key.to_string_lossy().to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    results
+}
+
 /// Find TLS certificate files for a domain (Let's Encrypt or /etc/wolfstack/)
 /// Returns (cert_path, key_path) if both exist
 pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
@@ -491,6 +534,13 @@ pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
     }
     if let Some((_dom, cert, key)) = live_certs.first() {
         info!("Found Let's Encrypt certificate via filesystem scan: {}", cert);
+        return Some((cert.clone(), key.clone()));
+    }
+
+    // Fallback: Proxmox VE certs
+    let pve_certs = scan_pve_certificates();
+    if let Some((_label, cert, key)) = pve_certs.first() {
+        info!("Found Proxmox VE certificate: {}", cert);
         return Some((cert.clone(), key.clone()));
     }
 
@@ -542,6 +592,20 @@ pub fn list_certificates() -> serde_json::Value {
             "cert_path": cert_path,
             "key_path": key_path,
             "source": "filesystem",
+            "valid": true,
+        }));
+    }
+
+    // 4. Proxmox VE certs
+    let pve_certs = scan_pve_certificates();
+    for (label, cert_path, key_path) in &pve_certs {
+        if seen.contains(cert_path) { continue; }
+        seen.insert(cert_path.clone());
+        results.push(serde_json::json!({
+            "domain": label,
+            "cert_path": cert_path,
+            "key_path": key_path,
+            "source": "proxmox",
             "valid": true,
         }));
     }
