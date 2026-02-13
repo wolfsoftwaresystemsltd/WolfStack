@@ -4679,22 +4679,28 @@ function renderDockerContainers(containers) {
             <td class="mem-cell">${s.memory_usage ? formatBytes(s.memory_usage) : '-'}</td>
             <td style="font-size:11px;">${ports}</td>
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleDockerAutostart('${c.id}', this.checked)"></td>
-            <td>
+            <td style="white-space:nowrap;">
                 ${isRunning ? `
-                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'stop')" title="Stop">⏹</button>
-                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'restart')" title="Restart">🔄</button>
-                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'pause')" title="Pause">⏸</button>
-                    <button class="btn btn-sm" style="margin:2px;" onclick="openConsole('docker', '${c.name}')" title="Console">💻</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Start">▶️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'stop')" title="Stop">⏹️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'restart')" title="Restart">🔄</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'pause')" title="Pause">⏸️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openConsole('docker', '${c.name}')" title="Console">💻</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Remove">🗑️</button>
                 ` : isPaused ? `
-                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'unpause')" title="Unpause">▶</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'unpause')" title="Unpause">▶️</button>
                 ` : `
-                    <button class="btn btn-sm" style="margin:2px;" onclick="dockerAction('${c.name}', 'start')" title="Start">▶</button>
-                    <button class="btn btn-sm" style="margin:2px;color:#ef4444;" onclick="dockerAction('${c.name}', 'remove')" title="Remove">🗑</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'start')" title="Start">▶️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Stop">⏹️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Restart">🔄</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Freeze">⏸️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Console">💻</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="dockerAction('${c.name}', 'remove')" title="Remove">🗑️</button>
                 `}
-                <button class="btn btn-sm" style="margin:2px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs">📜</button>
-                <button class="btn btn-sm" style="margin:2px;" onclick="viewDockerVolumes('${c.name}')" title="Volumes">📁</button>
-                <button class="btn btn-sm" style="margin:2px;" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button>
-                <button class="btn btn-sm" style="margin:2px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs">📜</button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewDockerVolumes('${c.name}')" title="Volumes">📁</button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>
             </td>
         </tr>`;
     }).join('');
