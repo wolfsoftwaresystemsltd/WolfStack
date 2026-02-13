@@ -442,6 +442,27 @@ else
             TRIES=$((TRIES + 1))
         done
 
+        # Ask about LAN auto-discovery
+        echo ""
+        echo "  ──────────────────────────────────────────────────"
+        echo "  LAN Auto-Discovery"
+        echo "  ──────────────────────────────────────────────────"
+        echo ""
+        echo "  WolfNet can broadcast discovery packets on your local"
+        echo "  network to automatically find other WolfNet nodes."
+        echo ""
+        echo "  ⚠  Do NOT enable on public/datacenter networks!"
+        echo "     (Proxmox VLANs, Hetzner, OVH, etc.)"
+        echo "     Only enable on private LANs (home, office)."
+        echo ""
+        echo -n "Enable LAN auto-discovery? [y/N]: "
+        read ENABLE_DISCOVERY < /dev/tty
+        if [ "$ENABLE_DISCOVERY" = "y" ] || [ "$ENABLE_DISCOVERY" = "Y" ]; then
+            WOLFNET_DISCOVERY="true"
+        else
+            WOLFNET_DISCOVERY="false"
+        fi
+
         # Generate keys
         KEY_FILE="/etc/wolfnet/private.key"
         /usr/local/bin/wolfnet genkey --output "$KEY_FILE" 2>/dev/null || true
@@ -457,7 +478,7 @@ address = "$WOLFNET_IP"
 subnet = 24
 listen_port = 9600
 gateway = false
-discovery = true
+discovery = $WOLFNET_DISCOVERY
 mtu = 1400
 
 [security]
@@ -466,6 +487,9 @@ private_key_file = "$KEY_FILE"
 # Peers will be added automatically when you add servers to WolfStack
 EOF
         echo "  ✓ WolfNet configured: $WOLFNET_IP/24 (subnet: ${WOLFNET_SUBNET}.0/24)"
+        if [ "$WOLFNET_DISCOVERY" = "false" ]; then
+            echo "  ℹ  Discovery disabled. You can enable it later in WolfStack → WolfNet → Network Settings."
+        fi
     fi
 
     # Create systemd service
