@@ -142,7 +142,14 @@
         ws.onclose = (e) => {
             statusEl.textContent = 'Disconnected';
             statusEl.className = 'status error';
-            term.writeln('\r\n\x1b[31mConnection closed (code: ' + e.code + ').\x1b[0m');
+            if (type === 'upgrade') {
+                term.writeln('\r\n\x1b[33m─────────────────────────────────────────────\x1b[0m');
+                term.writeln('\r\n\x1b[32m✅ WolfStack service is restarting...\x1b[0m');
+                term.writeln('\r\n\x1b[36mPlease refresh your browser and log in again.\x1b[0m');
+                term.writeln('\r\n\x1b[33m─────────────────────────────────────────────\x1b[0m');
+            } else {
+                term.writeln('\r\n\x1b[31mConnection closed (code: ' + e.code + ').\x1b[0m');
+            }
         };
 
         ws.onerror = () => {

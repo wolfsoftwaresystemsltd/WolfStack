@@ -668,7 +668,9 @@ fi
 # ─── Restart if upgrading ───────────────────────────────────────────────────
 if [ "$RESTART_SERVICE" = "true" ]; then
     echo ""
-    echo "✓ Upgrade binaries replaced — service will use new version on next restart."
+    echo "Restarting WolfStack service in 5 seconds..."
+    nohup bash -c "sleep 5 && systemctl restart wolfstack" &>/dev/null &
+    echo "✓ Service restart scheduled"
 fi
 
 # ─── Firewall ───────────────────────────────────────────────────────────────
