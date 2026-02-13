@@ -58,22 +58,39 @@ else
     exit 1
 fi
 
+# ─── Detect Proxmox VE host ─────────────────────────────────────────────────
+IS_PROXMOX=false
+if command -v pveversion &> /dev/null || [ -f /etc/pve/.version ] || dpkg -l proxmox-ve &> /dev/null 2>&1; then
+    IS_PROXMOX=true
+    PVE_VER=$(pveversion 2>/dev/null || echo "unknown")
+    echo "✓ Detected Proxmox VE host ($PVE_VER)"
+    echo "  Skipping packages already provided by Proxmox (QEMU, LXC)"
+fi
+
 # ─── Install system dependencies ────────────────────────────────────────────
 echo ""
 echo "Installing system dependencies..."
 
 if [ "$PKG_MANAGER" = "apt" ]; then
     apt update -qq
-    # Select architecture-appropriate QEMU package
-    ARCH=$(uname -m)
-    if [ "$ARCH" = "ppc64le" ] || [ "$ARCH" = "ppc64" ]; then
-        QEMU_PKG="qemu-system-ppc"
-    elif [ "$ARCH" = "aarch64" ]; then
-        QEMU_PKG="qemu-system-arm"
+    # On Proxmox hosts, QEMU and LXC are already provided by pve-qemu-kvm and lxc-pve.
+    # Installing the Debian versions would remove the proxmox-ve metapackage!
+    if [ "$IS_PROXMOX" = true ]; then
+        QEMU_PKG=""
+        LXC_PKGS=""
     else
-        QEMU_PKG="qemu-system-x86"
+        # Select architecture-appropriate QEMU package
+        ARCH=$(uname -m)
+        if [ "$ARCH" = "ppc64le" ] || [ "$ARCH" = "ppc64" ]; then
+            QEMU_PKG="qemu-system-ppc qemu-utils"
+        elif [ "$ARCH" = "aarch64" ]; then
+            QEMU_PKG="qemu-system-arm qemu-utils"
+        else
+            QEMU_PKG="qemu-system-x86 qemu-utils"
+        fi
+        LXC_PKGS="lxc lxc-templates"
     fi
-    apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils $QEMU_PKG qemu-utils socat s3fs nfs-common fuse3
+    apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev dnsmasq-base bridge-utils socat s3fs nfs-common fuse3 $LXC_PKGS $QEMU_PKG
 elif [ "$PKG_MANAGER" = "dnf" ]; then
     dnf install -y git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat s3fs-fuse nfs-utils fuse3
 elif [ "$PKG_MANAGER" = "yum" ]; then
