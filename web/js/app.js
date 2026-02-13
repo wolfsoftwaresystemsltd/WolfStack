@@ -2987,6 +2987,7 @@ function openNodeSettings(nodeId) {
 
     const clusterName = node.cluster_name || 'WolfStack';
     const isPve = node.node_type === 'proxmox';
+    const isSelf = node.is_self;
 
     const modal = document.createElement('div');
     modal.id = 'node-settings-modal';
@@ -2998,11 +2999,19 @@ function openNodeSettings(nodeId) {
                 <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
             </div>
             <div class="modal-body">
-                <div style="display:grid; grid-template-columns:auto 1fr; gap:8px 16px; margin-bottom:16px; font-size:13px;">
+                <div style="display:grid; grid-template-columns:auto 1fr; gap:8px 16px; margin-bottom:16px; font-size:13px; align-items:center;">
                     <span style="color:var(--text-muted);">Hostname</span>
-                    <span>${node.hostname}${node.is_self ? ' <span style="color:var(--accent-light);font-size:11px;">(this server)</span>' : ''}</span>
+                    ${isSelf
+            ? `<span>${node.hostname} <span style="color:var(--accent-light);font-size:11px;">(this server)</span></span>`
+            : `<input type="text" class="form-control" id="node-settings-hostname" value="${node.hostname}" style="font-size:13px;padding:4px 8px;">`}
                     <span style="color:var(--text-muted);">Address</span>
-                    <span style="font-family:'JetBrains Mono',monospace;font-size:12px;">${node.address}:${node.port}</span>
+                    ${isSelf
+            ? `<span style="font-family:'JetBrains Mono',monospace;font-size:12px;">${node.address}</span>`
+            : `<input type="text" class="form-control" id="node-settings-address" value="${node.address}" style="font-family:'JetBrains Mono',monospace;font-size:12px;padding:4px 8px;">`}
+                    <span style="color:var(--text-muted);">Port</span>
+                    ${isSelf
+            ? `<span style="font-family:'JetBrains Mono',monospace;font-size:12px;">${node.port}</span>`
+            : `<input type="number" class="form-control" id="node-settings-port" value="${node.port}" style="font-family:'JetBrains Mono',monospace;font-size:12px;padding:4px 8px;width:100px;">`}
                     <span style="color:var(--text-muted);">Node ID</span>
                     <span style="font-family:'JetBrains Mono',monospace;font-size:12px;">${node.id}</span>
                     <span style="color:var(--text-muted);">Type</span>
@@ -3035,6 +3044,9 @@ function openNodeSettings(nodeId) {
         </div>`;
     modal._nodeId = nodeId;
     modal._originalClusterName = clusterName;
+    modal._originalHostname = node.hostname;
+    modal._originalAddress = node.address;
+    modal._originalPort = node.port;
     document.body.appendChild(modal);
 }
 
@@ -3047,6 +3059,23 @@ async function saveNodeSettings() {
 
     const updates = {};
     if (newName && newName !== originalName) updates.cluster_name = newName;
+
+    // Hostname, address, port (only present for non-self nodes)
+    const hostnameEl = document.getElementById('node-settings-hostname');
+    const addressEl = document.getElementById('node-settings-address');
+    const portEl = document.getElementById('node-settings-port');
+    if (hostnameEl) {
+        const h = hostnameEl.value.trim();
+        if (h && h !== modal._originalHostname) updates.hostname = h;
+    }
+    if (addressEl) {
+        const a = addressEl.value.trim();
+        if (a && a !== modal._originalAddress) updates.address = a;
+    }
+    if (portEl) {
+        const p = parseInt(portEl.value, 10);
+        if (p && p !== modal._originalPort) updates.port = p;
+    }
 
     // PVE-specific fields
     const pveToken = document.getElementById('node-settings-pve-token')?.value.trim();

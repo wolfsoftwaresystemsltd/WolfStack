@@ -296,9 +296,12 @@ pub async fn remove_node(req: HttpRequest, state: web::Data<AppState>, path: web
     }
 }
 
-/// PATCH /api/nodes/{id}/settings — update PVE node settings
+/// PATCH /api/nodes/{id}/settings — update node settings
 #[derive(Deserialize)]
 pub struct UpdateNodeSettings {
+    pub hostname: Option<String>,
+    pub address: Option<String>,
+    pub port: Option<u16>,
     pub pve_token: Option<String>,
     pub pve_fingerprint: Option<String>,
     pub pve_cluster_name: Option<String>,
@@ -315,12 +318,18 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
         None
     };
 
-
-
     // Support updating both pve_cluster_name (for compat) and generic cluster_name
     let cluster_name = body.cluster_name.clone().or(body.pve_cluster_name.clone());
 
-    if state.cluster.update_node_settings(&id, body.pve_token.clone(), fp, cluster_name) {
+    if state.cluster.update_node_settings(
+        &id,
+        body.hostname.clone(),
+        body.address.clone(),
+        body.port,
+        body.pve_token.clone(),
+        fp,
+        cluster_name,
+    ) {
         HttpResponse::Ok().json(serde_json::json!({ "updated": true }))
     } else {
         HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" }))
