@@ -10,7 +10,7 @@
 //! - Discovers other nodes (via WolfNet or direct IP)
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{warn, debug};
@@ -64,10 +64,13 @@ pub struct ClusterState {
     pub self_id: String,
     pub self_address: String,
     pub port: u16,
+    /// Tombstone set: node IDs that were explicitly deleted and must not be re-added by gossip
+    deleted_ids: RwLock<HashSet<String>>,
 }
 
 impl ClusterState {
     const NODES_FILE: &'static str = "/etc/wolfstack/nodes.json";
+    const DELETED_FILE: &'static str = "/etc/wolfstack/deleted_nodes.json";
 
     pub fn new(self_id: String, self_address: String, port: u16) -> Self {
         let state = Self {
@@ -75,9 +78,10 @@ impl ClusterState {
             self_id,
             self_address,
             port,
+            deleted_ids: RwLock::new(HashSet::new()),
         };
-        // Load persisted remote nodes
-        // Load persisted remote nodes
+        // Load persisted state
+        state.load_deleted_ids();
         state.load_nodes();
         // Remove ghost nodes (same IP/port but different ID)
         state.cleanup_ghosts();
@@ -271,15 +275,89 @@ impl ClusterState {
         id
     }
 
-    /// Remove a server — persists to disk
+    /// Remove a server — persists to disk and adds to tombstone set
     pub fn remove_server(&self, id: &str) -> bool {
         let mut nodes = self.nodes.write().unwrap();
         let removed = nodes.remove(id).is_some();
         drop(nodes);
         if removed {
             self.save_nodes();
+            // Tombstone: prevent gossip from re-adding this node
+            self.add_tombstone(id);
         }
         removed
+    }
+
+    /// Add a node ID to the tombstone set (prevents gossip re-adding)
+    fn add_tombstone(&self, id: &str) {
+        let mut deleted = self.deleted_ids.write().unwrap();
+        deleted.insert(id.to_string());
+        drop(deleted);
+        self.save_deleted_ids();
+    }
+
+    /// Check if a node ID is tombstoned
+    pub fn is_tombstoned(&self, id: &str) -> bool {
+        self.deleted_ids.read().unwrap().contains(id)
+    }
+
+    /// Merge remote tombstones into local set
+    pub fn merge_tombstones(&self, remote_deleted: &[String]) {
+        let mut deleted = self.deleted_ids.write().unwrap();
+        let mut changed = false;
+        for id in remote_deleted {
+            if id != &self.self_id && deleted.insert(id.clone()) {
+                changed = true;
+            }
+        }
+        drop(deleted);
+        if changed {
+            // Also remove any nodes that are now tombstoned
+            let mut nodes = self.nodes.write().unwrap();
+            let to_remove: Vec<String> = nodes.keys()
+                .filter(|k| self.deleted_ids.read().unwrap().contains(*k))
+                .cloned()
+                .collect();
+            for id in &to_remove {
+                nodes.remove(id);
+            }
+            drop(nodes);
+            self.save_deleted_ids();
+            if !to_remove.is_empty() {
+                self.save_nodes();
+                tracing::info!("Removed {} node(s) via gossip tombstone", to_remove.len());
+            }
+        }
+    }
+
+    /// Get the current tombstone set
+    pub fn get_deleted_ids(&self) -> Vec<String> {
+        self.deleted_ids.read().unwrap().iter().cloned().collect()
+    }
+
+    /// Load tombstoned node IDs from disk
+    fn load_deleted_ids(&self) {
+        if let Ok(data) = std::fs::read_to_string(Self::DELETED_FILE) {
+            if let Ok(ids) = serde_json::from_str::<Vec<String>>(&data) {
+                let mut deleted = self.deleted_ids.write().unwrap();
+                for id in ids {
+                    deleted.insert(id);
+                }
+                debug!("Loaded {} tombstoned node IDs from {}", deleted.len(), Self::DELETED_FILE);
+            }
+        }
+    }
+
+    /// Save tombstoned node IDs to disk
+    fn save_deleted_ids(&self) {
+        let deleted = self.deleted_ids.read().unwrap();
+        let ids: Vec<&String> = deleted.iter().collect();
+        if let Ok(json) = serde_json::to_string_pretty(&ids) {
+            let _ = std::fs::create_dir_all("/etc/wolfstack");
+            if let Err(e) = std::fs::write(Self::DELETED_FILE, json) {
+                warn!("Failed to save deleted nodes: {}", e);
+            }
+        }
     }
 
     /// Update node settings (hostname, address, port, token, fingerprint, cluster name)
@@ -326,6 +404,8 @@ pub enum AgentMessage {
         public_ip: Option<String>,
         #[serde(default)]
         known_nodes: Vec<Node>,
+        #[serde(default)]
+        deleted_ids: Vec<String>,
     },
     /// "Give me your status"
     StatusRequest,
@@ -476,7 +556,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
             {
                 Ok(resp) => {
                     if let Ok(msg) = resp.json::<AgentMessage>().await {
-                        if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes } = msg {
+                        if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes, deleted_ids } = msg {
                             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                             cluster.update_remote(Node {
                                 id: node.id.clone(),
@@ -503,6 +583,9 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             // Reset fail count on success
                             POLL_FAIL_COUNTS.lock().unwrap().remove(&node.id);
 
+                            // Merge tombstones first — so we don't re-add deleted nodes
+                            cluster.merge_tombstones(&deleted_ids);
+
                             // Merge known_nodes (gossip) — mirror node settings from remote
                             let current_nodes = cluster.get_all_nodes();
                             let self_hostname = hostname::get()
@@ -514,6 +597,11 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                 }
                                 // Also skip if this is us by hostname+port (gossip may report different address)
                                 if known.node_type == "wolfstack" && known.hostname == self_hostname && known.port == cluster.port {
+                                    continue;
+                                }
+
+                                // Skip tombstoned nodes
+                                if cluster.is_tombstoned(&known.id) {
                                     continue;
                                 }
 

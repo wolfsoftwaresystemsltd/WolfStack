@@ -294,6 +294,27 @@ pub async fn remove_node(req: HttpRequest, state: web::Data<AppState>, path: web
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
     if state.cluster.remove_server(&id) {
+        // Broadcast deletion to all other online nodes so they don't gossip it back
+        let nodes = state.cluster.get_all_nodes();
+        let secret = state.cluster_secret.clone();
+        let delete_id = id.clone();
+        tokio::spawn(async move {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_default();
+            for node in &nodes {
+                if node.is_self || !node.online { continue; }
+                // Try internal HTTP port (port+1 for TLS nodes, then original port)
+                for port in [node.port + 1, node.port] {
+                    let url = format!("http://{}:{}/api/nodes/{}", node.address, port, delete_id);
+                    let _ = client.delete(&url)
+                        .header("X-WolfStack-Secret", &secret)
+                        .send()
+                        .await;
+                }
+            }
+        });
         HttpResponse::Ok().json(serde_json::json!({ "removed": true }))
     } else {
         HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" }))
@@ -841,6 +862,8 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
         public_ip,
         // Gossip all known nodes — the remote machine should be a mirror
         known_nodes: state.cluster.get_all_nodes(),
+        // Include tombstones so deletions propagate across the cluster
+        deleted_ids: state.cluster.get_deleted_ids(),
     };
     HttpResponse::Ok().json(msg)
 }
