@@ -662,6 +662,8 @@ pub struct ContainerInfo {
     pub runtime: String,  // "docker" or "lxc"
     pub ip_address: String,
     pub autostart: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub hostname: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -892,6 +894,7 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                         runtime: "docker".to_string(),
                         ip_address: ip,
                         autostart,
+                        hostname: String::new(),
                     }
                 })
                 .collect()
@@ -1175,13 +1178,15 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                         }
                     }
 
-                    // Check autostart in config
+                    // Read config for autostart and hostname
                     let config_path = format!("/var/lib/lxc/{}/config", name);
-                    let autostart = if let Ok(content) = std::fs::read_to_string(&config_path) {
-                         content.lines().any(|l| l.trim() == "lxc.start.auto = 1")
-                    } else {
-                        false
-                    };
+                    let config_content = std::fs::read_to_string(&config_path).unwrap_or_default();
+                    let autostart = config_content.lines().any(|l| l.trim() == "lxc.start.auto = 1");
+                    let hostname = config_content.lines()
+                        .find(|l| l.trim().starts_with("lxc.uts.name"))
+                        .and_then(|l| l.split('=').nth(1))
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
 
                     ContainerInfo {
                         id: name.clone(),
@@ -1194,6 +1199,7 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                         runtime: "lxc".to_string(),
                         ip_address: ip,
                         autostart,
+                        hostname,
                     }
                 })
                 .collect()

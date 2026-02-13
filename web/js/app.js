@@ -4829,7 +4829,7 @@ function renderLxcContainers(containers, stats) {
         const stateColor = isRunning ? '#10b981' : '#6b7280';
 
         return `<tr>
-            <td><strong>${c.name}</strong></td>
+            <td><strong>${c.hostname || c.name}</strong>${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
             <td><span style="color:${stateColor}">●</span> ${c.state}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
             <td>${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
