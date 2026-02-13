@@ -8049,7 +8049,7 @@ function onAiProviderChange() {
 
 async function exportConfig() {
     try {
-        const res = await fetch(apiUrl('/api/config/export'), { credentials: 'include' });
+        const res = await fetch('/api/config/export', { credentials: 'include' });
         if (!res.ok) throw new Error('Export failed: ' + res.status);
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
@@ -8081,7 +8081,7 @@ async function importConfigFile(input) {
             return;
         }
 
-        const res = await fetch(apiUrl('/api/config/import'), {
+        const res = await fetch('/api/config/import', {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
