@@ -5021,14 +5021,56 @@ function generateMacFor(nicIndex) {
 
 function toggleNicEditor(nicIndex) {
     var editor = document.getElementById('lxc-nic-editor-' + nicIndex);
-    var arrow = document.getElementById('lxc-nic-arrow-' + nicIndex);
     if (!editor) return;
-    if (editor.style.display === 'none') {
-        editor.style.display = 'block';
-        if (arrow) arrow.style.transform = 'rotate(90deg)';
-    } else {
-        editor.style.display = 'none';
-        if (arrow) arrow.style.transform = 'rotate(0deg)';
+
+    // If already showing, close it
+    if (editor.style.display === 'block') {
+        closeNicEditor();
+        return;
+    }
+
+    // Close any other open editor first
+    closeNicEditor();
+
+    // Show as popup overlay
+    var backdrop = document.getElementById('lxc-nic-backdrop');
+    if (!backdrop) {
+        backdrop = document.createElement('div');
+        backdrop.id = 'lxc-nic-backdrop';
+        backdrop.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:10001;display:flex;align-items:center;justify-content:center;';
+        backdrop.onclick = function (e) { if (e.target === backdrop) closeNicEditor(); };
+        document.body.appendChild(backdrop);
+    }
+    backdrop.style.display = 'flex';
+
+    // Move the editor into the backdrop as a popup
+    editor.style.display = 'block';
+    editor.style.cssText = 'display:block;background:var(--bg-primary);border:1px solid var(--border);border-radius:12px;padding:20px;width:520px;max-width:90vw;max-height:80vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.4);';
+    editor.setAttribute('data-was-nic', nicIndex);
+    backdrop.innerHTML = '';
+    backdrop.appendChild(editor);
+
+    // Mark arrow
+    var arrow = document.getElementById('lxc-nic-arrow-' + nicIndex);
+    if (arrow) arrow.style.transform = 'rotate(90deg)';
+}
+
+function closeNicEditor() {
+    var backdrop = document.getElementById('lxc-nic-backdrop');
+    if (backdrop) {
+        // Move editor back to its NIC item
+        var editor = backdrop.querySelector('.lxc-nic-editor');
+        if (editor) {
+            var nicIdx = editor.getAttribute('data-was-nic');
+            var nicItem = document.querySelector('.lxc-nic-item[data-nic-index="' + nicIdx + '"]');
+            if (nicItem) {
+                editor.style.cssText = 'display:none;padding:14px;border-top:1px solid var(--border);background:var(--bg-primary);';
+                nicItem.appendChild(editor);
+            }
+            var arrow = document.getElementById('lxc-nic-arrow-' + nicIdx);
+            if (arrow) arrow.style.transform = 'rotate(0deg)';
+        }
+        backdrop.style.display = 'none';
     }
 }
 
@@ -5052,9 +5094,13 @@ function addLxcNic() {
                     <div style="font-weight:600;font-size:13px;">net${newIdx} — eth${newIdx}</div>
                     <div style="font-size:11px;color:var(--text-muted);font-family:monospace;">New interface</div>
                 </div>
-                <span class="lxc-nic-arrow" id="lxc-nic-arrow-${newIdx}" style="font-size:12px;color:var(--text-muted);transition:transform .2s;transform:rotate(90deg);">▶</span>
+                <span class="lxc-nic-arrow" id="lxc-nic-arrow-${newIdx}" style="font-size:12px;color:var(--text-muted);transition:transform .2s;">▶</span>
             </div>
-            <div class="lxc-nic-editor" id="lxc-nic-editor-${newIdx}" style="display:block;padding:14px;border-top:1px solid var(--border);background:var(--bg-primary);">
+            <div class="lxc-nic-editor" id="lxc-nic-editor-${newIdx}" style="display:none;padding:14px;border-top:1px solid var(--border);background:var(--bg-primary);">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+                    <h4 style="margin:0;font-size:14px;">🔌 Edit net${newIdx} — eth${newIdx}</h4>
+                    <button class="btn btn-sm" onclick="closeNicEditor()" style="font-size:16px;padding:2px 8px;line-height:1;" title="Close">✕</button>
+                </div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
                     <div class="form-group" style="margin:0;">
                         <label style="font-size:11px;">Interface Name</label>
@@ -5103,6 +5149,8 @@ function addLxcNic() {
             </div>
         </div>`;
     list.insertAdjacentHTML('beforeend', html);
+    // Auto-open the editor popup for the new NIC
+    toggleNicEditor(newIdx);
 }
 
 function toggleIpv4Mode() {
@@ -5268,6 +5316,10 @@ async function openLxcSettings(name) {
                             <span class="lxc-nic-arrow" id="lxc-nic-arrow-${nic.index}" style="font-size:12px;color:var(--text-muted);transition:transform .2s;">▶</span>
                         </div>
                         <div class="lxc-nic-editor" id="lxc-nic-editor-${nic.index}" style="display:none;padding:14px;border-top:1px solid var(--border);background:var(--bg-primary);">
+                            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+                                <h4 style="margin:0;font-size:14px;">🔌 Edit net${nic.index} — ${escapeHtml(nic.name || 'eth' + nic.index)}</h4>
+                                <button class="btn btn-sm" onclick="closeNicEditor()" style="font-size:16px;padding:2px 8px;line-height:1;" title="Close">✕</button>
+                            </div>
                             <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
                                 <div class="form-group" style="margin:0;">
                                     <label style="font-size:11px;">Interface Name</label>
