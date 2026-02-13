@@ -7493,31 +7493,7 @@ function triggerUpgrade() {
     var banner = document.getElementById('update-banner');
     if (banner) banner.style.display = 'none';
 
-    // If upgrading the local machine, poll for it to come back and prompt re-login
-    if (isLocal) {
-        showToast('Upgrade started — monitoring progress in terminal window...', 'info');
-        var pollInterval = setInterval(function () {
-            // The service will restart — when it comes back, we'll get a 200
-            fetch('/api/nodes', { signal: AbortSignal.timeout(3000) })
-                .then(function (r) {
-                    if (r.ok) {
-                        clearInterval(pollInterval);
-                        // Service is back — show re-login prompt
-                        setTimeout(function () {
-                            if (confirm('✅ WolfStack has been upgraded and restarted.\n\nPlease log in again to use the updated version.\n\nClick OK to reload the page.')) {
-                                window.location.href = '/';
-                            }
-                        }, 1000);
-                    }
-                })
-                .catch(function () { /* still restarting — keep polling */ });
-        }, 5000); // Check every 5 seconds
-
-        // Stop polling after 5 minutes (safety)
-        setTimeout(function () { clearInterval(pollInterval); }, 5 * 60 * 1000);
-    } else {
-        showToast('Upgrade started on ' + machine + ' — watch the terminal window for progress.', 'info');
-    }
+    showToast('Upgrade started — watch the terminal window for progress.', 'info');
 }
 
 // ═══════════════════════════════════════════════════
