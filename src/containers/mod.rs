@@ -1115,6 +1115,17 @@ fn run_docker_cmd(args: &[&str]) -> Result<String, String> {
 
 /// List all LXC containers
 pub fn lxc_list_all() -> Vec<ContainerInfo> {
+    // Detect if Proxmox is available (pct command exists)
+    let is_proxmox = Command::new("which").arg("pct").output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if is_proxmox {
+        // Use pct list for Proxmox — only lists containers Proxmox knows about
+        return pct_list_all();
+    }
+
+    // Fallback: native LXC
     Command::new("lxc-ls")
         .args(["-f", "-F", "NAME,STATE,PID,RAM,IPV4"])
         .output()
@@ -1205,6 +1216,107 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// List LXC containers using Proxmox's pct command (filters out stale containers)
+fn pct_list_all() -> Vec<ContainerInfo> {
+    let output = match Command::new("pct").arg("list").output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return vec![],
+    };
+
+    output.lines()
+        .skip(1) // Skip header: VMID       Status     Lock         Name
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let vmid = parts.first()?.to_string();
+            let state = parts.get(1).unwrap_or(&"stopped").to_lowercase();
+            let pct_name = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
+
+            let status = if state == "running" {
+                // Get PID from lxc-info
+                let pid = Command::new("lxc-info")
+                    .args(["-n", &vmid, "-pH"])
+                    .output().ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or("-".to_string());
+                format!("Running (PID {})", pid)
+            } else {
+                "Stopped".to_string()
+            };
+
+            // Get IP addresses for running containers
+            let mut ip = String::new();
+            if state == "running" {
+                if let Ok(info_out) = Command::new("lxc-info")
+                    .args(["-n", &vmid, "-iH"])
+                    .output()
+                {
+                    let info_ip = String::from_utf8_lossy(&info_out.stdout)
+                        .lines()
+                        .filter(|l| !l.contains(':'))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if !info_ip.is_empty() && info_ip != "-" {
+                        ip = info_ip;
+                    }
+                }
+            }
+
+            // Read hostname and autostart from pct config (Proxmox format)
+            let mut hostname = pct_name.clone();
+            let mut autostart = false;
+            if let Ok(cfg_out) = Command::new("pct").args(["config", &vmid]).output() {
+                let cfg_text = String::from_utf8_lossy(&cfg_out.stdout);
+                for cline in cfg_text.lines() {
+                    let cline = cline.trim();
+                    if cline.starts_with("hostname:") {
+                        hostname = cline.split(':').nth(1).unwrap_or("").trim().to_string();
+                    } else if cline.starts_with("onboot:") {
+                        autostart = cline.split(':').nth(1).unwrap_or("").trim() == "1";
+                    }
+                    // Also extract IPs from net* lines for stopped containers
+                    if ip.is_empty() && cline.starts_with("net") && cline.contains("ip=") {
+                        if let Some(ip_part) = cline.split(',').find(|p| p.trim().starts_with("ip=")) {
+                            let configured_ip = ip_part.trim().trim_start_matches("ip=");
+                            if !configured_ip.is_empty() && configured_ip != "dhcp" {
+                                ip = configured_ip.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // WolfNet IP
+            let wolfnet_ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", vmid);
+            let wolfnet_ip = std::fs::read_to_string(&wolfnet_ip_file)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            if !wolfnet_ip.is_empty() {
+                if ip.is_empty() {
+                    ip = format!("{} (wolfnet)", wolfnet_ip);
+                } else if !ip.contains(&wolfnet_ip) {
+                    ip = format!("{}, {} (wolfnet)", ip, wolfnet_ip);
+                }
+            }
+
+            Some(ContainerInfo {
+                id: vmid.clone(),
+                name: vmid,
+                image: "lxc".to_string(),
+                status,
+                state,
+                created: String::new(),
+                ports: vec![],
+                runtime: "lxc".to_string(),
+                ip_address: ip,
+                autostart,
+                hostname,
+            })
+        })
+        .collect()
 }
 
 /// Get LXC container stats
@@ -1569,16 +1681,157 @@ pub struct LxcParsedConfig {
     // WolfNet
     pub wolfnet_ip: String,
 }
+/// Parse a Proxmox-format config (/etc/pve/lxc/<vmid>.conf)
+/// Format: `key: value` with network as `net0: name=eth0,bridge=vmbr0,hwaddr=...,ip=...,gw=...`
+fn parse_proxmox_config(mut cfg: LxcParsedConfig, content: &str, container: &str) -> LxcParsedConfig {
+    let mut net_map: std::collections::BTreeMap<u32, LxcNetInterface> = std::collections::BTreeMap::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() { continue; }
+
+        // Proxmox format: "key: value"
+        let (key, val) = match line.split_once(':') {
+            Some((k, v)) => (k.trim(), v.trim()),
+            None => continue,
+        };
+
+        // Network interfaces: net0, net1, etc.
+        if key.starts_with("net") {
+            if let Ok(idx) = key[3..].parse::<u32>() {
+                let nic = net_map.entry(idx).or_insert_with(|| LxcNetInterface {
+                    index: idx,
+                    ..Default::default()
+                });
+                // Parse comma-separated key=value pairs
+                for part in val.split(',') {
+                    let part = part.trim();
+                    if let Some((pk, pv)) = part.split_once('=') {
+                        match pk.trim() {
+                            "name" => nic.name = pv.to_string(),
+                            "bridge" => nic.link = pv.to_string(),
+                            "hwaddr" => nic.hwaddr = pv.to_string(),
+                            "ip" => {
+                                if pv != "dhcp" {
+                                    nic.ipv4 = pv.to_string();
+                                }
+                            }
+                            "gw" => nic.ipv4_gw = pv.to_string(),
+                            "ip6" => {
+                                if pv != "dhcp" && pv != "auto" {
+                                    nic.ipv6 = pv.to_string();
+                                }
+                            }
+                            "gw6" => nic.ipv6_gw = pv.to_string(),
+                            "type" => nic.net_type = pv.to_string(),
+                            "mtu" => nic.mtu = pv.to_string(),
+                            "tag" => nic.vlan = pv.to_string(),
+                            "firewall" => nic.firewall = pv == "1",
+                            "rate" => {} // bandwidth limit, ignore
+                            _ => {}
+                        }
+                    }
+                }
+                if nic.name.is_empty() {
+                    nic.name = format!("eth{}", idx);
+                }
+                if nic.net_type.is_empty() {
+                    nic.net_type = "veth".to_string();
+                }
+                nic.flags = "up".to_string();
+                continue;
+            }
+        }
+
+        match key {
+            "hostname" => cfg.hostname = val.to_string(),
+            "arch" => cfg.arch = val.to_string(),
+            "onboot" => cfg.autostart = val == "1",
+            "startup" => {
+                // Parse startup order: "order=N" format
+                if let Some(order_part) = val.split(',').find(|p| p.starts_with("order=")) {
+                    cfg.start_order = order_part[6..].parse().unwrap_or(0);
+                }
+            }
+            "cores" => cfg.cpus = val.to_string(),
+            "memory" => {
+                // Proxmox uses MB
+                let mb: u64 = val.parse().unwrap_or(0);
+                if mb > 0 {
+                    cfg.memory_limit = format!("{}M", mb);
+                }
+            }
+            "swap" => {
+                let mb: u64 = val.parse().unwrap_or(0);
+                if mb > 0 {
+                    cfg.swap_limit = format!("{}M", mb);
+                }
+            }
+            "unprivileged" => cfg.unprivileged = val == "1",
+            "features" => {
+                // features: nesting=1,keyctl=1,fuse=1
+                for feat in val.split(',') {
+                    let feat = feat.trim();
+                    match feat {
+                        "nesting=1" => cfg.nesting_enabled = true,
+                        "keyctl=1" => cfg.keyctl_enabled = true,
+                        "fuse=1" => cfg.fuse_enabled = true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Populate flat fields from NIC 0 for backward compat
+    if let Some(nic0) = net_map.get(&0) {
+        cfg.net_type = nic0.net_type.clone();
+        cfg.net_link = nic0.link.clone();
+        cfg.net_name = nic0.name.clone();
+        cfg.net_hwaddr = nic0.hwaddr.clone();
+        cfg.net_ipv4 = nic0.ipv4.clone();
+        cfg.net_ipv4_gw = nic0.ipv4_gw.clone();
+        cfg.net_ipv6 = nic0.ipv6.clone();
+        cfg.net_ipv6_gw = nic0.ipv6_gw.clone();
+        cfg.net_firewall = nic0.firewall;
+        cfg.net_mtu = nic0.mtu.clone();
+        cfg.net_vlan = nic0.vlan.clone();
+    }
+
+    cfg.network_interfaces = net_map.into_values().collect();
+
+    // Read WolfNet IP
+    let wolfnet_ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", container);
+    if let Ok(ip) = std::fs::read_to_string(&wolfnet_ip_file) {
+        cfg.wolfnet_ip = ip.trim().to_string();
+    }
+
+    cfg
+}
 
 /// Parse an LXC container config into structured form
 pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
-    let path = format!("/var/lib/lxc/{}/config", container);
-    let content = std::fs::read_to_string(&path).ok()?;
+    // Try Proxmox config first (/etc/pve/lxc/<vmid>.conf), then native LXC
+    let pve_path = format!("/etc/pve/lxc/{}.conf", container);
+    let lxc_path = format!("/var/lib/lxc/{}/config", container);
+
+    let (content, is_proxmox_fmt) = if let Ok(c) = std::fs::read_to_string(&pve_path) {
+        (c, true)
+    } else if let Ok(c) = std::fs::read_to_string(&lxc_path) {
+        (c, false)
+    } else {
+        return None;
+    };
 
     let mut cfg = LxcParsedConfig {
         raw_config: content.clone(),
         ..Default::default()
     };
+
+    if is_proxmox_fmt {
+        return Some(parse_proxmox_config(cfg, &content, container));
+    }
 
     // Collect network interfaces by index
     let mut net_map: std::collections::BTreeMap<u32, LxcNetInterface> = std::collections::BTreeMap::new();
@@ -1743,8 +1996,141 @@ pub struct LxcSettingsUpdate {
     // WolfNet
     pub wolfnet_ip: Option<String>,
 }
+/// Update LXC container settings via Proxmox pct set
+fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<String, String> {
+    let current = lxc_parse_config(container).unwrap_or_default();
+    let mut args: Vec<String> = vec!["set".to_string(), container.to_string()];
+
+    // Hostname
+    if let Some(ref h) = settings.hostname {
+        if !h.is_empty() {
+            args.push("--hostname".to_string());
+            args.push(h.clone());
+        }
+    }
+
+    // Memory (Proxmox uses MB as integer)
+    let mem = settings.memory_limit.as_deref().unwrap_or(&current.memory_limit);
+    if !mem.is_empty() {
+        let mb = parse_mem_to_mb(mem);
+        if mb > 0 {
+            args.push("--memory".to_string());
+            args.push(mb.to_string());
+        }
+    }
+
+    // Swap
+    let swap = settings.swap_limit.as_deref().unwrap_or(&current.swap_limit);
+    if !swap.is_empty() {
+        let mb = parse_mem_to_mb(swap);
+        if mb > 0 {
+            args.push("--swap".to_string());
+            args.push(mb.to_string());
+        }
+    }
+
+    // Cores / CPUs
+    let cpus = settings.cpus.as_deref().unwrap_or(&current.cpus);
+    if !cpus.is_empty() {
+        args.push("--cores".to_string());
+        args.push(cpus.to_string());
+    }
+
+    // Autostart
+    let autostart = settings.autostart.unwrap_or(current.autostart);
+    args.push("--onboot".to_string());
+    args.push(if autostart { "1" } else { "0" }.to_string());
+
+    // Features
+    let mut features: Vec<String> = Vec::new();
+    if settings.nesting_enabled.unwrap_or(current.nesting_enabled) { features.push("nesting=1".to_string()); }
+    if settings.keyctl_enabled.unwrap_or(current.keyctl_enabled) { features.push("keyctl=1".to_string()); }
+    if settings.fuse_enabled.unwrap_or(current.fuse_enabled) { features.push("fuse=1".to_string()); }
+    if !features.is_empty() {
+        args.push("--features".to_string());
+        args.push(features.join(","));
+    }
+
+    // Network interfaces
+    let nics: Vec<LxcNetInterface> = if let Some(ref ifaces) = settings.network_interfaces {
+        ifaces.clone()
+    } else {
+        current.network_interfaces.clone()
+    };
+
+    for nic in &nics {
+        let mut parts: Vec<String> = Vec::new();
+        let name = if nic.name.is_empty() { format!("eth{}", nic.index) } else { nic.name.clone() };
+        parts.push(format!("name={}", name));
+        if !nic.link.is_empty() { parts.push(format!("bridge={}", nic.link)); }
+        if !nic.hwaddr.is_empty() { parts.push(format!("hwaddr={}", nic.hwaddr)); }
+        if !nic.ipv4.is_empty() {
+            parts.push(format!("ip={}", nic.ipv4));
+        }
+        if !nic.ipv4_gw.is_empty() { parts.push(format!("gw={}", nic.ipv4_gw)); }
+        if !nic.ipv6.is_empty() {
+            parts.push(format!("ip6={}", nic.ipv6));
+        }
+        if !nic.ipv6_gw.is_empty() { parts.push(format!("gw6={}", nic.ipv6_gw)); }
+        let net_type = if nic.net_type.is_empty() { "veth".to_string() } else { nic.net_type.clone() };
+        parts.push(format!("type={}", net_type));
+        if !nic.mtu.is_empty() { parts.push(format!("mtu={}", nic.mtu)); }
+        if !nic.vlan.is_empty() { parts.push(format!("tag={}", nic.vlan)); }
+        if nic.firewall { parts.push("firewall=1".to_string()); }
+
+        args.push(format!("--net{}", nic.index));
+        args.push(parts.join(","));
+    }
+
+    // Execute pct set
+    let output = Command::new("pct")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Failed to run pct set: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("pct set failed: {}", stderr));
+    }
+
+    // Handle WolfNet IP separately
+    if let Some(ref wip) = settings.wolfnet_ip {
+        let wolfnet_dir = format!("/var/lib/lxc/{}/.wolfnet", container);
+        let wolfnet_ip_file = format!("{}/ip", wolfnet_dir);
+        let ip_trimmed = wip.trim();
+        if ip_trimmed.is_empty() {
+            let _ = std::fs::remove_file(&wolfnet_ip_file);
+        } else {
+            let _ = std::fs::create_dir_all(&wolfnet_dir);
+            std::fs::write(&wolfnet_ip_file, ip_trimmed)
+                .map_err(|e| format!("Failed to write WolfNet IP: {}", e))?;
+        }
+    }
+
+    Ok(format!("Settings updated for '{}' via pct", container))
+}
+
+/// Parse memory string (e.g. "512M", "1G", "1024") to MB
+fn parse_mem_to_mb(mem: &str) -> u64 {
+    let mem = mem.trim();
+    if mem.ends_with('G') || mem.ends_with('g') {
+        mem[..mem.len()-1].parse::<u64>().unwrap_or(0) * 1024
+    } else if mem.ends_with('M') || mem.ends_with('m') {
+        mem[..mem.len()-1].parse::<u64>().unwrap_or(0)
+    } else {
+        // Assume bytes or MB depending on magnitude
+        let val = mem.parse::<u64>().unwrap_or(0);
+        if val > 10000 { val / (1024 * 1024) } else { val }
+    }
+}
 
 pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<String, String> {
+    // Check if this is a Proxmox container
+    let pve_path = format!("/etc/pve/lxc/{}.conf", container);
+    if std::path::Path::new(&pve_path).exists() {
+        return pct_update_settings(container, settings);
+    }
+
     let path = format!("/var/lib/lxc/{}/config", container);
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Config not found: {}", e))?;
