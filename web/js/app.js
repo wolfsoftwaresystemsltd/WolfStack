@@ -5009,6 +5009,102 @@ function generateMac() {
     if (el) el.value = mac;
 }
 
+function generateMacFor(nicIndex) {
+    var hex = '0123456789ABCDEF';
+    var mac = '02';
+    for (var i = 0; i < 5; i++) {
+        mac += ':' + hex[Math.floor(Math.random() * 16)] + hex[Math.floor(Math.random() * 16)];
+    }
+    var el = document.querySelector(`.lxc-nic-field[data-nic="${nicIndex}"][data-field="hwaddr"]`);
+    if (el) el.value = mac;
+}
+
+function toggleNicEditor(nicIndex) {
+    var editor = document.getElementById('lxc-nic-editor-' + nicIndex);
+    var arrow = document.getElementById('lxc-nic-arrow-' + nicIndex);
+    if (!editor) return;
+    if (editor.style.display === 'none') {
+        editor.style.display = 'block';
+        if (arrow) arrow.style.transform = 'rotate(90deg)';
+    } else {
+        editor.style.display = 'none';
+        if (arrow) arrow.style.transform = 'rotate(0deg)';
+    }
+}
+
+function addLxcNic() {
+    var list = document.getElementById('lxc-nic-list');
+    if (!list) return;
+    // Find the next available index
+    var existing = list.querySelectorAll('.lxc-nic-item');
+    var maxIdx = -1;
+    existing.forEach(function (item) {
+        var idx = parseInt(item.getAttribute('data-nic-index'));
+        if (idx > maxIdx) maxIdx = idx;
+    });
+    var newIdx = maxIdx + 1;
+    var html = `
+        <div class="lxc-nic-item" data-nic-index="${newIdx}" style="margin-bottom:8px;border:1px solid var(--border);border-radius:8px;overflow:hidden;">
+            <div class="lxc-nic-summary" onclick="toggleNicEditor(${newIdx})" style="display:flex;align-items:center;gap:12px;padding:10px 14px;cursor:pointer;background:var(--bg-tertiary);transition:background .15s;"
+                 onmouseenter="this.style.background='var(--bg-secondary)'" onmouseleave="this.style.background='var(--bg-tertiary)'">
+                <span style="font-size:16px;">🔌</span>
+                <div style="flex:1;min-width:0;">
+                    <div style="font-weight:600;font-size:13px;">net${newIdx} — eth${newIdx}</div>
+                    <div style="font-size:11px;color:var(--text-muted);font-family:monospace;">New interface</div>
+                </div>
+                <span class="lxc-nic-arrow" id="lxc-nic-arrow-${newIdx}" style="font-size:12px;color:var(--text-muted);transition:transform .2s;transform:rotate(90deg);">▶</span>
+            </div>
+            <div class="lxc-nic-editor" id="lxc-nic-editor-${newIdx}" style="display:block;padding:14px;border-top:1px solid var(--border);background:var(--bg-primary);">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                    <div class="form-group" style="margin:0;">
+                        <label style="font-size:11px;">Interface Name</label>
+                        <input type="text" class="form-control lxc-nic-field" data-nic="${newIdx}" data-field="name" value="eth${newIdx}" placeholder="eth${newIdx}">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                        <label style="font-size:11px;">Type</label>
+                        <input type="text" class="form-control lxc-nic-field" data-nic="${newIdx}" data-field="net_type" value="veth" placeholder="veth">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                        <label style="font-size:11px;">Bridge / Link</label>
+                        <input type="text" class="form-control lxc-nic-field" data-nic="${newIdx}" data-field="link" value="" placeholder="e.g. lxcbr0, vmbr0">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                        <label style="font-size:11px;">MAC Address</label>
+                        <div style="display:flex;gap:4px;">
+                            <input type="text" class="form-control lxc-nic-field" data-nic="${newIdx}" data-field="hwaddr" value="" placeholder="AA:BB:CC:DD:EE:FF" style="flex:1;">
+                            <button class="btn btn-sm" onclick="generateMacFor(${newIdx})" title="Generate MAC" style="padding:4px 6px;font-size:10px;">🎲</button>
+                        </div>
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                        <label style="font-size:11px;">IPv4 Address / CIDR</label>
+                        <input type="text" class="form-control lxc-nic-field" data-nic="${newIdx}" data-field="ipv4" value="" placeholder="192.168.1.100/24 or blank for DHCP">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                        <label style="font-size:11px;">IPv4 Gateway</label>
+                        <input type="text" class="form-control lxc-nic-field" data-nic="${newIdx}" data-field="ipv4_gw" value="" placeholder="192.168.1.1">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                        <label style="font-size:11px;">IPv6 Address / CIDR</label>
+                        <input type="text" class="form-control lxc-nic-field" data-nic="${newIdx}" data-field="ipv6" value="" placeholder="fd00::100/64 or blank">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                        <label style="font-size:11px;">IPv6 Gateway</label>
+                        <input type="text" class="form-control lxc-nic-field" data-nic="${newIdx}" data-field="ipv6_gw" value="" placeholder="fd00::1">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                        <label style="font-size:11px;">MTU</label>
+                        <input type="text" class="form-control lxc-nic-field" data-nic="${newIdx}" data-field="mtu" value="" placeholder="Default">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                        <label style="font-size:11px;">VLAN Tag</label>
+                        <input type="text" class="form-control lxc-nic-field" data-nic="${newIdx}" data-field="vlan" value="" placeholder="None">
+                    </div>
+                </div>
+            </div>
+        </div>`;
+    list.insertAdjacentHTML('beforeend', html);
+}
+
 function toggleIpv4Mode() {
     var mode = document.querySelector('input[name="lxc-ipv4-mode"]:checked');
     var staticFields = document.getElementById('lxc-ipv4-static-fields');
@@ -5157,90 +5253,74 @@ async function openLxcSettings(name) {
 
             <!-- ═══ Tab 2: Network ═══ -->
             <div class="lxc-tab-page" id="lxc-tab-2" style="display:none;">
-                ${(cfg.network_interfaces || []).map((nic, idx) => {
-            if (nic.index === 0) {
-                // Primary NIC — fully editable with existing IDs
-                return `
-                <div style="margin-bottom:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
-                    <h4 style="margin:0 0 8px 0;font-size:13px;">🔌 net${nic.index} — ${escapeHtml(nic.name || 'eth0')} <span style="color:var(--text-muted);font-weight:normal;">(${escapeHtml(nic.net_type || 'veth')})</span></h4>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-                        <div class="form-group" style="margin:0;">
-                            <label>Interface Name</label>
-                            <input type="text" id="lxc-net-name" class="form-control" value="${escapeHtml(nic.name || 'eth0')}" placeholder="eth0">
+                <div id="lxc-nic-list">
+                ${((cfg.network_interfaces || []).length > 0 ? cfg.network_interfaces : [{ index: 0, net_type: 'veth', name: 'eth0', link: '', hwaddr: '', ipv4: '', ipv4_gw: '', ipv6: '', ipv6_gw: '', mtu: '', vlan: '' }]).map(nic => `
+                    <div class="lxc-nic-item" data-nic-index="${nic.index}" style="margin-bottom:8px;border:1px solid var(--border);border-radius:8px;overflow:hidden;">
+                        <div class="lxc-nic-summary" onclick="toggleNicEditor(${nic.index})" style="display:flex;align-items:center;gap:12px;padding:10px 14px;cursor:pointer;background:var(--bg-tertiary);transition:background .15s;"
+                             onmouseenter="this.style.background='var(--bg-secondary)'" onmouseleave="this.style.background='var(--bg-tertiary)'">
+                            <span style="font-size:16px;">🔌</span>
+                            <div style="flex:1;min-width:0;">
+                                <div style="font-weight:600;font-size:13px;">net${nic.index} — ${escapeHtml(nic.name || 'eth' + nic.index)}</div>
+                                <div style="font-size:11px;color:var(--text-muted);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                                    ${escapeHtml(nic.ipv4) || 'DHCP'} · ${escapeHtml(nic.link) || 'no bridge'} · ${escapeHtml(nic.hwaddr) || 'no MAC'}
+                                </div>
+                            </div>
+                            <span class="lxc-nic-arrow" id="lxc-nic-arrow-${nic.index}" style="font-size:12px;color:var(--text-muted);transition:transform .2s;">▶</span>
                         </div>
-                        <div class="form-group" style="margin:0;">
-                            <label>Bridge / Link</label>
-                            <input type="text" id="lxc-net-link" class="form-control" value="${escapeHtml(nic.link)}" placeholder="e.g. lxcbr0, vmbr0">
-                        </div>
-                        <div class="form-group" style="margin:0;">
-                            <label>MAC Address</label>
-                            <div style="display:flex;gap:4px;">
-                                <input type="text" id="lxc-net-hwaddr" class="form-control" value="${escapeHtml(nic.hwaddr)}"
-                                    placeholder="AA:BB:CC:DD:EE:FF" style="flex:1;">
-                                <button class="btn btn-sm" onclick="generateMac()" title="Generate random MAC"
-                                    style="padding:4px 8px;font-size:11px;">🎲</button>
+                        <div class="lxc-nic-editor" id="lxc-nic-editor-${nic.index}" style="display:none;padding:14px;border-top:1px solid var(--border);background:var(--bg-primary);">
+                            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                                <div class="form-group" style="margin:0;">
+                                    <label style="font-size:11px;">Interface Name</label>
+                                    <input type="text" class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="name" value="${escapeHtml(nic.name || 'eth' + nic.index)}" placeholder="eth${nic.index}">
+                                </div>
+                                <div class="form-group" style="margin:0;">
+                                    <label style="font-size:11px;">Type</label>
+                                    <input type="text" class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="net_type" value="${escapeHtml(nic.net_type || 'veth')}" placeholder="veth">
+                                </div>
+                                <div class="form-group" style="margin:0;">
+                                    <label style="font-size:11px;">Bridge / Link</label>
+                                    <input type="text" class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="link" value="${escapeHtml(nic.link)}" placeholder="e.g. lxcbr0, vmbr0">
+                                </div>
+                                <div class="form-group" style="margin:0;">
+                                    <label style="font-size:11px;">MAC Address</label>
+                                    <div style="display:flex;gap:4px;">
+                                        <input type="text" class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="hwaddr" value="${escapeHtml(nic.hwaddr)}" placeholder="AA:BB:CC:DD:EE:FF" style="flex:1;">
+                                        <button class="btn btn-sm" onclick="generateMacFor(${nic.index})" title="Generate MAC" style="padding:4px 6px;font-size:10px;">🎲</button>
+                                    </div>
+                                </div>
+                                <div class="form-group" style="margin:0;">
+                                    <label style="font-size:11px;">IPv4 Address / CIDR</label>
+                                    <input type="text" class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="ipv4" value="${escapeHtml(nic.ipv4)}" placeholder="192.168.1.100/24 or blank for DHCP">
+                                </div>
+                                <div class="form-group" style="margin:0;">
+                                    <label style="font-size:11px;">IPv4 Gateway</label>
+                                    <input type="text" class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="ipv4_gw" value="${escapeHtml(nic.ipv4_gw)}" placeholder="192.168.1.1">
+                                </div>
+                                <div class="form-group" style="margin:0;">
+                                    <label style="font-size:11px;">IPv6 Address / CIDR</label>
+                                    <input type="text" class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="ipv6" value="${escapeHtml(nic.ipv6)}" placeholder="fd00::100/64 or blank">
+                                </div>
+                                <div class="form-group" style="margin:0;">
+                                    <label style="font-size:11px;">IPv6 Gateway</label>
+                                    <input type="text" class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="ipv6_gw" value="${escapeHtml(nic.ipv6_gw)}" placeholder="fd00::1">
+                                </div>
+                                <div class="form-group" style="margin:0;">
+                                    <label style="font-size:11px;">MTU</label>
+                                    <input type="text" class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="mtu" value="${escapeHtml(nic.mtu)}" placeholder="Default">
+                                </div>
+                                <div class="form-group" style="margin:0;">
+                                    <label style="font-size:11px;">VLAN Tag</label>
+                                    <input type="text" class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="vlan" value="${escapeHtml(nic.vlan)}" placeholder="None">
+                                </div>
                             </div>
                         </div>
-                        <div class="form-group" style="margin:0;">
-                            <label>VLAN Tag</label>
-                            <input type="text" id="lxc-net-vlan" class="form-control" value="${escapeHtml(nic.vlan)}" placeholder="No VLAN">
-                        </div>
-                        <div class="form-group" style="margin:0;">
-                            <label>MTU</label>
-                            <input type="text" id="lxc-net-mtu" class="form-control" value="${escapeHtml(nic.mtu)}" placeholder="Same as bridge">
-                        </div>
                     </div>
-                </div>`;
-            } else {
-                // Additional NICs — read-only info cards
-                return `
-                <div style="margin-bottom:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);opacity:0.85;">
-                    <h4 style="margin:0 0 8px 0;font-size:13px;">🔌 net${nic.index} — ${escapeHtml(nic.name || 'eth' + nic.index)} <span style="color:var(--text-muted);font-weight:normal;">(${escapeHtml(nic.net_type || 'veth')})</span></h4>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;">
-                        <div><strong>Bridge:</strong> ${escapeHtml(nic.link) || '-'}</div>
-                        <div><strong>MAC:</strong> <span style="font-family:monospace;">${escapeHtml(nic.hwaddr) || '-'}</span></div>
-                        <div><strong>IPv4:</strong> <span style="font-family:monospace;">${escapeHtml(nic.ipv4) || 'DHCP'}</span></div>
-                        <div><strong>Gateway:</strong> <span style="font-family:monospace;">${escapeHtml(nic.ipv4_gw) || '-'}</span></div>
-                        ${nic.ipv6 ? `<div><strong>IPv6:</strong> <span style="font-family:monospace;">${escapeHtml(nic.ipv6)}</span></div>` : ''}
-                        ${nic.mtu ? `<div><strong>MTU:</strong> ${escapeHtml(nic.mtu)}</div>` : ''}
-                        ${nic.vlan ? `<div><strong>VLAN:</strong> ${escapeHtml(nic.vlan)}</div>` : ''}
-                    </div>
-                    <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">Edit additional NICs via the Raw Config tab.</div>
-                </div>`;
-            }
-        }).join('')}
+                `).join('')}
+                </div>
 
-                ${(cfg.network_interfaces || []).length === 0 ? `
-                <div style="margin-bottom:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
-                    <h4 style="margin:0 0 8px 0;font-size:13px;">🔌 net0 — eth0</h4>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-                        <div class="form-group" style="margin:0;">
-                            <label>Interface Name</label>
-                            <input type="text" id="lxc-net-name" class="form-control" value="eth0" placeholder="eth0">
-                        </div>
-                        <div class="form-group" style="margin:0;">
-                            <label>Bridge / Link</label>
-                            <input type="text" id="lxc-net-link" class="form-control" value="" placeholder="e.g. lxcbr0, vmbr0">
-                        </div>
-                        <div class="form-group" style="margin:0;">
-                            <label>MAC Address</label>
-                            <div style="display:flex;gap:4px;">
-                                <input type="text" id="lxc-net-hwaddr" class="form-control" value="" placeholder="AA:BB:CC:DD:EE:FF" style="flex:1;">
-                                <button class="btn btn-sm" onclick="generateMac()" title="Generate random MAC" style="padding:4px 8px;font-size:11px;">🎲</button>
-                            </div>
-                        </div>
-                        <div class="form-group" style="margin:0;">
-                            <label>VLAN Tag</label>
-                            <input type="text" id="lxc-net-vlan" class="form-control" value="" placeholder="No VLAN">
-                        </div>
-                        <div class="form-group" style="margin:0;">
-                            <label>MTU</label>
-                            <input type="text" id="lxc-net-mtu" class="form-control" value="" placeholder="Same as bridge">
-                        </div>
-                    </div>
-                </div>` : ''}
+                <button class="btn btn-sm" onclick="addLxcNic()" style="margin-top:4px;font-size:11px;padding:6px 12px;">+ Add Interface</button>
 
-                    <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
+                <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
                     <h4 style="margin:0 0 8px 0;font-size:13px;">🐺 WolfNet</h4>
                     <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end;">
                         <div class="form-group" style="margin:0;">
@@ -5255,66 +5335,6 @@ async function openLxcSettings(name) {
                     </div>
                     <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">Gateway is handled automatically by WolfNet — no need to configure it here.</div>
                     <div id="wolfnet-ip-warning" style="display:none;font-size:11px;color:var(--warning);margin-top:4px;"></div>
-                </div>
-
-                <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
-                    <h4 style="margin:0 0 8px 0;font-size:13px;">IPv4</h4>
-                    <div style="display:flex;gap:16px;margin-bottom:8px;">
-                        <label style="cursor:pointer;display:flex;align-items:center;gap:4px;">
-                            <input type="radio" name="lxc-ipv4-mode" value="static" onchange="toggleIpv4Mode()"
-                                ${ipv4Mode === 'static' ? 'checked' : ''}> Static
-                        </label>
-                        <label style="cursor:pointer;display:flex;align-items:center;gap:4px;">
-                            <input type="radio" name="lxc-ipv4-mode" value="dhcp" onchange="toggleIpv4Mode()"
-                                ${ipv4Mode === 'dhcp' ? 'checked' : ''}> DHCP
-                        </label>
-                    </div>
-                    <div id="lxc-ipv4-static-fields" style="display:${ipv4Mode === 'static' ? 'block' : 'none'};">
-                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-                            <div class="form-group" style="margin:0;">
-                                <label>IPv4/CIDR</label>
-                                <input type="text" id="lxc-net-ipv4" class="form-control" value="${escapeHtml(cfg.net_ipv4)}"
-                                    placeholder="192.168.1.100/24">
-                            </div>
-                            <div class="form-group" style="margin:0;">
-                                <label>Gateway</label>
-                                <input type="text" id="lxc-net-ipv4-gw" class="form-control" value="${escapeHtml(cfg.net_ipv4_gw)}"
-                                    placeholder="192.168.1.1">
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div style="margin-top:8px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
-                    <h4 style="margin:0 0 8px 0;font-size:13px;">IPv6</h4>
-                    <div style="display:flex;gap:16px;margin-bottom:8px;">
-                        <label style="cursor:pointer;display:flex;align-items:center;gap:4px;">
-                            <input type="radio" name="lxc-ipv6-mode" value="static" onchange="toggleIpv6Mode()"
-                                ${ipv6Mode === 'static' ? 'checked' : ''}> Static
-                        </label>
-                        <label style="cursor:pointer;display:flex;align-items:center;gap:4px;">
-                            <input type="radio" name="lxc-ipv6-mode" value="dhcp" onchange="toggleIpv6Mode()"
-                                ${ipv6Mode === 'dhcp' ? 'checked' : ''}> DHCP
-                        </label>
-                        <label style="cursor:pointer;display:flex;align-items:center;gap:4px;">
-                            <input type="radio" name="lxc-ipv6-mode" value="none" onchange="toggleIpv6Mode()"
-                                ${ipv6Mode === 'none' ? 'checked' : ''}> None
-                        </label>
-                    </div>
-                    <div id="lxc-ipv6-static-fields" style="display:${ipv6Mode === 'static' ? 'block' : 'none'};">
-                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-                            <div class="form-group" style="margin:0;">
-                                <label>IPv6/CIDR</label>
-                                <input type="text" id="lxc-net-ipv6" class="form-control" value="${escapeHtml(cfg.net_ipv6)}"
-                                    placeholder="fd00::100/64">
-                            </div>
-                            <div class="form-group" style="margin:0;">
-                                <label>Gateway</label>
-                                <input type="text" id="lxc-net-ipv6-gw" class="form-control" value="${escapeHtml(cfg.net_ipv6_gw)}"
-                                    placeholder="fd00::1">
-                            </div>
-                        </div>
-                    </div>
                 </div>
             </div>
 
@@ -5467,9 +5487,31 @@ async function saveLxcSettings(name) {
         }
     }
 
-    // Build structured settings from all tabs
-    var ipv4Mode = document.querySelector('input[name="lxc-ipv4-mode"]:checked');
-    var ipv6Mode = document.querySelector('input[name="lxc-ipv6-mode"]:checked');
+    // Collect all network interfaces from NIC editors
+    var networkInterfaces = [];
+    var nicItems = document.querySelectorAll('.lxc-nic-item');
+    nicItems.forEach(function (item) {
+        var idx = parseInt(item.getAttribute('data-nic-index'));
+        var getField = function (field) {
+            var el = item.querySelector(`.lxc-nic-field[data-field="${field}"]`);
+            return el ? el.value.trim() : '';
+        };
+        networkInterfaces.push({
+            index: idx,
+            net_type: getField('net_type') || 'veth',
+            name: getField('name') || ('eth' + idx),
+            link: getField('link'),
+            hwaddr: getField('hwaddr'),
+            ipv4: getField('ipv4'),
+            ipv4_gw: getField('ipv4_gw'),
+            ipv6: getField('ipv6'),
+            ipv6_gw: getField('ipv6_gw'),
+            mtu: getField('mtu'),
+            vlan: getField('vlan'),
+            firewall: false,
+            flags: 'up'
+        });
+    });
 
     var settings = {
         hostname: (document.getElementById('lxc-hostname') || {}).value || '',
@@ -5477,15 +5519,7 @@ async function saveLxcSettings(name) {
         start_delay: parseInt((document.getElementById('lxc-start-delay') || {}).value) || 0,
         start_order: parseInt((document.getElementById('lxc-start-order') || {}).value) || 0,
         unprivileged: (document.getElementById('lxc-unprivileged') || {}).value === 'true',
-        net_link: (document.getElementById('lxc-net-link') || {}).value || '',
-        net_name: (document.getElementById('lxc-net-name') || {}).value || '',
-        net_hwaddr: (document.getElementById('lxc-net-hwaddr') || {}).value || '',
-        net_ipv4: (ipv4Mode && ipv4Mode.value === 'static') ? ((document.getElementById('lxc-net-ipv4') || {}).value || '') : '',
-        net_ipv4_gw: (ipv4Mode && ipv4Mode.value === 'static') ? ((document.getElementById('lxc-net-ipv4-gw') || {}).value || '') : '',
-        net_ipv6: (ipv6Mode && ipv6Mode.value === 'static') ? ((document.getElementById('lxc-net-ipv6') || {}).value || '') : '',
-        net_ipv6_gw: (ipv6Mode && ipv6Mode.value === 'static') ? ((document.getElementById('lxc-net-ipv6-gw') || {}).value || '') : '',
-        net_mtu: (document.getElementById('lxc-net-mtu') || {}).value || '',
-        net_vlan: (document.getElementById('lxc-net-vlan') || {}).value || '',
+        network_interfaces: networkInterfaces,
         memory_limit: (document.getElementById('lxc-memory') || {}).value || '',
         swap_limit: (document.getElementById('lxc-swap') || {}).value || '',
         cpus: (document.getElementById('lxc-cpus') || {}).value || '',
