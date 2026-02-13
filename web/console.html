@@ -83,8 +83,11 @@
         const name = params.get('name') || '';
         const remoteHost = params.get('host') || '';
         const remotePort = params.get('port') || '';
+        const pveNodeId = params.get('pve_node_id') || '';
+        const pveVmid = params.get('pve_vmid') || '';
 
         const isRemote = remoteHost && remotePort;
+        const isPve = (type === 'pve' && pveNodeId && pveVmid);
         document.title = `Console — ${name}`;
         document.getElementById('title').textContent = `💻 Console — ${name} (${type})${isRemote ? ' @ ' + remoteHost : ''}`;
 
@@ -116,10 +119,18 @@
 
         term.writeln('\x1b[33mConnecting to ' + type + ' container: ' + name + (isRemote ? ' on ' + remoteHost : '') + '...\x1b[0m');
 
-        // WebSocket — connect to remote server if host/port are provided
-        const wsHost = isRemote ? remoteHost + ':' + remotePort : window.location.host;
-        const protocol = (isRemote ? 'ws:' : (window.location.protocol === 'https:' ? 'wss:' : 'ws:'));
-        const wsUrl = protocol + '//' + wsHost + '/ws/console/' + type + '/' + encodeURIComponent(name);
+        // WebSocket URL
+        let wsUrl;
+        if (isPve) {
+            // PVE console — connect through WolfStack's PVE WebSocket proxy
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            wsUrl = protocol + '//' + window.location.host + '/ws/pve-console/' + pveNodeId + '/' + pveVmid;
+        } else {
+            // Standard console — docker, lxc, host, vm, upgrade
+            const wsHost = isRemote ? remoteHost + ':' + remotePort : window.location.host;
+            const protocol = (isRemote ? 'ws:' : (window.location.protocol === 'https:' ? 'wss:' : 'ws:'));
+            wsUrl = protocol + '//' + wsHost + '/ws/console/' + type + '/' + encodeURIComponent(name);
+        }
         const ws = new WebSocket(wsUrl);
         ws.binaryType = 'arraybuffer';
 

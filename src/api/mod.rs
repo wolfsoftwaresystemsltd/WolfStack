@@ -20,6 +20,7 @@ use crate::agent::{ClusterState, AgentMessage};
 use crate::auth::SessionManager;
 
 mod console;
+mod pve_console;
 
 /// Progress state for PBS restore operations
 #[derive(Clone, Serialize, Default)]
@@ -3139,6 +3140,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups/{id}/restore", web::post().to(backup_restore))
         // Console WebSocket
         .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
+        // PVE Console WebSocket proxy
+        .route("/ws/pve-console/{node_id}/{vmid}", web::get().to(pve_console::pve_console_ws))
         // Agent (cluster-secret auth — inter-node communication)
         .route("/api/agent/status", web::get().to(agent_status))
         .route("/api/agent/storage/apply", web::post().to(agent_storage_apply))

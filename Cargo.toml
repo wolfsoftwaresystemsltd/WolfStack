@@ -14,6 +14,7 @@ actix-files = "0.6"
 actix-rt = "2"
 actix-ws = "0.3"
 portable-pty = "0.8"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures = "0.3"
 
 # Serialization
@@ -29,6 +30,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 
 # TLS (OpenSSL — system native, no CryptoProvider headaches)
 openssl = "0.10"
+native-tls = "0.2"
 
 # Logging
 tracing = "0.1"

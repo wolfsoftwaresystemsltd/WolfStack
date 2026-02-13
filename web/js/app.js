@@ -2874,9 +2874,7 @@ async function renderPveResourcesView(nodeId) {
 
     function consoleLink(g) {
         if (g.status !== 'running') return '';
-        const vncType = g.guest_type === 'qemu' ? 'kvm' : 'lxc';
-        const url = `https://${pveHost}:${pvePort}/?console=${vncType}&vmid=${g.vmid}&node=${g.node}`;
-        return `<a href="${url}" target="_blank" rel="noopener" class="btn btn-sm" style="font-size:11px;padding:3px 10px;text-decoration:none;">🖥 Console</a>`;
+        return `<button class="btn btn-sm" onclick="openPveConsole('${nodeId}', ${g.vmid}, '${g.name || 'VMID ' + g.vmid}')" style="font-size:11px;padding:3px 10px;">🖥 Console</button>`;
     }
 
     function guestCard(g) {
@@ -6284,6 +6282,13 @@ function closeConsole() { }
 
 function openVmConsole(name) {
     openConsole('vm', name);
+}
+
+function openPveConsole(nodeId, vmid, displayName) {
+    const url = '/console.html?type=pve&name=' + encodeURIComponent(displayName || 'VMID ' + vmid)
+        + '&pve_node_id=' + encodeURIComponent(nodeId)
+        + '&pve_vmid=' + encodeURIComponent(vmid);
+    window.open(url, 'pve_console_' + vmid, 'width=960,height=600,menubar=no,toolbar=no');
 }
 
 function openVmVnc(name, wsPort) {

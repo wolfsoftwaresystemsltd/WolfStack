@@ -255,6 +255,30 @@ impl PveClient {
         Ok(upid)
     }
 
+    /// Get a termproxy ticket for interactive terminal access to a guest
+    /// Returns (port, ticket, user) — port is on the PVE host where the WS is served
+    pub async fn termproxy(&self, vmid: u64, guest_type: &str) -> Result<(u16, String, String), String> {
+        let path = format!("/nodes/{}/{}/{}/termproxy", self.node_name, guest_type, vmid);
+        let data = self.post(&path).await?;
+        let port = data.get("port").and_then(|v| v.as_u64())
+            .ok_or("Missing port in termproxy response")? as u16;
+        let ticket = data.get("ticket").and_then(|v| v.as_str())
+            .ok_or("Missing ticket in termproxy response")?.to_string();
+        let user = data.get("user").and_then(|v| v.as_str()).unwrap_or("root@pam").to_string();
+        info!("PVE termproxy for {}/{} VMID {}: port={}", guest_type, self.node_name, vmid, port);
+        Ok((port, ticket, user))
+    }
+
+    /// Get the base URL of this PVE host
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Get the PVE node name
+    pub fn node_name(&self) -> &str {
+        &self.node_name
+    }
+
     /// Test connectivity — try to reach the PVE API
     pub async fn test_connection(&self) -> Result<String, String> {
         let data = self.get("/version").await?;
