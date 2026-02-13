@@ -74,10 +74,27 @@ echo "Installing system dependencies..."
 if [ "$PKG_MANAGER" = "apt" ]; then
     apt update -qq
     # On Proxmox hosts, QEMU and LXC are already provided by pve-qemu-kvm and lxc-pve.
-    # Installing the Debian versions would remove the proxmox-ve metapackage!
+    # Many Debian packages conflict with PVE equivalents, causing APT to try removing
+    # the proxmox-ve metapackage. We must be very conservative on PVE hosts.
     if [ "$IS_PROXMOX" = true ]; then
-        QEMU_PKG=""
-        LXC_PKGS=""
+        # Only install build dependencies needed for compiling Rust/WolfStack.
+        # Proxmox already provides QEMU, LXC, socat, bridge-utils, etc.
+        apt install -y --no-install-recommends git curl build-essential pkg-config libssl-dev libcrypt-dev || {
+            echo "⚠ Some build dependencies failed to install. Trying individually..."
+            for pkg in git curl build-essential pkg-config libssl-dev libcrypt-dev; do
+                dpkg -s "$pkg" &>/dev/null || apt install -y --no-install-recommends "$pkg" 2>/dev/null || true
+            done
+        }
+        # Install optional runtime deps one-by-one — skip if already provided by PVE
+        for pkg in dnsmasq-base bridge-utils socat s3fs nfs-common fuse3; do
+            if dpkg -s "$pkg" &>/dev/null; then
+                echo "  ✓ $pkg already installed"
+            else
+                echo "  Installing $pkg..."
+                apt install -y --no-install-recommends "$pkg" 2>/dev/null || \
+                    echo "  ⚠ Could not install $pkg (may conflict with PVE) — skipping"
+            fi
+        done
     else
         # Select architecture-appropriate QEMU package
         ARCH=$(uname -m)
@@ -88,9 +105,8 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         else
             QEMU_PKG="qemu-system-x86 qemu-utils"
         fi
-        LXC_PKGS="lxc lxc-templates"
+        apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils $QEMU_PKG socat s3fs nfs-common fuse3
     fi
-    apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev dnsmasq-base bridge-utils socat s3fs nfs-common fuse3 $LXC_PKGS $QEMU_PKG
 elif [ "$PKG_MANAGER" = "dnf" ]; then
     dnf install -y git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat s3fs-fuse nfs-utils fuse3
 elif [ "$PKG_MANAGER" = "yum" ]; then
