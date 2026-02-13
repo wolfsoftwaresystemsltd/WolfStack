@@ -166,7 +166,7 @@ impl AiAgent {
         &self,
         user_message: &str,
         system_context: &str,
-        cluster_nodes: &[(String, String, String)],  // (id, hostname, base_url)
+        cluster_nodes: &[(String, String, String, String)],  // (id, hostname, base_url_primary, base_url_fallback)
         cluster_secret: &str,
     ) -> Result<String, String> {
         let config = self.config.lock().unwrap().clone();
@@ -254,32 +254,41 @@ impl AiAgent {
                     ));
 
                     // Run on all remote cluster nodes
-                    for (node_id, node_hostname, base_url) in cluster_nodes {
-                        let remote_url = format!("{}/api/ai/exec", base_url);
-                        let remote_result = self.client
-                            .post(&remote_url)
-                            .header("X-WolfStack-Secret", cluster_secret)
-                            .json(&serde_json::json!({ "command": cmd }))
-                            .timeout(Duration::from_secs(15))
-                            .send()
-                            .await;
+                    for (node_id, node_hostname, url_primary, url_fallback) in cluster_nodes {
+                        // Try primary URL first (port+1 for HTTPS nodes), fall back to original port
+                        let urls = [url_primary.as_str(), url_fallback.as_str()];
+                        let mut output = String::new();
+                        for base_url in &urls {
+                            let remote_url = format!("{}/api/ai/exec", base_url);
+                            let remote_result = self.client
+                                .post(&remote_url)
+                                .header("X-WolfStack-Secret", cluster_secret)
+                                .json(&serde_json::json!({ "command": cmd }))
+                                .timeout(Duration::from_secs(15))
+                                .send()
+                                .await;
 
-                        let output = match remote_result {
-                            Ok(resp) => {
-                                let resp_text = resp.text().await.unwrap_or_default();
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp_text) {
-                                    if let Some(err) = json["error"].as_str() {
-                                        format!("ERROR: {}", err)
+                            match remote_result {
+                                Ok(resp) => {
+                                    let resp_text = resp.text().await.unwrap_or_default();
+                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp_text) {
+                                        if let Some(err) = json["error"].as_str() {
+                                            output = format!("ERROR: {}", err);
+                                        } else {
+                                            output = json["output"].as_str().unwrap_or("(no output)").to_string();
+                                        }
                                     } else {
-                                        json["output"].as_str().unwrap_or("(no output)").to_string()
+                                        let preview: String = resp_text.chars().take(200).collect();
+                                        output = format!("ERROR: Failed to parse response (body: {})", preview);
                                     }
-                                } else {
-                                    let preview: String = resp_text.chars().take(200).collect();
-                                    format!("ERROR: Failed to parse response (body: {})", preview)
+                                    break; // Got a response, don't try fallback
+                                }
+                                Err(e) => {
+                                    output = format!("ERROR: Connection failed — {}", e);
+                                    // Try next URL
                                 }
                             }
-                            Err(e) => format!("ERROR: Connection failed — {}", e),
-                        };
+                        }
 
                         command_results.push_str(&format!(
                             "\n=== {} ({}) ===\n$ {}\n{}\n",
