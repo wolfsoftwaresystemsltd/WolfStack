@@ -942,6 +942,7 @@ pub fn build_metrics_summary(
     lxc_count: u32,
     vm_count: u32,
     uptime_secs: u64,
+    guest_cpu_stats: Option<&[(&str, &str, u64, &str, f32)]>, // (pve_node, guest_type, vmid, name, cpu_percent)
 ) -> String {
     let mem_percent = if memory_total_gb > 0.0 { (memory_used_gb / memory_total_gb * 100.0) as u32 } else { 0 };
     let disk_percent = if disk_total_gb > 0.0 { (disk_used_gb / disk_total_gb * 100.0) as u32 } else { 0 };
@@ -949,7 +950,7 @@ pub fn build_metrics_summary(
     let uptime_days = uptime_hours / 24;
     let version = env!("CARGO_PKG_VERSION");
 
-    format!(
+    let mut summary = format!(
         "Hostname: {}\n\
          WolfStack Version: {}\n\
          CPU Usage: {:.1}%\n\
@@ -968,5 +969,22 @@ pub fn build_metrics_summary(
         lxc_count,
         vm_count,
         uptime_days, uptime_hours % 24,
-    )
+    );
+
+    // Append per-guest CPU stats if available (from Proxmox nodes)
+    if let Some(stats) = guest_cpu_stats {
+        let running: Vec<_> = stats.iter().filter(|(_, _, _, _, cpu)| *cpu > 0.0).collect();
+        if !running.is_empty() {
+            summary.push_str("\n\nProxmox Guest CPU Usage:");
+            for (pve_node, gtype, vmid, name, cpu) in running {
+                let label = if *gtype == "lxc" { "LXC" } else { "VM" };
+                summary.push_str(&format!(
+                    "\n  {} {} ({}) on {}: {:.1}%",
+                    label, vmid, name, pve_node, cpu * 100.0
+                ));
+            }
+        }
+    }
+
+    summary
 }

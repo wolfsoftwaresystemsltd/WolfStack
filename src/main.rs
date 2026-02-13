@@ -255,29 +255,64 @@ async fn main() -> std::io::Result<()> {
                 };
 
                 if is_configured {
-                    // Build metrics summary with real system data
-                    let summary = {
+                    // Collect local metrics (sync — release mutex before any .await)
+                    let (hostname, cpu_pct, mem_used_gb, mem_total_gb, disk_used_gb, disk_total_gb,
+                         docker_count, lxc_count, vm_count, uptime_secs) = {
                         let mut monitor = ai_state.monitor.lock().unwrap();
                         let m = monitor.collect();
                         let docker_count = containers::docker_list_all().len() as u32;
                         let lxc_count = containers::lxc_list_all().len() as u32;
                         let vm_count = ai_state.vms.lock().unwrap().list_vms().len() as u32;
 
-                        let mem_used_gb = m.memory_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-                        let mem_total_gb = m.memory_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                        let mem_used = m.memory_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                        let mem_total = m.memory_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
                         let root_disk = m.disks.iter().find(|d| d.mount_point == "/").or_else(|| m.disks.first());
-                        let disk_used_gb = root_disk.map(|d| d.used_bytes as f64 / (1024.0 * 1024.0 * 1024.0)).unwrap_or(0.0);
-                        let disk_total_gb = root_disk.map(|d| d.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)).unwrap_or(0.0);
+                        let disk_used = root_disk.map(|d| d.used_bytes as f64 / (1024.0 * 1024.0 * 1024.0)).unwrap_or(0.0);
+                        let disk_total = root_disk.map(|d| d.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)).unwrap_or(0.0);
 
-                        ai::build_metrics_summary(
-                            &m.hostname,
-                            m.cpu_usage_percent,
-                            mem_used_gb, mem_total_gb,
-                            disk_used_gb, disk_total_gb,
-                            docker_count, lxc_count, vm_count,
-                            m.uptime_secs,
-                        )
+                        (m.hostname.clone(), m.cpu_usage_percent, mem_used, mem_total,
+                         disk_used, disk_total, docker_count, lxc_count, vm_count, m.uptime_secs)
                     };
+                    // MutexGuard is now dropped — safe to .await below
+
+                    // Collect per-guest CPU stats from Proxmox nodes in the cluster
+                    let pve_nodes: Vec<_> = ai_state.cluster.get_all_nodes().into_iter()
+                        .filter(|n| n.node_type == "proxmox" && n.online && n.pve_token.is_some())
+                        .collect();
+
+                    let mut guest_stats_owned: Vec<(String, String, u64, String, f32)> = Vec::new();
+                    for pve_node in &pve_nodes {
+                        let token = pve_node.pve_token.as_deref().unwrap_or("");
+                        let pve_name = pve_node.pve_node_name.as_deref().unwrap_or(&pve_node.hostname);
+                        let fp = pve_node.pve_fingerprint.as_deref();
+                        if let Ok((_status, _lxc, _vm, _cluster, guests)) =
+                            crate::proxmox::poll_pve_node(&pve_node.address, pve_node.port, token, fp, pve_name).await
+                        {
+                            for g in guests.iter().filter(|g| g.status == "running") {
+                                guest_stats_owned.push((
+                                    pve_name.to_string(),
+                                    g.guest_type.clone(),
+                                    g.vmid,
+                                    g.name.clone(),
+                                    g.cpu,
+                                ));
+                            }
+                        }
+                    }
+
+                    let guest_stats_refs: Vec<(&str, &str, u64, &str, f32)> = guest_stats_owned.iter()
+                        .map(|(node, gtype, vmid, name, cpu)| (node.as_str(), gtype.as_str(), *vmid, name.as_str(), *cpu))
+                        .collect();
+
+                    let summary = ai::build_metrics_summary(
+                        &hostname,
+                        cpu_pct,
+                        mem_used_gb, mem_total_gb,
+                        disk_used_gb, disk_total_gb,
+                        docker_count, lxc_count, vm_count,
+                        uptime_secs,
+                        if guest_stats_refs.is_empty() { None } else { Some(&guest_stats_refs) },
+                    );
                     let _ = ai_agent_bg.health_check(&summary).await;
                 }
 

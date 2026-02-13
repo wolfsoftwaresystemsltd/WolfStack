@@ -356,7 +356,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
             let fp = node.pve_fingerprint.as_deref();
 
             match crate::proxmox::poll_pve_node(&node.address, node.port, &token, fp, &pve_name).await {
-                Ok((status, lxc_count, vm_count, fetched_cluster_name)) => {
+                Ok((status, lxc_count, vm_count, fetched_cluster_name, _guests)) => {
                     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                     let mem_pct = if status.mem_total > 0 {
                         (status.mem_used as f32 / status.mem_total as f32) * 100.0

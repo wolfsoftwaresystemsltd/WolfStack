@@ -50,6 +50,21 @@ pub async fn console_ws(
             c.args(&["--login"]);
             c.env("TERM", "xterm-256color");
             c
+        } else if ctype == "upgrade" {
+            // Run the WolfStack upgrade script with live output
+            let mut c = CommandBuilder::new("/bin/bash");
+            c.args(&["-c",
+                "echo '⚡ Starting WolfStack upgrade...'; echo ''; \
+                 curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash; \
+                 EXIT_CODE=$?; echo ''; \
+                 if [ $EXIT_CODE -eq 0 ]; then \
+                   echo '✅ Upgrade completed successfully.'; \
+                 else \
+                   echo \"❌ Upgrade failed with exit code $EXIT_CODE\"; \
+                 fi; \
+                 echo ''; echo 'You may close this window.'"]);
+            c.env("TERM", "xterm-256color");
+            c
         } else {
             let mut c = CommandBuilder::new("docker");
             // Use -it: -i keeps stdin open, -t allocates a TTY inside the container

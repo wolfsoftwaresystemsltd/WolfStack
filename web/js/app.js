@@ -248,6 +248,7 @@ function buildServerTree(nodes) {
                         <span class="tree-toggle ${shouldExpandNode ? 'expanded' : ''}" id="toggle-${node.id}">▶</span>
                         <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
                         <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${node.hostname}</span>
+                        <span class="remove-server-btn" onclick="event.stopPropagation(); openNodeSettings('${node.id}')" title="Node settings" style="margin-left:4px;">⚙️</span>
                         ${node.is_self ? '<span class="self-badge">this</span>' : `<span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemoveServer('${node.id}', '${node.hostname}')" title="Remove server">🗑️</span>`}
                     </div>
                     <div class="server-node-children ${shouldExpandNode ? 'expanded' : ''}" id="children-${node.id}">
@@ -2973,6 +2974,110 @@ async function saveWsClusterSettings() {
 
     modal.remove();
     showToast('Cluster renamed to "' + newName + '"', 'success');
+    fetchNodes();
+}
+
+// ─── Individual Node Settings ───
+function openNodeSettings(nodeId) {
+    const node = allNodes.find(n => n.id === nodeId);
+    if (!node) return;
+
+    let existing = document.getElementById('node-settings-modal');
+    if (existing) existing.remove();
+
+    const clusterName = node.cluster_name || 'WolfStack';
+    const isPve = node.node_type === 'proxmox';
+
+    const modal = document.createElement('div');
+    modal.id = 'node-settings-modal';
+    modal.className = 'modal-overlay active';
+    modal.innerHTML = `
+        <div class="modal">
+            <div class="modal-header">
+                <h3>⚙️ ${node.hostname} — Node Settings</h3>
+                <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
+            </div>
+            <div class="modal-body">
+                <div style="display:grid; grid-template-columns:auto 1fr; gap:8px 16px; margin-bottom:16px; font-size:13px;">
+                    <span style="color:var(--text-muted);">Hostname</span>
+                    <span>${node.hostname}${node.is_self ? ' <span style="color:var(--accent-light);font-size:11px;">(this server)</span>' : ''}</span>
+                    <span style="color:var(--text-muted);">Address</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:12px;">${node.address}:${node.port}</span>
+                    <span style="color:var(--text-muted);">Node ID</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:12px;">${node.id}</span>
+                    <span style="color:var(--text-muted);">Type</span>
+                    <span>${isPve ? '🖥️ Proxmox VE' : '☁️ WolfStack'}</span>
+                    <span style="color:var(--text-muted);">Status</span>
+                    <span>${node.online ? '<span style="color:var(--success);">● Online</span>' : '<span style="color:var(--danger);">● Offline</span>'}</span>
+                </div>
+                <hr style="border-color:var(--border);margin:16px 0;">
+                <div class="form-group">
+                    <label>Cluster Name</label>
+                    <input type="text" class="form-control" id="node-settings-cluster-name" value="${clusterName}">
+                    <small style="color: var(--text-muted);">Change to move this node to a different cluster group</small>
+                </div>
+                ${isPve ? `
+                <div class="form-group">
+                    <label>PVE Token</label>
+                    <input type="text" class="form-control" id="node-settings-pve-token" placeholder="Leave blank to keep current"
+                        value="">
+                    <small style="color: var(--text-muted);">Format: user@realm!tokenid=secret</small>
+                </div>
+                <div class="form-group">
+                    <label>TLS Fingerprint</label>
+                    <input type="text" class="form-control" id="node-settings-pve-fingerprint" value="${node.pve_fingerprint || ''}">
+                </div>` : ''}
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveNodeSettings()">Save Changes</button>
+            </div>
+        </div>`;
+    modal._nodeId = nodeId;
+    modal._originalClusterName = clusterName;
+    document.body.appendChild(modal);
+}
+
+async function saveNodeSettings() {
+    const modal = document.getElementById('node-settings-modal');
+    if (!modal) return;
+    const nodeId = modal._nodeId;
+    const originalName = modal._originalClusterName || '';
+    const newName = document.getElementById('node-settings-cluster-name')?.value.trim();
+
+    const updates = {};
+    if (newName && newName !== originalName) updates.cluster_name = newName;
+
+    // PVE-specific fields
+    const pveToken = document.getElementById('node-settings-pve-token')?.value.trim();
+    const pveFingerprint = document.getElementById('node-settings-pve-fingerprint')?.value.trim();
+    if (pveToken) updates.pve_token = pveToken;
+    if (pveFingerprint !== undefined && document.getElementById('node-settings-pve-fingerprint')) {
+        updates.pve_fingerprint = pveFingerprint || null;
+    }
+
+    if (Object.keys(updates).length === 0) {
+        showToast('No changes to save', 'info');
+        return;
+    }
+
+    try {
+        const resp = await fetch(`/api/nodes/${nodeId}/settings`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updates)
+        });
+        if (resp.ok) {
+            showToast('Node settings updated', 'success');
+        } else {
+            const err = await resp.json().catch(() => ({}));
+            showToast(err.error || 'Failed to update settings', 'error');
+        }
+    } catch (e) {
+        showToast('Failed to save: ' + e.message, 'error');
+    }
+
+    modal.remove();
     fetchNodes();
 }
 
@@ -7330,22 +7435,56 @@ setInterval(checkForUpdates, 6 * 60 * 60 * 1000);
 function triggerUpgrade() {
     var bannerText = document.getElementById('update-banner-text');
     var msg = bannerText ? bannerText.textContent : 'Update available';
-    if (!confirm('⚡ ' + msg + '\n\nThis will run the WolfStack upgrade script on the server.\nWolfStack will restart automatically when complete.\n\nProceed?')) return;
 
-    fetch(apiUrl('/api/upgrade'), { method: 'POST' })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-            if (data.error) {
-                showToast(data.error, 'error');
-            } else {
-                showToast(data.message || 'Upgrade started', 'success');
-                var banner = document.getElementById('update-banner');
-                if (banner) banner.style.display = 'none';
-            }
-        })
-        .catch(function (e) {
-            showToast('Upgrade failed: ' + e.message, 'error');
-        });
+    // Determine which node we're upgrading
+    var targetNode = null;
+    var isLocal = true;
+    if (currentNodeId) {
+        targetNode = allNodes.find(n => n.id === currentNodeId);
+        if (targetNode && !targetNode.is_self) {
+            isLocal = false;
+        }
+    }
+
+    var machine = isLocal ? 'this machine (local)' : (targetNode ? targetNode.hostname + ' (' + targetNode.address + ')' : 'this machine');
+    if (!confirm('⚡ ' + msg + '\n\nThis will run the WolfStack upgrade script on ' + machine + '.\nA terminal window will open so you can monitor the progress.\n\nProceed?')) return;
+
+    // Open console popup with type=upgrade to stream live output
+    var url = '/console.html?type=upgrade&name=wolfstack';
+    if (targetNode && !targetNode.is_self) {
+        url += '&host=' + encodeURIComponent(targetNode.address) + '&port=' + encodeURIComponent(targetNode.port);
+    }
+    window.open(url, 'upgrade_console', 'width=960,height=600,menubar=no,toolbar=no');
+
+    // Hide the update banner
+    var banner = document.getElementById('update-banner');
+    if (banner) banner.style.display = 'none';
+
+    // If upgrading the local machine, poll for it to come back and prompt re-login
+    if (isLocal) {
+        showToast('Upgrade started — monitoring progress in terminal window...', 'info');
+        var pollInterval = setInterval(function () {
+            // The service will restart — when it comes back, we'll get a 200
+            fetch('/api/nodes', { signal: AbortSignal.timeout(3000) })
+                .then(function (r) {
+                    if (r.ok) {
+                        clearInterval(pollInterval);
+                        // Service is back — show re-login prompt
+                        setTimeout(function () {
+                            if (confirm('✅ WolfStack has been upgraded and restarted.\n\nPlease log in again to use the updated version.\n\nClick OK to reload the page.')) {
+                                window.location.href = '/';
+                            }
+                        }, 1000);
+                    }
+                })
+                .catch(function () { /* still restarting — keep polling */ });
+        }, 5000); // Check every 5 seconds
+
+        // Stop polling after 5 minutes (safety)
+        setTimeout(function () { clearInterval(pollInterval); }, 5 * 60 * 1000);
+    } else {
+        showToast('Upgrade started on ' + machine + ' — watch the terminal window for progress.', 'info');
+    }
 }
 
 // ═══════════════════════════════════════════════════

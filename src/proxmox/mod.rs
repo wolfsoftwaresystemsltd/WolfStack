@@ -20,6 +20,7 @@ pub struct PveGuest {
     pub status: String,        // "running", "stopped"
     pub guest_type: String,    // "qemu" or "lxc"
     pub cpus: u32,
+    pub cpu: f32,              // 0.0–1.0 fraction of allocated CPUs
     pub maxmem: u64,           // bytes
     pub mem: u64,              // current usage bytes
     pub maxdisk: u64,          // bytes
@@ -202,6 +203,7 @@ impl PveClient {
             status: v.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
             guest_type: "qemu".to_string(),
             cpus: v.get("cpus").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+            cpu: v.get("cpu").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
             maxmem: v.get("maxmem").and_then(|v| v.as_u64()).unwrap_or(0),
             mem: v.get("mem").and_then(|v| v.as_u64()).unwrap_or(0),
             maxdisk: v.get("maxdisk").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -222,6 +224,7 @@ impl PveClient {
             status: v.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
             guest_type: "lxc".to_string(),
             cpus: v.get("cpus").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+            cpu: v.get("cpu").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
             maxmem: v.get("maxmem").and_then(|v| v.as_u64()).unwrap_or(0),
             mem: v.get("mem").and_then(|v| v.as_u64()).unwrap_or(0),
             maxdisk: v.get("maxdisk").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -283,6 +286,7 @@ impl PveClient {
 }
 
 /// Poll a Proxmox node and return metrics mapped to WolfStack format
+/// Returns (status, lxc_count, vm_count, cluster_name, guests)
 pub async fn poll_pve_node(
     address: &str,
     port: u16,
@@ -290,7 +294,7 @@ pub async fn poll_pve_node(
     fingerprint: Option<&str>,
 
     node_name: &str,
-) -> Result<(PveNodeStatus, u32, u32, Option<String>), String> {
+) -> Result<(PveNodeStatus, u32, u32, Option<String>, Vec<PveGuest>), String> {
     // Enhanced logging for debugging offline status
     let client = PveClient::new(address, port, token, fingerprint, node_name);
     
@@ -315,5 +319,5 @@ pub async fn poll_pve_node(
     let lxc_count = guests.iter().filter(|g| g.guest_type == "lxc").count() as u32;
     let vm_count = guests.iter().filter(|g| g.guest_type == "qemu").count() as u32;
 
-    Ok((status, lxc_count, vm_count, cluster_name))
+    Ok((status, lxc_count, vm_count, cluster_name, guests))
 }
