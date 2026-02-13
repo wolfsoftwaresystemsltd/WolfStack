@@ -230,7 +230,10 @@ if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev
     if [ -d "$WOLFNET_SRC_DIR" ]; then
         echo "  Checking for WolfNet updates..."
         cd "$WOLFNET_SRC_DIR"
-        git fetch origin 2>/dev/null || true
+        git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+        if ! git fetch origin 2>&1; then
+            echo "  ⚠ Git fetch failed — check network or repo access"
+        fi
         LOCAL_HASH=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
         REMOTE_HASH=$(git rev-parse origin/main 2>/dev/null || echo "unknown")
         if [ "$LOCAL_HASH" != "$REMOTE_HASH" ] && [ "$REMOTE_HASH" != "unknown" ]; then
@@ -275,7 +278,10 @@ elif command -v wolfnet &> /dev/null; then
     if [ -d "$WOLFNET_SRC_DIR" ]; then
         echo "  Checking for WolfNet updates..."
         cd "$WOLFNET_SRC_DIR"
-        git fetch origin 2>/dev/null || true
+        git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+        if ! git fetch origin 2>&1; then
+            echo "  ⚠ Git fetch failed — check network or repo access"
+        fi
         LOCAL_HASH=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
         REMOTE_HASH=$(git rev-parse origin/main 2>/dev/null || echo "unknown")
         if [ "$LOCAL_HASH" != "$REMOTE_HASH" ] && [ "$REMOTE_HASH" != "unknown" ]; then
@@ -357,9 +363,11 @@ else
     echo "  Downloading WolfNet..."
     WOLFNET_SRC_DIR="/opt/wolfnet-src"
     if [ -d "$WOLFNET_SRC_DIR" ]; then
+        git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
         cd "$WOLFNET_SRC_DIR" && git fetch origin && git reset --hard origin/main
     else
         git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+        git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
         cd "$WOLFNET_SRC_DIR"
     fi
 

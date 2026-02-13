@@ -80,7 +80,7 @@ async fn pve_bridge(
     term_port: u16,
     ticket: String,
     token: String,
-    fingerprint: Option<String>,
+    _fingerprint: Option<String>,
     vmid: u64,
     guest_type: String,
 ) {
