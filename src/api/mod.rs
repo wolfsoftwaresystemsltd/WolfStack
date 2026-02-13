@@ -591,6 +591,208 @@ pub async fn service_action(
     }
 }
 
+// ─── Cron Job Management API ───
+
+#[derive(Deserialize)]
+pub struct CronJobRequest {
+    pub schedule: String,
+    pub command: String,
+    #[serde(default)]
+    pub comment: String,
+    pub index: Option<usize>,
+    #[serde(default = "cron_enabled_default")]
+    pub enabled: bool,
+}
+
+fn cron_enabled_default() -> bool { true }
+
+#[derive(serde::Serialize)]
+struct CronEntry {
+    index: usize,
+    schedule: String,
+    command: String,
+    comment: String,
+    human: String,
+    enabled: bool,
+    raw: String,
+}
+
+fn humanize_schedule(schedule: &str) -> String {
+    match schedule.trim() {
+        "@reboot" => "On reboot".to_string(),
+        "@hourly" => "Every hour".to_string(),
+        "@daily" | "@midnight" => "Every day (midnight)".to_string(),
+        "@weekly" => "Every week".to_string(),
+        "@monthly" => "Every month".to_string(),
+        "@yearly" | "@annually" => "Every year".to_string(),
+        s => {
+            let parts: Vec<&str> = s.split_whitespace().collect();
+            if parts.len() != 5 { return s.to_string(); }
+            let (min, hour, dom, mon, dow) = (parts[0], parts[1], parts[2], parts[3], parts[4]);
+            // Common patterns
+            if s == "* * * * *" { return "Every minute".to_string(); }
+            if min.starts_with("*/") && hour == "*" && dom == "*" && mon == "*" && dow == "*" {
+                let n = &min[2..];
+                return format!("Every {} minutes", n);
+            }
+            if min != "*" && hour == "*" && dom == "*" && mon == "*" && dow == "*" {
+                return format!("Hourly at :{}", min);
+            }
+            if min != "*" && hour != "*" && dom == "*" && mon == "*" && dow == "*" {
+                return format!("Daily at {}:{}", hour, if min.len() == 1 { format!("0{}", min) } else { min.to_string() });
+            }
+            if min != "*" && hour != "*" && dom == "*" && mon == "*" && dow != "*" {
+                let day = match dow {
+                    "0" | "7" => "Sunday", "1" => "Monday", "2" => "Tuesday",
+                    "3" => "Wednesday", "4" => "Thursday", "5" => "Friday", "6" => "Saturday",
+                    _ => dow,
+                };
+                return format!("Every {} at {}:{}", day, hour, if min.len() == 1 { format!("0{}", min) } else { min.to_string() });
+            }
+            if min != "*" && hour != "*" && dom != "*" && mon == "*" && dow == "*" {
+                return format!("Monthly on day {} at {}:{}", dom, hour, if min.len() == 1 { format!("0{}", min) } else { min.to_string() });
+            }
+            s.to_string()
+        }
+    }
+}
+
+fn parse_crontab_line(line: &str, index: usize) -> Option<CronEntry> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() { return None; }
+
+    // Check for disabled entries
+    if trimmed.starts_with("# DISABLED: ") {
+        let rest = &trimmed["# DISABLED: ".len()..];
+        if let Some(entry) = parse_cron_expression(rest, index) {
+            return Some(CronEntry { enabled: false, ..entry });
+        }
+        return None;
+    }
+
+    // Skip pure comments
+    if trimmed.starts_with('#') { return None; }
+
+    parse_cron_expression(trimmed, index)
+}
+
+fn parse_cron_expression(line: &str, index: usize) -> Option<CronEntry> {
+    let trimmed = line.trim();
+    // Handle @reboot, @hourly, etc.
+    if trimmed.starts_with('@') {
+        let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+        if parts.len() < 2 { return None; }
+        let schedule = parts[0].to_string();
+        let rest = parts[1].trim();
+        let (command, comment) = extract_inline_comment(rest);
+        return Some(CronEntry {
+            human: humanize_schedule(&schedule),
+            index, schedule, command, comment, enabled: true, raw: line.to_string(),
+        });
+    }
+
+    // Standard 5-field cron
+    let parts: Vec<&str> = trimmed.splitn(6, char::is_whitespace).collect();
+    if parts.len() < 6 { return None; }
+    let schedule = parts[..5].join(" ");
+    let rest = parts[5].trim();
+    let (command, comment) = extract_inline_comment(rest);
+    Some(CronEntry {
+        human: humanize_schedule(&schedule),
+        index, schedule, command, comment, enabled: true, raw: line.to_string(),
+    })
+}
+
+fn extract_inline_comment(s: &str) -> (String, String) {
+    // Look for # comment at end (not inside quotes)
+    if let Some(pos) = s.rfind(" # ") {
+        (s[..pos].trim().to_string(), s[pos+3..].trim().to_string())
+    } else {
+        (s.trim().to_string(), String::new())
+    }
+}
+
+fn read_crontab() -> (Vec<String>, String) {
+    let output = std::process::Command::new("crontab")
+        .arg("-l")
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let raw = String::from_utf8_lossy(&o.stdout).to_string();
+            let lines: Vec<String> = raw.lines().map(|l| l.to_string()).collect();
+            (lines, raw)
+        }
+        _ => (vec![], String::new()),
+    }
+}
+
+fn write_crontab(lines: &[String]) -> Result<(), String> {
+    let content = lines.join("\n") + "\n";
+    let mut child = std::process::Command::new("crontab")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn crontab: {}", e))?;
+    use std::io::Write;
+    child.stdin.as_mut().unwrap()
+        .write_all(content.as_bytes())
+        .map_err(|e| format!("Failed to write crontab: {}", e))?;
+    let status = child.wait().map_err(|e| format!("crontab error: {}", e))?;
+    if status.success() { Ok(()) } else { Err("crontab exited with error".to_string()) }
+}
+
+/// GET /api/cron — list cron entries
+pub async fn cron_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (lines, raw) = read_crontab();
+    let entries: Vec<CronEntry> = lines.iter().enumerate()
+        .filter_map(|(i, line)| parse_crontab_line(line, i))
+        .collect();
+    HttpResponse::Ok().json(serde_json::json!({ "entries": entries, "raw": raw }))
+}
+
+/// POST /api/cron — add or edit a cron entry
+pub async fn cron_save(req: HttpRequest, state: web::Data<AppState>, body: web::Json<CronJobRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (mut lines, _) = read_crontab();
+    let comment_suffix = if body.comment.is_empty() { String::new() } else { format!(" # {}", body.comment) };
+    let new_line = if body.enabled {
+        format!("{} {}{}", body.schedule, body.command, comment_suffix)
+    } else {
+        format!("# DISABLED: {} {}{}", body.schedule, body.command, comment_suffix)
+    };
+
+    if let Some(idx) = body.index {
+        if idx < lines.len() {
+            lines[idx] = new_line;
+        } else {
+            return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Index out of range" }));
+        }
+    } else {
+        lines.push(new_line);
+    }
+
+    match write_crontab(&lines) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "status": "saved" })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/cron/{index} — remove a cron entry by line index
+pub async fn cron_delete(req: HttpRequest, state: web::Data<AppState>, path: web::Path<usize>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let idx = path.into_inner();
+    let (mut lines, _) = read_crontab();
+    if idx >= lines.len() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Index out of range" }));
+    }
+    lines.remove(idx);
+    match write_crontab(&lines) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "status": "deleted" })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 // ─── Certbot API ───
 
 #[derive(Deserialize)]
@@ -2798,6 +3000,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/components/{name}/install", web::post().to(install_component))
         // Services
         .route("/api/services/{name}/action", web::post().to(service_action))
+        // Cron Jobs
+        .route("/api/cron", web::get().to(cron_list))
+        .route("/api/cron", web::post().to(cron_save))
+        .route("/api/cron/{index}", web::delete().to(cron_delete))
         // Certificates
         .route("/api/certificates", web::post().to(request_certificate))
         .route("/api/certificates/list", web::get().to(list_certificates))

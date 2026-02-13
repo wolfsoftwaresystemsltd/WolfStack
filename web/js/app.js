@@ -109,6 +109,7 @@ function selectServerView(nodeId, view) {
         networking: 'Networking',
         wolfnet: 'WolfNet',
         certificates: 'Certificates',
+        cron: 'Cron Jobs',
         'pve-resources': 'VMs & Containers',
     };
     document.getElementById('page-title').textContent = `${hostname} — ${viewTitles[view] || view}`;
@@ -165,6 +166,7 @@ function selectServerView(nodeId, view) {
     if (view === 'backups') loadBackups();
     if (view === 'wolfnet') loadWolfNet();
     if (view === 'certificates') loadCertificates();
+    if (view === 'cron') loadCronJobs();
     if (view === 'pve-resources') renderPveResourcesView(nodeId);
 }
 
@@ -292,6 +294,9 @@ function buildServerTree(nodes) {
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="certificates" onclick="selectServerView('${node.id}', 'certificates')">
                             <span class="icon">🔒</span> Certificates
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="cron" onclick="selectServerView('${node.id}', 'cron')">
+                            <span class="icon">🕐</span> Cron Jobs
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
                             <span class="icon">💻</span> Terminal
@@ -2520,6 +2525,183 @@ async function loadCertificates() {
     } catch (e) {
         el.innerHTML = '<p style="color: var(--text-muted);">Could not load certificates.</p>';
     }
+}
+
+// ─── Cron Job Management ───
+
+async function loadCronJobs() {
+    var container = document.getElementById('cron-entries-container');
+    if (!container) return;
+    container.innerHTML = '<div style="color:var(--text-muted);">Loading cron jobs...</div>';
+    try {
+        var resp = await fetch(apiUrl('/api/cron'));
+        var data = await resp.json();
+        var entries = data.entries || [];
+        var raw = data.raw || '';
+
+        // Update raw crontab
+        var rawEl = document.getElementById('raw-crontab-content');
+        if (rawEl) rawEl.textContent = raw || '(empty crontab)';
+
+        if (entries.length === 0) {
+            container.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:14px;">No cron jobs found. Add one above or use a Quick Action.</div>';
+            return;
+        }
+
+        var html = '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">';
+        html += '<thead><tr style="border-bottom:2px solid var(--border,#333);text-align:left;">' +
+            '<th style="padding:10px 12px;color:var(--text-muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">Status</th>' +
+            '<th style="padding:10px 12px;color:var(--text-muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">Schedule</th>' +
+            '<th style="padding:10px 12px;color:var(--text-muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">Command</th>' +
+            '<th style="padding:10px 12px;color:var(--text-muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">Comment</th>' +
+            '<th style="padding:10px 12px;color:var(--text-muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;text-align:right;">Actions</th>' +
+            '</tr></thead><tbody>';
+
+        entries.forEach(function (e) {
+            var statusBadge = e.enabled
+                ? '<span style="display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;background:rgba(34,197,94,0.15);color:#22c55e;">Active</span>'
+                : '<span style="display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;background:rgba(239,68,68,0.15);color:#ef4444;">Disabled</span>';
+
+            html += '<tr style="border-bottom:1px solid var(--border,#333);">' +
+                '<td style="padding:10px 12px;">' + statusBadge + '</td>' +
+                '<td style="padding:10px 12px;"><div style="font-weight:600;color:var(--text);">' + escapeHtml(e.human) + '</div>' +
+                '<div style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);">' + escapeHtml(e.schedule) + '</div></td>' +
+                '<td style="padding:10px 12px;font-family:var(--font-mono);font-size:12px;color:var(--text);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(e.command) + '">' + escapeHtml(e.command) + '</td>' +
+                '<td style="padding:10px 12px;color:var(--text-muted);font-size:12px;">' + escapeHtml(e.comment || '—') + '</td>' +
+                '<td style="padding:10px 12px;text-align:right;white-space:nowrap;">' +
+                '<button class="btn btn-sm" onclick="toggleCronJob(' + e.index + ', ' + e.enabled + ', \'' + escapeHtml(e.schedule).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.command).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.comment).replace(/'/g, "\\'") + '\')" title="' + (e.enabled ? 'Disable' : 'Enable') + '" style="margin-right:4px;">' + (e.enabled ? '⏸️' : '▶️') + '</button>' +
+                '<button class="btn btn-sm" onclick="deleteCronJob(' + e.index + ')" title="Delete" style="color:var(--danger,#ef4444);">🗑️</button>' +
+                '</td></tr>';
+        });
+        html += '</tbody></table></div>';
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = '<div style="color:var(--danger,#ef4444);">Failed to load cron jobs: ' + e.message + '</div>';
+    }
+}
+
+
+function onCronPresetChange() {
+    var sel = document.getElementById('cron-schedule-preset');
+    var custom = document.getElementById('cron-custom-schedule-group');
+    if (sel && custom) {
+        custom.hidden = (sel.value !== 'custom');
+    }
+}
+
+async function addCronJob() {
+    var sel = document.getElementById('cron-schedule-preset');
+    var schedule = sel.value;
+    if (schedule === 'custom') {
+        schedule = (document.getElementById('cron-custom-schedule') || {}).value || '';
+    }
+    var command = (document.getElementById('cron-command') || {}).value || '';
+    var comment = (document.getElementById('cron-comment') || {}).value || '';
+
+    if (!schedule || !command) {
+        showToast('Please enter both a schedule and a command.', 'warning');
+        return;
+    }
+
+    try {
+        var resp = await fetch(apiUrl('/api/cron'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ schedule: schedule, command: command, comment: comment, enabled: true })
+        });
+        var data = await resp.json();
+        if (data.status === 'saved') {
+            showToast('Cron job added!', 'success');
+            document.getElementById('cron-command').value = '';
+            document.getElementById('cron-comment').value = '';
+            if (document.getElementById('cron-custom-schedule')) document.getElementById('cron-custom-schedule').value = '';
+            loadCronJobs();
+        } else {
+            showToast('Error: ' + (data.error || 'Failed to save'), 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function deleteCronJob(index) {
+    if (!confirm('Delete this cron job?')) return;
+    try {
+        var resp = await fetch(apiUrl('/api/cron/' + index), { method: 'DELETE' });
+        var data = await resp.json();
+        if (data.status === 'deleted') {
+            showToast('Cron job deleted.', 'success');
+            loadCronJobs();
+        } else {
+            showToast('Error: ' + (data.error || 'Failed to delete'), 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function toggleCronJob(index, currentlyEnabled, schedule, command, comment) {
+    try {
+        var resp = await fetch(apiUrl('/api/cron'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                schedule: schedule,
+                command: command,
+                comment: comment || '',
+                index: index,
+                enabled: !currentlyEnabled
+            })
+        });
+        var data = await resp.json();
+        if (data.status === 'saved') {
+            showToast(currentlyEnabled ? 'Cron job disabled.' : 'Cron job enabled.', 'success');
+            loadCronJobs();
+        } else {
+            showToast('Error: ' + (data.error || 'Failed'), 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+var PREMADE_CRON_JOBS = {
+    'wolfstack-update': { schedule: '0 3 * * *', command: 'cd /opt/wolfstack && bash setup.sh --auto', comment: 'Auto-update WolfStack' },
+    'docker-prune': { schedule: '0 4 * * 0', command: 'docker image prune -af 2>/dev/null; docker system prune -f 2>/dev/null', comment: 'Clean Docker images (weekly)' },
+    'apt-update': { schedule: '0 2 * * 1', command: 'apt-get update -qq && apt-get upgrade -y -qq', comment: 'System updates (weekly Mon 2AM)' },
+    'certbot-renew': { schedule: '0 5 * * *', command: 'certbot renew --quiet', comment: 'Renew SSL certificates' },
+    'tmpclean': { schedule: '0 6 * * *', command: 'find /tmp -type f -atime +7 -delete 2>/dev/null', comment: 'Clean /tmp files older than 7 days' }
+};
+
+async function addPremadeCron(type) {
+    var job = PREMADE_CRON_JOBS[type];
+    if (!job) return;
+    if (!confirm('Add premade cron job?\n\nSchedule: ' + job.schedule + '\nCommand: ' + job.command + '\nComment: ' + job.comment)) return;
+    try {
+        var resp = await fetch(apiUrl('/api/cron'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ schedule: job.schedule, command: job.command, comment: job.comment, enabled: true })
+        });
+        var data = await resp.json();
+        if (data.status === 'saved') {
+            showToast('Premade cron job added!', 'success');
+            loadCronJobs();
+        } else {
+            showToast('Error: ' + (data.error || 'Failed'), 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+function toggleRawCrontab() {
+    var body = document.getElementById('raw-crontab-body');
+    var arrow = document.getElementById('raw-crontab-arrow');
+    if (!body) return;
+    var isHidden = body.style.display === 'none';
+    body.style.display = isHidden ? 'block' : 'none';
+    if (arrow) arrow.style.transform = isHidden ? 'rotate(90deg)' : 'rotate(0deg)';
 }
 
 // ─── Modals ───

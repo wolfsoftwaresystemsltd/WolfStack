@@ -939,7 +939,107 @@
             </div>
         </div>
 
+        <!-- ═══ Cron Jobs Page ═══ -->
+        <div id="page-cron" class="page-view" style="display:none;">
+            <!-- Quick Add -->
+            <div class="card">
+                <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+                    <h3>➕ Add Cron Job</h3>
+                </div>
+                <div class="card-body">
+                    <div style="display:grid; grid-template-columns:200px 1fr auto; gap:12px; align-items:end;">
+                        <div class="form-group" style="margin:0;">
+                            <label style="font-size:12px;">Schedule</label>
+                            <select id="cron-schedule-preset" class="form-control" onchange="onCronPresetChange()">
+                                <option value="0 * * * *">Every Hour</option>
+                                <option value="*/5 * * * *">Every 5 Minutes</option>
+                                <option value="*/15 * * * *">Every 15 Minutes</option>
+                                <option value="0 0 * * *">Daily at Midnight</option>
+                                <option value="0 3 * * *">Daily at 3 AM</option>
+                                <option value="0 0 * * 0">Every Sunday</option>
+                                <option value="0 0 * * 1">Every Monday</option>
+                                <option value="0 0 1 * *">Monthly (1st)</option>
+                                <option value="@reboot">On Reboot</option>
+                                <option value="custom">Custom...</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="margin:0;" id="cron-custom-schedule-group" hidden>
+                            <label style="font-size:12px;">Custom Schedule (5 fields)</label>
+                            <input type="text" id="cron-custom-schedule" class="form-control" placeholder="* * * * *"
+                                style="font-family:var(--font-mono);font-size:13px;">
+                        </div>
+                        <div class="form-group" style="margin:0; flex:1;">
+                            <label style="font-size:12px;">Command</label>
+                            <input type="text" id="cron-command" class="form-control"
+                                placeholder="e.g. /usr/bin/backup.sh"
+                                style="font-family:var(--font-mono);font-size:13px;">
+                        </div>
+                        <button class="btn btn-primary" onclick="addCronJob()" style="height:38px;white-space:nowrap;">
+                            ➕ Add Job
+                        </button>
+                    </div>
+                    <div class="form-group" style="margin-top:8px;">
+                        <label style="font-size:12px;">Comment (optional)</label>
+                        <input type="text" id="cron-comment" class="form-control" placeholder="Description of this job"
+                            style="font-size:13px;">
+                    </div>
+                </div>
+            </div>
 
+            <!-- Premade Jobs -->
+            <div class="card" style="margin-top:20px;">
+                <div class="card-header">
+                    <h3>⚡ Quick Actions</h3>
+                </div>
+                <div class="card-body" style="display:flex; flex-wrap:wrap; gap:10px;">
+                    <button class="btn" onclick="addPremadeCron('wolfstack-update')"
+                        style="display:flex;align-items:center;gap:6px;">
+                        🐺 Auto-update WolfStack
+                    </button>
+                    <button class="btn" onclick="addPremadeCron('docker-prune')"
+                        style="display:flex;align-items:center;gap:6px;">
+                        🐳 Clean Docker Images
+                    </button>
+                    <button class="btn" onclick="addPremadeCron('apt-update')"
+                        style="display:flex;align-items:center;gap:6px;">
+                        📦 System Updates (weekly)
+                    </button>
+                    <button class="btn" onclick="addPremadeCron('certbot-renew')"
+                        style="display:flex;align-items:center;gap:6px;">
+                        🔒 Renew SSL Certs
+                    </button>
+                    <button class="btn" onclick="addPremadeCron('tmpclean')"
+                        style="display:flex;align-items:center;gap:6px;">
+                        🗑️ Clean /tmp
+                    </button>
+                </div>
+            </div>
+
+            <!-- Crontab Entries -->
+            <div class="card" style="margin-top:20px;">
+                <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+                    <h3>📋 Cron Entries</h3>
+                    <button class="btn btn-sm" onclick="loadCronJobs()" title="Refresh">🔄 Refresh</button>
+                </div>
+                <div class="card-body">
+                    <div id="cron-entries-container" style="font-size:14px; color:var(--text-muted);">Loading...</div>
+                </div>
+            </div>
+
+            <!-- Raw Crontab -->
+            <div class="card" style="margin-top:20px;">
+                <div class="card-header" style="cursor:pointer;" onclick="toggleRawCrontab()">
+                    <h3 style="display:flex;align-items:center;gap:8px;">
+                        <span id="raw-crontab-arrow" style="transition:transform 0.2s;">▶</span>
+                        Raw Crontab
+                    </h3>
+                </div>
+                <div id="raw-crontab-body" class="card-body" style="display:none;">
+                    <pre id="raw-crontab-content"
+                        style="margin:0; padding:16px; background:var(--bg-primary,#0f0f1a); border-radius:8px; font-size:12px; font-family:var(--font-mono); color:var(--text); overflow-x:auto; white-space:pre-wrap; word-break:break-all;"></pre>
+                </div>
+            </div>
+        </div>
 
         <!-- ═══ Docker Containers Page ═══ -->
         <div id="page-containers" class="page-view" style="display:none;">
