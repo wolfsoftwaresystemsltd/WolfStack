@@ -266,14 +266,16 @@ impl AiAgent {
 
                         let output = match remote_result {
                             Ok(resp) => {
-                                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                                let resp_text = resp.text().await.unwrap_or_default();
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp_text) {
                                     if let Some(err) = json["error"].as_str() {
                                         format!("ERROR: {}", err)
                                     } else {
                                         json["output"].as_str().unwrap_or("(no output)").to_string()
                                     }
                                 } else {
-                                    "ERROR: Failed to parse response".to_string()
+                                    let preview: String = resp_text.chars().take(200).collect();
+                                    format!("ERROR: Failed to parse response (body: {})", preview)
                                 }
                             }
                             Err(e) => format!("ERROR: Connection failed — {}", e),

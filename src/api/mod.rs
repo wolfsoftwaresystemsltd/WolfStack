@@ -1668,7 +1668,7 @@ pub async fn ai_chat(
     let cluster_nodes: Vec<(String, String, String)> = {
         let nodes = state.cluster.get_all_nodes();
         nodes.iter()
-            .filter(|n| !n.is_self && n.online)
+            .filter(|n| !n.is_self && n.online && n.node_type != "proxmox")
             .map(|n| {
                 let base_url = format!("http://{}:{}", n.address, n.port);
                 (n.id.clone(), n.hostname.clone(), base_url)
