@@ -175,16 +175,93 @@ echo ""
 echo "Checking WolfNet (cluster networking)..."
 
 if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev/null; then
-    # Already installed and running — nothing to do
+    # Already installed and running — check for upgrades
     echo "✓ WolfNet already installed and running"
     WOLFNET_IP=$(ip -4 addr show wolfnet0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]}' || echo "")
     if [ -n "$WOLFNET_IP" ]; then
         echo "  WolfNet IP: $WOLFNET_IP"
     fi
 
+    # Check if WolfNet needs an upgrade
+    WOLFNET_SRC_DIR="/opt/wolfnet-src"
+    if [ -d "$WOLFNET_SRC_DIR" ]; then
+        echo "  Checking for WolfNet updates..."
+        cd "$WOLFNET_SRC_DIR"
+        git fetch origin 2>/dev/null || true
+        LOCAL_HASH=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+        REMOTE_HASH=$(git rev-parse origin/main 2>/dev/null || echo "unknown")
+        if [ "$LOCAL_HASH" != "$REMOTE_HASH" ] && [ "$REMOTE_HASH" != "unknown" ]; then
+            echo "  ⚡ WolfNet update available — upgrading..."
+            git reset --hard origin/main
+
+            # Ensure Rust is available
+            export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
+            if command -v cargo &> /dev/null; then
+                cd "$WOLFNET_SRC_DIR/wolfnet"
+                if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
+                    chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
+                    su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
+                else
+                    cargo build --release
+                fi
+
+                # Install updated binaries
+                systemctl stop wolfnet 2>/dev/null || true
+                cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
+                chmod +x /usr/local/bin/wolfnet
+                if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
+                    cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+                    chmod +x /usr/local/bin/wolfnetctl
+                fi
+                systemctl start wolfnet 2>/dev/null || true
+                echo "  ✓ WolfNet upgraded and restarted"
+            else
+                echo "  ⚠ Cargo not found — skipping WolfNet rebuild"
+            fi
+        else
+            echo "  ✓ WolfNet is up to date"
+        fi
+    fi
+
 elif command -v wolfnet &> /dev/null; then
-    # Installed but not running — just start it
+    # Installed but not running — check for upgrades, then start
     echo "✓ WolfNet installed (not running)"
+
+    # Check for upgrades first
+    WOLFNET_SRC_DIR="/opt/wolfnet-src"
+    if [ -d "$WOLFNET_SRC_DIR" ]; then
+        echo "  Checking for WolfNet updates..."
+        cd "$WOLFNET_SRC_DIR"
+        git fetch origin 2>/dev/null || true
+        LOCAL_HASH=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+        REMOTE_HASH=$(git rev-parse origin/main 2>/dev/null || echo "unknown")
+        if [ "$LOCAL_HASH" != "$REMOTE_HASH" ] && [ "$REMOTE_HASH" != "unknown" ]; then
+            echo "  ⚡ WolfNet update available — upgrading..."
+            git reset --hard origin/main
+            export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
+            if command -v cargo &> /dev/null; then
+                cd "$WOLFNET_SRC_DIR/wolfnet"
+                if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
+                    chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
+                    su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
+                else
+                    cargo build --release
+                fi
+                cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
+                chmod +x /usr/local/bin/wolfnet
+                if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
+                    cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+                    chmod +x /usr/local/bin/wolfnetctl
+                fi
+                echo "  ✓ WolfNet upgraded"
+            else
+                echo "  ⚠ Cargo not found — skipping WolfNet rebuild"
+            fi
+        else
+            echo "  ✓ WolfNet is up to date"
+        fi
+    fi
+
     echo "  Starting WolfNet..."
     systemctl start wolfnet 2>/dev/null || true
     sleep 2
