@@ -201,19 +201,26 @@ impl PveClient {
         let data = self.get(&format!("/nodes/{}/qemu", self.node_name)).await?;
         let arr = data.as_array().ok_or("Expected array from /qemu")?;
 
-        Ok(arr.iter().map(|v| PveGuest {
-            vmid: v.get("vmid").and_then(|v| v.as_u64()).unwrap_or(0),
-            name: v.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            status: v.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-            guest_type: "qemu".to_string(),
-            cpus: v.get("cpus").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
-            cpu: v.get("cpu").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
-            maxmem: v.get("maxmem").and_then(|v| v.as_u64()).unwrap_or(0),
-            mem: v.get("mem").and_then(|v| v.as_u64()).unwrap_or(0),
-            maxdisk: v.get("maxdisk").and_then(|v| v.as_u64()).unwrap_or(0),
-            disk: v.get("disk").and_then(|v| v.as_u64()).unwrap_or(0),
-            uptime: v.get("uptime").and_then(|v| v.as_u64()).unwrap_or(0),
-            node: self.node_name.clone(),
+        Ok(arr.iter().map(|v| {
+            let vmid = v.get("vmid").and_then(|v| v.as_u64()).unwrap_or(0);
+            // Name fallback: name -> hostname -> "VM {vmid}"
+            let name = v.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                .or_else(|| v.get("hostname").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
+                .unwrap_or("").to_string();
+            PveGuest {
+                vmid,
+                name,
+                status: v.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                guest_type: "qemu".to_string(),
+                cpus: v.get("cpus").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+                cpu: v.get("cpu").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                maxmem: v.get("maxmem").and_then(|v| v.as_u64()).unwrap_or(0),
+                mem: v.get("mem").and_then(|v| v.as_u64()).unwrap_or(0),
+                maxdisk: v.get("maxdisk").and_then(|v| v.as_u64()).unwrap_or(0),
+                disk: v.get("disk").and_then(|v| v.as_u64()).unwrap_or(0),
+                uptime: v.get("uptime").and_then(|v| v.as_u64()).unwrap_or(0),
+                node: self.node_name.clone(),
+            }
         }).collect())
     }
 
@@ -222,19 +229,26 @@ impl PveClient {
         let data = self.get(&format!("/nodes/{}/lxc", self.node_name)).await?;
         let arr = data.as_array().ok_or("Expected array from /lxc")?;
 
-        Ok(arr.iter().map(|v| PveGuest {
-            vmid: v.get("vmid").and_then(|v| v.as_u64()).unwrap_or(0),
-            name: v.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            status: v.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-            guest_type: "lxc".to_string(),
-            cpus: v.get("cpus").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
-            cpu: v.get("cpu").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
-            maxmem: v.get("maxmem").and_then(|v| v.as_u64()).unwrap_or(0),
-            mem: v.get("mem").and_then(|v| v.as_u64()).unwrap_or(0),
-            maxdisk: v.get("maxdisk").and_then(|v| v.as_u64()).unwrap_or(0),
-            disk: v.get("disk").and_then(|v| v.as_u64()).unwrap_or(0),
-            uptime: v.get("uptime").and_then(|v| v.as_u64()).unwrap_or(0),
-            node: self.node_name.clone(),
+        Ok(arr.iter().map(|v| {
+            let vmid = v.get("vmid").and_then(|v| v.as_u64()).unwrap_or(0);
+            // Name fallback: name -> hostname -> "" (frontend will show "CT {vmid}")
+            let name = v.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                .or_else(|| v.get("hostname").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
+                .unwrap_or("").to_string();
+            PveGuest {
+                vmid,
+                name,
+                status: v.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                guest_type: "lxc".to_string(),
+                cpus: v.get("cpus").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+                cpu: v.get("cpu").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                maxmem: v.get("maxmem").and_then(|v| v.as_u64()).unwrap_or(0),
+                mem: v.get("mem").and_then(|v| v.as_u64()).unwrap_or(0),
+                maxdisk: v.get("maxdisk").and_then(|v| v.as_u64()).unwrap_or(0),
+                disk: v.get("disk").and_then(|v| v.as_u64()).unwrap_or(0),
+                uptime: v.get("uptime").and_then(|v| v.as_u64()).unwrap_or(0),
+                node: self.node_name.clone(),
+            }
         }).collect())
     }
 

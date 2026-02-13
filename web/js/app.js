@@ -2946,8 +2946,8 @@ async function renderPveResourcesView(nodeId) {
                 <div style="display:flex;align-items:center;gap:8px;">
                     <span style="font-size:20px;">${typeIcon}</span>
                     <div>
-                        <div style="font-weight:600;font-size:14px;">${g.name || 'Unnamed'}</div>
-                        <div style="font-size:11px;color:var(--text-muted);">${typeLabel} ${g.vmid} · ${g.node}</div>
+                        <div style="font-weight:600;font-size:14px;">${g.name || (typeLabel + ' ' + g.vmid)}</div>
+                        <div style="font-size:11px;color:var(--text-muted);">${typeLabel} ${g.vmid}${g.name ? ' · ' + g.node : ' · ' + g.node}</div>
                     </div>
                 </div>
                 ${statusBadge(g.status)}

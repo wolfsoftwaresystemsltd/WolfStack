@@ -3216,6 +3216,14 @@ pub async fn config_import(
         }
     }
 
+    // Reload AI config into the running agent so changes take effect immediately
+    if obj.contains_key("ai_config") {
+        let reloaded = crate::ai::AiConfig::load();
+        let mut cfg = state.ai_agent.config.lock().unwrap();
+        *cfg = reloaded;
+        info!("AI config reloaded from imported file");
+    }
+
     // Backup config (schedules only)
     if let Some(val) = obj.get("backup_config") {
         // Merge schedules into existing config, keeping existing entries
