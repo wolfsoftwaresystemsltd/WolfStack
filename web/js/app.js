@@ -3677,6 +3677,20 @@ async function loadNodeVersionInfo(node) {
     } else {
         badgeEl.textContent = '❓ Unknown';
         badgeEl.style.color = 'var(--text-muted,#888)';
+
+        // Still offer upgrade button when version can't be determined
+        const targetLabel = node.is_self ? 'this server' : node.hostname;
+        const versionNote = latestVersion ? `Latest: v${latestVersion}. ` : '';
+        actionEl.style.display = 'block';
+        actionEl.innerHTML = `
+            <div style="background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.2);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:0.82em;color:#60a5fa;line-height:1.5;">
+                ℹ️ ${versionNote}Could not detect the installed version on <strong>${targetLabel}</strong>.
+                You can still run the upgrade script to install or update WolfStack.
+            </div>
+            <button class="btn" style="background:#3b82f6;color:#fff;font-weight:600;width:100%;" onclick="upgradeNode('${node.id}')">
+                ⬆️ Install / Upgrade WolfStack on ${targetLabel}
+            </button>
+        `;
     }
 }
 
