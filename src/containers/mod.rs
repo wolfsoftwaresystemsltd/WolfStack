@@ -2845,7 +2845,7 @@ fn pct_ensure_template(storage: &str, distribution: &str, release: &str, archite
     }
 
     if best_template.is_empty() {
-        return Err(format!("No Proxmox template found for {} {} {}", distribution, release, architecture));
+        return Err(format!("No Proxmox template found matching '{} {} {}'. Available templates may not include this distribution/release. Check 'pveam available --section system' on the node.", distribution, release, architecture));
     }
 
     // Download the template
@@ -2855,8 +2855,11 @@ fn pct_ensure_template(storage: &str, distribution: &str, release: &str, archite
 
     if !dl_output.status.success() {
         let stderr = String::from_utf8_lossy(&dl_output.stderr);
-        return Err(format!("Template download failed: {}", stderr));
+        let stdout = String::from_utf8_lossy(&dl_output.stdout);
+        return Err(format!("Template download failed for '{}' on storage '{}': {} {}", best_template, storage, stderr.trim(), stdout.trim()));
     }
+
+    info!("Template downloaded: {} to {}", best_template, storage);
 
     // Return the volid
     Ok(format!("{}:vztmpl/{}", storage, best_template))
@@ -2927,7 +2930,8 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(format!("pct create failed: {} {}", stderr.trim(), stdout.trim()))
+        error!("pct create failed for '{}' (VMID {}): {} {}", name, vmid, stderr.trim(), stdout.trim());
+        Err(format!("Container creation failed (VMID {}): {} {}", vmid, stderr.trim(), stdout.trim()))
     }
 }
 

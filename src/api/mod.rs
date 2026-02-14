@@ -1423,15 +1423,18 @@ pub async fn node_proxy(
     let internal_port = node.port + 1;
     let url = format!("http://{}:{}/api/{}", node.address, internal_port, api_path);
 
+    let method = req.method().clone();
+
     let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(
+            if method == actix_web::http::Method::POST || method == actix_web::http::Method::PUT { 300 } else { 120 }
+        ))
         .build()
     {
         Ok(c) => c,
         Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("HTTP client error: {}", e)})),
     };
 
-    let method = req.method().clone();
     let mut builder = match method {
         actix_web::http::Method::GET => client.get(&url),
         actix_web::http::Method::POST => client.post(&url),

@@ -6742,8 +6742,68 @@ async function createLxcContainer() {
         return;
     }
 
+    // Show progress modal
     closeContainerDetail();
-    showToast(`Creating LXC container '${name}' (${distribution} ${release})... This may take a minute.`, 'info');
+    const modal = document.createElement('div');
+    modal.id = 'lxc-create-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
+    modal.innerHTML = `
+        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:32px 40px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);text-align:center;">
+            <div id="lxc-create-spinner" style="margin-bottom:16px;">
+                <div style="width:48px;height:48px;border:4px solid var(--border,#555);border-top:4px solid var(--primary,#7c3aed);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto;"></div>
+            </div>
+            <h3 id="lxc-create-title" style="margin:0 0 8px 0;color:var(--text,#fff);font-size:1.2em;">Creating Container</h3>
+            <p id="lxc-create-status" style="margin:0 0 16px 0;color:var(--text-muted,#aaa);font-size:0.95em;">
+                Preparing <strong>${name}</strong> (${distribution} ${release})...
+            </p>
+            <div id="lxc-create-steps" style="text-align:left;font-size:0.85em;color:var(--text-muted,#999);line-height:1.8;margin-bottom:16px;">
+                <div id="step-template" style="opacity:1;">⏳ Downloading template...</div>
+                <div id="step-create" style="opacity:0.4;">⬜ Creating container...</div>
+                <div id="step-config" style="opacity:0.4;">⬜ Applying configuration...</div>
+            </div>
+            <div id="lxc-create-result" style="display:none;padding:12px;border-radius:8px;margin-bottom:16px;text-align:left;font-size:0.9em;word-break:break-word;max-height:200px;overflow-y:auto;"></div>
+            <button id="lxc-create-close-btn" style="display:none;" class="btn" onclick="document.getElementById('lxc-create-modal')?.remove()">Close</button>
+        </div>
+    `;
+    // Add spin animation if not already present
+    if (!document.getElementById('lxc-spin-style')) {
+        const style = document.createElement('style');
+        style.id = 'lxc-spin-style';
+        style.textContent = '@keyframes spin { to { transform: rotate(360deg); } }';
+        document.head.appendChild(style);
+    }
+    document.body.appendChild(modal);
+
+    const updateStep = (stepId, icon, text, active) => {
+        const el = document.getElementById(stepId);
+        if (el) { el.innerHTML = `${icon} ${text}`; el.style.opacity = active ? '1' : '0.4'; }
+    };
+    const setStatus = (text) => {
+        const el = document.getElementById('lxc-create-status');
+        if (el) el.innerHTML = text;
+    };
+    const showResult = (success, message) => {
+        const spinner = document.getElementById('lxc-create-spinner');
+        const title = document.getElementById('lxc-create-title');
+        const result = document.getElementById('lxc-create-result');
+        const closeBtn = document.getElementById('lxc-create-close-btn');
+        if (spinner) spinner.innerHTML = success
+            ? '<div style="font-size:48px;">✅</div>'
+            : '<div style="font-size:48px;">❌</div>';
+        if (title) title.textContent = success ? 'Container Created' : 'Creation Failed';
+        if (result) {
+            result.style.display = 'block';
+            result.style.background = success ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)';
+            result.style.border = success ? '1px solid rgba(34,197,94,0.3)' : '1px solid rgba(239,68,68,0.3)';
+            result.style.color = success ? 'var(--success,#22c55e)' : 'var(--error,#ef4444)';
+            result.textContent = message;
+        }
+        if (closeBtn) closeBtn.style.display = 'inline-block';
+    };
+
+    // Step 1: Template & creation (all happens server-side in one call)
+    updateStep('step-template', '⏳', 'Downloading template (this may take a minute)...', true);
+    setStatus(`Creating <strong>${name}</strong> on ${storage_path || 'default storage'}...`);
 
     try {
         const resp = await fetch(apiUrl('/api/containers/lxc/create'), {
@@ -6751,28 +6811,50 @@ async function createLxcContainer() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, distribution, release, architecture, wolfnet_ip, storage_path, root_password, memory_limit, cpu_cores }),
         });
-        const data = await resp.json();
+
+        let data;
+        const contentType = resp.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+            data = await resp.json();
+        } else {
+            const text = await resp.text();
+            data = { error: text || `HTTP ${resp.status}: ${resp.statusText}` };
+        }
+
         if (resp.ok) {
-            // Apply bind mounts after creation
-            for (const mount of mounts) {
-                try {
-                    await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`), {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(mount),
-                    });
-                } catch (e) {
-                    showToast(`Mount warning: ${e.message}`, 'warning');
+            updateStep('step-template', '✅', 'Template ready', true);
+            updateStep('step-create', '✅', 'Container created', true);
+
+            // Step 3: Apply mounts if any
+            if (mounts.length > 0) {
+                updateStep('step-config', '⏳', `Applying ${mounts.length} mount(s)...`, true);
+                for (const mount of mounts) {
+                    try {
+                        await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`), {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(mount),
+                        });
+                    } catch (e) { /* mount warning */ }
                 }
             }
-            const mountMsg = mounts.length > 0 ? ` with ${mounts.length} mount(s)` : '';
-            showToast(data.message || `Container '${name}' created${mountMsg}!`, 'success');
+            updateStep('step-config', '✅', 'Configuration applied', true);
+
+            const msg = data.message || `Container '${name}' created successfully`;
+            showResult(true, msg);
             setTimeout(loadLxcContainers, 500);
         } else {
-            showToast(data.error || 'Failed to create container', 'error');
+            updateStep('step-template', '❌', 'Failed', true);
+            const errMsg = data.error || data.message || `HTTP ${resp.status}: Creation failed`;
+            showResult(false, errMsg);
         }
     } catch (e) {
-        showToast(`Create failed: ${e.message}`, 'error');
+        updateStep('step-template', '❌', 'Connection error', true);
+        let errMsg = e.message || 'Unknown error';
+        if (errMsg.includes('Failed to fetch') || errMsg.includes('NetworkError')) {
+            errMsg = 'Request timed out or connection lost. The template download may still be running on the server. Check the Proxmox UI or try again in a few minutes.';
+        }
+        showResult(false, errMsg);
     }
 }
 
