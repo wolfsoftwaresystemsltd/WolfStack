@@ -3551,6 +3551,21 @@ function openNodeSettings(nodeId) {
                     <span style="color:var(--text-muted);">Status</span>
                     <span>${node.online ? '<span style="color:var(--success);">● Online</span>' : '<span style="color:var(--danger);">● Offline</span>'}</span>
                 </div>
+
+                <div id="node-version-section" style="background:var(--bg-secondary,#161622);border:1px solid var(--border,#333);border-radius:8px;padding:14px 16px;margin-bottom:16px;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+                        <span style="font-weight:600;font-size:13px;color:var(--text,#fff);">📦 WolfStack Version</span>
+                        <span id="node-version-badge" style="font-size:11px;padding:2px 8px;border-radius:4px;background:var(--bg-primary,#111);color:var(--text-muted,#888);">checking...</span>
+                    </div>
+                    <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12px;margin-top:8px;">
+                        <span style="color:var(--text-muted);">Installed:</span>
+                        <span id="node-version-installed" style="font-family:'JetBrains Mono',monospace;color:var(--text-muted,#888);">—</span>
+                        <span style="color:var(--text-muted);">Latest:</span>
+                        <span id="node-version-latest" style="font-family:'JetBrains Mono',monospace;color:var(--text-muted,#888);">—</span>
+                    </div>
+                    <div id="node-upgrade-action" style="display:none;margin-top:12px;"></div>
+                </div>
+
                 <hr style="border-color:var(--border);margin:16px 0;">
                 <div class="form-group">
                     <label>Cluster Name</label>
@@ -3580,6 +3595,110 @@ function openNodeSettings(nodeId) {
     modal._originalAddress = node.address;
     modal._originalPort = node.port;
     document.body.appendChild(modal);
+
+    // Fetch version info asynchronously
+    loadNodeVersionInfo(node);
+}
+
+async function loadNodeVersionInfo(node) {
+    const installedEl = document.getElementById('node-version-installed');
+    const latestEl = document.getElementById('node-version-latest');
+    const badgeEl = document.getElementById('node-version-badge');
+    const actionEl = document.getElementById('node-upgrade-action');
+    if (!installedEl) return;
+
+    let installedVersion = '';
+    let latestVersion = '';
+
+    // 1. Get installed version from the node
+    try {
+        if (node.is_self) {
+            // Local: read from the version element on the page
+            const vEl = document.querySelector('.version');
+            if (vEl) installedVersion = vEl.textContent.replace(/^v/i, '').trim();
+        } else {
+            // Remote: fetch /api/nodes through the proxy to get the remote server's version
+            const resp = await fetch(`/api/nodes/${node.id}/proxy/nodes`);
+            if (resp.ok) {
+                const data = await resp.json();
+                installedVersion = data.version || '';
+            }
+        }
+    } catch (e) { }
+
+    if (installedVersion) {
+        installedEl.textContent = 'v' + installedVersion;
+        installedEl.style.color = 'var(--text,#fff)';
+    } else {
+        installedEl.textContent = 'unknown';
+        installedEl.style.color = '#ef4444';
+    }
+
+    // 2. Get latest version from GitHub
+    try {
+        const resp = await fetch('https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/Cargo.toml');
+        const text = await resp.text();
+        const match = text.match(/^version\s*=\s*"([^"]+)"/m);
+        if (match) latestVersion = match[1];
+    } catch (e) { }
+
+    if (latestVersion) {
+        latestEl.textContent = 'v' + latestVersion;
+        latestEl.style.color = 'var(--text,#fff)';
+    } else {
+        latestEl.textContent = 'unable to check';
+        latestEl.style.color = 'var(--text-muted,#888)';
+    }
+
+    // 3. Compare and show badge + upgrade button
+    if (installedVersion && latestVersion) {
+        if (installedVersion === latestVersion) {
+            badgeEl.textContent = '✅ Up to date';
+            badgeEl.style.background = 'rgba(16,185,129,0.15)';
+            badgeEl.style.color = '#10b981';
+        } else {
+            badgeEl.textContent = '⬆️ Update available';
+            badgeEl.style.background = 'rgba(239,168,68,0.15)';
+            badgeEl.style.color = '#f59e0b';
+
+            const targetLabel = node.is_self ? 'this server' : node.hostname;
+            actionEl.style.display = 'block';
+            actionEl.innerHTML = `
+                <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:0.82em;color:#f59e0b;line-height:1.5;">
+                    ⚡ <strong>v${latestVersion}</strong> is available (installed: v${installedVersion}).
+                    Upgrading will download and install the latest WolfStack binary on <strong>${targetLabel}</strong>.
+                    A terminal window will open to show progress.
+                </div>
+                <button class="btn" style="background:#f59e0b;color:#000;font-weight:600;width:100%;" onclick="upgradeNode('${node.id}')">
+                    ⬆️ Upgrade ${targetLabel} to v${latestVersion}
+                </button>
+            `;
+        }
+    } else {
+        badgeEl.textContent = '❓ Unknown';
+        badgeEl.style.color = 'var(--text-muted,#888)';
+    }
+}
+
+function upgradeNode(nodeId) {
+    const node = allNodes.find(n => n.id === nodeId);
+    if (!node) return;
+
+    const machine = node.is_self ? 'this machine (local)' : (node.hostname + ' (' + node.address + ')');
+    if (!confirm('⚡ Upgrade WolfStack on ' + machine + '?\n\nThis will run the upgrade script. A terminal window will open so you can monitor progress.\n\nThe service will restart after upgrading — refresh your browser when done.\n\nProceed?')) return;
+
+    // Open console popup with type=upgrade
+    let url = '/console.html?type=upgrade&name=wolfstack';
+    if (!node.is_self) {
+        url += '&host=' + encodeURIComponent(node.address) + '&port=' + encodeURIComponent(node.port);
+    }
+    window.open(url, 'upgrade_console_' + nodeId, 'width=960,height=600,menubar=no,toolbar=no');
+
+    showToast('Upgrade started — watch the terminal window for progress.', 'info');
+
+    // Close the settings modal
+    const modal = document.getElementById('node-settings-modal');
+    if (modal) modal.remove();
 }
 
 async function saveNodeSettings() {
