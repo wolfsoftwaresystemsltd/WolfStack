@@ -706,7 +706,7 @@ pub async fn cluster_diagnose(req: HttpRequest, state: web::Data<AppState>, body
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
     let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(15))
         .danger_accept_invalid_certs(true)
         .build()
     {

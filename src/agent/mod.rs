@@ -601,7 +601,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
         debug!("Polling remote node {} (trying port+1 HTTP, port HTTPS, port HTTP)", node.id);
 
         let client = match reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
             .danger_accept_invalid_certs(true)
             .build()
         {
