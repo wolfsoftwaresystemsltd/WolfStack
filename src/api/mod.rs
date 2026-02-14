@@ -698,6 +698,184 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
     }))
 }
 
+/// POST /api/cluster/diagnose — manually poll each node and report detailed connectivity info
+pub async fn cluster_diagnose(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfNetSyncRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let node_ids = &body.node_ids;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("HTTP client error: {}", e)})),
+    };
+
+    let mut results = Vec::new();
+
+    for nid in node_ids {
+        let node = match state.cluster.get_node(nid) {
+            Some(n) => n,
+            None => {
+                results.push(serde_json::json!({
+                    "node_id": nid,
+                    "hostname": "unknown",
+                    "address": "",
+                    "port": 0,
+                    "is_self": false,
+                    "wolfstack_api": { "reachable": false, "error": "Node not found in cluster" },
+                    "wolfnet": { "reachable": false },
+                    "last_seen_ago_secs": null,
+                }));
+                continue;
+            }
+        };
+
+        let last_seen_ago = if node.last_seen > 0 { Some(now.saturating_sub(node.last_seen)) } else { None };
+
+        if node.is_self {
+            results.push(serde_json::json!({
+                "node_id": node.id,
+                "hostname": node.hostname,
+                "address": node.address,
+                "port": node.port,
+                "is_self": true,
+                "wolfstack_api": {
+                    "reachable": true,
+                    "url_used": "localhost (self)",
+                    "status_code": 200,
+                    "latency_ms": 0,
+                    "error": null,
+                },
+                "wolfnet": {
+                    "ip": "self",
+                    "reachable": true,
+                    "latency_ms": 0,
+                },
+                "last_seen_ago_secs": 0,
+            }));
+            continue;
+        }
+
+        // Try HTTP poll on port+1 first, then main port (same as background poller)
+        let urls = vec![
+            format!("http://{}:{}/api/agent/status", node.address, node.port + 1),
+            format!("http://{}:{}/api/agent/status", node.address, node.port),
+        ];
+
+        let mut api_result = serde_json::json!({
+            "reachable": false,
+            "url_used": null,
+            "status_code": null,
+            "latency_ms": null,
+            "error": "Could not reach node on either port",
+        });
+
+        for url in &urls {
+            let start = std::time::Instant::now();
+            match client.get(url)
+                .header("X-WolfStack-Secret", &state.cluster_secret)
+                .send().await
+            {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let latency = start.elapsed().as_millis() as u64;
+                    let body_text = resp.text().await.unwrap_or_default();
+
+                    // Try to parse as AgentMessage
+                    let is_valid = serde_json::from_str::<serde_json::Value>(&body_text)
+                        .map(|v| v.get("StatusReport").is_some() || v.get("hostname").is_some())
+                        .unwrap_or(false);
+
+                    if status == 200 && (is_valid || body_text.contains("hostname")) {
+                        api_result = serde_json::json!({
+                            "reachable": true,
+                            "url_used": url,
+                            "status_code": status,
+                            "latency_ms": latency,
+                            "error": null,
+                        });
+                        break;
+                    } else {
+                        // Got a response but not the expected one
+                        let snippet = if body_text.len() > 100 { &body_text[..100] } else { &body_text };
+                        api_result = serde_json::json!({
+                            "reachable": false,
+                            "url_used": url,
+                            "status_code": status,
+                            "latency_ms": latency,
+                            "error": format!("HTTP {}: {}", status, snippet.trim()),
+                        });
+                        // Don't break — try the other port
+                    }
+                }
+                Err(e) => {
+                    let latency = start.elapsed().as_millis() as u64;
+                    let err_str = format!("{}", e);
+                    // Only update if we haven't gotten a better result
+                    if api_result.get("status_code").and_then(|v| v.as_u64()).is_none() {
+                        api_result = serde_json::json!({
+                            "reachable": false,
+                            "url_used": url,
+                            "status_code": null,
+                            "latency_ms": latency,
+                            "error": err_str,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Check WolfNet connectivity by pinging the node's WolfNet IP
+        let wolfnet_result = {
+            // Get WolfNet peers to find this node's WolfNet IP
+            let peers = networking::get_wolfnet_peers_list();
+            let wolfnet_ip = peers.iter()
+                .find(|p| p.name.contains(&node.hostname) || node.hostname.contains(&p.name))
+                .map(|p| p.ip.clone());
+
+            if let Some(ref ip) = wolfnet_ip {
+                // Quick ping test (1 packet, 2s timeout)
+                let start = std::time::Instant::now();
+                let ping_ok = std::process::Command::new("ping")
+                    .args(["-c", "1", "-W", "2", ip])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                let latency = start.elapsed().as_millis() as u64;
+                let ping_latency: Option<u64> = if ping_ok { Some(latency) } else { None };
+
+                serde_json::json!({
+                    "ip": ip,
+                    "reachable": ping_ok,
+                    "latency_ms": ping_latency,
+                })
+            } else {
+                serde_json::json!({
+                    "ip": serde_json::Value::Null,
+                    "reachable": false,
+                    "latency_ms": serde_json::Value::Null,
+                })
+            }
+        };
+
+        results.push(serde_json::json!({
+            "node_id": node.id,
+            "hostname": node.hostname,
+            "address": node.address,
+            "port": node.port,
+            "is_self": false,
+            "wolfstack_api": api_result,
+            "wolfnet": wolfnet_result,
+            "last_seen_ago_secs": last_seen_ago,
+        }));
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({ "results": results }))
+}
+
 /// GET /api/nodes/{id}/pve/resources — list VMs and containers on a Proxmox node
 pub async fn get_pve_resources(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
@@ -3562,6 +3740,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // Cluster
         .route("/api/cluster/verify-token", web::get().to(verify_join_token))
         .route("/api/cluster/wolfnet-sync", web::post().to(wolfnet_sync_cluster))
+        .route("/api/cluster/diagnose", web::post().to(cluster_diagnose))
         .route("/api/nodes", web::get().to(get_nodes))
         .route("/api/nodes", web::post().to(add_node))
         .route("/api/nodes/{id}", web::get().to(get_node))

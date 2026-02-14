@@ -3254,6 +3254,17 @@ function openWsClusterSettings(clusterName) {
                     </button>
                     <span id="ws-wolfnet-sync-status" style="margin-left: 10px; font-size: 12px; color: var(--text-muted);"></span>
                 </div>
+                <hr style="border-color: var(--border); margin: 20px 0;">
+                <div class="form-group">
+                    <label>🔍 Cluster Check</label>
+                    <p style="color: var(--text-muted); font-size: 12px; margin: 4px 0 12px;">
+                        Diagnose connectivity to all nodes — checks WolfStack API reachability and WolfNet tunnel status.
+                    </p>
+                    <button class="btn" id="ws-diagnose-btn" style="background: var(--accent); color: #fff; font-size: 13px;" onclick="runClusterDiagnostics()">
+                        🔍 Run Diagnostics
+                    </button>
+                    <div id="ws-diagnose-results" style="margin-top: 12px;"></div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
@@ -3336,6 +3347,124 @@ async function syncWolfNetCluster() {
     }
 
     if (btn) { btn.disabled = false; btn.textContent = '🔗 Update WolfNet Connections'; }
+}
+
+async function runClusterDiagnostics() {
+    const modal = document.getElementById('ws-settings-modal');
+    if (!modal) return;
+    const nodeIds = modal._nodeIds || [];
+    if (nodeIds.length === 0) return;
+
+    const btn = document.getElementById('ws-diagnose-btn');
+    const resultsDiv = document.getElementById('ws-diagnose-results');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Checking...'; }
+    if (resultsDiv) resultsDiv.innerHTML = '<div style="color:var(--text-muted);font-size:12px;">Polling nodes, this may take a few seconds...</div>';
+
+    try {
+        const resp = await fetch('/api/cluster/diagnose', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ node_ids: nodeIds })
+        });
+        const data = await resp.json();
+
+        if (data.error) {
+            if (resultsDiv) resultsDiv.innerHTML = `<div style="color:var(--danger);">❌ ${data.error}</div>`;
+            return;
+        }
+
+        // Build results table
+        let html = `<div style="border:1px solid var(--border); border-radius:8px; overflow:hidden; font-size:12px;">
+            <table style="width:100%; border-collapse:collapse;">
+                <thead>
+                    <tr style="background:var(--bg-tertiary); text-align:left;">
+                        <th style="padding:8px 10px;">Node</th>
+                        <th style="padding:8px 6px;">API</th>
+                        <th style="padding:8px 6px;">WolfNet</th>
+                        <th style="padding:8px 6px;">Latency</th>
+                        <th style="padding:8px 6px;">Last Seen</th>
+                    </tr>
+                </thead>
+                <tbody>`;
+
+        for (const r of (data.results || [])) {
+            const api = r.wolfstack_api || {};
+            const wn = r.wolfnet || {};
+            const apiOk = api.reachable;
+            const wnOk = wn.reachable;
+            const isSelf = r.is_self;
+
+            // API status
+            let apiCell;
+            if (isSelf) {
+                apiCell = '<span style="color:#10b981;">✅ Self</span>';
+            } else if (apiOk) {
+                apiCell = '<span style="color:#10b981;">✅ OK</span>';
+            } else {
+                const errTip = api.error ? api.error.replace(/"/g, '&quot;') : 'Unknown error';
+                const statusBadge = api.status_code ? ` <span style="opacity:0.7;">(${api.status_code})</span>` : '';
+                apiCell = `<span style="color:#ef4444;" title="${errTip}">❌ Fail${statusBadge}</span>`;
+            }
+
+            // WolfNet status
+            let wnCell;
+            if (isSelf) {
+                wnCell = '<span style="color:#10b981;">✅ Self</span>';
+            } else if (wn.ip === null) {
+                wnCell = '<span style="color:#f59e0b;" title="No WolfNet peer found for this node">⚠️ No peer</span>';
+            } else if (wnOk) {
+                wnCell = `<span style="color:#10b981;">✅ ${wn.ip}</span>`;
+            } else {
+                wnCell = `<span style="color:#ef4444;">❌ ${wn.ip}</span>`;
+            }
+
+            // Latency
+            const latency = apiOk ? `${api.latency_ms}ms` : (wn.latency_ms ? `${wn.latency_ms}ms (wn)` : '—');
+
+            // Last seen
+            let lastSeen = '—';
+            if (isSelf) {
+                lastSeen = 'now';
+            } else if (r.last_seen_ago_secs !== null && r.last_seen_ago_secs !== undefined) {
+                const secs = r.last_seen_ago_secs;
+                if (secs < 60) lastSeen = `${secs}s ago`;
+                else if (secs < 3600) lastSeen = `${Math.floor(secs / 60)}m ago`;
+                else if (secs < 86400) lastSeen = `${Math.floor(secs / 3600)}h ago`;
+                else lastSeen = `${Math.floor(secs / 86400)}d ago`;
+
+                if (secs > 120 && !apiOk) lastSeen = `<span style="color:#ef4444;">${lastSeen}</span>`;
+                else if (secs > 60) lastSeen = `<span style="color:#f59e0b;">${lastSeen}</span>`;
+            }
+
+            // Row background
+            const rowBg = (!apiOk && !isSelf) ? 'background:rgba(239,68,68,0.05);' : '';
+
+            html += `<tr style="border-top:1px solid var(--border);${rowBg}">
+                <td style="padding:6px 10px;font-weight:600;">${r.hostname}${isSelf ? ' <span style="color:var(--accent-light);font-size:10px;">(this)</span>' : ''}</td>
+                <td style="padding:6px;">${apiCell}</td>
+                <td style="padding:6px;">${wnCell}</td>
+                <td style="padding:6px;font-family:monospace;">${latency}</td>
+                <td style="padding:6px;">${lastSeen}</td>
+            </tr>`;
+
+            // Show error detail row if API failed
+            if (!apiOk && !isSelf && api.error) {
+                html += `<tr style="border-top:none;${rowBg}">
+                    <td colspan="5" style="padding:2px 10px 8px;font-size:11px;color:var(--text-muted);font-family:monospace;word-break:break-all;">
+                        ↳ ${api.url_used || ''}: ${api.error}
+                    </td>
+                </tr>`;
+            }
+        }
+
+        html += '</tbody></table></div>';
+        if (resultsDiv) resultsDiv.innerHTML = html;
+
+    } catch (e) {
+        if (resultsDiv) resultsDiv.innerHTML = `<div style="color:var(--danger);">❌ ${e.message}</div>`;
+    }
+
+    if (btn) { btn.disabled = false; btn.textContent = '🔍 Run Diagnostics'; }
 }
 
 // ─── Individual Node Settings ───

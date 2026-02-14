@@ -652,6 +652,10 @@ pub fn get_wolfnet_status() -> WolfNetStatus {
 }
 
 /// Read WolfNet peers from config.toml
+pub fn get_wolfnet_peers_list() -> Vec<WolfNetPeer> {
+    get_wolfnet_peers()
+}
+
 fn get_wolfnet_peers() -> Vec<WolfNetPeer> {
     let config_path = "/etc/wolfnet/config.toml";
     let mut peers = Vec::new();
@@ -856,8 +860,8 @@ pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option
     std::fs::write(config_path, &output)
         .map_err(|e| format!("Failed to write config: {}", e))?;
 
-    // Signal WolfNet to reload config (SIGHUP = hot-reload, no restart needed)
-    let _ = Command::new("pkill").args(["-HUP", "wolfnet"]).output();
+    // Apply config: try SIGHUP hot-reload, fall back to restart for older wolfnet
+    reload_or_restart_wolfnet();
 
     Ok(result_msg)
 }
@@ -928,10 +932,42 @@ pub fn remove_wolfnet_peer(name: &str) -> Result<String, String> {
 
     info!("Removed WolfNet peer: {}", name);
 
-    // Signal WolfNet to reload config (SIGHUP = hot-reload, no restart needed)
+    // Apply config: try SIGHUP hot-reload, fall back to restart for older wolfnet
+    reload_or_restart_wolfnet();
+
+    Ok(format!("Peer '{}' removed and WolfNet reloaded", name))
+}
+
+/// Try SIGHUP hot-reload first; if wolfnet dies (old version without handler),
+/// fall back to systemctl restart.
+fn reload_or_restart_wolfnet() {
+    // Check if wolfnet is currently running
+    let was_running = Command::new("pgrep").arg("wolfnet")
+        .output().map(|o| o.status.success()).unwrap_or(false);
+
+    if !was_running {
+        // Not running at all — just start it
+        info!("WolfNet not running, starting via systemctl");
+        let _ = Command::new("systemctl").args(["start", "wolfnet"]).output();
+        return;
+    }
+
+    // Send SIGHUP for hot-reload
     let _ = Command::new("pkill").args(["-HUP", "wolfnet"]).output();
 
-    Ok(format!("Peer '{}' removed and WolfNet restarted", name))
+    // Brief pause to let signal be processed
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Check if it survived (old versions without SIGHUP handler will die)
+    let still_running = Command::new("pgrep").arg("wolfnet")
+        .output().map(|o| o.status.success()).unwrap_or(false);
+
+    if !still_running {
+        warn!("WolfNet died after SIGHUP (old version?) — restarting via systemctl");
+        let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
+    } else {
+        info!("WolfNet config hot-reloaded via SIGHUP");
+    }
 }
 
 /// Restart or start WolfNet service
