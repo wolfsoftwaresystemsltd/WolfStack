@@ -186,6 +186,8 @@ async fn main() -> std::io::Result<()> {
         // Initialize AI agent
         let ai_agent = Arc::new(ai::AiAgent::new());
 
+        let cached_status: Arc<std::sync::RwLock<Option<serde_json::Value>>> = Arc::new(std::sync::RwLock::new(None));
+
         // Create app state
         let app_state = web::Data::new(api::AppState {
             monitor: Mutex::new(mon),
@@ -197,6 +199,7 @@ async fn main() -> std::io::Result<()> {
             join_token: api::load_join_token(),
             pbs_restore_progress: Mutex::new(Default::default()),
             ai_agent: ai_agent.clone(),
+            cached_status: cached_status.clone(),
         });
 
         // Background: periodic self-monitoring update
@@ -204,6 +207,7 @@ async fn main() -> std::io::Result<()> {
         let cluster_clone = cluster.clone();
         // Clone public_ip for the background task
         let public_ip = public_ip.clone();
+        let cached_status_bg = cached_status.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -221,9 +225,30 @@ async fn main() -> std::io::Result<()> {
                 let docker_count = containers::docker_list_all().len() as u32;
                 let lxc_count = containers::lxc_list_all().len() as u32;
                 let vm_count = state_clone.vms.lock().unwrap().list_vms().len() as u32;
-                // Use the initially detected public_ip (cloned into the closure)
-                // Note: If public IP changes (dynamic IP), we'd need to re-fetch it periodically.
-                // For now, assuming static public IP session.
+
+                // Cache the agent status report for instant polling responses
+                let self_id = cluster_clone.self_id.clone();
+                let hostname = metrics.hostname.clone();
+                let known_nodes = cluster_clone.get_all_nodes();
+                let deleted_ids = cluster_clone.get_deleted_ids();
+                let msg = agent::AgentMessage::StatusReport {
+                    node_id: self_id,
+                    hostname,
+                    metrics: metrics.clone(),
+                    components: components.clone(),
+                    docker_count,
+                    lxc_count,
+                    vm_count,
+                    public_ip: public_ip.clone(),
+                    known_nodes,
+                    deleted_ids,
+                };
+                if let Ok(json) = serde_json::to_value(&msg) {
+                    if let Ok(mut cache) = cached_status_bg.write() {
+                        *cache = Some(json);
+                    }
+                }
+
                 cluster_clone.update_self(metrics, components, docker_count, lxc_count, vm_count, public_ip.clone());
             }
         });

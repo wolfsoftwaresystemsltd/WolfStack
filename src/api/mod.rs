@@ -47,6 +47,8 @@ pub struct AppState {
     pub join_token: String,
     pub pbs_restore_progress: std::sync::Mutex<PbsRestoreProgress>,
     pub ai_agent: Arc<crate::ai::AiAgent>,
+    /// Pre-built agent status response, updated every 2s by background task
+    pub cached_status: Arc<std::sync::RwLock<Option<serde_json::Value>>>,
 }
 
 /// Load or generate the join token from /etc/wolfstack/join-token
@@ -1359,8 +1361,18 @@ pub async fn list_certificates(req: HttpRequest, state: web::Data<AppState>) -> 
 // ─── Agent API (server-to-server, no auth required) ───
 
 /// GET /api/agent/status — return this node's status (for remote polling)
+/// Uses pre-cached data from the 2-second background task for instant responses.
 pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(e) = require_cluster_auth(&req, &state) { return e; }
+
+    // Return cached status if available (sub-millisecond response)
+    if let Ok(cache) = state.cached_status.read() {
+        if let Some(ref json) = *cache {
+            return HttpResponse::Ok().json(json);
+        }
+    }
+
+    // Fallback: first request before cache is populated (only happens once at startup)
     let metrics = state.monitor.lock().unwrap().collect();
     let components = installer::get_all_status();
     let hostname = metrics.hostname.clone();
@@ -1377,9 +1389,7 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
         lxc_count,
         vm_count,
         public_ip,
-        // Gossip all known nodes — the remote machine should be a mirror
         known_nodes: state.cluster.get_all_nodes(),
-        // Include tombstones so deletions propagate across the cluster
         deleted_ids: state.cluster.get_deleted_ids(),
     };
     HttpResponse::Ok().json(msg)
