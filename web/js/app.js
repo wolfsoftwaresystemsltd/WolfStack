@@ -6026,10 +6026,10 @@ async function doMigrate(name) {
 }
 
 async function cloneLxcContainer(name) {
-    // Fetch cluster nodes for the target selector
+    // Fetch cluster nodes from LOCAL server (not proxied) for the target selector
     let nodes = [];
     try {
-        const resp = await fetch(apiUrl('/api/nodes'));
+        const resp = await fetch('/api/nodes');
         if (resp.ok) {
             const data = await resp.json();
             nodes = Array.isArray(data) ? data : (data.nodes || []);
@@ -6051,8 +6051,10 @@ async function cloneLxcContainer(name) {
                         <option value="">This node (local clone)</option>
                         ${nodes.filter(n => !n.is_self && n.online).map(n => `<option value="${n.id}">${n.hostname} (${n.address})</option>`).join('')}
                     </select></div>
-                <div><label style="font-size:13px;color:var(--text-muted,#aaa);">Storage (optional)</label>
-                    <input id="clone-storage" type="text" placeholder="auto" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;"></div>
+                <div><label style="font-size:13px;color:var(--text-muted,#aaa);">Storage</label>
+                    <select id="clone-storage" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
+                        <option value="">Auto (default)</option>
+                    </select></div>
                 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
                     <button class="btn" onclick="document.getElementById('lxc-clone-modal')?.remove()">Cancel</button>
                     <button class="btn" style="background:var(--primary,#7c3aed);color:#fff;" onclick="doCloneLxc('${name}')">Clone</button>
@@ -6061,6 +6063,28 @@ async function cloneLxcContainer(name) {
         </div>
     `;
     document.body.appendChild(modal);
+
+    // Populate storage dropdown from /api/storage/list (proxied to the target node)
+    try {
+        const storageResp = await fetch(apiUrl('/api/storage/list'));
+        if (storageResp.ok) {
+            const storageData = await storageResp.json();
+            const sel = document.getElementById('clone-storage');
+            if (storageData.proxmox) {
+                const stores = storageData.storages.filter(s =>
+                    s.content && s.content.some(c => c === 'rootdir' || c === 'images')
+                );
+                (stores.length ? stores : storageData.storages.filter(s => s.status === 'active')).forEach(s => {
+                    const free = formatBytes(s.available_bytes);
+                    sel.insertAdjacentHTML('beforeend', `<option value="${s.id}">${s.id} (${s.storage_type}, ${free} free)</option>`);
+                });
+            } else if (storageData.paths) {
+                storageData.paths.forEach(p => {
+                    sel.insertAdjacentHTML('beforeend', `<option value="${p.path}">${p.path} (${formatBytes(p.free_bytes)} free)</option>`);
+                });
+            }
+        }
+    } catch (e) { }
 }
 
 async function doCloneLxc(name) {
@@ -6137,9 +6161,10 @@ async function doCloneLxc(name) {
 }
 
 async function migrateLxcContainer(name) {
+    // Fetch cluster nodes from LOCAL server (not proxied) — remote nodes don't have cluster info
     let nodes = [];
     try {
-        const resp = await fetch(apiUrl('/api/nodes'));
+        const resp = await fetch('/api/nodes');
         if (resp.ok) {
             const data = await resp.json();
             nodes = Array.isArray(data) ? data : (data.nodes || []);
