@@ -6936,6 +6936,7 @@ function removeLxcMountRow(btn) {
 // ─── LXC Container Creation ───
 
 let lxcTemplatesCache = null;
+let lxcTemplatesCacheNodeId = null;
 
 function showLxcCreate() {
     const modal = document.getElementById('container-detail-modal');
@@ -6953,9 +6954,11 @@ async function loadLxcTemplates() {
     const body = document.getElementById('container-detail-body');
 
     try {
-        if (!lxcTemplatesCache) {
+        // Invalidate cache when switching nodes (Proxmox vs standalone have different templates)
+        if (!lxcTemplatesCache || lxcTemplatesCacheNodeId !== currentNodeId) {
             const resp = await fetch(apiUrl('/api/containers/lxc/templates'));
             lxcTemplatesCache = await resp.json();
+            lxcTemplatesCacheNodeId = currentNodeId;
         }
 
         const templates = lxcTemplatesCache;
