@@ -1868,6 +1868,7 @@ pub struct MigrateExternalRequest {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct ImportRequest {
     pub new_name: String,
     pub storage: Option<String>,

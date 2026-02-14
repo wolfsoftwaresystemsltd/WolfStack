@@ -3779,6 +3779,7 @@ pub fn docker_import_image(tar_path: &str, container_name: &str) -> Result<Strin
     Ok(format!("Container '{}' imported ({})", container_name, &id[..12.min(id.len())]))
 }
 /// Clone an LXC container (Proxmox-aware)
+#[allow(dead_code)]
 pub fn lxc_clone(container: &str, new_name: &str) -> Result<String, String> {
     info!("Cloning LXC container {} as {}", container, new_name);
 
