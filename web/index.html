@@ -1933,6 +1933,120 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
 
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header">
+                    <h3>📋 Container Cloning &amp; Migration</h3>
+                    <div style="font-size: 12px; color: var(--text-muted);">How to clone and migrate LXC containers
+                        between nodes</div>
+                </div>
+                <div class="card-body" style="padding:24px; line-height:1.7;">
+                    <h4 style="margin-bottom:12px; color:var(--accent-light);">Cloning a Container</h4>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">Clone creates a full copy of an existing
+                        container. You can clone locally or to another node in the cluster.</p>
+                    <ol style="color:var(--text-secondary); padding-left:20px; margin-bottom:16px;">
+                        <li>Right-click or use the ⚙ menu on a container and select <strong>Clone</strong></li>
+                        <li>Enter a <strong>New Name</strong> for the cloned container</li>
+                        <li>Choose a <strong>Target Node</strong> — local or any node in the cluster</li>
+                        <li>Select <strong>Storage</strong> from the dropdown (shows available Proxmox storage or
+                            filesystem paths with free space)</li>
+                        <li>Click <strong>Clone</strong> — a progress modal shows real-time status</li>
+                    </ol>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Migrating a Container</h4>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">Migration moves a container from one node
+                        to another, removing the original after successful transfer.</p>
+                    <ol style="color:var(--text-secondary); padding-left:20px; margin-bottom:16px;">
+                        <li>Right-click or use the ⚙ menu on a container and select <strong>Migrate</strong></li>
+                        <li>Select the <strong>Target Node</strong> from the dropdown, or choose <strong>External
+                                Cluster</strong> for cross-cluster migration</li>
+                        <li>Click <strong>Migrate</strong> to start</li>
+                    </ol>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Migration Progress</h4>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">Migration shows a detailed step-by-step
+                        progress panel with five phases:</p>
+                    <div
+                        style="background:var(--bg-tertiary); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:16px;">
+                        <div
+                            style="display:flex; flex-direction:column; gap:6px; font-size:13px; color:var(--text-secondary);">
+                            <div>⏹️ <strong>Stopping container</strong> — gracefully stops the running container</div>
+                            <div>📦 <strong>Creating archive</strong> — exports the container to a tar/vzdump archive
+                            </div>
+                            <div>📤 <strong>Transferring</strong> — uploads the archive to the target node</div>
+                            <div>📥 <strong>Importing</strong> — creates the container on the target node from the
+                                archive</div>
+                            <div>🧹 <strong>Cleaning up</strong> — removes the source container after successful import
+                            </div>
+                        </div>
+                    </div>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">Each step shows a spinning indicator when
+                        active, ✅ when complete, or ❌ if it fails. An elapsed timer keeps you informed of the total
+                        duration.</p>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Cross-Cluster Migration</h4>
+                    <p style="color:var(--text-secondary);">To migrate to a different WolfStack cluster, select
+                        <strong>External Cluster</strong> in the target dropdown and provide the remote server's URL and
+                        API token. The container will be exported, uploaded to the external server, and imported there.
+                    </p>
+                </div>
+            </div>
+
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-header">
+                    <h3>⬆️ Node Settings &amp; Remote Upgrades</h3>
+                    <div style="font-size: 12px; color: var(--text-muted);">Managing individual nodes and keeping
+                        WolfStack up to date</div>
+                </div>
+                <div class="card-body" style="padding:24px; line-height:1.7;">
+                    <h4 style="margin-bottom:12px; color:var(--accent-light);">Node Settings</h4>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">Click the ⚙️ gear icon next to any node
+                        in the sidebar to open <strong>Node Settings</strong>. Here you can:</p>
+                    <ul style="color:var(--text-secondary); padding-left:20px; margin-bottom:16px;">
+                        <li>View and edit the node's <strong>hostname</strong>, <strong>address</strong>, and
+                            <strong>port</strong></li>
+                        <li>Change the <strong>cluster name</strong> to move a node between cluster groups</li>
+                        <li>Update <strong>PVE Token</strong> and <strong>TLS Fingerprint</strong> for Proxmox nodes
+                        </li>
+                        <li>See the installed and latest <strong>WolfStack version</strong></li>
+                    </ul>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Version Checking</h4>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">Node Settings automatically checks the
+                        installed WolfStack version against the latest release on GitHub:</p>
+                    <div
+                        style="background:var(--bg-tertiary); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:16px;">
+                        <div
+                            style="display:flex; flex-direction:column; gap:8px; font-size:13px; color:var(--text-secondary);">
+                            <div>✅ <strong>Up to date</strong> — installed version matches or exceeds the latest release
+                            </div>
+                            <div>⬆️ <strong>Update available</strong> — a newer version is available on GitHub</div>
+                            <div>❓ <strong>Unknown</strong> — version could not be detected (upgrade button still
+                                available)</div>
+                        </div>
+                    </div>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Remote Upgrades</h4>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">When an update is available (or version
+                        is unknown), an <strong>Upgrade</strong> button appears. Clicking it:</p>
+                    <ol style="color:var(--text-secondary); padding-left:20px; margin-bottom:16px;">
+                        <li>Opens a terminal console window connected to the target node</li>
+                        <li>Runs the WolfStack upgrade script: <code
+                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash</code>
+                        </li>
+                        <li>Shows live output as the upgrade progresses</li>
+                        <li>Displays a restart message when the service restarts</li>
+                    </ol>
+                    <p style="color:var(--text-secondary);">After the upgrade completes, <strong>refresh your
+                            browser</strong> and log in again. The version in the footer will reflect the new version.
+                    </p>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Update Banner</h4>
+                    <p style="color:var(--text-secondary);">WolfStack also checks for updates automatically every 6
+                        hours. When a newer version is detected, a banner appears at the top of the page. Clicking the
+                        upgrade button in the banner runs the same upgrade process on the currently selected node.</p>
+                </div>
+            </div>
+
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-header">
                     <h3>🔧 Troubleshooting</h3>
                     <div style="font-size: 12px; color: var(--text-muted);">Common issues and solutions</div>
                 </div>
@@ -1959,9 +2073,53 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                         accessible from this server and that both nodes run the same version. Check cluster secret
                         matches.</p>
 
-                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Update checker shows false positive</h4>
-                    <p style="color:var(--text-secondary);">Restart the service after updating to ensure the version
-                        string matches. The version is checked against the GitHub releases page.</p>
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Container creation fails on Proxmox node
+                    </h4>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">If creating a container on a Proxmox node
+                        fails with template errors, try refreshing the page and switching to the correct node before
+                        clicking <strong>Create</strong>. The template list is cached per node — switching nodes will
+                        fetch the correct templates (Proxmox <code
+                            style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">pveam</code>
+                        templates vs standalone LXC templates).</p>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Proxmox containers not connecting to
+                        WolfNet</h4>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">Proxmox LXC containers use <code
+                            style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">lxcbr0</code> for
+                        WolfNet connectivity (not <code
+                            style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">vmbr0</code>). If a
+                        container can't reach WolfNet IPs:</p>
+                    <ol style="color:var(--text-secondary); padding-left:20px; margin-bottom:16px;">
+                        <li>Check the container's network config: <code
+                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">pct config &lt;VMID&gt;</code>
+                        </li>
+                        <li>Verify it uses <code
+                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">bridge=lxcbr0</code>
+                            if WolfNet is enabled</li>
+                        <li>Ensure <code
+                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">lxcbr0</code>
+                            is present: <code
+                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">ip link show lxcbr0</code>
+                        </li>
+                    </ol>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Migration hangs or fails</h4>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">Migration requires network connectivity
+                        between nodes. Check:</p>
+                    <ul style="color:var(--text-secondary); padding-left:20px; margin-bottom:16px;">
+                        <li>Both nodes can reach each other on port <code
+                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">8553</code> (or
+                            configured port)</li>
+                        <li>The target node has enough disk space for the container archive</li>
+                        <li>Large containers may take several minutes — the progress panel shows elapsed time</li>
+                    </ul>
+
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Node version shows "unknown" in settings
+                    </h4>
+                    <p style="color:var(--text-secondary);">This means WolfStack couldn't detect the version on the
+                        remote node, usually because the node is a Proxmox host without WolfStack installed, or the API
+                        proxy isn't reachable. You can still click the <strong>Install / Upgrade</strong> button to
+                        install or update WolfStack on that node.</p>
                 </div>
             </div>
 
