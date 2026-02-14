@@ -5936,7 +5936,8 @@ async function migrateDockerContainer(name) {
 
     try {
         const resp = await fetch('/api/nodes');
-        const nodes = await resp.json();
+        const data = await resp.json();
+        const nodes = Array.isArray(data) ? data : (data.nodes || []);
 
         let nodeOpts = '';
         if (nodes && nodes.length > 0) {
@@ -6031,7 +6032,7 @@ async function cloneLxcContainer(name) {
         const resp = await fetch(apiUrl('/api/nodes'));
         if (resp.ok) {
             const data = await resp.json();
-            nodes = Array.isArray(data) ? data : [];
+            nodes = Array.isArray(data) ? data : (data.nodes || []);
         }
     } catch (e) { }
 
@@ -6141,7 +6142,7 @@ async function migrateLxcContainer(name) {
         const resp = await fetch(apiUrl('/api/nodes'));
         if (resp.ok) {
             const data = await resp.json();
-            nodes = Array.isArray(data) ? data : [];
+            nodes = Array.isArray(data) ? data : (data.nodes || []);
         }
     } catch (e) { }
     const remoteNodes = nodes.filter(n => !n.is_self && n.online);
@@ -6164,6 +6165,11 @@ async function migrateLxcContainer(name) {
                         <option value="__external__">External cluster...</option>
                     </select></div>
                 <div id="migrate-external-fields" style="display:none;">
+                    <div style="background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.3);border-radius:8px;padding:10px 12px;margin-bottom:12px;color:#60a5fa;font-size:0.82em;line-height:1.5;">
+                        💡 <strong>Cross-cluster migration</strong> lets you move a container to a WolfStack instance on a different network.
+                        On the <em>destination</em> cluster, go to <strong>LXC Containers → Generate Transfer Token</strong> to create a one-time token.
+                        The token is valid for 30 minutes and authorises this node to push the container to that cluster.
+                    </div>
                     <label style="font-size:13px;color:var(--text-muted,#aaa);">Target URL</label>
                     <input id="migrate-ext-url" type="text" placeholder="https://target.example.com:8553" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;margin-bottom:8px;">
                     <label style="font-size:13px;color:var(--text-muted,#aaa);">Transfer Token</label>
