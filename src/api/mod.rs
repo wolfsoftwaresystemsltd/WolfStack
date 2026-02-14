@@ -514,11 +514,9 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
     // Collect WolfNet info from each node
     #[derive(Clone)]
     struct NodeWnInfo {
-        node_id: String,
         hostname: String,
         wolfnet_ip: String,
         public_key: String,
-        listen_port: u16,
         /// The reachable endpoint (node.address:listen_port) for WolfNet
         endpoint: String,
         is_self: bool,
@@ -562,11 +560,9 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                     // Use the node's real address (not WolfNet IP) as the endpoint
                     let endpoint = format!("{}:{}", node.address, listen_port);
                     infos.push(NodeWnInfo {
-                        node_id: nid.clone(),
                         hostname,
                         wolfnet_ip: address,
                         public_key,
-                        listen_port,
                         endpoint,
                         is_self: true,
                         address: node.address.clone(),
@@ -601,11 +597,9 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                         }
                         let endpoint = format!("{}:{}", node.address, listen_port);
                         infos.push(NodeWnInfo {
-                            node_id: nid.clone(),
                             hostname,
                             wolfnet_ip: address,
                             public_key,
-                            listen_port,
                             endpoint,
                             is_self: false,
                             address: node.address.clone(),
