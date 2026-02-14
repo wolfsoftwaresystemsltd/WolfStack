@@ -2778,6 +2778,7 @@ async function addServer() {
             showToast('Proxmox cluster added — ' + data.nodes_discovered.length + ' node(s) discovered: ' + data.nodes_discovered.join(', '), 'success');
         } else {
             showToast('Server ' + address + ' added', 'success');
+            setTimeout(() => showToast('💡 When done adding nodes, use "Update WolfNet Connections" in Cluster Settings to sync networking', 'info'), 1500);
         }
         closeModal();
         document.getElementById('new-server-address').value = '';
