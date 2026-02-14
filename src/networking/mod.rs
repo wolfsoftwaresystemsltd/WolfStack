@@ -754,9 +754,17 @@ pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option
     let mut content = std::fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read config: {}", e))?;
 
-    // Check for duplicate
+    // Check for duplicate by name, public key, or allowed IP
     if content.contains(&format!("name = \"{}\"", name)) {
         return Err(format!("Peer '{}' already exists", name));
+    }
+    if let Some(pk) = public_key {
+        if !pk.is_empty() && content.contains(pk) {
+            return Err(format!("Peer with public key '{}...' already exists", &pk[..pk.len().min(12)]));
+        }
+    }
+    if !ip.is_empty() && (content.contains(&format!("allowed_ip = \"{}\"", ip)) || content.contains(&format!("ip = \"{}\"", ip))) {
+        return Err(format!("Peer with IP '{}' already exists", ip));
     }
 
     // Append peer section
@@ -765,7 +773,7 @@ pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option
         content.push_str(&format!("endpoint = \"{}\"\n", endpoint));
     }
     if !ip.is_empty() {
-        content.push_str(&format!("ip = \"{}\"\n", ip));
+        content.push_str(&format!("allowed_ip = \"{}\"\n", ip));
     }
     if let Some(pk) = public_key {
         if !pk.is_empty() {
