@@ -2989,7 +2989,8 @@ fn pct_ensure_template(storage: &str, distribution: &str, release: &str, archite
 /// Create an LXC container via Proxmox's pct command (public API entry point)
 pub fn pct_create_api(name: &str, distribution: &str, release: &str, architecture: &str,
               storage_id: Option<&str>, root_password: Option<&str>,
-              memory_mb: Option<u32>, cpu_cores: Option<u32>) -> Result<String, String> {
+              memory_mb: Option<u32>, cpu_cores: Option<u32>,
+              wolfnet_ip: Option<&str>) -> Result<String, String> {
     let vmid = pct_next_vmid()?;
     let storage = storage_id.unwrap_or("local-lvm");
 
@@ -3012,7 +3013,7 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
         "--hostname".to_string(), name.to_string(),
         "--storage".to_string(), storage.to_string(),
         "--rootfs".to_string(), format!("{}:8", storage), // 8GB default rootfs
-        "--net0".to_string(), "name=eth0,bridge=vmbr0,ip=dhcp".to_string(),
+        "--net0".to_string(), format!("name=eth0,bridge={},ip=dhcp", if wolfnet_ip.is_some() { "lxcbr0" } else { "vmbr0" }),
         "--start".to_string(), "0".to_string(),
         "--unprivileged".to_string(), "1".to_string(),
     ];
@@ -3047,6 +3048,14 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
 
     if output.status.success() {
         info!("Proxmox container {} (VMID {}) created successfully", name, vmid);
+
+        // Attach WolfNet if an IP was requested
+        if let Some(ip) = wolfnet_ip {
+            if let Err(e) = lxc_attach_wolfnet(&vmid.to_string(), ip) {
+                warn!("WolfNet attachment warning for VMID {}: {}", vmid, e);
+            }
+        }
+
         Ok(format!("Container '{}' created (VMID {}, {} {} {}, storage: {})", name, vmid, distribution, release, architecture, storage))
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -3352,7 +3361,7 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
     // On Proxmox, delegate to pct create
     if is_proxmox() {
         info!("Proxmox detected — using pct create");
-        return pct_create_api(name, distribution, release, architecture, storage_path, None, None, None);
+        return pct_create_api(name, distribution, release, architecture, storage_path, None, None, None, None);
     }
 
     // Standalone: use native lxc-create

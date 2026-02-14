@@ -1638,7 +1638,8 @@ pub async fn lxc_create(
 
         return match containers::pct_create_api(
             &body.name, &body.distribution, &body.release, &body.architecture,
-            storage, password, memory_mb, cpu_cores
+            storage, password, memory_mb, cpu_cores,
+            body.wolfnet_ip.as_deref(),
         ) {
             Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
             Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
