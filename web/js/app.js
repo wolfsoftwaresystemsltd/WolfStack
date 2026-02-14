@@ -5097,12 +5097,6 @@ async function viewDockerVolumes(container) {
 let lxcPollTimer = null;
 
 async function loadLxcContainers() {
-    // Immediately clear stale data
-    const table = document.getElementById('lxc-containers-table');
-    const empty = document.getElementById('lxc-empty');
-    if (table) table.innerHTML = '';
-    if (empty) empty.style.display = 'none';
-
     fetchContainerStatus();
 
     try {
@@ -5162,7 +5156,7 @@ function renderLxcContainers(containers, stats) {
                 <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'stop')"` : ''} title="Stop">⏹️</button>
                 <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'restart')"` : ''} title="Restart">🔄</button>
                 <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'freeze')"` : ''} title="Freeze">⏸️</button>
-                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openConsole('lxc', '${c.name}')"` : ''} title="Console">💻</button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}', '${c.hostname || c.name}')"` : ''} title="Console">💻</button>
                 <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'destroy')"` : ''} title="Destroy">🗑️</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs">📜</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcSettings('${c.name}')" title="Settings">⚙️</button>
@@ -6033,7 +6027,10 @@ async function cloneLxcContainer(name) {
     let nodes = [];
     try {
         const resp = await fetch(apiUrl('/api/nodes'));
-        if (resp.ok) nodes = await resp.json();
+        if (resp.ok) {
+            const data = await resp.json();
+            nodes = Array.isArray(data) ? data : [];
+        }
     } catch (e) { }
 
     const modal = document.createElement('div');
@@ -6140,7 +6137,10 @@ async function migrateLxcContainer(name) {
     let nodes = [];
     try {
         const resp = await fetch(apiUrl('/api/nodes'));
-        if (resp.ok) nodes = await resp.json();
+        if (resp.ok) {
+            const data = await resp.json();
+            nodes = Array.isArray(data) ? data : [];
+        }
     } catch (e) { }
     const remoteNodes = nodes.filter(n => !n.is_self && n.online);
 
@@ -7149,6 +7149,19 @@ function openConsole(type, name) {
 function fitConsole() { }
 function consoleKeyHandler() { }
 function closeConsole() { }
+
+function openLxcConsole(vmidOrName, displayName) {
+    // For Proxmox nodes, use PVE console proxy with the VMID
+    if (currentNodeId) {
+        const node = allNodes.find(n => n.id === currentNodeId);
+        if (node && node.node_type === 'proxmox') {
+            openPveConsole(currentNodeId, vmidOrName, displayName || vmidOrName);
+            return;
+        }
+    }
+    // Native LXC — use standard console
+    openConsole('lxc', vmidOrName);
+}
 
 function openVmConsole(name) {
     openConsole('vm', name);
