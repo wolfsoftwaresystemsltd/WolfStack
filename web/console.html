@@ -127,23 +127,49 @@
             wsUrl = protocol + '//' + window.location.host + '/ws/pve-console/' + pveNodeId + '/' + pveVmid;
             connectWebSocket(wsUrl);
         } else if (isRemote) {
-            // Remote console — try wss first, fall back to ws
-            const wsHost = remoteHost + ':' + remotePort;
+            // Remote console — try wss first, fall back to ws on port+1 (HTTP inter-node port)
+            const portNum = parseInt(remotePort, 10);
             const wsPath = '/ws/console/' + type + '/' + encodeURIComponent(name);
-            const wssUrl = 'wss://' + wsHost + wsPath;
-            const wsUrlFallback = 'ws://' + wsHost + wsPath;
+            const wssUrl = 'wss://' + remoteHost + ':' + portNum + wsPath;
+            // When wss fails (HTTPS on main port), try ws on the HTTP inter-node port (port+1)
+            const wsFallbacks = [
+                'ws://' + remoteHost + ':' + (portNum + 1) + wsPath,
+                'ws://' + remoteHost + ':' + portNum + wsPath,
+            ];
 
-            term.writeln('\x1b[90mTrying secure connection (wss)...\x1b[0m');
+            term.writeln('\x1b[90mTrying secure connection (wss://' + remoteHost + ':' + portNum + ')...\x1b[0m');
             const testWs = new WebSocket(wssUrl);
             testWs.binaryType = 'arraybuffer';
             let settled = false;
+
+            function tryFallbacks(idx) {
+                if (idx >= wsFallbacks.length) {
+                    term.writeln('\x1b[31mCould not connect to remote host.\x1b[0m');
+                    statusEl.textContent = 'Connection failed';
+                    statusEl.style.color = '#ef4444';
+                    return;
+                }
+                const url = wsFallbacks[idx];
+                term.writeln('\x1b[90mTrying ' + url.split('/ws/')[0] + '...\x1b[0m');
+                const ws = new WebSocket(url);
+                ws.binaryType = 'arraybuffer';
+                let done = false;
+                const t = setTimeout(() => {
+                    if (!done) { done = true; try { ws.close(); } catch (e) { } tryFallbacks(idx + 1); }
+                }, 3000);
+                ws.onopen = () => {
+                    if (!done) { done = true; clearTimeout(t); attachWebSocket(ws); }
+                };
+                ws.onerror = () => {
+                    if (!done) { done = true; clearTimeout(t); tryFallbacks(idx + 1); }
+                };
+            }
 
             const fallbackTimeout = setTimeout(() => {
                 if (!settled) {
                     settled = true;
                     try { testWs.close(); } catch (e) { }
-                    term.writeln('\x1b[90mFalling back to ws...\x1b[0m');
-                    connectWebSocket(wsUrlFallback);
+                    tryFallbacks(0);
                 }
             }, 3000);
 
@@ -160,8 +186,7 @@
                 if (!settled) {
                     settled = true;
                     clearTimeout(fallbackTimeout);
-                    term.writeln('\x1b[90mFalling back to ws...\x1b[0m');
-                    connectWebSocket(wsUrlFallback);
+                    tryFallbacks(0);
                 }
             };
         } else {
