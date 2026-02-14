@@ -1840,12 +1840,16 @@
                                 style="background:var(--bg-tertiary); padding:12px; border-radius:6px; overflow-x:auto; margin:8px 0 12px; color:var(--text);"><code>curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash</code></pre>
                         </li>
                         <li><strong>Get the token from each server</strong> — after installation, each server displays
-                            its cluster token. Copy it.</li>
-                        <li><strong>Open the web UI</strong> — navigate to <code
+                            its cluster token. You can also retrieve it later by running <code
+                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">wolfstack --show-token</code>
+                            on that server.</li>
+                        <li><strong>Open the web UI</strong> on <strong>one</strong> server — navigate to <code
                                 style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">http://your-server-ip:8553</code>
-                            in your browser and log in.</li>
-                        <li><strong>Add your nodes</strong> — click the <strong>+ Add Server</strong> button in the
-                            sidebar and enter the address and token for each node.</li>
+                            in your browser and log in. You only need to log in to one server — this will be your
+                            management dashboard.</li>
+                        <li><strong>Add your other nodes</strong> — click the <strong>+ Add Server</strong> button in
+                            the
+                            sidebar and enter the address and token for each additional server.</li>
                     </ol>
                     <div
                         style="background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.2); border-radius:8px; padding:12px; margin-bottom:8px;">
