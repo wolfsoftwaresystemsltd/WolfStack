@@ -1786,14 +1786,14 @@ function renderVms(vms) {
                 <td>${wolfnetIp !== '—' ? `<span class="badge" style="background:var(--accent-bg); color:var(--accent);">${wolfnetIp}</span>` : '—'}</td>
                 <td>${vncText}</td>
                 <td><input type="checkbox" ${autostart} onchange="toggleVmAutostart('${vm.name}', this.checked)"></td>
-                <td>
-                    <button class="btn btn-sm" style="margin:2px;" onclick="showVmLogs('${vm.name}')" title="Logs">📋</button>
+                <td style="white-space:nowrap;">
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="showVmLogs('${vm.name}')" title="Logs">📋</button>
                     ${vm.running ?
-                `${vm.vnc_ws_port ? `<button class="btn btn-sm" style="margin:2px;" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port})" title="Console">🖥️</button>` : ''}
-                         <button class="btn btn-danger btn-sm" style="margin:2px;" onclick="vmAction('${vm.name}', 'stop')">Stop</button>` :
-                `<button class="btn btn-sm" style="margin:2px;" onclick="showVmSettings('${vm.name}')" title="Settings">⚙️</button>
-                         <button class="btn btn-success btn-sm" style="margin:2px;" onclick="vmAction('${vm.name}', 'start')">Start</button>
-                         <button class="btn btn-danger btn-sm" style="margin:2px;" onclick="deleteVm('${vm.name}')">Delete</button>`
+                `${vm.vnc_ws_port ? `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port})" title="Console">🖥️</button>` : ''}
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="vmAction('${vm.name}', 'stop')" title="Stop">⏹️</button>` :
+                `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="showVmSettings('${vm.name}')" title="Settings">⚙️</button>
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#22c55e;" onclick="vmAction('${vm.name}', 'start')" title="Start">▶️</button>
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="deleteVm('${vm.name}')" title="Delete">🗑️</button>`
             }
                 </td>
             </tr>
