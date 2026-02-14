@@ -3052,7 +3052,7 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
         // Attach WolfNet if an IP was requested
         if let Some(ip) = wolfnet_ip {
             if let Err(e) = lxc_attach_wolfnet(&vmid.to_string(), ip) {
-                warn!("WolfNet attachment warning for VMID {}: {}", vmid, e);
+                error!("WolfNet attachment warning for VMID {}: {}", vmid, e);
             }
         }
 
