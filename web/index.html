@@ -1824,21 +1824,35 @@
                     </div>
                 </div>
                 <div class="card-body" style="padding:24px; line-height:1.7;">
-                    <h4 style="margin-bottom:12px; color:var(--accent-light);">Getting Started</h4>
+                    <h4 style="margin-bottom:12px; color:var(--accent-light);">What is WolfStack?</h4>
                     <p style="color:var(--text-secondary); margin-bottom:16px;">WolfStack is a unified server management
-                        dashboard. Use the sidebar to navigate between your servers and the Datacenter overview. Add
-                        servers via <strong>+ Add Server</strong> in the sidebar.</p>
+                        dashboard for managing containers, VMs, networking, storage, and more across multiple servers —
+                        all from a single web interface.
+                        It supports both standalone Linux servers and Proxmox VE clusters.</p>
 
-                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Multi-Server Clustering</h4>
-                    <p style="color:var(--text-secondary); margin-bottom:8px;">WolfStack nodes discover each other and
-                        share status via a gossip protocol. To add a remote WolfStack node:</p>
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">⚡ Quick Start</h4>
+                    <p style="color:var(--text-secondary); margin-bottom:8px;">Get your cluster up and running in
+                        minutes:</p>
                     <ol style="color:var(--text-secondary); padding-left:20px; margin-bottom:16px;">
-                        <li>Install WolfStack on the remote server using <code
-                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash</code>
+                        <li><strong>Install WolfStack on each server</strong> — run this on every machine you want to
+                            manage:
+                            <pre
+                                style="background:var(--bg-tertiary); padding:12px; border-radius:6px; overflow-x:auto; margin:8px 0 12px; color:var(--text);"><code>curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash</code></pre>
                         </li>
-                        <li>Click <strong>+ Add Server</strong> and enter the remote server's IP/hostname</li>
-                        <li>The node will appear in the sidebar and begin reporting metrics</li>
+                        <li><strong>Get the token from each server</strong> — after installation, each server displays
+                            its cluster token. Copy it.</li>
+                        <li><strong>Open the web UI</strong> — navigate to <code
+                                style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;">http://your-server-ip:8553</code>
+                            in your browser and log in.</li>
+                        <li><strong>Add your nodes</strong> — click the <strong>+ Add Server</strong> button in the
+                            sidebar and enter the address and token for each node.</li>
                     </ol>
+                    <div
+                        style="background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.2); border-radius:8px; padding:12px; margin-bottom:8px;">
+                        <p style="color:#10b981; margin:0; font-size:13px;"><strong>✅ That's it!</strong> Your nodes
+                            will appear in the sidebar with live metrics, and you can manage containers, networking,
+                            storage, and more from a single dashboard.</p>
+                    </div>
                 </div>
             </div>
 
@@ -2001,7 +2015,8 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                         in the sidebar to open <strong>Node Settings</strong>. Here you can:</p>
                     <ul style="color:var(--text-secondary); padding-left:20px; margin-bottom:16px;">
                         <li>View and edit the node's <strong>hostname</strong>, <strong>address</strong>, and
-                            <strong>port</strong></li>
+                            <strong>port</strong>
+                        </li>
                         <li>Change the <strong>cluster name</strong> to move a node between cluster groups</li>
                         <li>Update <strong>PVE Token</strong> and <strong>TLS Fingerprint</strong> for Proxmox nodes
                         </li>
