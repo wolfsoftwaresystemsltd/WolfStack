@@ -1847,12 +1847,30 @@ pub async fn docker_action(
 pub struct CloneRequest {
     pub new_name: String,
     pub snapshot: Option<bool>,  // LXC only — use copy-on-write clone
+    pub storage: Option<String>, // target storage (Proxmox ID or path)
+    pub target_node: Option<String>, // clone to a different node in the cluster
 }
 
 #[derive(Deserialize)]
 pub struct MigrateRequest {
+    pub target_node: String,
+    pub storage: Option<String>,
+    pub new_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct MigrateExternalRequest {
     pub target_url: String,
-    pub remove_source: Option<bool>,
+    pub target_token: String,
+    pub new_name: Option<String>,
+    pub storage: Option<String>,
+    pub delete_source: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct ImportRequest {
+    pub new_name: String,
+    pub storage: Option<String>,
 }
 
 /// POST /api/containers/docker/{id}/clone — clone a Docker container
@@ -1871,11 +1889,16 @@ pub async fn docker_clone(
 }
 
 /// POST /api/containers/docker/{id}/migrate — migrate a Docker container to another node
+#[derive(Deserialize)]
+pub struct DockerMigrateRequest {
+    pub target_url: String,
+    pub remove_source: Option<bool>,
+}
 pub async fn docker_migrate(
     req: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
-    body: web::Json<MigrateRequest>,
+    body: web::Json<DockerMigrateRequest>,
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
@@ -1967,14 +1990,423 @@ pub async fn lxc_clone(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
+
+    // Remote clone: export → transfer → import on target node
+    if let Some(ref target_node_id) = body.target_node {
+        return lxc_remote_clone(&state, &name, &body.new_name, target_node_id, body.storage.as_deref()).await;
+    }
+
+    // Local clone
+    let storage = body.storage.as_deref();
     let result = if body.snapshot.unwrap_or(false) {
         containers::lxc_clone_snapshot(&name, &body.new_name)
     } else {
-        containers::lxc_clone(&name, &body.new_name)
+        containers::lxc_clone_local(&name, &body.new_name, storage)
     };
     match result {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// Remote clone: export on this node, stream to target, import there
+async fn lxc_remote_clone(
+    state: &web::Data<AppState>,
+    source: &str,
+    new_name: &str,
+    target_node_id: &str,
+    storage: Option<&str>,
+) -> HttpResponse {
+    // 1. Find target node
+    let node = match state.cluster.get_node(target_node_id) {
+        Some(n) => n,
+        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "Target node not found"})),
+    };
+    if node.is_self {
+        // Local clone, not remote
+        match containers::lxc_clone_local(source, new_name, storage) {
+            Ok(msg) => return HttpResponse::Ok().json(serde_json::json!({"message": msg})),
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+        }
+    }
+
+    // 2. Stop container before export
+    let _ = containers::lxc_stop(source);
+
+    // 3. Export container
+    let (archive_path, meta) = match containers::lxc_export(source) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = containers::lxc_start(source); // restart on failure
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Export failed: {}", e)}));
+        }
+    };
+
+    // 4. Read archive and POST to target node's import endpoint
+    let archive_bytes = match std::fs::read(&archive_path) {
+        Ok(b) => b,
+        Err(e) => {
+            containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
+            let _ = containers::lxc_start(source);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Failed to read archive: {}", e)}));
+        }
+    };
+
+    let internal_port = node.port + 1;
+    let import_url = format!("http://{}:{}/api/containers/lxc/import", node.address, internal_port);
+    let storage_val = storage.unwrap_or("").to_string();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600)) // 10 min for large transfers
+        .build()
+        .unwrap_or_default();
+
+    // Build multipart form
+    let form = reqwest::multipart::Form::new()
+        .text("new_name", new_name.to_string())
+        .text("storage", storage_val)
+        .text("meta", serde_json::to_string(&meta).unwrap_or_default())
+        .part("archive", reqwest::multipart::Part::bytes(archive_bytes)
+            .file_name(archive_path.file_name().unwrap_or_default().to_string_lossy().to_string()));
+
+    let resp = client.post(&import_url)
+        .header("X-WolfStack-Secret", state.cluster_secret.clone())
+        .multipart(form)
+        .send()
+        .await;
+
+    // Cleanup export
+    containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
+    let _ = containers::lxc_start(source); // restart source
+
+    match resp {
+        Ok(r) => {
+            if r.status().is_success() {
+                match r.json::<serde_json::Value>().await {
+                    Ok(data) => HttpResponse::Ok().json(serde_json::json!({
+                        "message": format!("Container '{}' cloned to '{}' on node '{}'", source, new_name, target_node_id),
+                        "detail": data
+                    })),
+                    Err(_) => HttpResponse::Ok().json(serde_json::json!({
+                        "message": format!("Container '{}' cloned to '{}' on node '{}'", source, new_name, target_node_id)
+                    })),
+                }
+            } else {
+                let err_text = r.text().await.unwrap_or_default();
+                HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Import on target failed: {}", err_text)}))
+            }
+        }
+        Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
+            "error": format!("Transfer to {} failed: {}", node.address, e)
+        })),
+    }
+}
+
+/// POST /api/containers/lxc/{name}/export — export container as downloadable archive
+pub async fn lxc_export_endpoint(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+
+    // Stop, export, restart
+    let _ = containers::lxc_stop(&name);
+    let (archive_path, meta) = match containers::lxc_export(&name) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = containers::lxc_start(&name);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": e}));
+        }
+    };
+    let _ = containers::lxc_start(&name);
+
+    // Read the file and return as binary download
+    match std::fs::read(&archive_path) {
+        Ok(bytes) => {
+            let filename = archive_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
+            HttpResponse::Ok()
+                .insert_header(("Content-Disposition", format!("attachment; filename=\"{}\"", filename)))
+                .insert_header(("X-Container-Meta", serde_json::to_string(&meta).unwrap_or_default()))
+                .content_type("application/octet-stream")
+                .body(bytes)
+        }
+        Err(e) => {
+            containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Read archive: {}", e)}))
+        }
+    }
+}
+
+/// POST /api/containers/lxc/import — import container from uploaded archive (multipart)
+pub async fn lxc_import_endpoint(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    mut payload: actix_multipart::Multipart,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    lxc_import_endpoint_inner(&mut payload).await
+}
+
+/// POST /api/containers/lxc/{name}/migrate — migrate to another node (clone + destroy source)
+pub async fn lxc_migrate(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<MigrateRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    let new_name = body.new_name.as_deref().unwrap_or(&name);
+
+    // Clone to target node
+    let clone_resp = lxc_remote_clone(&state, &name, new_name, &body.target_node, body.storage.as_deref()).await;
+
+    // If clone succeeded, destroy source
+    if clone_resp.status().is_success() {
+        let _ = containers::lxc_stop(&name);
+        match containers::lxc_destroy(&name) {
+            Ok(_) => {
+                info!("Migrated '{}' to node '{}' and destroyed source", name, body.target_node);
+            }
+            Err(e) => {
+                tracing::warn!("Migration: clone succeeded but failed to destroy source '{}': {}", name, e);
+            }
+        }
+    }
+
+    clone_resp
+}
+
+// ─── Cross-cluster Transfer Tokens ───
+
+static TRANSFER_TOKENS: std::sync::LazyLock<std::sync::Mutex<Vec<TransferToken>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+#[derive(Clone, Debug)]
+struct TransferToken {
+    token: String,
+    expires: std::time::Instant,
+}
+
+/// POST /api/containers/transfer-token — generate a one-time import token
+pub async fn generate_transfer_token(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let token = format!("wst_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+    let expires = std::time::Instant::now() + std::time::Duration::from_secs(1800); // 30 min
+
+    if let Ok(mut tokens) = TRANSFER_TOKENS.lock() {
+        // Purge expired
+        tokens.retain(|t| t.expires > std::time::Instant::now());
+        tokens.push(TransferToken { token: token.clone(), expires });
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "token": token,
+        "expires_in_seconds": 1800,
+        "instructions": "Provide this token to the source cluster to authorize a container transfer."
+    }))
+}
+
+/// Validate and consume a transfer token
+fn validate_transfer_token(token: &str) -> bool {
+    if let Ok(mut tokens) = TRANSFER_TOKENS.lock() {
+        tokens.retain(|t| t.expires > std::time::Instant::now()); // purge expired
+        if let Some(pos) = tokens.iter().position(|t| t.token == token) {
+            tokens.remove(pos); // consume
+            return true;
+        }
+    }
+    false
+}
+
+/// POST /api/containers/lxc/import-external — import from external cluster (requires transfer token)
+pub async fn lxc_import_external(
+    req: HttpRequest,
+    _state: web::Data<AppState>,
+    mut payload: actix_multipart::Multipart,
+) -> HttpResponse {
+    // Extract token from header
+    let token = match req.headers().get("X-Transfer-Token") {
+        Some(v) => v.to_str().unwrap_or("").to_string(),
+        None => return HttpResponse::Unauthorized().json(serde_json::json!({"error": "X-Transfer-Token header required"})),
+    };
+
+    if !validate_transfer_token(&token) {
+        return HttpResponse::Forbidden().json(serde_json::json!({"error": "Invalid or expired transfer token"}));
+    }
+
+    info!("External import authorized with transfer token");
+    // Delegate to the standard import logic (re-auth not needed — token was validated)
+    lxc_import_endpoint_inner(&mut payload).await
+}
+
+/// Shared import logic for both internal and external imports
+async fn lxc_import_endpoint_inner(
+    payload: &mut actix_multipart::Multipart,
+) -> HttpResponse {
+    let import_dir = std::path::Path::new("/tmp/wolfstack-imports");
+    let _ = std::fs::create_dir_all(import_dir);
+
+    let mut new_name = String::new();
+    let mut storage = None;
+    let mut archive_path = None;
+
+    use futures::StreamExt;
+    while let Some(item) = payload.next().await {
+        let mut field = match item {
+            Ok(f) => f,
+            Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("Multipart error: {}", e)})),
+        };
+
+        let field_name = field.name().unwrap_or("").to_string();
+        match field_name.as_str() {
+            "new_name" => {
+                let mut buf = Vec::new();
+                while let Some(chunk) = field.next().await {
+                    if let Ok(data) = chunk { buf.extend_from_slice(&data); }
+                }
+                new_name = String::from_utf8_lossy(&buf).trim().to_string();
+            }
+            "storage" => {
+                let mut buf = Vec::new();
+                while let Some(chunk) = field.next().await {
+                    if let Ok(data) = chunk { buf.extend_from_slice(&data); }
+                }
+                let s = String::from_utf8_lossy(&buf).trim().to_string();
+                if !s.is_empty() { storage = Some(s); }
+            }
+            "archive" => {
+                let filename = field.content_disposition()
+                    .and_then(|cd| cd.get_filename().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "import.tar.gz".to_string());
+                let dest = import_dir.join(&filename);
+                let mut file = match std::fs::File::create(&dest) {
+                    Ok(f) => f,
+                    Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Write error: {}", e)})),
+                };
+                use std::io::Write;
+                while let Some(chunk) = field.next().await {
+                    if let Ok(data) = chunk {
+                        if let Err(e) = file.write_all(&data) {
+                            return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Write error: {}", e)}));
+                        }
+                    }
+                }
+                archive_path = Some(dest);
+            }
+            _ => { while let Some(_) = field.next().await {} }
+        }
+    }
+
+    if new_name.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "new_name is required"}));
+    }
+    let archive = match archive_path {
+        Some(p) => p,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "archive file is required"})),
+    };
+
+    match containers::lxc_import(archive.to_str().unwrap(), &new_name, storage.as_deref()) {
+        Ok(msg) => {
+            let _ = std::fs::remove_file(&archive);
+            HttpResponse::Ok().json(serde_json::json!({"message": msg}))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&archive);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e}))
+        }
+    }
+}
+
+/// POST /api/containers/lxc/{name}/migrate-external — migrate to external cluster
+pub async fn lxc_migrate_external(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<MigrateExternalRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    let new_name = body.new_name.as_deref().unwrap_or(&name);
+
+    // 1. Stop and export
+    let _ = containers::lxc_stop(&name);
+    let (archive_path, meta) = match containers::lxc_export(&name) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = containers::lxc_start(&name);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Export failed: {}", e)}));
+        }
+    };
+
+    // 2. Read archive
+    let archive_bytes = match std::fs::read(&archive_path) {
+        Ok(b) => b,
+        Err(e) => {
+            containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
+            let _ = containers::lxc_start(&name);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Read archive: {}", e)}));
+        }
+    };
+
+    // 3. POST to external cluster's import-external endpoint
+    let import_url = format!("{}/api/containers/lxc/import-external", body.target_url.trim_end_matches('/'));
+    let storage_val = body.storage.as_deref().unwrap_or("").to_string();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .danger_accept_invalid_certs(true) // cross-cluster may have self-signed certs
+        .build()
+        .unwrap_or_default();
+
+    let form = reqwest::multipart::Form::new()
+        .text("new_name", new_name.to_string())
+        .text("storage", storage_val)
+        .text("meta", serde_json::to_string(&meta).unwrap_or_default())
+        .part("archive", reqwest::multipart::Part::bytes(archive_bytes)
+            .file_name(archive_path.file_name().unwrap_or_default().to_string_lossy().to_string()));
+
+    let resp = client.post(&import_url)
+        .header("X-Transfer-Token", &body.target_token)
+        .multipart(form)
+        .send()
+        .await;
+
+    // Cleanup
+    containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
+
+    match resp {
+        Ok(r) => {
+            if r.status().is_success() {
+                // Optionally destroy source
+                if body.delete_source.unwrap_or(false) {
+                    let _ = containers::lxc_destroy(&name);
+                    info!("Migrated '{}' to external cluster and destroyed source", name);
+                } else {
+                    let _ = containers::lxc_start(&name);
+                }
+                HttpResponse::Ok().json(serde_json::json!({
+                    "message": format!("Container '{}' transferred to {}", name, body.target_url)
+                }))
+            } else {
+                let _ = containers::lxc_start(&name);
+                let err = r.text().await.unwrap_or_default();
+                HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("External import failed: {}", err)}))
+            }
+        }
+        Err(e) => {
+            let _ = containers::lxc_start(&name);
+            HttpResponse::BadGateway().json(serde_json::json!({
+                "error": format!("Transfer to {} failed: {}", body.target_url, e)
+            }))
+        }
     }
 }
 
@@ -3879,6 +4311,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/lxc", web::get().to(lxc_list))
         .route("/api/containers/lxc/templates", web::get().to(lxc_templates))
         .route("/api/containers/lxc/create", web::post().to(lxc_create))
+        .route("/api/containers/lxc/import", web::post().to(lxc_import_endpoint))
+        .route("/api/containers/lxc/import-external", web::post().to(lxc_import_external))
+        .route("/api/containers/transfer-token", web::post().to(generate_transfer_token))
         .route("/api/storage/list", web::get().to(storage_list))
         .route("/api/containers/lxc/stats", web::get().to(lxc_stats))
         .route("/api/containers/lxc/{name}/logs", web::get().to(lxc_logs))
@@ -3893,6 +4328,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/lxc/{name}/network-link", web::post().to(lxc_set_network_link))
         .route("/api/containers/lxc/{name}/parsed-config", web::get().to(lxc_parsed_config))
         .route("/api/containers/lxc/{name}/settings", web::post().to(lxc_update_settings))
+        .route("/api/containers/lxc/{name}/export", web::post().to(lxc_export_endpoint))
+        .route("/api/containers/lxc/{name}/migrate", web::post().to(lxc_migrate))
+        .route("/api/containers/lxc/{name}/migrate-external", web::post().to(lxc_migrate_external))
         // Network Conflicts
         .route("/api/network/conflicts", web::get().to(network_conflicts))
         // WolfNet

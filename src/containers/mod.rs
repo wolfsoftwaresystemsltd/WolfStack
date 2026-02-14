@@ -2598,9 +2598,13 @@ pub struct LxcTemplate {
     pub variant: String,
 }
 
-/// List available LXC templates from the LXC image server
+/// List available LXC templates from the LXC image server (standalone) or pveam (Proxmox)
 pub fn lxc_list_templates() -> Vec<LxcTemplate> {
-    // Try fetching from lxc image server index
+    if is_proxmox() {
+        return lxc_list_templates_proxmox();
+    }
+
+    // Standalone: fetch from lxc image server index
     let output = Command::new("wget")
         .args(["-qO-", "https://images.linuxcontainers.org/meta/1.0/index-system"])
         .output();
@@ -2679,6 +2683,123 @@ pub fn lxc_list_templates() -> Vec<LxcTemplate> {
         ];
     }
 
+    templates
+}
+
+/// List available templates from Proxmox (pveam available --section system)
+/// Parses template names like: debian-12-standard_12.2-1_amd64.tar.zst
+fn lxc_list_templates_proxmox() -> Vec<LxcTemplate> {
+    // Update template index first
+    let _ = Command::new("pveam").arg("update").output();
+
+    let output = Command::new("pveam")
+        .args(["available", "--section", "system"])
+        .output();
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => {
+            info!("Failed to run pveam available, falling back to curated Proxmox templates");
+            return vec![
+                LxcTemplate { distribution: "debian".into(), release: "12".into(), architecture: "amd64".into(), variant: "standard".into() },
+                LxcTemplate { distribution: "ubuntu".into(), release: "24.04".into(), architecture: "amd64".into(), variant: "standard".into() },
+                LxcTemplate { distribution: "ubuntu".into(), release: "22.04".into(), architecture: "amd64".into(), variant: "standard".into() },
+                LxcTemplate { distribution: "alpine".into(), release: "3.20".into(), architecture: "amd64".into(), variant: "default".into() },
+                LxcTemplate { distribution: "centos".into(), release: "9".into(), architecture: "amd64".into(), variant: "default".into() },
+                LxcTemplate { distribution: "fedora".into(), release: "40".into(), architecture: "amd64".into(), variant: "default".into() },
+                LxcTemplate { distribution: "rockylinux".into(), release: "9".into(), architecture: "amd64".into(), variant: "default".into() },
+            ];
+        }
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut templates = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for line in text.lines() {
+        // Format: "system          debian-12-standard_12.2-1_amd64.tar.zst"
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 { continue; }
+        let tpl_name = parts[1]; // e.g. "debian-12-standard_12.2-1_amd64.tar.zst"
+
+        // Strip file extension (.tar.zst, .tar.gz, .tar.xz)
+        let base = tpl_name
+            .trim_end_matches(".tar.zst")
+            .trim_end_matches(".tar.gz")
+            .trim_end_matches(".tar.xz");
+
+        // Parse: {distro}-{release}-{variant}_{version}_{arch}
+        // Examples:
+        //   debian-12-standard_12.7-1_amd64
+        //   ubuntu-24.04-standard_24.04-2_amd64
+        //   alpine-3.20-default_20240908_amd64
+        //   archlinux-base_20230608-1_amd64  (no release number in name)
+
+        // Extract architecture (last segment after _)
+        let arch = if let Some(pos) = base.rfind('_') {
+            &base[pos+1..]
+        } else {
+            "amd64"
+        };
+
+        // Get the part before the architecture
+        let pre_arch = if let Some(pos) = base.rfind('_') {
+            &base[..pos]
+        } else {
+            base
+        };
+
+        // Split on the first underscore to separate distro-release-variant from version
+        let (dist_rel_var, _version) = if let Some(pos) = pre_arch.find('_') {
+            (&pre_arch[..pos], &pre_arch[pos+1..])
+        } else {
+            (pre_arch, "")
+        };
+
+        // Parse distro-release-variant: split by '-' 
+        // Common patterns: "debian-12-standard", "ubuntu-24.04-standard", "alpine-3.20-default"
+        // Edge cases: "archlinux-base" (no numeric release)
+        let segments: Vec<&str> = dist_rel_var.splitn(3, '-').collect();
+        let (distro, release, variant) = match segments.len() {
+            3 => (segments[0], segments[1], segments[2]),
+            2 => {
+                // Could be "archlinux-base" or "distro-release"
+                let s1 = segments[1];
+                if s1.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                    (segments[0], s1, "default")
+                } else {
+                    (segments[0], "latest", s1)
+                }
+            },
+            1 => (segments[0], "latest", "default"),
+            _ => continue,
+        };
+
+        let key = format!("{}-{}-{}", distro, release, arch);
+        if seen.insert(key) {
+            templates.push(LxcTemplate {
+                distribution: distro.to_string(),
+                release: release.to_string(),
+                architecture: arch.to_string(),
+                variant: variant.to_string(),
+            });
+        }
+    }
+
+    // Sort by distribution, then release descending
+    templates.sort_by(|a, b| {
+        a.distribution.cmp(&b.distribution)
+            .then(b.release.cmp(&a.release))
+    });
+
+    if templates.is_empty() {
+        return vec![
+            LxcTemplate { distribution: "debian".into(), release: "12".into(), architecture: "amd64".into(), variant: "standard".into() },
+            LxcTemplate { distribution: "ubuntu".into(), release: "24.04".into(), architecture: "amd64".into(), variant: "standard".into() },
+        ];
+    }
+
+    info!("Listed {} Proxmox templates via pveam", templates.len());
     templates
 }
 
@@ -2933,6 +3054,294 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
         error!("pct create failed for '{}' (VMID {}): {} {}", name, vmid, stderr.trim(), stdout.trim());
         Err(format!("Container creation failed (VMID {}): {} {}", vmid, stderr.trim(), stdout.trim()))
     }
+}
+
+// ─── Clone, Export, Import ───
+
+/// Clone an LXC container on the same node
+pub fn lxc_clone_local(source: &str, new_name: &str, storage: Option<&str>) -> Result<String, String> {
+    info!("Cloning container {} → {}", source, new_name);
+
+    if is_proxmox() {
+        let new_vmid = pct_next_vmid()?;
+        let mut args = vec![
+            "clone".to_string(),
+            source.to_string(),          // source VMID
+            new_vmid.to_string(),        // target VMID
+            "--hostname".to_string(), new_name.to_string(),
+            "--full".to_string(), "1".to_string(),  // full clone, not linked
+        ];
+        if let Some(s) = storage {
+            if !s.is_empty() {
+                args.push("--storage".to_string());
+                args.push(s.to_string());
+            }
+        }
+        info!("pct {}", args.join(" "));
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let output = Command::new("pct").args(&args_ref).output()
+            .map_err(|e| format!("Failed to run pct clone: {}", e))?;
+
+        if output.status.success() {
+            info!("Cloned {} → {} (VMID {})", source, new_name, new_vmid);
+            Ok(format!("Container '{}' cloned to '{}' (VMID {})", source, new_name, new_vmid))
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            Err(format!("Clone failed: {} {}", stderr.trim(), stdout.trim()))
+        }
+    } else {
+        // Standalone: lxc-copy
+        let mut args = vec!["-n", source, "-N", new_name];
+        let path_str;
+        if let Some(s) = storage {
+            if !s.is_empty() && s != "/var/lib/lxc" {
+                path_str = s.to_string();
+                args.push("-P");
+                args.push(&path_str);
+            }
+        }
+        let output = Command::new("lxc-copy").args(&args).output()
+            .map_err(|e| format!("Failed to run lxc-copy: {}", e))?;
+
+        if output.status.success() {
+            info!("Cloned {} → {} via lxc-copy", source, new_name);
+            Ok(format!("Container '{}' cloned to '{}'", source, new_name))
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("Clone failed: {}", stderr.trim()))
+        }
+    }
+}
+
+/// Export container metadata for transfer
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerExportMeta {
+    pub name: String,
+    pub distribution: String,
+    pub release: String,
+    pub architecture: String,
+    pub memory_mb: Option<u32>,
+    pub cpu_cores: Option<u32>,
+    pub source_type: String, // "proxmox" or "standalone"
+    pub archive_format: String, // "vzdump" or "tar.gz"
+}
+
+/// Export an LXC container to an archive file
+/// Returns (archive_path, metadata)
+pub fn lxc_export(container: &str) -> Result<(std::path::PathBuf, ContainerExportMeta), String> {
+    let export_dir = std::path::Path::new("/tmp/wolfstack-exports");
+    std::fs::create_dir_all(export_dir).map_err(|e| format!("Failed to create export dir: {}", e))?;
+
+    if is_proxmox() {
+        // Use vzdump for Proxmox containers
+        info!("Exporting Proxmox container {} via vzdump", container);
+        let output = Command::new("vzdump")
+            .args([container, "--dumpdir", "/tmp/wolfstack-exports", "--mode", "stop", "--compress", "zstd"])
+            .output()
+            .map_err(|e| format!("vzdump failed to start: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("vzdump failed: {}", stderr.trim()));
+        }
+
+        // Find the generated vzdump file
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let archive_path = find_vzdump_archive(&stdout, export_dir, container)?;
+
+        // Extract metadata from pct config
+        let meta = extract_pve_container_meta(container)?;
+
+        Ok((archive_path, meta))
+    } else {
+        // Standalone: tar the rootfs + config
+        info!("Exporting standalone container {} via tar", container);
+        let container_dir = format!("/var/lib/lxc/{}", container);
+        if !std::path::Path::new(&container_dir).exists() {
+            return Err(format!("Container directory not found: {}", container_dir));
+        }
+
+        let archive_name = format!("{}.tar.gz", container);
+        let archive_path = export_dir.join(&archive_name);
+
+        let output = Command::new("tar")
+            .args(["czf", archive_path.to_str().unwrap(), "-C", &container_dir, "."])
+            .output()
+            .map_err(|e| format!("tar failed: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("tar failed: {}", stderr.trim()));
+        }
+
+        let meta = ContainerExportMeta {
+            name: container.to_string(),
+            distribution: "unknown".to_string(),
+            release: "unknown".to_string(),
+            architecture: "amd64".to_string(),
+            memory_mb: None,
+            cpu_cores: None,
+            source_type: "standalone".to_string(),
+            archive_format: "tar.gz".to_string(),
+        };
+
+        info!("Exported {} to {}", container, archive_path.display());
+        Ok((archive_path, meta))
+    }
+}
+
+/// Find the vzdump archive file from vzdump output
+fn find_vzdump_archive(stdout: &str, export_dir: &std::path::Path, vmid: &str) -> Result<std::path::PathBuf, String> {
+    // vzdump prints the archive path: "creating vzdump archive '/tmp/.../vzdump-lxc-100-...tar.zst'"
+    for line in stdout.lines() {
+        if line.contains("creating") && line.contains("vzdump") {
+            if let Some(start) = line.find('\'') {
+                if let Some(end) = line.rfind('\'') {
+                    if start < end {
+                        let path = &line[start+1..end];
+                        let p = std::path::PathBuf::from(path);
+                        if p.exists() {
+                            return Ok(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: search the export dir for the newest vzdump file matching this vmid
+    if let Ok(entries) = std::fs::read_dir(export_dir) {
+        let mut best: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&format!("vzdump-lxc-{}-", vmid)) {
+                if let Ok(meta) = entry.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        if best.as_ref().map(|(_, t)| modified > *t).unwrap_or(true) {
+                            best = Some((entry.path(), modified));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((path, _)) = best {
+            return Ok(path);
+        }
+    }
+    Err(format!("Could not find vzdump archive for VMID {}", vmid))
+}
+
+/// Extract container metadata from Proxmox config
+fn extract_pve_container_meta(vmid: &str) -> Result<ContainerExportMeta, String> {
+    let output = Command::new("pct").args(["config", vmid]).output()
+        .map_err(|e| format!("pct config failed: {}", e))?;
+    let config_text = String::from_utf8_lossy(&output.stdout);
+
+    let mut memory_mb = None;
+    let mut cpu_cores = None;
+    let mut hostname = vmid.to_string();
+
+    for line in config_text.lines() {
+        let parts: Vec<&str> = line.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            let key = parts[0].trim();
+            let val = parts[1].trim();
+            match key {
+                "hostname" => hostname = val.to_string(),
+                "memory" => memory_mb = val.parse().ok(),
+                "cores" => cpu_cores = val.parse().ok(),
+                _ => {}
+            }
+        }
+    }
+
+    Ok(ContainerExportMeta {
+        name: hostname,
+        distribution: "unknown".to_string(),
+        release: "unknown".to_string(),
+        architecture: "amd64".to_string(),
+        memory_mb,
+        cpu_cores,
+        source_type: "proxmox".to_string(),
+        archive_format: "vzdump".to_string(),
+    })
+}
+
+/// Import an LXC container from an archive file
+pub fn lxc_import(archive_path: &str, new_name: &str, storage: Option<&str>) -> Result<String, String> {
+    let path = std::path::Path::new(archive_path);
+    if !path.exists() {
+        return Err(format!("Archive not found: {}", archive_path));
+    }
+
+    info!("Importing container '{}' from {}", new_name, archive_path);
+
+    if is_proxmox() {
+        let new_vmid = pct_next_vmid()?;
+        let storage_id = storage.unwrap_or("local-lvm");
+
+        let mut args = vec![
+            "restore".to_string(),
+            new_vmid.to_string(),
+            archive_path.to_string(),
+            "--storage".to_string(), storage_id.to_string(),
+            "--hostname".to_string(), new_name.to_string(),
+        ];
+
+        // For vzdump archives, pct restore handles them natively
+        // For tar.gz archives from standalone nodes, we need --rootfs
+        if archive_path.ends_with(".tar.gz") {
+            args.push("--unprivileged".to_string());
+            args.push("1".to_string());
+        }
+
+        info!("pct {}", args.join(" "));
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let output = Command::new("pct").args(&args_ref).output()
+            .map_err(|e| format!("pct restore failed: {}", e))?;
+
+        if output.status.success() {
+            info!("Imported '{}' as VMID {}", new_name, new_vmid);
+            Ok(format!("Container '{}' imported (VMID {}, storage: {})", new_name, new_vmid, storage_id))
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            Err(format!("Import failed: {} {}", stderr.trim(), stdout.trim()))
+        }
+    } else {
+        // Standalone: create empty container + extract archive
+        let container_dir = format!("/var/lib/lxc/{}", new_name);
+        if std::path::Path::new(&container_dir).exists() {
+            return Err(format!("Container '{}' already exists", new_name));
+        }
+
+        std::fs::create_dir_all(&container_dir)
+            .map_err(|e| format!("Failed to create container dir: {}", e))?;
+
+        let output = Command::new("tar")
+            .args(["xzf", archive_path, "-C", &container_dir])
+            .output()
+            .map_err(|e| format!("tar extract failed: {}", e))?;
+
+        if output.status.success() {
+            info!("Imported standalone container '{}'", new_name);
+            Ok(format!("Container '{}' imported from archive", new_name))
+        } else {
+            // Cleanup on failure
+            let _ = std::fs::remove_dir_all(&container_dir);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("Import failed: {}", stderr.trim()))
+        }
+    }
+}
+
+/// Clean up export files after transfer
+pub fn lxc_export_cleanup(archive_path: &str) {
+    let _ = std::fs::remove_file(archive_path);
+    // Also remove .meta.json if present
+    let meta_path = format!("{}.meta.json", archive_path.trim_end_matches(".tar.gz").trim_end_matches(".tar.zst"));
+    let _ = std::fs::remove_file(&meta_path);
+    info!("Cleaned up export: {}", archive_path);
 }
 
 /// Create an LXC container from a download template
@@ -3369,10 +3778,13 @@ pub fn docker_import_image(tar_path: &str, container_name: &str) -> Result<Strin
     let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(format!("Container '{}' imported ({})", container_name, &id[..12.min(id.len())]))
 }
-
-/// Clone an LXC container using lxc-copy
+/// Clone an LXC container (Proxmox-aware)
 pub fn lxc_clone(container: &str, new_name: &str) -> Result<String, String> {
     info!("Cloning LXC container {} as {}", container, new_name);
+
+    if is_proxmox() {
+        return lxc_clone_local(container, new_name, None);
+    }
 
     let output = Command::new("lxc-copy")
         .args(["-n", container, "-N", new_name])
@@ -3391,8 +3803,29 @@ pub fn lxc_clone(container: &str, new_name: &str) -> Result<String, String> {
 }
 
 /// Clone an LXC container as a snapshot (faster, copy-on-write)
+/// On Proxmox, uses linked clone (not full)
 pub fn lxc_clone_snapshot(container: &str, new_name: &str) -> Result<String, String> {
     info!("Snapshot-cloning LXC container {} as {}", container, new_name);
+
+    if is_proxmox() {
+        // Proxmox linked clone (--full 0)
+        let new_vmid = pct_next_vmid()?;
+        let vmid_str = new_vmid.to_string();
+        let args = vec![
+            "clone", container, &vmid_str,
+            "--hostname", new_name,
+        ];
+        info!("pct {}", args.join(" "));
+        let output = Command::new("pct").args(&args).output()
+            .map_err(|e| format!("pct clone failed: {}", e))?;
+
+        if output.status.success() {
+            return Ok(format!("Container '{}' linked-cloned to '{}' (VMID {})", container, new_name, new_vmid));
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Linked clone failed: {}", stderr.trim()));
+        }
+    }
 
     let output = Command::new("lxc-copy")
         .args(["-n", container, "-N", new_name, "-s"])

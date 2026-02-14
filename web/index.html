@@ -51,7 +51,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v7.9.6</span>
+                <span class="version">v8.4.0</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -1140,8 +1140,13 @@
             <div class="card">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
                     <h3>LXC Containers</h3>
-                    <button class="btn btn-sm btn-primary" onclick="showLxcCreate()" style="font-size:12px;">+
-                        Create Container</button>
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn btn-sm" onclick="generateTransferToken()"
+                            style="font-size:12px; background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);">🔑
+                            Import Token</button>
+                        <button class="btn btn-sm btn-primary" onclick="showLxcCreate()" style="font-size:12px;">+
+                            Create Container</button>
+                    </div>
                 </div>
                 <div class="card-body">
                     <table class="data-table">

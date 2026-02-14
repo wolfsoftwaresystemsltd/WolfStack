@@ -5097,6 +5097,12 @@ async function viewDockerVolumes(container) {
 let lxcPollTimer = null;
 
 async function loadLxcContainers() {
+    // Immediately clear stale data
+    const table = document.getElementById('lxc-containers-table');
+    const empty = document.getElementById('lxc-empty');
+    if (table) table.innerHTML = '';
+    if (empty) empty.style.display = 'none';
+
     fetchContainerStatus();
 
     try {
@@ -5161,6 +5167,8 @@ function renderLxcContainers(containers, stats) {
                 <button class="btn btn-sm" style="${btnStyle}" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs">📜</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcSettings('${c.name}')" title="Settings">⚙️</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="cloneLxcContainer('${c.name}')" title="Clone">📋</button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="migrateLxcContainer('${c.name}')" title="Migrate">🚀</button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="exportLxcContainer('${c.name}')" title="Export">📦</button>
             </td>
         </tr>`;
     }).join('');
@@ -6021,25 +6029,288 @@ async function doMigrate(name) {
 }
 
 async function cloneLxcContainer(name) {
-    const newName = prompt(`Clone LXC container '${name}' — enter a name for the clone:`, name + '-clone');
-    if (!newName) return;
-
-    showToast(`Cloning ${name}...`, 'info');
+    // Fetch cluster nodes for the target selector
+    let nodes = [];
     try {
+        const resp = await fetch(apiUrl('/api/nodes'));
+        if (resp.ok) nodes = await resp.json();
+    } catch (e) { }
+
+    const modal = document.createElement('div');
+    modal.id = 'lxc-clone-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
+    modal.innerHTML = `
+        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:400px;max-width:500px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+            <h3 style="margin:0 0 16px;color:var(--text,#fff);">📋 Clone Container</h3>
+            <p style="margin:0 0 16px;color:var(--text-muted,#aaa);font-size:0.9em;">Clone <strong>${name}</strong> to a new container.</p>
+            <div style="display:flex;flex-direction:column;gap:12px;">
+                <div><label style="font-size:13px;color:var(--text-muted,#aaa);">New Name</label>
+                    <input id="clone-new-name" type="text" value="${name}-clone" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;"></div>
+                <div><label style="font-size:13px;color:var(--text-muted,#aaa);">Target Node</label>
+                    <select id="clone-target-node" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
+                        <option value="">This node (local clone)</option>
+                        ${nodes.filter(n => !n.is_self && n.online).map(n => `<option value="${n.id}">${n.hostname} (${n.address})</option>`).join('')}
+                    </select></div>
+                <div><label style="font-size:13px;color:var(--text-muted,#aaa);">Storage (optional)</label>
+                    <input id="clone-storage" type="text" placeholder="auto" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;"></div>
+                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+                    <button class="btn" onclick="document.getElementById('lxc-clone-modal')?.remove()">Cancel</button>
+                    <button class="btn" style="background:var(--primary,#7c3aed);color:#fff;" onclick="doCloneLxc('${name}')">Clone</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+async function doCloneLxc(name) {
+    const newName = document.getElementById('clone-new-name').value.trim();
+    const targetNode = document.getElementById('clone-target-node').value;
+    const storage = document.getElementById('clone-storage').value.trim();
+    if (!newName) { showToast('Enter a name for the clone', 'error'); return; }
+
+    document.getElementById('lxc-clone-modal')?.remove();
+
+    // Show progress modal
+    const modal = document.createElement('div');
+    modal.id = 'lxc-op-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
+    modal.innerHTML = `
+        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:400px;max-width:500px;box-shadow:0 20px 60px rgba(0,0,0,0.5);text-align:center;">
+            <div style="width:48px;height:48px;border:4px solid var(--border,#555);border-top:4px solid var(--primary,#7c3aed);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px;"></div>
+            <h3 style="margin:0 0 8px;color:var(--text,#fff);">Cloning Container</h3>
+            <p id="lxc-op-status" style="margin:0;color:var(--text-muted,#aaa);font-size:0.9em;">Cloning <strong>${name}</strong> → <strong>${newName}</strong>${targetNode ? ' (remote)' : ''}...</p>
+            <div id="lxc-op-result" style="display:none;margin-top:16px;padding:12px;border-radius:8px;text-align:left;font-size:0.9em;"></div>
+            <button id="lxc-op-close" style="display:none;margin-top:12px;" class="btn" onclick="document.getElementById('lxc-op-modal')?.remove()">Close</button>
+        </div>
+    `;
+    if (!document.getElementById('lxc-spin-style')) {
+        const s = document.createElement('style'); s.id = 'lxc-spin-style';
+        s.textContent = '@keyframes spin { to { transform: rotate(360deg); } }';
+        document.head.appendChild(s);
+    }
+    document.body.appendChild(modal);
+
+    try {
+        const body = { new_name: newName };
+        if (targetNode) body.target_node = targetNode;
+        if (storage) body.storage = storage;
+
         const resp = await fetch(apiUrl(`/api/containers/lxc/${name}/clone`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ new_name: newName }),
+            body: JSON.stringify(body),
         });
-        const data = await resp.json();
+        let data;
+        try { data = await resp.json(); } catch { data = {}; }
+
+        const resultEl = document.getElementById('lxc-op-result');
+        const statusEl = document.getElementById('lxc-op-status');
+        const spinner = modal.querySelector('div > div:first-child');
+        if (spinner) spinner.style.display = 'none';
+        document.getElementById('lxc-op-close').style.display = '';
+
         if (resp.ok) {
-            showToast(data.message || `Cloned as '${newName}'`, 'success');
+            statusEl.textContent = '✅ Clone complete!';
+            resultEl.style.display = 'block';
+            resultEl.style.background = 'rgba(16,185,129,0.15)';
+            resultEl.style.color = '#10b981';
+            resultEl.textContent = data.message || `Cloned as '${newName}'`;
             setTimeout(loadLxcContainers, 500);
         } else {
-            showToast(data.error || 'Clone failed', 'error');
+            statusEl.textContent = '❌ Clone failed';
+            resultEl.style.display = 'block';
+            resultEl.style.background = 'rgba(239,68,68,0.15)';
+            resultEl.style.color = '#ef4444';
+            resultEl.textContent = data.error || 'Unknown error';
         }
     } catch (e) {
-        showToast(`Clone failed: ${e.message}`, 'error');
+        const resultEl = document.getElementById('lxc-op-result');
+        const statusEl = document.getElementById('lxc-op-status');
+        statusEl.textContent = '❌ Clone failed';
+        resultEl.style.display = 'block';
+        resultEl.style.background = 'rgba(239,68,68,0.15)';
+        resultEl.style.color = '#ef4444';
+        resultEl.textContent = e.message;
+        document.getElementById('lxc-op-close').style.display = '';
+    }
+}
+
+async function migrateLxcContainer(name) {
+    let nodes = [];
+    try {
+        const resp = await fetch(apiUrl('/api/nodes'));
+        if (resp.ok) nodes = await resp.json();
+    } catch (e) { }
+    const remoteNodes = nodes.filter(n => !n.is_self && n.online);
+
+    const modal = document.createElement('div');
+    modal.id = 'lxc-migrate-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
+    modal.innerHTML = `
+        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+            <h3 style="margin:0 0 16px;color:var(--text,#fff);">🚀 Migrate Container</h3>
+            <p style="margin:0 0 12px;color:var(--text-muted,#aaa);font-size:0.9em;">Move <strong>${name}</strong> to another node. The container will be stopped, transferred, and destroyed on this node.</p>
+            <div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:10px 12px;margin-bottom:16px;color:#ef4444;font-size:0.85em;">
+                ⚠️ The container will experience downtime during migration.
+            </div>
+            <div style="display:flex;flex-direction:column;gap:12px;">
+                <div><label style="font-size:13px;color:var(--text-muted,#aaa);">Migrate to</label>
+                    <select id="migrate-target" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
+                        <option value="">— Select a cluster node —</option>
+                        ${remoteNodes.map(n => `<option value="${n.id}">${n.hostname} (${n.address})</option>`).join('')}
+                        <option value="__external__">External cluster...</option>
+                    </select></div>
+                <div id="migrate-external-fields" style="display:none;">
+                    <label style="font-size:13px;color:var(--text-muted,#aaa);">Target URL</label>
+                    <input id="migrate-ext-url" type="text" placeholder="https://target.example.com:8553" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;margin-bottom:8px;">
+                    <label style="font-size:13px;color:var(--text-muted,#aaa);">Transfer Token</label>
+                    <input id="migrate-ext-token" type="text" placeholder="wst_..." style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
+                </div>
+                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+                    <button class="btn" onclick="document.getElementById('lxc-migrate-modal')?.remove()">Cancel</button>
+                    <button class="btn" style="background:#ef4444;color:#fff;" onclick="doMigrateLxc('${name}')">Migrate</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    // Show/hide external fields
+    document.getElementById('migrate-target').addEventListener('change', e => {
+        document.getElementById('migrate-external-fields').style.display = e.target.value === '__external__' ? 'block' : 'none';
+    });
+}
+
+async function doMigrateLxc(name) {
+    const target = document.getElementById('migrate-target').value;
+    if (!target) { showToast('Select a target node', 'error'); return; }
+
+    // Read values BEFORE removing the modal
+    const extUrl = document.getElementById('migrate-ext-url')?.value.trim() || '';
+    const extToken = document.getElementById('migrate-ext-token')?.value.trim() || '';
+    document.getElementById('lxc-migrate-modal')?.remove();
+
+    // Progress modal
+    const modal = document.createElement('div');
+    modal.id = 'lxc-op-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
+    modal.innerHTML = `
+        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:400px;max-width:500px;box-shadow:0 20px 60px rgba(0,0,0,0.5);text-align:center;">
+            <div style="width:48px;height:48px;border:4px solid var(--border,#555);border-top:4px solid #ef4444;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px;"></div>
+            <h3 style="margin:0 0 8px;color:var(--text,#fff);">Migrating Container</h3>
+            <p id="lxc-op-status" style="margin:0;color:var(--text-muted,#aaa);font-size:0.9em;">Stopping, exporting, and transferring <strong>${name}</strong>...</p>
+            <p style="margin:8px 0 0;color:var(--text-muted,#666);font-size:0.8em;">This may take several minutes for large containers.</p>
+            <div id="lxc-op-result" style="display:none;margin-top:16px;padding:12px;border-radius:8px;text-align:left;font-size:0.9em;"></div>
+            <button id="lxc-op-close" style="display:none;margin-top:12px;" class="btn" onclick="document.getElementById('lxc-op-modal')?.remove()">Close</button>
+        </div>
+    `;
+    if (!document.getElementById('lxc-spin-style')) {
+        const s = document.createElement('style'); s.id = 'lxc-spin-style';
+        s.textContent = '@keyframes spin { to { transform: rotate(360deg); } }';
+        document.head.appendChild(s);
+    }
+    document.body.appendChild(modal);
+
+    try {
+        let resp;
+        if (target === '__external__') {
+            if (!extUrl || !extToken) { showToast('Enter URL and token', 'error'); modal.remove(); return; }
+            resp = await fetch(apiUrl(`/api/containers/lxc/${name}/migrate-external`), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target_url: extUrl, target_token: extToken, delete_source: true }),
+            });
+        } else {
+            resp = await fetch(apiUrl(`/api/containers/lxc/${name}/migrate`), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target_node: target }),
+            });
+        }
+
+        let data;
+        try { data = await resp.json(); } catch { data = {}; }
+
+        const resultEl = document.getElementById('lxc-op-result');
+        const statusEl = document.getElementById('lxc-op-status');
+        const spinner = modal.querySelector('div > div:first-child');
+        if (spinner) spinner.style.display = 'none';
+        document.getElementById('lxc-op-close').style.display = '';
+
+        if (resp.ok) {
+            statusEl.textContent = '✅ Migration complete!';
+            resultEl.style.display = 'block';
+            resultEl.style.background = 'rgba(16,185,129,0.15)';
+            resultEl.style.color = '#10b981';
+            resultEl.textContent = data.message || 'Migrated successfully';
+            setTimeout(loadLxcContainers, 500);
+        } else {
+            statusEl.textContent = '❌ Migration failed';
+            resultEl.style.display = 'block';
+            resultEl.style.background = 'rgba(239,68,68,0.15)';
+            resultEl.style.color = '#ef4444';
+            resultEl.textContent = data.error || 'Unknown error';
+        }
+    } catch (e) {
+        document.getElementById('lxc-op-status').textContent = '❌ Migration failed';
+        const r = document.getElementById('lxc-op-result');
+        r.style.display = 'block'; r.style.background = 'rgba(239,68,68,0.15)'; r.style.color = '#ef4444';
+        r.textContent = e.message;
+        document.getElementById('lxc-op-close').style.display = '';
+    }
+}
+
+async function exportLxcContainer(name) {
+    if (!confirm(`Export container '${name}'? The container will be briefly stopped.`)) return;
+    showToast(`Exporting ${name}...`, 'info');
+
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/lxc/${name}/export`), { method: 'POST' });
+        if (!resp.ok) {
+            let data;
+            try { data = await resp.json(); } catch { data = {}; }
+            showToast(data.error || 'Export failed', 'error');
+            return;
+        }
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${name}-export.tar.gz`;
+        a.click();
+        URL.revokeObjectURL(url);
+        showToast(`Exported ${name} — downloading...`, 'success');
+    } catch (e) {
+        showToast(`Export failed: ${e.message}`, 'error');
+    }
+}
+
+async function generateTransferToken() {
+    try {
+        const resp = await fetch(apiUrl('/api/containers/transfer-token'), { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok) { showToast(data.error || 'Failed', 'error'); return; }
+
+        const modal = document.createElement('div');
+        modal.id = 'transfer-token-modal';
+        modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
+        modal.innerHTML = `
+            <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:400px;max-width:500px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+                <h3 style="margin:0 0 12px;color:var(--text,#fff);">🔑 Transfer Token Generated</h3>
+                <p style="color:var(--text-muted,#aaa);font-size:0.9em;margin-bottom:16px;">
+                    Share this token with the source cluster admin. It expires in 30 minutes and can only be used once.
+                </p>
+                <div style="background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:8px;padding:12px;font-family:monospace;font-size:13px;color:var(--text,#fff);word-break:break-all;margin-bottom:12px;">${data.token}</div>
+                <div style="display:flex;gap:8px;justify-content:flex-end;">
+                    <button class="btn" onclick="navigator.clipboard.writeText('${data.token}');showToast('Token copied!','success')">📋 Copy</button>
+                    <button class="btn" onclick="document.getElementById('transfer-token-modal')?.remove()">Close</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+    } catch (e) {
+        showToast(`Error: ${e.message}`, 'error');
     }
 }
 
