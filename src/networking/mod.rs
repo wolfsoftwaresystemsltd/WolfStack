@@ -689,7 +689,7 @@ fn get_wolfnet_peers() -> Vec<WolfNetPeer> {
             } else if let Some(val) = line.strip_prefix("endpoint") {
                 let val = val.trim().trim_start_matches('=').trim().trim_matches('"');
                 current_endpoint = val.to_string();
-            } else if let Some(val) = line.strip_prefix("ip") {
+            } else if let Some(val) = line.strip_prefix("allowed_ip").or_else(|| line.strip_prefix("ip")) {
                 let val = val.trim().trim_start_matches('=').trim().trim_matches('"');
                 current_ip = val.to_string();
             }
