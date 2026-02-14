@@ -748,48 +748,78 @@ pub fn save_wolfnet_config(content: &str) -> Result<String, String> {
     Ok("Configuration saved".to_string())
 }
 
-/// Add a peer to WolfNet config
+/// Add or update a peer in WolfNet config (upsert).
+/// If a peer with the same name, public key, or allowed IP already exists,
+/// its name and endpoint are updated. Otherwise a new peer is appended.
 pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option<&str>) -> Result<String, String> {
-    let config_path = "/etc/wolfnet/config.toml";
-    let mut content = std::fs::read_to_string(config_path)
-        .map_err(|e| format!("Failed to read config: {}", e))?;
+    let config_path = std::path::Path::new("/etc/wolfnet/config.toml");
+    let mut config = wolfnet::config::Config::load(config_path)
+        .map_err(|e| format!("Failed to load config: {}", e))?;
 
-    // Check for duplicate by name, public key, or allowed IP
-    if content.contains(&format!("name = \"{}\"", name)) {
-        return Err(format!("Peer '{}' already exists", name));
-    }
-    if let Some(pk) = public_key {
-        if !pk.is_empty() && content.contains(pk) {
-            return Err(format!("Peer with public key '{}...' already exists", &pk[..pk.len().min(12)]));
+    // Check if a peer already exists with the same name, public key, or IP
+    let existing_idx = config.peers.iter().position(|p| {
+        // Match by name
+        if let Some(ref pname) = p.name {
+            if pname == name { return true; }
         }
-    }
-    if !ip.is_empty() && (content.contains(&format!("allowed_ip = \"{}\"", ip)) || content.contains(&format!("ip = \"{}\"", ip))) {
-        return Err(format!("Peer with IP '{}' already exists", ip));
-    }
-
-    // Append peer section
-    content.push_str(&format!("\n\n[[peers]]\nname = \"{}\"\n", name));
-    if !endpoint.is_empty() {
-        content.push_str(&format!("endpoint = \"{}\"\n", endpoint));
-    }
-    if !ip.is_empty() {
-        content.push_str(&format!("allowed_ip = \"{}\"\n", ip));
-    }
-    if let Some(pk) = public_key {
-        if !pk.is_empty() {
-            content.push_str(&format!("public_key = \"{}\"\n", pk));
+        // Match by public key
+        if let Some(pk) = public_key {
+            if !pk.is_empty() && p.public_key == pk { return true; }
         }
+        // Match by IP
+        if !ip.is_empty() && p.allowed_ip == ip { return true; }
+        false
+    });
+
+    if let Some(idx) = existing_idx {
+        // Update existing peer's name and endpoint
+        let peer = &mut config.peers[idx];
+        let old_name = peer.name.clone().unwrap_or_default();
+        let old_endpoint = peer.endpoint.clone().unwrap_or_default();
+
+        let mut changed = false;
+        if peer.name.as_deref() != Some(name) {
+            peer.name = Some(name.to_string());
+            changed = true;
+        }
+        if !endpoint.is_empty() && peer.endpoint.as_deref() != Some(endpoint) {
+            peer.endpoint = Some(endpoint.to_string());
+            changed = true;
+        }
+
+        if !changed {
+            return Err(format!("Peer '{}' already exists (no changes needed)", name));
+        }
+
+        config.save(config_path)
+            .map_err(|e| format!("Failed to write config: {}", e))?;
+
+        info!("Updated WolfNet peer: {} → {} (endpoint: {} → {})", old_name, name, old_endpoint, endpoint);
+
+        // Restart WolfNet to apply
+        let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
+
+        Ok(format!("Peer '{}' updated and WolfNet restarted", name))
+    } else {
+        // Add new peer
+        let pk = public_key.unwrap_or("").to_string();
+        config.peers.push(wolfnet::config::PeerConfig {
+            public_key: pk,
+            endpoint: if endpoint.is_empty() { None } else { Some(endpoint.to_string()) },
+            allowed_ip: ip.to_string(),
+            name: Some(name.to_string()),
+        });
+
+        config.save(config_path)
+            .map_err(|e| format!("Failed to write config: {}", e))?;
+
+        info!("Added WolfNet peer: {} ({})", name, ip);
+
+        // Restart WolfNet to apply
+        let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
+
+        Ok(format!("Peer '{}' added and WolfNet restarted", name))
     }
-
-    std::fs::write(config_path, &content)
-        .map_err(|e| format!("Failed to write config: {}", e))?;
-
-    info!("Added WolfNet peer: {} ({})", name, ip);
-
-    // Restart WolfNet to apply
-    let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
-
-    Ok(format!("Peer '{}' added and WolfNet restarted", name))
 }
 
 /// Remove a peer from WolfNet config by name
