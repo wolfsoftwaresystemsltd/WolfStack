@@ -3272,7 +3272,7 @@ async function saveWsClusterSettings() {
     const newName = document.getElementById('ws-settings-cluster-name')?.value.trim();
 
     if (!newName || newName === originalName) {
-        showToast('No changes to save', 'info');
+        modal.remove();
         return;
     }
 

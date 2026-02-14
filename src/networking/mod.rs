@@ -752,38 +752,66 @@ pub fn save_wolfnet_config(content: &str) -> Result<String, String> {
 /// If a peer with the same name, public key, or allowed IP already exists,
 /// its name and endpoint are updated. Otherwise a new peer is appended.
 pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option<&str>) -> Result<String, String> {
-    let config_path = std::path::Path::new("/etc/wolfnet/config.toml");
-    let mut config = wolfnet::config::Config::load(config_path)
-        .map_err(|e| format!("Failed to load config: {}", e))?;
+    let config_path = "/etc/wolfnet/config.toml";
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read config: {}", e))?;
 
-    // Check if a peer already exists with the same name, public key, or IP
-    let existing_idx = config.peers.iter().position(|p| {
-        // Match by name
-        if let Some(ref pname) = p.name {
-            if pname == name { return true; }
+    // Fix any `ip = ` entries to `allowed_ip = ` before parsing
+    let fixed: String = content.lines().map(|line| {
+        let trimmed = line.trim();
+        if trimmed.starts_with("ip = ") && !trimmed.starts_with("ip_") {
+            line.replace("ip = ", "allowed_ip = ")
+        } else {
+            line.to_string()
         }
-        // Match by public key
-        if let Some(pk) = public_key {
-            if !pk.is_empty() && p.public_key == pk { return true; }
-        }
-        // Match by IP
-        if !ip.is_empty() && p.allowed_ip == ip { return true; }
-        false
+    }).collect::<Vec<_>>().join("\n");
+
+    let mut doc: toml::Value = toml::from_str(&fixed)
+        .map_err(|e| format!("Failed to parse config: {}", e))?;
+
+    let peers = doc.get_mut("peers")
+        .and_then(|v| v.as_array_mut());
+
+    // Find existing peer by name, public key, or IP
+    let existing_idx = peers.as_ref().and_then(|arr| {
+        arr.iter().position(|p| {
+            // Match by name
+            if let Some(pname) = p.get("name").and_then(|v| v.as_str()) {
+                if pname == name { return true; }
+            }
+            // Match by public key
+            if let Some(pk) = public_key {
+                if !pk.is_empty() {
+                    if let Some(ppk) = p.get("public_key").and_then(|v| v.as_str()) {
+                        if ppk == pk { return true; }
+                    }
+                }
+            }
+            // Match by IP
+            if !ip.is_empty() {
+                if let Some(pip) = p.get("allowed_ip").and_then(|v| v.as_str()) {
+                    if pip == ip { return true; }
+                }
+            }
+            false
+        })
     });
 
+    let result_msg;
+
     if let Some(idx) = existing_idx {
-        // Update existing peer's name and endpoint
-        let peer = &mut config.peers[idx];
-        let old_name = peer.name.clone().unwrap_or_default();
-        let old_endpoint = peer.endpoint.clone().unwrap_or_default();
+        let peers_arr = doc.get_mut("peers").unwrap().as_array_mut().unwrap();
+        let peer = &mut peers_arr[idx];
+        let old_name = peer.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let old_endpoint = peer.get("endpoint").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
         let mut changed = false;
-        if peer.name.as_deref() != Some(name) {
-            peer.name = Some(name.to_string());
+        if peer.get("name").and_then(|v| v.as_str()) != Some(name) {
+            peer.as_table_mut().unwrap().insert("name".to_string(), toml::Value::String(name.to_string()));
             changed = true;
         }
-        if !endpoint.is_empty() && peer.endpoint.as_deref() != Some(endpoint) {
-            peer.endpoint = Some(endpoint.to_string());
+        if !endpoint.is_empty() && peer.get("endpoint").and_then(|v| v.as_str()) != Some(endpoint) {
+            peer.as_table_mut().unwrap().insert("endpoint".to_string(), toml::Value::String(endpoint.to_string()));
             changed = true;
         }
 
@@ -791,35 +819,47 @@ pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option
             return Err(format!("Peer '{}' already exists (no changes needed)", name));
         }
 
-        config.save(config_path)
-            .map_err(|e| format!("Failed to write config: {}", e))?;
-
         info!("Updated WolfNet peer: {} → {} (endpoint: {} → {})", old_name, name, old_endpoint, endpoint);
-
-        // Restart WolfNet to apply
-        let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
-
-        Ok(format!("Peer '{}' updated and WolfNet restarted", name))
+        result_msg = format!("Peer '{}' updated and WolfNet restarted", name);
     } else {
         // Add new peer
-        let pk = public_key.unwrap_or("").to_string();
-        config.peers.push(wolfnet::config::PeerConfig {
-            public_key: pk,
-            endpoint: if endpoint.is_empty() { None } else { Some(endpoint.to_string()) },
-            allowed_ip: ip.to_string(),
-            name: Some(name.to_string()),
-        });
+        let mut new_peer = toml::map::Map::new();
+        new_peer.insert("name".to_string(), toml::Value::String(name.to_string()));
+        if let Some(pk) = public_key {
+            if !pk.is_empty() {
+                new_peer.insert("public_key".to_string(), toml::Value::String(pk.to_string()));
+            }
+        }
+        if !endpoint.is_empty() {
+            new_peer.insert("endpoint".to_string(), toml::Value::String(endpoint.to_string()));
+        }
+        if !ip.is_empty() {
+            new_peer.insert("allowed_ip".to_string(), toml::Value::String(ip.to_string()));
+        }
 
-        config.save(config_path)
-            .map_err(|e| format!("Failed to write config: {}", e))?;
+        if let Some(arr) = doc.get_mut("peers").and_then(|v| v.as_array_mut()) {
+            arr.push(toml::Value::Table(new_peer));
+        } else {
+            doc.as_table_mut().unwrap().insert(
+                "peers".to_string(),
+                toml::Value::Array(vec![toml::Value::Table(new_peer)]),
+            );
+        }
 
         info!("Added WolfNet peer: {} ({})", name, ip);
-
-        // Restart WolfNet to apply
-        let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
-
-        Ok(format!("Peer '{}' added and WolfNet restarted", name))
+        result_msg = format!("Peer '{}' added and WolfNet restarted", name);
     }
+
+    // Write back
+    let output = toml::to_string_pretty(&doc)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    std::fs::write(config_path, &output)
+        .map_err(|e| format!("Failed to write config: {}", e))?;
+
+    // Restart WolfNet to apply
+    let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
+
+    Ok(result_msg)
 }
 
 /// Remove a peer from WolfNet config by name
