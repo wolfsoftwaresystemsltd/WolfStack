@@ -856,8 +856,8 @@ pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option
     std::fs::write(config_path, &output)
         .map_err(|e| format!("Failed to write config: {}", e))?;
 
-    // Restart WolfNet to apply
-    let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
+    // Signal WolfNet to reload config (SIGHUP = hot-reload, no restart needed)
+    let _ = Command::new("pkill").args(["-HUP", "wolfnet"]).output();
 
     Ok(result_msg)
 }
@@ -928,8 +928,8 @@ pub fn remove_wolfnet_peer(name: &str) -> Result<String, String> {
 
     info!("Removed WolfNet peer: {}", name);
 
-    // Restart WolfNet to apply
-    let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
+    // Signal WolfNet to reload config (SIGHUP = hot-reload, no restart needed)
+    let _ = Command::new("pkill").args(["-HUP", "wolfnet"]).output();
 
     Ok(format!("Peer '{}' removed and WolfNet restarted", name))
 }
