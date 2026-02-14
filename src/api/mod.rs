@@ -497,6 +497,213 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
     }
 }
 
+/// POST /api/cluster/wolfnet-sync — ensure all WolfStack nodes in a cluster know about each other's WolfNet peers
+#[derive(Deserialize)]
+pub struct WolfNetSyncRequest {
+    pub node_ids: Vec<String>,
+}
+
+pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfNetSyncRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let node_ids = &body.node_ids;
+    if node_ids.len() < 2 {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "Need at least 2 nodes to sync"}));
+    }
+
+    // Collect WolfNet info from each node
+    #[derive(Clone)]
+    struct NodeWnInfo {
+        node_id: String,
+        hostname: String,
+        wolfnet_ip: String,
+        public_key: String,
+        listen_port: u16,
+        /// The reachable endpoint (node.address:listen_port) for WolfNet
+        endpoint: String,
+        is_self: bool,
+        address: String,
+        port: u16,
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("HTTP client error: {}", e)})),
+    };
+
+    let mut infos: Vec<NodeWnInfo> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    for nid in node_ids {
+        let node = match state.cluster.get_node(nid) {
+            Some(n) => n,
+            None => { errors.push(format!("Node {} not found", nid)); continue; }
+        };
+        if node.node_type != "wolfstack" {
+            errors.push(format!("{} is not a WolfStack node", node.hostname));
+            continue;
+        }
+
+        if node.is_self {
+            // Get local info directly
+            match networking::get_wolfnet_local_info() {
+                Some(info) => {
+                    let hostname = info["hostname"].as_str().unwrap_or("").to_string();
+                    let address = info["address"].as_str().unwrap_or("").to_string();
+                    let public_key = info["public_key"].as_str().unwrap_or("").to_string();
+                    let listen_port = info["listen_port"].as_u64().unwrap_or(9600) as u16;
+                    if address.is_empty() || public_key.is_empty() {
+                        errors.push(format!("{}: WolfNet not configured", node.hostname));
+                        continue;
+                    }
+                    // Use the node's real address (not WolfNet IP) as the endpoint
+                    let endpoint = format!("{}:{}", node.address, listen_port);
+                    infos.push(NodeWnInfo {
+                        node_id: nid.clone(),
+                        hostname,
+                        wolfnet_ip: address,
+                        public_key,
+                        listen_port,
+                        endpoint,
+                        is_self: true,
+                        address: node.address.clone(),
+                        port: node.port,
+                    });
+                }
+                None => {
+                    errors.push(format!("{}: WolfNet not running", node.hostname));
+                }
+            }
+        } else {
+            // Fetch from remote node via HTTP
+            let internal_port = node.port + 1;
+            let url = format!("http://{}:{}/api/networking/wolfnet/local-info", node.address, internal_port);
+            match client.get(&url)
+                .header("X-WolfStack-Secret", &state.cluster_secret)
+                .send().await
+            {
+                Ok(resp) => {
+                    if let Ok(info) = resp.json::<serde_json::Value>().await {
+                        if info.get("error").is_some() {
+                            errors.push(format!("{}: {}", node.hostname, info["error"]));
+                            continue;
+                        }
+                        let hostname = info["hostname"].as_str().unwrap_or("").to_string();
+                        let address = info["address"].as_str().unwrap_or("").to_string();
+                        let public_key = info["public_key"].as_str().unwrap_or("").to_string();
+                        let listen_port = info["listen_port"].as_u64().unwrap_or(9600) as u16;
+                        if address.is_empty() || public_key.is_empty() {
+                            errors.push(format!("{}: WolfNet not configured", node.hostname));
+                            continue;
+                        }
+                        let endpoint = format!("{}:{}", node.address, listen_port);
+                        infos.push(NodeWnInfo {
+                            node_id: nid.clone(),
+                            hostname,
+                            wolfnet_ip: address,
+                            public_key,
+                            listen_port,
+                            endpoint,
+                            is_self: false,
+                            address: node.address.clone(),
+                            port: node.port,
+                        });
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!("{}: unreachable ({})", node.hostname, e));
+                }
+            }
+        }
+    }
+
+    if infos.len() < 2 {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "status": "error",
+            "message": "Could not reach enough nodes to sync",
+            "errors": errors,
+        }));
+    }
+
+    // Now tell each node about every other node
+    let mut synced = 0u32;
+    let mut skipped = 0u32;
+
+    for i in 0..infos.len() {
+        let target = &infos[i];
+        for j in 0..infos.len() {
+            if i == j { continue; }
+            let peer = &infos[j];
+
+            if target.is_self {
+                // Add peer locally
+                match networking::add_wolfnet_peer(
+                    &peer.hostname,
+                    &peer.endpoint,
+                    &peer.wolfnet_ip,
+                    Some(&peer.public_key),
+                ) {
+                    Ok(_) => { synced += 1; }
+                    Err(e) => {
+                        if e.contains("already exists") {
+                            skipped += 1;
+                        } else {
+                            errors.push(format!("local add {}: {}", peer.hostname, e));
+                        }
+                    }
+                }
+            } else {
+                // Add peer on remote node
+                let internal_port = target.port + 1;
+                let url = format!("http://{}:{}/api/networking/wolfnet/peers", target.address, internal_port);
+                let payload = serde_json::json!({
+                    "name": peer.hostname,
+                    "endpoint": peer.endpoint,
+                    "ip": peer.wolfnet_ip,
+                    "public_key": peer.public_key,
+                });
+                match client.post(&url)
+                    .header("X-WolfStack-Secret", &state.cluster_secret)
+                    .header("Content-Type", "application/json")
+                    .body(payload.to_string())
+                    .send().await
+                {
+                    Ok(resp) => {
+                        if let Ok(data) = resp.json::<serde_json::Value>().await {
+                            if data.get("error").is_some() {
+                                let err = data["error"].as_str().unwrap_or("unknown");
+                                if err.contains("already exists") {
+                                    skipped += 1;
+                                } else {
+                                    errors.push(format!("{} → {}: {}", target.hostname, peer.hostname, err));
+                                }
+                            } else {
+                                synced += 1;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(format!("{} → {}: {}", target.hostname, peer.hostname, e));
+                    }
+                }
+            }
+        }
+    }
+
+    info!("WolfNet sync: {} peers added, {} already existed, {} errors", synced, skipped, errors.len());
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "ok",
+        "synced": synced,
+        "skipped": skipped,
+        "nodes_reached": infos.len(),
+        "errors": errors,
+    }))
+}
+
 /// GET /api/nodes/{id}/pve/resources — list VMs and containers on a Proxmox node
 pub async fn get_pve_resources(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
@@ -3360,6 +3567,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/auth/join-token", web::get().to(get_join_token))
         // Cluster
         .route("/api/cluster/verify-token", web::get().to(verify_join_token))
+        .route("/api/cluster/wolfnet-sync", web::post().to(wolfnet_sync_cluster))
         .route("/api/nodes", web::get().to(get_nodes))
         .route("/api/nodes", web::post().to(add_node))
         .route("/api/nodes/{id}", web::get().to(get_node))

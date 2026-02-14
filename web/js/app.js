@@ -3241,6 +3241,18 @@ function openWsClusterSettings(clusterName) {
                     <label>Cluster Name</label>
                     <input type="text" class="form-control" id="ws-settings-cluster-name" value="${clusterName}">
                 </div>
+                <hr style="border-color: var(--border); margin: 20px 0;">
+                <div class="form-group">
+                    <label>🔗 WolfNet Mesh Connectivity</label>
+                    <p style="color: var(--text-muted); font-size: 12px; margin: 4px 0 12px;">
+                        Ensures all nodes in this cluster know about each other's WolfNet connections.<br>
+                        Run this after adding new nodes to automatically set up peer-to-peer networking.
+                    </p>
+                    <button class="btn" id="ws-wolfnet-sync-btn" style="background: var(--accent); color: #fff; font-size: 13px;" onclick="syncWolfNetCluster()">
+                        🔗 Update WolfNet Connections
+                    </button>
+                    <span id="ws-wolfnet-sync-status" style="margin-left: 10px; font-size: 12px; color: var(--text-muted);"></span>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
@@ -3277,6 +3289,52 @@ async function saveWsClusterSettings() {
     modal.remove();
     showToast('Cluster renamed to "' + newName + '"', 'success');
     fetchNodes();
+}
+
+async function syncWolfNetCluster() {
+    const modal = document.getElementById('ws-settings-modal');
+    if (!modal) return;
+    const nodeIds = modal._nodeIds || [];
+    if (nodeIds.length < 2) {
+        showToast('Need at least 2 nodes in the cluster to sync WolfNet', 'error');
+        return;
+    }
+
+    const btn = document.getElementById('ws-wolfnet-sync-btn');
+    const status = document.getElementById('ws-wolfnet-sync-status');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Syncing...'; }
+    if (status) status.textContent = 'Connecting to nodes...';
+
+    try {
+        const resp = await fetch('/api/cluster/wolfnet-sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ node_ids: nodeIds })
+        });
+        const data = await resp.json();
+
+        if (data.error) {
+            showToast('WolfNet sync failed: ' + data.error, 'error');
+            if (status) status.textContent = '❌ ' + data.error;
+        } else if (data.status === 'error') {
+            showToast('WolfNet sync: ' + data.message, 'error');
+            if (status) status.textContent = '❌ ' + data.message;
+        } else {
+            let msg = `✅ ${data.nodes_reached} nodes reached`;
+            if (data.synced > 0) msg += `, ${data.synced} new peer(s) added`;
+            if (data.skipped > 0) msg += `, ${data.skipped} already connected`;
+            showToast(msg, 'success');
+            if (status) status.textContent = msg;
+            if (data.errors && data.errors.length > 0) {
+                showToast('Some issues: ' + data.errors.join('; '), 'warning');
+            }
+        }
+    } catch (e) {
+        showToast('WolfNet sync error: ' + e.message, 'error');
+        if (status) status.textContent = '❌ ' + e.message;
+    }
+
+    if (btn) { btn.disabled = false; btn.textContent = '🔗 Update WolfNet Connections'; }
 }
 
 // ─── Individual Node Settings ───
