@@ -3652,7 +3652,7 @@ async function loadNodeVersionInfo(node) {
 
     // 3. Compare and show badge + upgrade button
     if (installedVersion && latestVersion) {
-        if (installedVersion === latestVersion) {
+        if (installedVersion === latestVersion || !isNewerVersion(latestVersion, installedVersion)) {
             badgeEl.textContent = '✅ Up to date';
             badgeEl.style.background = 'rgba(16,185,129,0.15)';
             badgeEl.style.color = '#10b981';
@@ -8761,7 +8761,7 @@ function checkForUpdates() {
             var match = text.match(/^version\s*=\s*"([^"]+)"/m);
             if (!match) return;
             var latestVersion = match[1];
-            if (latestVersion !== currentVersion) {
+            if (isNewerVersion(latestVersion, currentVersion)) {
                 var banner = document.getElementById('update-banner');
                 var bannerText = document.getElementById('update-banner-text');
                 if (banner) {
@@ -8771,6 +8771,19 @@ function checkForUpdates() {
             }
         })
         .catch(function () { /* silently ignore — no internet or private repo */ });
+}
+
+// Returns true if 'latest' is strictly newer than 'current' (semver comparison)
+function isNewerVersion(latest, current) {
+    var l = latest.split('.').map(Number);
+    var c = current.split('.').map(Number);
+    for (var i = 0; i < Math.max(l.length, c.length); i++) {
+        var lv = l[i] || 0;
+        var cv = c[i] || 0;
+        if (lv > cv) return true;
+        if (lv < cv) return false;
+    }
+    return false;
 }
 
 // Check for updates on page load, then every 6 hours
