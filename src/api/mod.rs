@@ -707,6 +707,7 @@ pub async fn cluster_diagnose(req: HttpRequest, state: web::Data<AppState>, body
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
+        .danger_accept_invalid_certs(true)
         .build()
     {
         Ok(c) => c,
@@ -759,9 +760,10 @@ pub async fn cluster_diagnose(req: HttpRequest, state: web::Data<AppState>, body
             continue;
         }
 
-        // Try HTTP poll on port+1 first, then main port (same as background poller)
+        // Try HTTP on port+1 first (inter-node), then HTTPS on main port, then HTTP on main port
         let urls = vec![
             format!("http://{}:{}/api/agent/status", node.address, node.port + 1),
+            format!("https://{}:{}/api/agent/status", node.address, node.port),
             format!("http://{}:{}/api/agent/status", node.address, node.port),
         ];
 
@@ -770,7 +772,7 @@ pub async fn cluster_diagnose(req: HttpRequest, state: web::Data<AppState>, body
             "url_used": null,
             "status_code": null,
             "latency_ms": null,
-            "error": "Could not reach node on either port",
+            "error": "Could not reach node on any port/protocol",
         });
 
         for url in &urls {

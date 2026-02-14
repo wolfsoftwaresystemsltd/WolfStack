@@ -592,15 +592,17 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
 
         // ── Poll WolfStack node via agent ──
         // When TLS is enabled, the main port serves HTTPS and inter-node HTTP is on port+1.
-        // Try port+1 first (works for HTTPS nodes), then fall back to the original port (HTTP-only nodes).
+        // Try: 1) HTTP port+1 (inter-node), 2) HTTPS main port, 3) HTTP main port (legacy)
         let urls = vec![
             format!("http://{}:{}/api/agent/status", node.address, node.port + 1),
+            format!("https://{}:{}/api/agent/status", node.address, node.port),
             format!("http://{}:{}/api/agent/status", node.address, node.port),
         ];
-        debug!("Polling remote node {} (trying ports {} and {})", node.id, node.port + 1, node.port);
+        debug!("Polling remote node {} (trying port+1 HTTP, port HTTPS, port HTTP)", node.id);
 
         let client = match reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
+            .danger_accept_invalid_certs(true)
             .build()
         {
             Ok(c) => c,
