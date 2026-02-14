@@ -6628,31 +6628,64 @@ function selectLxcTemplate(distro, release, arch, variant) {
 
     document.getElementById('lxc-create-name').focus();
 
-    // Populate storage dropdown from disk metrics
-    const node = currentNodeId ? allNodes.find(n => n.id === currentNodeId) : null;
+    // Populate storage dropdown from /api/storage/list (Proxmox-aware)
     const storageSelect = document.getElementById('lxc-create-storage');
     const storageInfo = document.getElementById('lxc-storage-info');
-    if (node?.metrics?.disks && node.metrics.disks.length > 0) {
-        storageSelect.innerHTML = '';
-        const rootDisk = node.metrics.disks.find(d => d.mount_point === '/');
-        const rootFree = rootDisk ? ` (${formatBytes(rootDisk.available_bytes)} free)` : '';
-        storageSelect.innerHTML += `<option value="/var/lib/lxc">/var/lib/lxc (default)${rootFree}</option>`;
-        node.metrics.disks.forEach(d => {
-            if (d.mount_point !== '/' && d.available_bytes > 1073741824) {
-                const free = formatBytes(d.available_bytes);
-                const path = d.mount_point + '/lxc';
-                storageSelect.innerHTML += `<option value="${path}">${path} (${free} free)</option>`;
+    fetch(apiUrl('/api/storage/list'))
+        .then(r => r.json())
+        .then(data => {
+            storageSelect.innerHTML = '';
+            if (data.proxmox) {
+                // Proxmox: show PVE storage IDs
+                const rootdirStorages = data.storages.filter(s =>
+                    s.content && s.content.some(c => c === 'rootdir' || c === 'images')
+                );
+                if (rootdirStorages.length === 0) {
+                    // Fallback: show all active storages
+                    data.storages.filter(s => s.status === 'active').forEach(s => {
+                        const free = formatBytes(s.available_bytes);
+                        storageSelect.innerHTML += `<option value="${s.id}">${s.id} (${s.type}, ${free} free)</option>`;
+                    });
+                } else {
+                    rootdirStorages.forEach(s => {
+                        const free = formatBytes(s.available_bytes);
+                        const def = s.id === 'local-lvm' ? ' (default)' : '';
+                        storageSelect.innerHTML += `<option value="${s.id}"${def ? ' selected' : ''}>${s.id} (${s.type}, ${free} free)${def}</option>`;
+                    });
+                }
+                storageInfo.textContent = 'Proxmox storage';
+            } else {
+                // Standalone: show filesystem mount points
+                const defaultOpt = `<option value="/var/lib/lxc">/var/lib/lxc (default)</option>`;
+                storageSelect.innerHTML = defaultOpt;
+                data.storages.forEach(s => {
+                    if (s.id !== '/') {
+                        const free = formatBytes(s.available_bytes);
+                        const path = s.id + '/lxc';
+                        storageSelect.innerHTML += `<option value="${path}">${path} (${free} free)</option>`;
+                    }
+                });
+            }
+            storageSelect.onchange = () => {
+                const sel = storageSelect.value;
+                const match = data.storages.find(s => sel.startsWith(s.id));
+                storageInfo.textContent = match ? `${formatBytes(match.available_bytes)} free` : '';
+            };
+        })
+        .catch(() => {
+            // Fallback to old disk metrics approach
+            const node = currentNodeId ? allNodes.find(n => n.id === currentNodeId) : null;
+            if (node?.metrics?.disks) {
+                storageSelect.innerHTML = '<option value="/var/lib/lxc">/var/lib/lxc (default)</option>';
+                node.metrics.disks.forEach(d => {
+                    if (d.mount_point !== '/' && d.available_bytes > 1073741824) {
+                        const free = formatBytes(d.available_bytes);
+                        const path = d.mount_point + '/lxc';
+                        storageSelect.innerHTML += `<option value="${path}">${path} (${free} free)</option>`;
+                    }
+                });
             }
         });
-        if (rootDisk) {
-            storageInfo.textContent = `Root: ${formatBytes(rootDisk.available_bytes)} free`;
-        }
-        storageSelect.onchange = () => {
-            const sel = storageSelect.value;
-            const disk = node.metrics.disks.find(d => sel.startsWith(d.mount_point));
-            storageInfo.textContent = disk ? `${formatBytes(disk.available_bytes)} free` : '';
-        };
-    }
 
     // Fetch WolfNet status and suggest an IP
     fetch(apiUrl('/api/wolfnet/status'))

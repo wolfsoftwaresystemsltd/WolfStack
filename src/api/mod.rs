@@ -1619,6 +1619,30 @@ pub async fn lxc_create(
     body: web::Json<LxcCreateRequest>,
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    // On Proxmox, pct_create handles password, memory, and CPU natively
+    if containers::is_proxmox() {
+        let storage = body.storage_path.as_deref();
+        let password = body.root_password.as_deref();
+        // Parse memory limit (e.g. "512m" -> 512, "2g" -> 2048)
+        let memory_mb = body.memory_limit.as_deref().and_then(|m| {
+            let m = m.trim().to_lowercase();
+            if m.ends_with('g') { m.trim_end_matches('g').parse::<u32>().ok().map(|v| v * 1024) }
+            else if m.ends_with('m') { m.trim_end_matches('m').parse::<u32>().ok() }
+            else { m.parse::<u32>().ok() }
+        });
+        let cpu_cores = body.cpu_cores.as_deref().and_then(|c| c.parse::<u32>().ok());
+
+        return match containers::pct_create_api(
+            &body.name, &body.distribution, &body.release, &body.architecture,
+            storage, password, memory_mb, cpu_cores
+        ) {
+            Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        };
+    }
+
+    // Standalone LXC path
     let storage = body.storage_path.as_deref();
     match containers::lxc_create(&body.name, &body.distribution, &body.release, &body.architecture, storage) {
         Ok(msg) => {
@@ -1656,6 +1680,57 @@ pub async fn lxc_create(
             HttpResponse::Ok().json(serde_json::json!({ "message": messages.join(" — ") }))
         }
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/storage/list — list available storage locations (Proxmox-aware)
+pub async fn storage_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let is_pve = containers::is_proxmox();
+
+    if is_pve {
+        // Return Proxmox storage IDs
+        let storages = containers::pvesm_list_storage();
+        let items: Vec<serde_json::Value> = storages.iter().map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "type": s.storage_type,
+                "status": s.status,
+                "total_bytes": s.total_bytes,
+                "used_bytes": s.used_bytes,
+                "available_bytes": s.available_bytes,
+                "content": s.content,
+            })
+        }).collect();
+        HttpResponse::Ok().json(serde_json::json!({
+            "proxmox": true,
+            "storages": items,
+        }))
+    } else {
+        // Return filesystem-based storage
+        let node = state.cluster.get_node(&state.cluster.self_id);
+        let disks = node.as_ref().and_then(|n| n.metrics.as_ref())
+            .map(|m| &m.disks)
+            .cloned()
+            .unwrap_or_default();
+
+        let items: Vec<serde_json::Value> = disks.iter()
+            .filter(|d| d.available_bytes > 1073741824) // > 1GB free
+            .map(|d| serde_json::json!({
+                "id": d.mount_point,
+                "type": "dir",
+                "status": "active",
+                "total_bytes": d.total_bytes,
+                "used_bytes": d.used_bytes,
+                "available_bytes": d.available_bytes,
+                "content": ["rootdir", "images"],
+            }))
+            .collect();
+        HttpResponse::Ok().json(serde_json::json!({
+            "proxmox": false,
+            "storages": items,
+        }))
     }
 }
 
@@ -3801,6 +3876,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/lxc", web::get().to(lxc_list))
         .route("/api/containers/lxc/templates", web::get().to(lxc_templates))
         .route("/api/containers/lxc/create", web::post().to(lxc_create))
+        .route("/api/storage/list", web::get().to(storage_list))
         .route("/api/containers/lxc/stats", web::get().to(lxc_stats))
         .route("/api/containers/lxc/{name}/logs", web::get().to(lxc_logs))
         .route("/api/containers/lxc/{name}/config", web::get().to(lxc_config))

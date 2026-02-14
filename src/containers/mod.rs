@@ -1479,7 +1479,11 @@ pub fn lxc_set_root_password(container: &str, password: &str) -> Result<String, 
 /// Start an LXC container
 pub fn lxc_start(container: &str) -> Result<String, String> {
     ensure_lxc_bridge();
-    let result = run_lxc_cmd(&["lxc-start", "-n", container]);
+    let result = if is_proxmox() {
+        run_lxc_cmd(&["pct", "start", container])
+    } else {
+        run_lxc_cmd(&["lxc-start", "-n", container])
+    };
     
     // Apply WolfNet IP if configured
     if result.is_ok() {
@@ -1573,7 +1577,11 @@ fn lxc_post_start_setup(container: &str) {
 
 /// Stop an LXC container
 pub fn lxc_stop(container: &str) -> Result<String, String> {
-    run_lxc_cmd(&["lxc-stop", "-n", container])
+    if is_proxmox() {
+        run_lxc_cmd(&["pct", "stop", container])
+    } else {
+        run_lxc_cmd(&["lxc-stop", "-n", container])
+    }
 }
 
 /// Restart an LXC container
@@ -1584,18 +1592,30 @@ pub fn lxc_restart(container: &str) -> Result<String, String> {
 
 /// Freeze (pause) an LXC container
 pub fn lxc_freeze(container: &str) -> Result<String, String> {
-    run_lxc_cmd(&["lxc-freeze", "-n", container])
+    if is_proxmox() {
+        run_lxc_cmd(&["pct", "suspend", container])
+    } else {
+        run_lxc_cmd(&["lxc-freeze", "-n", container])
+    }
 }
 
 /// Unfreeze an LXC container
 pub fn lxc_unfreeze(container: &str) -> Result<String, String> {
-    run_lxc_cmd(&["lxc-unfreeze", "-n", container])
+    if is_proxmox() {
+        run_lxc_cmd(&["pct", "resume", container])
+    } else {
+        run_lxc_cmd(&["lxc-unfreeze", "-n", container])
+    }
 }
 
 /// Destroy an LXC container
 pub fn lxc_destroy(container: &str) -> Result<String, String> {
     lxc_stop(container).ok(); // Stop first, ignore errors
-    run_lxc_cmd(&["lxc-destroy", "-n", container])
+    if is_proxmox() {
+        run_lxc_cmd(&["pct", "destroy", container])
+    } else {
+        run_lxc_cmd(&["lxc-destroy", "-n", container])
+    }
 }
 
 /// Read LXC container config
@@ -2662,10 +2682,267 @@ pub fn lxc_list_templates() -> Vec<LxcTemplate> {
     templates
 }
 
+// ─── Proxmox VE Detection & Helpers ───
+
+/// Detect if we're running on a Proxmox VE node (cached after first check)
+pub fn is_proxmox() -> bool {
+    static IS_PVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *IS_PVE.get_or_init(|| {
+        Command::new("which").arg("pct").output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+}
+
+/// PVE storage entry from `pvesm status`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PveStorage {
+    pub id: String,
+    pub storage_type: String,
+    pub status: String,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub available_bytes: u64,
+    /// Which content types are allowed (e.g. "images", "rootdir", "vztmpl", "iso")
+    pub content: Vec<String>,
+}
+
+/// List available Proxmox storage via `pvesm status`
+pub fn pvesm_list_storage() -> Vec<PveStorage> {
+    let output = match Command::new("pvesm").args(["status", "--output-format", "json"]).output() {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => {
+            // Fallback: try text format
+            return pvesm_list_storage_text();
+        }
+    };
+
+    // Try JSON parsing first
+    if let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(&output) {
+        return items.iter().filter_map(|item| {
+            let id = item.get("storage")?.as_str()?.to_string();
+            let storage_type = item.get("type")?.as_str()?.to_string();
+            let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("active").to_string();
+            let total = item.get("total").and_then(|v| v.as_u64()).unwrap_or(0) * 1024; // KB to bytes
+            let used = item.get("used").and_then(|v| v.as_u64()).unwrap_or(0) * 1024;
+            let avail = item.get("avail").and_then(|v| v.as_u64()).unwrap_or(0) * 1024;
+            let content = item.get("content").and_then(|v| v.as_str())
+                .unwrap_or("")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            Some(PveStorage { id, storage_type, status, total_bytes: total, used_bytes: used, available_bytes: avail, content })
+        }).collect();
+    }
+
+    pvesm_list_storage_text()
+}
+
+/// Fallback: parse `pvesm status` text output
+fn pvesm_list_storage_text() -> Vec<PveStorage> {
+    let output = match Command::new("pvesm").arg("status").output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return vec![],
+    };
+
+    // Header: Name           Type     Status           Total            Used       Available        %
+    output.lines().skip(1).filter_map(|line| {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 7 { return None; }
+        let id = parts[0].to_string();
+        let storage_type = parts[1].to_string();
+        let status = parts[2].to_string();
+        let total = parts[3].parse::<u64>().unwrap_or(0) * 1024;
+        let used = parts[4].parse::<u64>().unwrap_or(0) * 1024;
+        let avail = parts[5].parse::<u64>().unwrap_or(0) * 1024;
+
+        // Get content types from `pvesm show <storage>`
+        let content = pvesm_get_content(&id);
+        Some(PveStorage { id, storage_type, status, total_bytes: total, used_bytes: used, available_bytes: avail, content })
+    }).collect()
+}
+
+/// Get content types for a specific PVE storage
+fn pvesm_get_content(storage_id: &str) -> Vec<String> {
+    // Try reading from /etc/pve/storage.cfg directly for speed
+    if let Ok(cfg) = std::fs::read_to_string("/etc/pve/storage.cfg") {
+        let mut in_section = false;
+        for line in cfg.lines() {
+            let trimmed = line.trim();
+            // Section headers look like: dir: local
+            if !trimmed.starts_with('#') && trimmed.contains(':') && !trimmed.starts_with('\t') && !trimmed.starts_with(' ') {
+                let parts: Vec<&str> = trimmed.splitn(2, ':').collect();
+                in_section = parts.get(1).map(|s| s.trim()) == Some(storage_id);
+            } else if in_section && trimmed.starts_with("content") {
+                return trimmed.split_whitespace().skip(1)
+                    .flat_map(|s| s.split(','))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+        }
+    }
+    vec![]
+}
+
+/// Get next available VMID from Proxmox
+fn pct_next_vmid() -> Result<u32, String> {
+    let output = Command::new("pvesh").args(["get", "/cluster/nextid"])
+        .output()
+        .map_err(|e| format!("Failed to get next VMID: {}", e))?;
+    if !output.status.success() {
+        return Err("pvesh get /cluster/nextid failed".to_string());
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // pvesh may return JSON string like "100" or just 100
+    let cleaned = text.trim_matches('"');
+    cleaned.parse::<u32>().map_err(|e| format!("Invalid VMID '{}': {}", cleaned, e))
+}
+
+/// Download a template to Proxmox's template storage if not already cached
+fn pct_ensure_template(storage: &str, distribution: &str, release: &str, architecture: &str) -> Result<String, String> {
+    // Check if template already exists
+    let list_output = Command::new("pveam").args(["list", storage]).output()
+        .map_err(|e| format!("Failed to list templates: {}", e))?;
+    let list_text = String::from_utf8_lossy(&list_output.stdout);
+
+    // Look for matching template (e.g. "ubuntu-24.04-standard" or "debian-12-standard")
+    let search_term = format!("{}-{}", distribution, release);
+    for line in list_text.lines() {
+        if line.contains(&search_term) && line.contains(architecture) {
+            // Already have this template — extract the volid
+            let volid = line.split_whitespace().next().unwrap_or("").to_string();
+            if !volid.is_empty() {
+                info!("Template already cached: {}", volid);
+                return Ok(volid);
+            }
+        }
+    }
+
+    // Update available template list
+    info!("Updating Proxmox template list...");
+    let _ = Command::new("pveam").arg("update").output();
+
+    // Search available templates
+    let avail_output = Command::new("pveam").args(["available", "--section", "system"]).output()
+        .map_err(|e| format!("Failed to search templates: {}", e))?;
+    let avail_text = String::from_utf8_lossy(&avail_output.stdout);
+
+    // Find best matching template
+    let mut best_template = String::new();
+    for line in avail_text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let template_name = parts[1];
+            if template_name.contains(&search_term) {
+                // Prefer "standard" variant and matching architecture
+                if template_name.contains("standard") || best_template.is_empty() {
+                    best_template = template_name.to_string();
+                }
+            }
+        }
+    }
+
+    if best_template.is_empty() {
+        return Err(format!("No Proxmox template found for {} {} {}", distribution, release, architecture));
+    }
+
+    // Download the template
+    info!("Downloading template: {} to {}", best_template, storage);
+    let dl_output = Command::new("pveam").args(["download", storage, &best_template]).output()
+        .map_err(|e| format!("Failed to download template: {}", e))?;
+
+    if !dl_output.status.success() {
+        let stderr = String::from_utf8_lossy(&dl_output.stderr);
+        return Err(format!("Template download failed: {}", stderr));
+    }
+
+    // Return the volid
+    Ok(format!("{}:vztmpl/{}", storage, best_template))
+}
+
+/// Create an LXC container via Proxmox's pct command (public API entry point)
+pub fn pct_create_api(name: &str, distribution: &str, release: &str, architecture: &str,
+              storage_id: Option<&str>, root_password: Option<&str>,
+              memory_mb: Option<u32>, cpu_cores: Option<u32>) -> Result<String, String> {
+    let vmid = pct_next_vmid()?;
+    let storage = storage_id.unwrap_or("local-lvm");
+
+    // Determine which storage holds templates (use "local" for vztmpl by default)
+    let template_storage = if storage == "local-lvm" || storage == "local-zfs" {
+        "local"  // LVM/ZFS can't hold templates, use "local" (directory)
+    } else {
+        storage
+    };
+
+    // Ensure the template is downloaded
+    let template_volid = pct_ensure_template(template_storage, distribution, release, architecture)?;
+
+    info!("Creating Proxmox container {} (VMID {}) from {}", name, vmid, template_volid);
+
+    let mut args = vec![
+        "create".to_string(),
+        vmid.to_string(),
+        template_volid,
+        "--hostname".to_string(), name.to_string(),
+        "--storage".to_string(), storage.to_string(),
+        "--rootfs".to_string(), format!("{}:8", storage), // 8GB default rootfs
+        "--net0".to_string(), "name=eth0,bridge=vmbr0,ip=dhcp".to_string(),
+        "--start".to_string(), "0".to_string(),
+        "--unprivileged".to_string(), "1".to_string(),
+    ];
+
+    if let Some(pw) = root_password {
+        if !pw.is_empty() {
+            args.push("--password".to_string());
+            args.push(pw.to_string());
+        }
+    }
+
+    if let Some(mem) = memory_mb {
+        if mem > 0 {
+            args.push("--memory".to_string());
+            args.push(mem.to_string());
+        }
+    }
+
+    if let Some(cores) = cpu_cores {
+        if cores > 0 {
+            args.push("--cores".to_string());
+            args.push(cores.to_string());
+        }
+    }
+
+    info!("pct {}", args.join(" "));
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let output = Command::new("pct")
+        .args(&args_ref)
+        .output()
+        .map_err(|e| format!("Failed to run pct create: {}", e))?;
+
+    if output.status.success() {
+        info!("Proxmox container {} (VMID {}) created successfully", name, vmid);
+        Ok(format!("Container '{}' created (VMID {}, {} {} {}, storage: {})", name, vmid, distribution, release, architecture, storage))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Err(format!("pct create failed: {} {}", stderr.trim(), stdout.trim()))
+    }
+}
+
 /// Create an LXC container from a download template
+/// On Proxmox nodes, automatically uses `pct create` instead of `lxc-create`
 pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &str, storage_path: Option<&str>) -> Result<String, String> {
     info!("Creating LXC container {} ({} {} {})", name, distribution, release, architecture);
 
+    // On Proxmox, delegate to pct create
+    if is_proxmox() {
+        info!("Proxmox detected — using pct create");
+        return pct_create_api(name, distribution, release, architecture, storage_path, None, None, None);
+    }
+
+    // Standalone: use native lxc-create
     let mut args = vec![
         "-t", "download",
         "-n", name,

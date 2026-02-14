@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{info, error, warn};
 use rand::Rng;
+use crate::containers;
 
 /// A storage volume that can be attached to a VM
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -170,10 +171,6 @@ impl VmManager {
     }
 
     pub fn create_vm(&self, mut config: VmConfig) -> Result<(), String> {
-        if self.vm_config_path(&config.name).exists() {
-            return Err("VM already exists".to_string());
-        }
-
         // Validation
         if config.cpus == 0 { config.cpus = 1; }
         if config.memory_mb == 0 { config.memory_mb = 1024; }
@@ -191,6 +188,16 @@ impl VmManager {
             } else {
                 config.wolfnet_ip = None;
             }
+        }
+
+        // On Proxmox, delegate to qm create
+        if containers::is_proxmox() {
+            return self.qm_create(&config);
+        }
+
+        // Standalone: use QEMU directly
+        if self.vm_config_path(&config.name).exists() {
+            return Err("VM already exists".to_string());
         }
 
         // Ensure storage path exists
@@ -226,6 +233,69 @@ impl VmManager {
         info!("Created VM: {} (WolfNet: {:?}, disks: {})", 
               config.name, config.wolfnet_ip, 1 + config.extra_disks.len());
         Ok(())
+    }
+
+    /// Create a VM via Proxmox's qm command
+    fn qm_create(&self, config: &VmConfig) -> Result<(), String> {
+        // Get next available VMID
+        let vmid_output = Command::new("pvesh").args(["get", "/cluster/nextid"]).output()
+            .map_err(|e| format!("Failed to get next VMID: {}", e))?;
+        if !vmid_output.status.success() {
+            return Err("pvesh get /cluster/nextid failed".to_string());
+        }
+        let vmid_text = String::from_utf8_lossy(&vmid_output.stdout).trim().trim_matches('"').to_string();
+        let vmid: u32 = vmid_text.parse().map_err(|e| format!("Invalid VMID '{}': {}", vmid_text, e))?;
+
+        // Determine storage ID (use Proxmox storage name, default to "local-lvm")
+        let storage = config.storage_path.as_deref().unwrap_or("local-lvm");
+
+        info!("Creating Proxmox VM {} (VMID {}) on storage {}", config.name, vmid, storage);
+
+        let mut args = vec![
+            "create".to_string(),
+            vmid.to_string(),
+            "--name".to_string(), config.name.clone(),
+            "--cores".to_string(), config.cpus.to_string(),
+            "--memory".to_string(), config.memory_mb.to_string(),
+            "--scsi0".to_string(), format!("{}:{}", storage, config.disk_size_gb),
+            "--scsihw".to_string(), "virtio-scsi-single".to_string(),
+            "--net0".to_string(), format!("virtio,bridge=vmbr0"),
+            "--ostype".to_string(), "l26".to_string(), // Linux 2.6+ kernel
+        ];
+
+        // ISO (CD-ROM)
+        if let Some(ref iso) = config.iso_path {
+            if !iso.is_empty() {
+                // On Proxmox, ISOs are referred to as storage:iso/filename.iso
+                args.push("--ide2".to_string());
+                args.push(format!("{},media=cdrom", iso));
+                args.push("--boot".to_string());
+                args.push("order=ide2;scsi0".to_string());
+            }
+        }
+
+        info!("qm {}", args.join(" "));
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let output = Command::new("qm")
+            .args(&args_ref)
+            .output()
+            .map_err(|e| format!("Failed to run qm create: {}", e))?;
+
+        if output.status.success() {
+            info!("Proxmox VM {} (VMID {}) created successfully", config.name, vmid);
+
+            // Also save a WolfStack config for tracking
+            let mut tracked = config.clone();
+            tracked.storage_path = Some(storage.to_string());
+            let json = serde_json::to_string_pretty(&tracked).map_err(|e| e.to_string())?;
+            let _ = fs::write(self.vm_config_path(&config.name), json);
+
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            Err(format!("qm create failed: {} {}", stderr.trim(), stdout.trim()))
+        }
     }
 
     /// Create a volume's disk file
@@ -367,8 +437,24 @@ impl VmManager {
         Ok(())
     }
 
-    /// List available storage locations (mounted filesystems with usable space)
+    /// List available storage locations (Proxmox-aware)
     pub fn list_storage_locations(&self) -> Vec<StorageLocation> {
+        // On Proxmox, use pvesm for storage IDs
+        if containers::is_proxmox() {
+            let pve_storages = containers::pvesm_list_storage();
+            return pve_storages.iter()
+                .filter(|s| s.status == "active")
+                .filter(|s| s.content.iter().any(|c| c == "images" || c == "rootdir"))
+                .map(|s| StorageLocation {
+                    path: s.id.clone(), // PVE storage ID as "path"
+                    total_gb: s.total_bytes / 1073741824,
+                    available_gb: s.available_bytes / 1073741824,
+                    fs_type: s.storage_type.clone(),
+                })
+                .collect();
+        }
+
+        // Standalone: filesystem-based storage
         let mut locations = Vec::new();
         if let Ok(output) = Command::new("df").args(["-BG", "--output=target,size,avail,fstype"]).output() {
             if let Ok(text) = String::from_utf8(output.stdout) {
