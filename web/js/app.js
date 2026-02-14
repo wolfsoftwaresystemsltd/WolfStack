@@ -6224,17 +6224,40 @@ async function doMigrateLxc(name) {
     const extToken = document.getElementById('migrate-ext-token')?.value.trim() || '';
     document.getElementById('lxc-migrate-modal')?.remove();
 
-    // Progress modal
+    const isExternal = target === '__external__';
+    if (isExternal && (!extUrl || !extToken)) { showToast('Enter URL and token', 'error'); return; }
+
+    // Step definitions
+    const steps = [
+        { id: 'stop', label: 'Stopping container', icon: '⏹️' },
+        { id: 'export', label: 'Creating archive (vzdump/tar)', icon: '📦' },
+        { id: 'upload', label: isExternal ? `Uploading to ${extUrl.replace(/https?:\/\//, '').split('/')[0]}` : 'Transferring to target node', icon: '📤' },
+        { id: 'import', label: 'Importing on target node', icon: '📥' },
+        { id: 'cleanup', label: 'Cleaning up source', icon: '🧹' },
+    ];
+
+    // Progress modal with step list
     const modal = document.createElement('div');
     modal.id = 'lxc-op-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
     modal.innerHTML = `
-        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:400px;max-width:500px;box-shadow:0 20px 60px rgba(0,0,0,0.5);text-align:center;">
-            <div style="width:48px;height:48px;border:4px solid var(--border,#555);border-top:4px solid #ef4444;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px;"></div>
-            <h3 style="margin:0 0 8px;color:var(--text,#fff);">Migrating Container</h3>
-            <p id="lxc-op-status" style="margin:0;color:var(--text-muted,#aaa);font-size:0.9em;">Stopping, exporting, and transferring <strong>${name}</strong>...</p>
-            <p style="margin:8px 0 0;color:var(--text-muted,#666);font-size:0.8em;">This may take several minutes for large containers.</p>
-            <div id="lxc-op-result" style="display:none;margin-top:16px;padding:12px;border-radius:8px;text-align:left;font-size:0.9em;"></div>
+        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:440px;max-width:540px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+            <h3 style="margin:0 0 6px;color:var(--text,#fff);">🚀 Migrating Container</h3>
+            <p style="margin:0 0 16px;color:var(--text-muted,#aaa);font-size:0.85em;">Moving <strong>${name}</strong> — this may take several minutes for large containers.</p>
+            <div id="migrate-steps" style="display:flex;flex-direction:column;gap:6px;margin-bottom:16px;">
+                ${steps.map((s, i) => `
+                    <div id="mstep-${s.id}" style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;background:var(--bg-secondary,#161622);transition:all 0.3s;">
+                        <span class="mstep-icon" style="width:24px;text-align:center;font-size:14px;color:var(--text-muted,#555);">${s.icon}</span>
+                        <span style="flex:1;font-size:0.88em;color:var(--text-muted,#666);">${s.label}</span>
+                        <span class="mstep-status" style="font-size:12px;color:var(--text-muted,#555);min-width:20px;text-align:center;">⬜</span>
+                    </div>
+                `).join('')}
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                <div id="migrate-spinner" style="width:20px;height:20px;border:3px solid var(--border,#555);border-top:3px solid #ef4444;border-radius:50%;animation:spin 1s linear infinite;flex-shrink:0;"></div>
+                <span id="migrate-elapsed" style="font-size:0.82em;color:var(--text-muted,#888);">Elapsed: 0s</span>
+            </div>
+            <div id="lxc-op-result" style="display:none;margin-top:12px;padding:12px;border-radius:8px;text-align:left;font-size:0.9em;"></div>
             <button id="lxc-op-close" style="display:none;margin-top:12px;" class="btn" onclick="document.getElementById('lxc-op-modal')?.remove()">Close</button>
         </div>
     `;
@@ -6245,10 +6268,60 @@ async function doMigrateLxc(name) {
     }
     document.body.appendChild(modal);
 
+    // Elapsed timer
+    const startTime = Date.now();
+    const elapsedEl = document.getElementById('migrate-elapsed');
+    const elapsedTimer = setInterval(() => {
+        const secs = Math.floor((Date.now() - startTime) / 1000);
+        const mins = Math.floor(secs / 60);
+        elapsedEl.textContent = mins > 0 ? `Elapsed: ${mins}m ${secs % 60}s` : `Elapsed: ${secs}s`;
+    }, 1000);
+
+    // Step progress animation — advance through steps on realistic timers
+    function setStepActive(stepId) {
+        const el = document.getElementById('mstep-' + stepId);
+        if (!el) return;
+        el.style.background = 'rgba(124,58,237,0.15)';
+        el.style.border = '1px solid rgba(124,58,237,0.3)';
+        el.querySelector('.mstep-status').innerHTML = '<div style="width:14px;height:14px;border:2px solid var(--border,#555);border-top:2px solid #7c3aed;border-radius:50%;animation:spin 1s linear infinite;display:inline-block;"></div>';
+        el.querySelector('span:nth-child(2)').style.color = 'var(--text,#fff)';
+    }
+    function setStepDone(stepId) {
+        const el = document.getElementById('mstep-' + stepId);
+        if (!el) return;
+        el.style.background = 'rgba(16,185,129,0.08)';
+        el.style.border = '1px solid rgba(16,185,129,0.2)';
+        el.querySelector('.mstep-status').textContent = '✅';
+        el.querySelector('span:nth-child(2)').style.color = '#10b981';
+    }
+    function setStepFailed(stepId) {
+        const el = document.getElementById('mstep-' + stepId);
+        if (!el) return;
+        el.style.background = 'rgba(239,68,68,0.1)';
+        el.style.border = '1px solid rgba(239,68,68,0.2)';
+        el.querySelector('.mstep-status').textContent = '❌';
+        el.querySelector('span:nth-child(2)').style.color = '#ef4444';
+    }
+
+    // Animate steps on realistic timers (the backend is doing these steps sequentially)
+    let currentStep = 0;
+    const stepTimings = [2000, 8000, 15000, 20000]; // cumulative approximate timings; upload is the longest
+    const stepTimers = [];
+
+    setStepActive(steps[0].id);
+    for (let i = 0; i < stepTimings.length; i++) {
+        stepTimers.push(setTimeout(() => {
+            setStepDone(steps[i].id);
+            if (i + 1 < steps.length) {
+                setStepActive(steps[i + 1].id);
+                currentStep = i + 1;
+            }
+        }, stepTimings[i]));
+    }
+
     try {
         let resp;
-        if (target === '__external__') {
-            if (!extUrl || !extToken) { showToast('Enter URL and token', 'error'); modal.remove(); return; }
+        if (isExternal) {
             resp = await fetch(apiUrl(`/api/containers/lxc/${name}/migrate-external`), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -6262,31 +6335,45 @@ async function doMigrateLxc(name) {
             });
         }
 
+        // Clear step timers — backend has finished
+        stepTimers.forEach(t => clearTimeout(t));
+        clearInterval(elapsedTimer);
+        const totalSecs = Math.floor((Date.now() - startTime) / 1000);
+        const totalMins = Math.floor(totalSecs / 60);
+        elapsedEl.textContent = totalMins > 0 ? `Completed in ${totalMins}m ${totalSecs % 60}s` : `Completed in ${totalSecs}s`;
+
         let data;
         try { data = await resp.json(); } catch { data = {}; }
 
         const resultEl = document.getElementById('lxc-op-result');
-        const statusEl = document.getElementById('lxc-op-status');
-        const spinner = modal.querySelector('div > div:first-child');
+        const spinner = document.getElementById('migrate-spinner');
         if (spinner) spinner.style.display = 'none';
         document.getElementById('lxc-op-close').style.display = '';
 
         if (resp.ok) {
-            statusEl.textContent = '✅ Migration complete!';
+            // Mark all steps done
+            steps.forEach(s => setStepDone(s.id));
             resultEl.style.display = 'block';
             resultEl.style.background = 'rgba(16,185,129,0.15)';
             resultEl.style.color = '#10b981';
             resultEl.textContent = data.message || 'Migrated successfully';
             setTimeout(loadLxcContainers, 500);
         } else {
-            statusEl.textContent = '❌ Migration failed';
+            // Mark current step as failed, leave rest as pending
+            steps.slice(0, currentStep).forEach(s => setStepDone(s.id));
+            setStepFailed(steps[currentStep].id);
             resultEl.style.display = 'block';
             resultEl.style.background = 'rgba(239,68,68,0.15)';
             resultEl.style.color = '#ef4444';
             resultEl.textContent = data.error || 'Unknown error';
         }
     } catch (e) {
-        document.getElementById('lxc-op-status').textContent = '❌ Migration failed';
+        stepTimers.forEach(t => clearTimeout(t));
+        clearInterval(elapsedTimer);
+        steps.slice(0, currentStep).forEach(s => setStepDone(s.id));
+        setStepFailed(steps[currentStep].id);
+        const spinner = document.getElementById('migrate-spinner');
+        if (spinner) spinner.style.display = 'none';
         const r = document.getElementById('lxc-op-result');
         r.style.display = 'block'; r.style.background = 'rgba(239,68,68,0.15)'; r.style.color = '#ef4444';
         r.textContent = e.message;
