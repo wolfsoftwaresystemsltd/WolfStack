@@ -5105,8 +5105,10 @@ async function loadLxcContainers() {
             fetch(apiUrl('/api/containers/lxc/stats')),
         ]);
 
-        const containers = await containersResp.json();
-        const stats = await statsResp.json();
+        const containersData = containersResp.ok ? await containersResp.json() : [];
+        const statsData = statsResp.ok ? await statsResp.json() : [];
+        const containers = Array.isArray(containersData) ? containersData : [];
+        const stats = Array.isArray(statsData) ? statsData : [];
 
         // Index stats by name
         const lxcStats = {};
