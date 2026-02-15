@@ -1059,8 +1059,12 @@
                     <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                         <span style="font-size:20px;">🗄️</span>
                         <div style="display:flex; align-items:center; gap:6px; flex:1; min-width:0; flex-wrap:wrap;">
-                            <input type="text" class="form-control" id="mysql-host" placeholder="localhost"
-                                value="localhost" style="width:140px; font-size:13px; font-family:var(--font-mono);">
+                            <select id="mysql-container-select" onchange="mysqlSelectContainer(this.value)"
+                                style="display:none; font-size:13px; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg-secondary); color:var(--text-primary); font-family:var(--font-mono); max-width:200px;">
+                                <option value="">Manual connection</option>
+                            </select>
+                            <input type="text" class="form-control" id="mysql-host" placeholder="localhost" value=""
+                                style="width:140px; font-size:13px; font-family:var(--font-mono);">
                             <span style="color:var(--text-muted);">:</span>
                             <input type="number" class="form-control" id="mysql-port" placeholder="3306" value="3306"
                                 style="width:80px; font-size:13px; font-family:var(--font-mono);">

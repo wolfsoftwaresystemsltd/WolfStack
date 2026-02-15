@@ -4259,6 +4259,15 @@ pub async fn mysql_detect(
     HttpResponse::Ok().json(crate::mysql_editor::detect_mysql())
 }
 
+/// GET /api/mysql/detect-containers — find MySQL/MariaDB in Docker/LXC containers
+pub async fn mysql_detect_containers(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let containers = crate::mysql_editor::detect_mysql_containers();
+    HttpResponse::Ok().json(serde_json::json!({ "containers": containers }))
+}
+
 #[derive(Deserialize)]
 pub struct MysqlConnectRequest {
     pub host: String,
@@ -4449,6 +4458,24 @@ pub async fn mysql_query(
     body: web::Json<MysqlQueryRequest>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
+
+    // SQL safety guard — block dangerous DDL/DCL statements
+    let upper = body.query.trim().to_uppercase();
+    let blocked_patterns = [
+        "DROP DATABASE", "DROP SCHEMA",
+        "GRANT ", "REVOKE ",
+        "CREATE USER", "DROP USER", "ALTER USER",
+        "LOAD DATA", "LOAD_FILE",
+        "INTO OUTFILE", "INTO DUMPFILE",
+    ];
+    for pattern in &blocked_patterns {
+        if upper.contains(pattern) {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Blocked: '{}' statements are not allowed through the web editor for safety. Use a direct MySQL client instead.", pattern.trim()),
+            }));
+        }
+    }
+
     let params = crate::mysql_editor::ConnParams {
         host: body.host.clone(),
         port: body.port,
@@ -4621,6 +4648,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/ws/pve-console/{node_id}/{vmid}", web::get().to(pve_console::pve_console_ws))
         // MySQL Database Editor
         .route("/api/mysql/detect", web::get().to(mysql_detect))
+        .route("/api/mysql/detect-containers", web::get().to(mysql_detect_containers))
         .route("/api/mysql/connect", web::post().to(mysql_connect))
         .route("/api/mysql/databases", web::post().to(mysql_databases))
         .route("/api/mysql/tables", web::post().to(mysql_tables))

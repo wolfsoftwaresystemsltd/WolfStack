@@ -9229,9 +9229,28 @@ let mysqlTotalPages = 0;
 let mysqlDatabases = [];
 
 function loadMySQLEditor() {
-    // Reset state when navigating to the editor
+    // ── Full state reset when switching nodes ──
+    mysqlDisconnect();
+
     const banner = document.getElementById('mysql-detect-banner');
     banner.style.display = 'none';
+
+    // Auto-fill host with the current node's IP address
+    const node = currentNodeId ? allNodes.find(n => n.id === currentNodeId) : null;
+    const hostInput = document.getElementById('mysql-host');
+    if (node && node.address && !node.is_self) {
+        hostInput.value = node.address;
+    } else {
+        hostInput.value = 'localhost';
+    }
+    document.getElementById('mysql-port').value = '3306';
+    document.getElementById('mysql-user').value = '';
+    document.getElementById('mysql-pass').value = '';
+
+    // Reset container dropdown
+    const containerSelect = document.getElementById('mysql-container-select');
+    containerSelect.style.display = 'none';
+    containerSelect.innerHTML = '<option value="">Manual connection</option>';
 
     // Detect MySQL on this node
     const nodeId = currentNodeId;
@@ -9251,7 +9270,43 @@ function loadMySQLEditor() {
             }
         })
         .catch(() => { });
+
+    // Detect MySQL containers (Docker/LXC)
+    fetch(`${baseUrl}/api/mysql/detect-containers`, { credentials: 'include' })
+        .then(r => r.json())
+        .then(data => {
+            const containers = data.containers || [];
+            if (containers.length === 0) return;
+
+            containerSelect.innerHTML = '<option value="">Manual connection</option>';
+            containers.forEach((c, i) => {
+                const label = `🐳 ${c.name} (${c.image}) — ${c.host}:${c.port}`;
+                containerSelect.innerHTML += `<option value="${i}">${label}</option>`;
+            });
+            containerSelect.style.display = 'inline-block';
+
+            // Store for selection handler
+            containerSelect._containers = containers;
+        })
+        .catch(() => { });
 }
+
+/** When user selects a container from the dropdown, auto-fill connection fields */
+function mysqlSelectContainer(idx) {
+    const containerSelect = document.getElementById('mysql-container-select');
+    const containers = containerSelect._containers || [];
+    if (idx === '' || !containers[idx]) {
+        // "Manual connection" selected — reset to node IP
+        const node = currentNodeId ? allNodes.find(n => n.id === currentNodeId) : null;
+        document.getElementById('mysql-host').value = (node && node.address && !node.is_self) ? node.address : 'localhost';
+        document.getElementById('mysql-port').value = '3306';
+        return;
+    }
+    const c = containers[idx];
+    document.getElementById('mysql-host').value = c.host;
+    document.getElementById('mysql-port').value = c.port;
+}
+
 
 function getNodeApiBase(nodeId) {
     if (!nodeId) return '';

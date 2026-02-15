@@ -108,12 +108,21 @@ pub fn detect_mysql() -> serde_json::Value {
 }
 
 /// Test a MySQL connection — returns the server version string on success
+/// Uses a 5-second timeout to prevent the UI from hanging on unreachable hosts.
 pub async fn test_connection(params: &ConnParams) -> Result<String, String> {
     let pool = Pool::new(params.to_opts());
-    let mut conn = pool
-        .get_conn()
-        .await
-        .map_err(|e| format!("Connection failed: {}", e))?;
+
+    // Wrap connection attempt in a timeout so we don't hang forever
+    let conn_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        pool.get_conn(),
+    ).await;
+
+    let mut conn = match conn_result {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => return Err(format!("Connection failed: {}", e)),
+        Err(_) => return Err("Connection timed out after 5 seconds".to_string()),
+    };
 
     let version: Option<String> = conn
         .query_first("SELECT VERSION()")
@@ -414,4 +423,127 @@ fn rows_to_json(rows: &[Row], columns: &[String]) -> Vec<Vec<serde_json::Value>>
                 .collect()
         })
         .collect()
+}
+
+/// Detect MySQL/MariaDB instances running inside Docker and LXC containers
+pub fn detect_mysql_containers() -> Vec<serde_json::Value> {
+    let mut results = Vec::new();
+
+    // ── Docker containers ──
+    if let Ok(output) = std::process::Command::new("docker")
+        .args(["ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Ports}}", "--no-trunc"])
+        .output()
+    {
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if line.is_empty() { continue; }
+                let parts: Vec<&str> = line.split('\t').collect();
+                let name = parts.first().unwrap_or(&"").to_string();
+                let image = parts.get(1).unwrap_or(&"").to_string();
+                let ports_str = parts.get(2).unwrap_or(&"").to_string();
+
+                let image_lower = image.to_lowercase();
+                if !image_lower.contains("mysql") && !image_lower.contains("mariadb") {
+                    continue;
+                }
+
+                // Try to find the published host port for 3306
+                let mut host_port: u16 = 3306;
+                for port_mapping in ports_str.split(", ") {
+                    // Format: "0.0.0.0:3307->3306/tcp" or ":::3307->3306/tcp"
+                    if port_mapping.contains("->3306/") {
+                        if let Some(arrow_pos) = port_mapping.find("->") {
+                            let before = &port_mapping[..arrow_pos];
+                            if let Some(colon_pos) = before.rfind(':') {
+                                if let Ok(p) = before[colon_pos + 1..].parse::<u16>() {
+                                    host_port = p;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Get container IP address
+                let ip = std::process::Command::new("docker")
+                    .args(["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", &name])
+                    .output()
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+
+                // Use localhost if there's a published port mapping, else use the container IP
+                let host = if ports_str.contains("->3306/") {
+                    "127.0.0.1".to_string()
+                } else if !ip.is_empty() {
+                    ip
+                } else {
+                    "127.0.0.1".to_string()
+                };
+
+                results.push(serde_json::json!({
+                    "name": name,
+                    "image": image,
+                    "runtime": "docker",
+                    "host": host,
+                    "port": host_port,
+                }));
+            }
+        }
+    }
+
+    // ── LXC containers ──
+    if let Ok(output) = std::process::Command::new("lxc-ls")
+        .args(["-f", "-F", "NAME,STATE"])
+        .output()
+    {
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines().skip(1) {
+                if line.is_empty() { continue; }
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let name = parts.first().unwrap_or(&"").to_string();
+                let state = parts.get(1).unwrap_or(&"STOPPED").to_lowercase();
+                if state != "running" { continue; }
+
+                // Check if mysqld is running inside the container
+                let mysql_check = std::process::Command::new("lxc-attach")
+                    .args(["-n", &name, "--", "pgrep", "-x", "mysqld"])
+                    .output();
+                let mariadb_check = std::process::Command::new("lxc-attach")
+                    .args(["-n", &name, "--", "pgrep", "-x", "mariadbd"])
+                    .output();
+
+                let has_mysql = mysql_check.map(|o| o.status.success()).unwrap_or(false)
+                    || mariadb_check.map(|o| o.status.success()).unwrap_or(false);
+
+                if !has_mysql { continue; }
+
+                // Get the container's IP
+                let ip = std::process::Command::new("lxc-info")
+                    .args(["-n", &name, "-iH"])
+                    .output()
+                    .ok()
+                    .map(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .lines()
+                            .find(|l| !l.contains(':')) // skip IPv6
+                            .unwrap_or("")
+                            .trim()
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+
+                if ip.is_empty() { continue; }
+
+                results.push(serde_json::json!({
+                    "name": name,
+                    "image": "mysql (lxc)",
+                    "runtime": "lxc",
+                    "host": ip,
+                    "port": 3306,
+                }));
+            }
+        }
+    }
+
+    results
 }
