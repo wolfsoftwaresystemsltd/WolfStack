@@ -111,6 +111,7 @@ function selectServerView(nodeId, view) {
         certificates: 'Certificates',
         cron: 'Cron Jobs',
         'pve-resources': 'VMs & Containers',
+        'mysql-editor': 'MySQL',
     };
     document.getElementById('page-title').textContent = `${hostname} — ${viewTitles[view] || view}`;
     document.getElementById('hostname-display').textContent = `${hostname} (${node?.address}:${node?.port})`;
@@ -177,6 +178,7 @@ function selectServerView(nodeId, view) {
     if (view === 'certificates') loadCertificates();
     if (view === 'cron') loadCronJobs();
     if (view === 'pve-resources') renderPveResourcesView(nodeId);
+    if (view === 'mysql-editor') loadMySQLEditor();
 }
 
 // ─── Server Tree ───
@@ -309,6 +311,9 @@ function buildServerTree(nodes) {
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
                             <span class="icon">💻</span> Terminal
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="mysql-editor" onclick="selectServerView('${node.id}', 'mysql-editor')">
+                            <span class="icon">🗄️</span> MySQL
                         </a>
                     </div>
                 </div>`;
@@ -9211,4 +9216,524 @@ async function importConfigFile(input) {
     }
 
     input.value = '';
+}
+
+// ─── MySQL Database Editor ───
+
+let mysqlCreds = null; // { host, port, user, password }
+let mysqlCurrentDb = null;
+let mysqlCurrentTable = null;
+let mysqlCurrentPage = 0;
+let mysqlPageSize = 50;
+let mysqlTotalPages = 0;
+let mysqlDatabases = [];
+
+function loadMySQLEditor() {
+    // Reset state when navigating to the editor
+    const banner = document.getElementById('mysql-detect-banner');
+    banner.style.display = 'none';
+
+    // Detect MySQL on this node
+    const nodeId = currentNodeId;
+    const baseUrl = nodeId ? getNodeApiBase(nodeId) : '';
+    fetch(`${baseUrl}/api/mysql/detect`, { credentials: 'include' })
+        .then(r => r.json())
+        .then(data => {
+            banner.style.display = 'block';
+            if (data.installed) {
+                banner.innerHTML = `<div style="padding:8px 14px; background:rgba(46,204,113,0.1); border:1px solid rgba(46,204,113,0.3); border-radius:6px; font-size:12px; color:#2ecc71;">
+                    ✅ MySQL detected — ${data.version || 'installed'} ${data.service_running ? '• Service running' : '• Service not running'}
+                </div>`;
+            } else {
+                banner.innerHTML = `<div style="padding:8px 14px; background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); border-radius:6px; font-size:12px; color:#e74c3c;">
+                    ⚠️ MySQL not detected on this node. You can still connect to a remote MySQL server using the connection bar above.
+                </div>`;
+            }
+        })
+        .catch(() => { });
+}
+
+function getNodeApiBase(nodeId) {
+    if (!nodeId) return '';
+    const node = allNodes.find(n => n.id === nodeId);
+    if (node && node.is_self) return '';
+    return `/api/nodes/${nodeId}/proxy`;
+}
+
+async function mysqlConnect() {
+    const host = document.getElementById('mysql-host').value.trim() || 'localhost';
+    const port = parseInt(document.getElementById('mysql-port').value) || 3306;
+    const user = document.getElementById('mysql-user').value.trim();
+    const pass = document.getElementById('mysql-pass').value;
+
+    if (!user) {
+        showToast('Please enter a MySQL username', 'error');
+        return;
+    }
+
+    const btn = document.getElementById('mysql-connect-btn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Connecting...';
+
+    const badge = document.getElementById('mysql-status-badge');
+    badge.textContent = 'Connecting...';
+    badge.style.background = 'rgba(241,196,15,0.15)';
+    badge.style.color = '#f1c40f';
+
+    try {
+        const baseUrl = getNodeApiBase(currentNodeId);
+        const resp = await fetch(`${baseUrl}/api/mysql/connect`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host, port, user, password: pass }),
+        });
+        const data = await resp.json();
+
+        if (data.connected) {
+            mysqlCreds = { host, port, user, password: pass };
+            badge.textContent = `Connected — MySQL ${data.version}`;
+            badge.style.background = 'rgba(46,204,113,0.15)';
+            badge.style.color = '#2ecc71';
+
+            btn.style.display = 'none';
+            document.getElementById('mysql-disconnect-btn').style.display = '';
+
+            // Show main editor
+            const main = document.getElementById('mysql-editor-main');
+            main.style.display = 'flex';
+
+            // Load databases
+            await mysqlLoadDatabases();
+            showToast('Connected to MySQL ' + data.version, 'success');
+        } else {
+            badge.textContent = 'Connection failed';
+            badge.style.background = 'rgba(231,76,60,0.15)';
+            badge.style.color = '#e74c3c';
+            showToast(data.error || 'Connection failed', 'error');
+        }
+    } catch (e) {
+        badge.textContent = 'Error';
+        badge.style.background = 'rgba(231,76,60,0.15)';
+        badge.style.color = '#e74c3c';
+        showToast('Connection error: ' + e.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '🔌 Connect';
+    }
+}
+
+function mysqlDisconnect() {
+    mysqlCreds = null;
+    mysqlCurrentDb = null;
+    mysqlCurrentTable = null;
+    mysqlDatabases = [];
+
+    const badge = document.getElementById('mysql-status-badge');
+    badge.textContent = 'Not connected';
+    badge.style.background = 'var(--bg-tertiary)';
+    badge.style.color = 'var(--text-muted)';
+
+    document.getElementById('mysql-connect-btn').style.display = '';
+    document.getElementById('mysql-disconnect-btn').style.display = 'none';
+    document.getElementById('mysql-editor-main').style.display = 'none';
+
+    // Reset panels
+    document.getElementById('mysql-db-tree').innerHTML =
+        '<div style="padding:16px; color:var(--text-muted); text-align:center; font-size:12px;">Connect to see databases</div>';
+    document.getElementById('mysql-data-grid').innerHTML =
+        '<div style="padding:40px; text-align:center; color:var(--text-muted);">Select a table from the left panel to view data</div>';
+    document.getElementById('mysql-tab-structure').innerHTML =
+        '<div style="padding:40px; text-align:center; color:var(--text-muted);">Select a table to view its structure</div>';
+    document.getElementById('mysql-pagination').style.display = 'none';
+    document.getElementById('mysql-table-info').innerHTML = '';
+
+    showToast('Disconnected from MySQL', 'info');
+}
+
+async function mysqlLoadDatabases() {
+    if (!mysqlCreds) return;
+
+    const tree = document.getElementById('mysql-db-tree');
+    tree.innerHTML = '<div style="padding:16px; text-align:center; color:var(--text-muted); font-size:12px;">Loading...</div>';
+
+    try {
+        const baseUrl = getNodeApiBase(currentNodeId);
+        const resp = await fetch(`${baseUrl}/api/mysql/databases`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(mysqlCreds),
+        });
+        const data = await resp.json();
+
+        if (data.error) {
+            tree.innerHTML = `<div style="padding:16px; text-align:center; color:#e74c3c; font-size:12px;">${data.error}</div>`;
+            return;
+        }
+
+        mysqlDatabases = data.databases || [];
+
+        // Update query tab database selector
+        const queryDbSelect = document.getElementById('mysql-query-db');
+        queryDbSelect.innerHTML = '<option value="">-- select --</option>' +
+            mysqlDatabases.map(db => `<option value="${db}">${db}</option>`).join('');
+
+        // Render tree
+        let html = '';
+        for (const db of mysqlDatabases) {
+            const isSystem = ['information_schema', 'performance_schema', 'mysql', 'sys'].includes(db);
+            html += `<div class="mysql-db-node" data-db="${db}">
+                <div onclick="mysqlToggleDb('${db}')" style="padding:5px 14px; cursor:pointer; display:flex; align-items:center; gap:6px; transition:background 0.15s;"
+                     onmouseover="this.style.background='var(--bg-tertiary)'" onmouseout="this.style.background='none'">
+                    <span class="mysql-db-arrow" id="mysql-arrow-${db}" style="font-size:10px; transition:transform 0.2s; display:inline-block;">▶</span>
+                    <span style="font-size:14px;">${isSystem ? '🔧' : '📁'}</span>
+                    <span style="color:var(--text-primary); font-size:12px; ${isSystem ? 'opacity:0.6;' : ''}">${db}</span>
+                </div>
+                <div id="mysql-tables-${db}" style="display:none; padding-left:28px;"></div>
+            </div>`;
+        }
+        tree.innerHTML = html || '<div style="padding:16px; text-align:center; color:var(--text-muted); font-size:12px;">No databases found</div>';
+
+    } catch (e) {
+        tree.innerHTML = `<div style="padding:16px; text-align:center; color:#e74c3c; font-size:12px;">Error: ${e.message}</div>`;
+    }
+}
+
+async function mysqlToggleDb(db) {
+    const container = document.getElementById(`mysql-tables-${db}`);
+    const arrow = document.getElementById(`mysql-arrow-${db}`);
+
+    if (container.style.display !== 'none') {
+        container.style.display = 'none';
+        arrow.style.transform = 'rotate(0deg)';
+        return;
+    }
+
+    arrow.style.transform = 'rotate(90deg)';
+    container.style.display = 'block';
+    container.innerHTML = '<div style="padding:6px 0; font-size:11px; color:var(--text-muted);">Loading tables...</div>';
+
+    try {
+        const baseUrl = getNodeApiBase(currentNodeId);
+        const resp = await fetch(`${baseUrl}/api/mysql/tables`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...mysqlCreds, database: db }),
+        });
+        const data = await resp.json();
+
+        if (data.error) {
+            container.innerHTML = `<div style="padding:6px 0; font-size:11px; color:#e74c3c;">${data.error}</div>`;
+            return;
+        }
+
+        const tables = data.tables || [];
+        if (tables.length === 0) {
+            container.innerHTML = '<div style="padding:6px 0; font-size:11px; color:var(--text-muted);">No tables</div>';
+            return;
+        }
+
+        let html = '';
+        for (const t of tables) {
+            const icon = t.type === 'VIEW' ? '👁️' : '📄';
+            const rows = t.rows != null ? ` (${Number(t.rows).toLocaleString()})` : '';
+            const isActive = (mysqlCurrentDb === db && mysqlCurrentTable === t.name);
+            html += `<div onclick="mysqlSelectTable('${db}', '${t.name.replace(/'/g, "\\'")}')" 
+                style="padding:4px 8px; cursor:pointer; display:flex; align-items:center; gap:6px; border-radius:4px; transition:background 0.15s; ${isActive ? 'background:var(--accent-primary-15);' : ''}"
+                onmouseover="this.style.background='var(--bg-tertiary)'" 
+                onmouseout="this.style.background='${isActive ? 'var(--accent-primary-15)' : 'none'}'"
+                class="mysql-table-item" data-db="${db}" data-table="${t.name}">
+                <span style="font-size:12px;">${icon}</span>
+                <span style="color:var(--text-secondary); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${t.name}<span style="color:var(--text-muted);">${rows}</span></span>
+            </div>`;
+        }
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = `<div style="padding:6px 0; font-size:11px; color:#e74c3c;">Error: ${e.message}</div>`;
+    }
+}
+
+async function mysqlSelectTable(db, table) {
+    mysqlCurrentDb = db;
+    mysqlCurrentTable = table;
+    mysqlCurrentPage = 0;
+
+    // Update table info in header
+    document.getElementById('mysql-table-info').innerHTML =
+        `<span style="font-size:14px;">📄</span> <strong>${db}</strong>.<strong>${table}</strong>`;
+
+    // Highlight active table in tree
+    document.querySelectorAll('.mysql-table-item').forEach(el => {
+        const isActive = el.dataset.db === db && el.dataset.table === table;
+        el.style.background = isActive ? 'var(--accent-primary-15)' : 'none';
+    });
+
+    // Switch to data tab and load data
+    mysqlSwitchTab('data');
+    await mysqlLoadTableData();
+
+    // Also update the query db selector
+    document.getElementById('mysql-query-db').value = db;
+}
+
+async function mysqlLoadTableData() {
+    if (!mysqlCreds || !mysqlCurrentDb || !mysqlCurrentTable) return;
+
+    const grid = document.getElementById('mysql-data-grid');
+    grid.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);"><div class="spinner-sm"></div> Loading data...</div>';
+
+    try {
+        const baseUrl = getNodeApiBase(currentNodeId);
+        const resp = await fetch(`${baseUrl}/api/mysql/data`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                ...mysqlCreds,
+                database: mysqlCurrentDb,
+                table: mysqlCurrentTable,
+                page: mysqlCurrentPage,
+                page_size: mysqlPageSize,
+            }),
+        });
+        const data = await resp.json();
+
+        if (data.error) {
+            grid.innerHTML = `<div style="padding:40px; text-align:center; color:#e74c3c;">${data.error}</div>`;
+            return;
+        }
+
+        mysqlTotalPages = data.total_pages || 1;
+        mysqlRenderGrid(data.columns || [], data.rows || [], grid);
+
+        // Update pagination
+        const pagination = document.getElementById('mysql-pagination');
+        pagination.style.display = 'flex';
+        document.getElementById('mysql-row-info').textContent =
+            `${Number(data.total_rows || 0).toLocaleString()} rows total`;
+        document.getElementById('mysql-page-info').textContent =
+            `Page ${(data.page || 0) + 1} / ${data.total_pages || 1}`;
+        document.getElementById('mysql-prev-btn').disabled = (data.page || 0) === 0;
+        document.getElementById('mysql-next-btn').disabled = ((data.page || 0) + 1) >= (data.total_pages || 1);
+
+    } catch (e) {
+        grid.innerHTML = `<div style="padding:40px; text-align:center; color:#e74c3c;">Error: ${e.message}</div>`;
+    }
+}
+
+function mysqlRenderGrid(columns, rows, container) {
+    if (columns.length === 0) {
+        container.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);">No data</div>';
+        return;
+    }
+
+    let html = `<table style="width:100%; border-collapse:collapse; font-family:var(--font-mono); font-size:12px;">
+        <thead>
+            <tr style="position:sticky; top:0; z-index:1;">`;
+
+    // Header
+    html += '<th style="padding:8px 12px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; white-space:nowrap; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">#</th>';
+    for (const col of columns) {
+        html += `<th style="padding:8px 12px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; white-space:nowrap; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">${escapeHtml(col)}</th>`;
+    }
+    html += '</tr></thead><tbody>';
+
+    // Rows
+    const offset = mysqlCurrentPage * mysqlPageSize;
+    for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const rowNum = offset + i + 1;
+        const bgColor = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
+        html += `<tr style="background:${bgColor}; transition:background 0.1s;" onmouseover="this.style.background='var(--accent-primary-10)'" onmouseout="this.style.background='${bgColor}'">`;
+        html += `<td style="padding:6px 12px; border-bottom:1px solid var(--border); color:var(--text-muted); font-size:11px;">${rowNum}</td>`;
+        for (let j = 0; j < columns.length; j++) {
+            const val = j < row.length ? row[j] : null;
+            let display, style = 'padding:6px 12px; border-bottom:1px solid var(--border); max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;';
+            if (val === null) {
+                display = '<span style="color:var(--text-muted); font-style:italic;">NULL</span>';
+            } else if (typeof val === 'number') {
+                display = `<span style="color:#3498db;">${val}</span>`;
+                style += ' text-align:right;';
+            } else {
+                display = escapeHtml(String(val));
+            }
+            html += `<td style="${style}" title="${escapeHtml(String(val ?? 'NULL'))}">${display}</td>`;
+        }
+        html += '</tr>';
+    }
+
+    html += '</tbody></table>';
+    container.innerHTML = html;
+}
+
+function mysqlChangePage(delta) {
+    const newPage = mysqlCurrentPage + delta;
+    if (newPage < 0 || newPage >= mysqlTotalPages) return;
+    mysqlCurrentPage = newPage;
+    mysqlLoadTableData();
+}
+
+function mysqlSwitchTab(tab) {
+    // Update tab buttons
+    document.querySelectorAll('.mysql-tab').forEach(btn => {
+        const isActive = btn.dataset.tab === tab;
+        btn.style.color = isActive ? 'var(--text-primary)' : 'var(--text-muted)';
+        btn.style.fontWeight = isActive ? '500' : '400';
+        btn.style.borderBottom = isActive ? '2px solid var(--accent-primary)' : '2px solid transparent';
+        if (isActive) btn.classList.add('active');
+        else btn.classList.remove('active');
+    });
+
+    // Show/hide tab content
+    document.getElementById('mysql-tab-data').style.display = tab === 'data' ? 'flex' : 'none';
+    document.getElementById('mysql-tab-structure').style.display = tab === 'structure' ? 'block' : 'none';
+    document.getElementById('mysql-tab-query').style.display = tab === 'query' ? 'flex' : 'none';
+
+    // Load content for the selected tab
+    if (tab === 'structure' && mysqlCurrentDb && mysqlCurrentTable) {
+        mysqlLoadStructure();
+    }
+}
+
+async function mysqlLoadStructure() {
+    if (!mysqlCreds || !mysqlCurrentDb || !mysqlCurrentTable) return;
+
+    const container = document.getElementById('mysql-tab-structure');
+    container.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);"><div class="spinner-sm"></div> Loading structure...</div>';
+
+    try {
+        const baseUrl = getNodeApiBase(currentNodeId);
+        const resp = await fetch(`${baseUrl}/api/mysql/structure`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                ...mysqlCreds,
+                database: mysqlCurrentDb,
+                table: mysqlCurrentTable,
+            }),
+        });
+        const data = await resp.json();
+
+        if (data.error) {
+            container.innerHTML = `<div style="padding:40px; text-align:center; color:#e74c3c;">${data.error}</div>`;
+            return;
+        }
+
+        const cols = data.columns || [];
+        let html = `<table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead>
+                <tr>
+                    <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Column</th>
+                    <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Type</th>
+                    <th style="padding:10px 14px; text-align:center; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Nullable</th>
+                    <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Key</th>
+                    <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Default</th>
+                    <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Extra</th>
+                </tr>
+            </thead>
+            <tbody>`;
+
+        for (let i = 0; i < cols.length; i++) {
+            const c = cols[i];
+            const bgColor = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
+            const keyBadge = c.key === 'PRI' ? '<span style="background:rgba(241,196,15,0.2); color:#f1c40f; padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600;">PRI</span>'
+                : c.key === 'UNI' ? '<span style="background:rgba(52,152,219,0.2); color:#3498db; padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600;">UNI</span>'
+                    : c.key === 'MUL' ? '<span style="background:rgba(155,89,182,0.2); color:#9b59b6; padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600;">MUL</span>'
+                        : c.key || '';
+
+            html += `<tr style="background:${bgColor};">
+                <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); font-weight:500; color:var(--text-primary);">${escapeHtml(c.name)}</td>
+                <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:#e67e22;">${escapeHtml(c.type)}</td>
+                <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">${c.nullable ? '✅' : '❌'}</td>
+                <td style="padding:8px 14px; border-bottom:1px solid var(--border);">${keyBadge}</td>
+                <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:var(--text-muted);">${c.default != null ? escapeHtml(String(c.default)) : '<span style="font-style:italic;">NULL</span>'}</td>
+                <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:var(--text-muted);">${escapeHtml(c.extra || '')}</td>
+            </tr>`;
+        }
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+
+    } catch (e) {
+        container.innerHTML = `<div style="padding:40px; text-align:center; color:#e74c3c;">Error: ${e.message}</div>`;
+    }
+}
+
+async function mysqlExecuteQuery() {
+    if (!mysqlCreds) {
+        showToast('Not connected to MySQL', 'error');
+        return;
+    }
+
+    const query = document.getElementById('mysql-query-input').value.trim();
+    if (!query) {
+        showToast('Please enter a SQL query', 'error');
+        return;
+    }
+
+    const db = document.getElementById('mysql-query-db').value || '';
+    const resultDiv = document.getElementById('mysql-query-result');
+    resultDiv.innerHTML = '<div style="padding:30px; text-align:center; color:var(--text-muted);"><div class="spinner-sm"></div> Executing query...</div>';
+
+    const startTime = performance.now();
+
+    try {
+        const baseUrl = getNodeApiBase(currentNodeId);
+        const resp = await fetch(`${baseUrl}/api/mysql/query`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...mysqlCreds, database: db, query }),
+        });
+        const data = await resp.json();
+        const elapsed = ((performance.now() - startTime) / 1000).toFixed(3);
+
+        if (data.error) {
+            resultDiv.innerHTML = `<div style="padding:20px;">
+                <div style="padding:12px 16px; background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); border-radius:6px; font-family:var(--font-mono); font-size:12px; color:#e74c3c;">${escapeHtml(data.error)}</div>
+                <div style="margin-top:8px; font-size:11px; color:var(--text-muted);">Executed in ${elapsed}s</div>
+            </div>`;
+            return;
+        }
+
+        if (data.type === 'resultset') {
+            let html = `<div style="padding:8px 14px; font-size:11px; color:var(--text-muted); border-bottom:1px solid var(--border); background:var(--bg-secondary);">
+                ${data.row_count} row(s) returned in ${elapsed}s
+            </div>`;
+            const gridDiv = document.createElement('div');
+            gridDiv.style.cssText = 'flex:1; overflow:auto;';
+            resultDiv.innerHTML = html;
+            resultDiv.appendChild(gridDiv);
+            // Reuse the grid renderer with page 0
+            const savedPage = mysqlCurrentPage;
+            const savedPageSize = mysqlPageSize;
+            mysqlCurrentPage = 0;
+            mysqlPageSize = data.rows.length;
+            mysqlRenderGrid(data.columns || [], data.rows || [], gridDiv);
+            mysqlCurrentPage = savedPage;
+            mysqlPageSize = savedPageSize;
+        } else {
+            // Modification result
+            resultDiv.innerHTML = `<div style="padding:20px;">
+                <div style="padding:12px 16px; background:rgba(46,204,113,0.1); border:1px solid rgba(46,204,113,0.3); border-radius:6px; font-size:13px; color:#2ecc71;">
+                    ✅ ${escapeHtml(data.message || 'Query executed successfully')}
+                    ${data.last_insert_id ? `<br><span style="font-size:12px; color:var(--text-muted);">Last insert ID: ${data.last_insert_id}</span>` : ''}
+                </div>
+                <div style="margin-top:8px; font-size:11px; color:var(--text-muted);">Executed in ${elapsed}s</div>
+            </div>`;
+        }
+    } catch (e) {
+        resultDiv.innerHTML = `<div style="padding:20px;">
+            <div style="padding:12px 16px; background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); border-radius:6px; font-family:var(--font-mono); font-size:12px; color:#e74c3c;">Error: ${escapeHtml(e.message)}</div>
+        </div>`;
+    }
+}
+
+// Helper: escape HTML
+function escapeHtml(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }

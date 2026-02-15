@@ -24,6 +24,7 @@ mod networking;
 mod backup;
 mod vms;
 mod proxmox;
+mod mysql_editor;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_files;

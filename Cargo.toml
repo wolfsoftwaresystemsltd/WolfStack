@@ -1,6 +1,6 @@
 [package]
 name = "wolfstack"
-version = "8.5.7"
+version = "8.6.0"
 edition = "2021"
 authors = ["Wolf Software Systems Ltd"]
 description = "Server management platform for the Wolf software suite"
@@ -57,6 +57,9 @@ lettre = { version = "0.11", features = ["tokio1-rustls-tls", "smtp-transport", 
 # S3 client (pure Rust — works on IBM Power/ppc64le, no C/C++ deps)
 rust-s3 = { version = "0.35", default-features = false, features = ["tokio-rustls-tls"] }
 lz4_flex = "0.11"
+
+# MySQL database editor
+mysql_async = "0.34"
 
 [[bin]]
 name = "wolfstack"

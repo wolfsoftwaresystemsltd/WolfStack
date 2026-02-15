@@ -4249,6 +4249,219 @@ pub async fn system_upgrade(
     }
 }
 
+// ─── MySQL Database Editor API ───
+
+/// GET /api/mysql/detect — check if MySQL is installed on this node
+pub async fn mysql_detect(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(crate::mysql_editor::detect_mysql())
+}
+
+#[derive(Deserialize)]
+pub struct MysqlConnectRequest {
+    pub host: String,
+    #[serde(default = "mysql_default_port")]
+    pub port: u16,
+    pub user: String,
+    #[serde(default)]
+    pub password: String,
+}
+
+fn mysql_default_port() -> u16 { 3306 }
+
+/// POST /api/mysql/connect — test a MySQL connection
+pub async fn mysql_connect(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<MysqlConnectRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let params = crate::mysql_editor::ConnParams {
+        host: body.host.clone(),
+        port: body.port,
+        user: body.user.clone(),
+        password: body.password.clone(),
+        database: None,
+    };
+    match crate::mysql_editor::test_connection(&params).await {
+        Ok(version) => HttpResponse::Ok().json(serde_json::json!({
+            "connected": true,
+            "version": version,
+        })),
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({
+            "connected": false,
+            "error": e,
+        })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MysqlCredsRequest {
+    pub host: String,
+    #[serde(default = "mysql_default_port")]
+    pub port: u16,
+    pub user: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default)]
+    pub database: Option<String>,
+}
+
+impl MysqlCredsRequest {
+    fn to_params(&self) -> crate::mysql_editor::ConnParams {
+        crate::mysql_editor::ConnParams {
+            host: self.host.clone(),
+            port: self.port,
+            user: self.user.clone(),
+            password: self.password.clone(),
+            database: self.database.clone(),
+        }
+    }
+}
+
+/// POST /api/mysql/databases — list databases
+pub async fn mysql_databases(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<MysqlCredsRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match crate::mysql_editor::list_databases(&body.to_params()).await {
+        Ok(dbs) => HttpResponse::Ok().json(serde_json::json!({ "databases": dbs })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MysqlTablesRequest {
+    pub host: String,
+    #[serde(default = "mysql_default_port")]
+    pub port: u16,
+    pub user: String,
+    #[serde(default)]
+    pub password: String,
+    pub database: String,
+}
+
+/// POST /api/mysql/tables — list tables in a database
+pub async fn mysql_tables(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<MysqlTablesRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let params = crate::mysql_editor::ConnParams {
+        host: body.host.clone(),
+        port: body.port,
+        user: body.user.clone(),
+        password: body.password.clone(),
+        database: Some(body.database.clone()),
+    };
+    match crate::mysql_editor::list_tables(&params, &body.database).await {
+        Ok(tables) => HttpResponse::Ok().json(serde_json::json!({ "tables": tables })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MysqlStructureRequest {
+    pub host: String,
+    #[serde(default = "mysql_default_port")]
+    pub port: u16,
+    pub user: String,
+    #[serde(default)]
+    pub password: String,
+    pub database: String,
+    pub table: String,
+}
+
+/// POST /api/mysql/structure — get table structure
+pub async fn mysql_structure(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<MysqlStructureRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let params = crate::mysql_editor::ConnParams {
+        host: body.host.clone(),
+        port: body.port,
+        user: body.user.clone(),
+        password: body.password.clone(),
+        database: Some(body.database.clone()),
+    };
+    match crate::mysql_editor::table_structure(&params, &body.database, &body.table).await {
+        Ok(cols) => HttpResponse::Ok().json(serde_json::json!({ "columns": cols })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MysqlDataRequest {
+    pub host: String,
+    #[serde(default = "mysql_default_port")]
+    pub port: u16,
+    pub user: String,
+    #[serde(default)]
+    pub password: String,
+    pub database: String,
+    pub table: String,
+    #[serde(default)]
+    pub page: u64,
+    #[serde(default = "mysql_default_page_size")]
+    pub page_size: u64,
+}
+
+fn mysql_default_page_size() -> u64 { 50 }
+
+/// POST /api/mysql/data — get paginated table data
+pub async fn mysql_data(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<MysqlDataRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let params = crate::mysql_editor::ConnParams {
+        host: body.host.clone(),
+        port: body.port,
+        user: body.user.clone(),
+        password: body.password.clone(),
+        database: Some(body.database.clone()),
+    };
+    match crate::mysql_editor::table_data(&params, &body.database, &body.table, body.page, body.page_size).await {
+        Ok(data) => HttpResponse::Ok().json(data),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MysqlQueryRequest {
+    pub host: String,
+    #[serde(default = "mysql_default_port")]
+    pub port: u16,
+    pub user: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default)]
+    pub database: String,
+    pub query: String,
+}
+
+/// POST /api/mysql/query — execute arbitrary SQL
+pub async fn mysql_query(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<MysqlQueryRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let params = crate::mysql_editor::ConnParams {
+        host: body.host.clone(),
+        port: body.port,
+        user: body.user.clone(),
+        password: body.password.clone(),
+        database: if body.database.is_empty() { None } else { Some(body.database.clone()) },
+    };
+    match crate::mysql_editor::execute_query(&params, &body.database, &body.query).await {
+        Ok(result) => HttpResponse::Ok().json(result),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -4406,6 +4619,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
         // PVE Console WebSocket proxy
         .route("/ws/pve-console/{node_id}/{vmid}", web::get().to(pve_console::pve_console_ws))
+        // MySQL Database Editor
+        .route("/api/mysql/detect", web::get().to(mysql_detect))
+        .route("/api/mysql/connect", web::post().to(mysql_connect))
+        .route("/api/mysql/databases", web::post().to(mysql_databases))
+        .route("/api/mysql/tables", web::post().to(mysql_tables))
+        .route("/api/mysql/structure", web::post().to(mysql_structure))
+        .route("/api/mysql/data", web::post().to(mysql_data))
+        .route("/api/mysql/query", web::post().to(mysql_query))
         // Agent (cluster-secret auth — inter-node communication)
         .route("/api/agent/status", web::get().to(agent_status))
         .route("/api/agent/storage/apply", web::post().to(agent_storage_apply))
