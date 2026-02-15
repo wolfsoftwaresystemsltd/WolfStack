@@ -9335,6 +9335,10 @@ async function mysqlConnect() {
     badge.style.background = 'rgba(241,196,15,0.15)';
     badge.style.color = '#f1c40f';
 
+    // 8-second timeout so the UI never gets stuck
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+
     try {
         const baseUrl = getNodeApiBase(currentNodeId);
         const resp = await fetch(`${baseUrl}/api/mysql/connect`, {
@@ -9342,7 +9346,9 @@ async function mysqlConnect() {
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ host, port, user, password: pass }),
+            signal: controller.signal,
         });
+        clearTimeout(timeoutId);
         const data = await resp.json();
 
         if (data.connected) {
@@ -9368,10 +9374,14 @@ async function mysqlConnect() {
             showToast(data.error || 'Connection failed', 'error');
         }
     } catch (e) {
+        clearTimeout(timeoutId);
+        const msg = e.name === 'AbortError'
+            ? 'Connection timed out — check host/port and ensure MySQL is reachable'
+            : 'Connection error: ' + e.message;
         badge.textContent = 'Error';
         badge.style.background = 'rgba(231,76,60,0.15)';
         badge.style.color = '#e74c3c';
-        showToast('Connection error: ' + e.message, 'error');
+        showToast(msg, 'error');
     } finally {
         btn.disabled = false;
         btn.textContent = '🔌 Connect';
