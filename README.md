@@ -2,6 +2,8 @@
 
 The flagship management dashboard for the [Wolf Software Systems](https://wolf.uk.com/) infrastructure suite. Monitor servers, manage **virtual machines (KVM/QEMU)**, Docker and LXC containers, control services, edit configurations, and view logs — all from one beautiful, Proxmox-like web interface.
 
+**[Reddit Community (r/WolfStack)](https://www.reddit.com/r/WolfStack/)** • **[Discord](https://discord.gg/q9qMjHjUQY)** • **[Patreon](https://www.patreon.com/15362110/join)**
+
 ![WolfStack Dashboard](screenshot.png)
 
 ## Quick Install
