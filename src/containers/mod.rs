@@ -483,7 +483,7 @@ pub fn lxc_attach_wolfnet(container: &str, ip: &str) -> Result<String, String> {
     Ok(format!("LXC container '{}' will use WolfNet IP {} on start", container, ip))
 }
 
-/// Get the bridge IP assigned to a container's interface (e.g. eth1)
+/// Get the bridge IP assigned to a container's interface (e.g. wn0)
 fn get_container_bridge_ip(container: &str, iface: &str) -> String {
     if let Ok(output) = Command::new("lxc-attach")
         .args(["-n", container, "--", "ip", "-4", "addr", "show", iface])
@@ -519,23 +519,23 @@ fn lxc_apply_wolfnet(container: &str) {
         // Wait for container to be ready
         std::thread::sleep(std::time::Duration::from_secs(2));
 
-        // On Proxmox, WolfNet uses eth1 on lxcbr0 (eth0 stays on vmbr0).
+        // On Proxmox, WolfNet uses wn0 on lxcbr0 (eth0 stays on vmbr0).
         // On standalone LXC, WolfNet uses a secondary IP on eth0 via lxcbr0.
         let is_pve = is_proxmox();
-        let wolfnet_iface = if is_pve { "eth1" } else { "eth0" };
+        let wolfnet_iface = if is_pve { "wn0" } else { "eth0" };
 
         if is_pve {
-            // Proxmox: eth1 is on lxcbr0, IP is set in pct config.
-            // Just add the WolfNet IP as a secondary /32 and ensure eth1 is up.
+            // Proxmox: wn0 is on lxcbr0, IP is set in pct config.
+            // Just add the WolfNet IP as a secondary /32 and ensure wn0 is up.
             let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "link", "set", "eth1", "up"])
+                .args(["-n", container, "--", "ip", "link", "set", "wn0", "up"])
                 .output();
             let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "eth1"])
+                .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "wn0"])
                 .output();
 
-            // Get the bridge IP of eth1 to use for host routing
-            let bridge_ip = get_container_bridge_ip(container, "eth1");
+            // Get the bridge IP of wn0 to use for host routing
+            let bridge_ip = get_container_bridge_ip(container, "wn0");
 
             // Host route — via bridge IP so traffic for WolfNet IP reaches container
             let _ = Command::new("ip").args(["route", "del", &format!("{}/32", ip)]).output();
@@ -3106,19 +3106,19 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
     if output.status.success() {
         info!("Proxmox container {} (VMID {}) created successfully", name, vmid);
 
-        // Attach WolfNet: add eth1 on lxcbr0 with the WolfNet IP
+        // Attach WolfNet: add wn0 on lxcbr0 with the WolfNet IP
         if let Some(ip) = wolfnet_ip {
             // Ensure lxcbr0 bridge exists before adding NIC
             ensure_lxc_bridge();
 
             // Add a second NIC on lxcbr0 for WolfNet traffic
-            let net1_cfg = format!("name=eth1,bridge=lxcbr0,ip={}/24,gw=10.0.3.1", ip);
+            let net1_cfg = format!("name=wn0,bridge=lxcbr0,ip={}/24,gw=10.0.3.1", ip);
             let set_out = Command::new("pct")
                 .args(["set", &vmid.to_string(), "--net1", &net1_cfg])
                 .output();
             match set_out {
                 Ok(ref o) if o.status.success() => {
-                    info!("Added WolfNet NIC (eth1) on lxcbr0 with IP {} to VMID {}", ip, vmid);
+                    info!("Added WolfNet NIC (wn0) on lxcbr0 with IP {} to VMID {}", ip, vmid);
                 }
                 Ok(ref o) => {
                     error!("Failed to add WolfNet NIC to VMID {}: {}", vmid, String::from_utf8_lossy(&o.stderr));
