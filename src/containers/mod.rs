@@ -768,6 +768,12 @@ fn lxc_apply_wolfnet(container: &str) {
                 .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "wn0"])
                 .output();
 
+            // Route WolfNet subnet through wn0 via lxcbr0 gateway — without this,
+            // 10.10.10.x traffic goes out via eth0/vmbr0 where WolfNet is unreachable.
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "ip", "route", "replace", "10.10.10.0/24", "via", "10.0.3.1", "dev", "wn0"])
+                .output();
+
             // Host route — via bridge IP so traffic for WolfNet IP reaches container
             let _ = Command::new("ip").args(["route", "del", &format!("{}/32", ip)]).output();
             let out = Command::new("ip")
