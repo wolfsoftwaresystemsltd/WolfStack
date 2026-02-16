@@ -221,16 +221,15 @@ pub fn wolfnet_used_ips() -> Vec<String> {
         }
     }
 
-    // LXC containers (from ARP table)
-    if let Ok(output) = Command::new("ip")
-        .args(["neigh", "show", "dev", "wolfnet0"])
-        .output()
-    {
-        let text = String::from_utf8_lossy(&output.stdout);
-        for line in text.lines() {
-            if let Some(ip) = line.split_whitespace().next() {
-                if ip.contains('.') {
-                    ips.push(ip.to_string());
+    // LXC containers (from .wolfnet/ip marker files — authoritative source)
+    let lxc_base = std::path::Path::new("/var/lib/lxc");
+    if let Ok(entries) = std::fs::read_dir(lxc_base) {
+        for entry in entries.flatten() {
+            let ip_file = entry.path().join(".wolfnet/ip");
+            if let Ok(contents) = std::fs::read_to_string(&ip_file) {
+                let ip = contents.trim().to_string();
+                if !ip.is_empty() && !ips.contains(&ip) {
+                    ips.push(ip);
                 }
             }
         }
