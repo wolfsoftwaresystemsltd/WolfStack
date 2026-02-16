@@ -111,7 +111,7 @@ function selectServerView(nodeId, view) {
         certificates: 'Certificates',
         cron: 'Cron Jobs',
         'pve-resources': 'VMs & Containers',
-        'mysql-editor': 'MySQL',
+        'mysql-editor': 'MariaDB/MySQL',
     };
     document.getElementById('page-title').textContent = `${hostname} — ${viewTitles[view] || view}`;
     document.getElementById('hostname-display').textContent = `${hostname} (${node?.address}:${node?.port})`;
@@ -313,7 +313,7 @@ function buildServerTree(nodes) {
                             <span class="icon">💻</span> Terminal
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="mysql-editor" onclick="selectServerView('${node.id}', 'mysql-editor')">
-                            <span class="icon">🗄️</span> MySQL
+                            <span class="icon">🗄️</span> MariaDB/MySQL
                         </a>
                     </div>
                 </div>`;
@@ -9425,8 +9425,10 @@ function mysqlDisconnect() {
         '<div style="padding:16px; color:var(--text-muted); text-align:center; font-size:12px;">Connect to see databases</div>';
     document.getElementById('mysql-data-grid').innerHTML =
         '<div style="padding:40px; text-align:center; color:var(--text-muted);">Select a table from the left panel to view data</div>';
-    document.getElementById('mysql-tab-structure').innerHTML =
+    document.getElementById('mysql-struct-columns').innerHTML =
         '<div style="padding:40px; text-align:center; color:var(--text-muted);">Select a table to view its structure</div>';
+    document.getElementById('mysql-struct-indexes').innerHTML = '';
+    document.getElementById('mysql-struct-triggers').innerHTML = '';
     document.getElementById('mysql-pagination').style.display = 'none';
     document.getElementById('mysql-table-info').innerHTML = '';
 
@@ -9680,19 +9682,21 @@ function mysqlSwitchTab(tab) {
 
     // Show/hide tab content
     document.getElementById('mysql-tab-data').style.display = tab === 'data' ? 'flex' : 'none';
-    document.getElementById('mysql-tab-structure').style.display = tab === 'structure' ? 'block' : 'none';
+    document.getElementById('mysql-tab-structure').style.display = tab === 'structure' ? 'flex' : 'none';
     document.getElementById('mysql-tab-query').style.display = tab === 'query' ? 'flex' : 'none';
 
     // Load content for the selected tab
     if (tab === 'structure' && mysqlCurrentDb && mysqlCurrentTable) {
         mysqlLoadStructure();
+        mysqlLoadIndexes();
+        mysqlLoadTriggers();
     }
 }
 
 async function mysqlLoadStructure() {
     if (!mysqlCreds || !mysqlCurrentDb || !mysqlCurrentTable) return;
 
-    const container = document.getElementById('mysql-tab-structure');
+    const container = document.getElementById('mysql-struct-columns');
     container.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);"><div class="spinner-sm"></div> Loading structure...</div>';
 
     const baseUrl = getNodeApiBase(currentNodeId);
@@ -9803,7 +9807,316 @@ async function mysqlLoadStructure() {
     }
 }
 
-// Helper to run ALTER TABLE via the query endpoint
+// ─── Structure Sub-tab Switching ───
+function mysqlStructSwitchTab(tab) {
+    document.querySelectorAll('.mysql-struct-tab').forEach(btn => {
+        const isActive = btn.dataset.stab === tab;
+        btn.style.color = isActive ? 'var(--text-primary)' : 'var(--text-muted)';
+        btn.style.fontWeight = isActive ? '500' : '400';
+        btn.style.borderBottom = isActive ? '2px solid var(--accent-primary)' : '2px solid transparent';
+    });
+    document.getElementById('mysql-struct-columns').style.display = tab === 'columns' ? 'block' : 'none';
+    document.getElementById('mysql-struct-indexes').style.display = tab === 'indexes' ? 'block' : 'none';
+    document.getElementById('mysql-struct-triggers').style.display = tab === 'triggers' ? 'block' : 'none';
+}
+
+// ─── Indexes ───
+async function mysqlLoadIndexes() {
+    if (!mysqlCreds || !mysqlCurrentDb || !mysqlCurrentTable) return;
+    const container = document.getElementById('mysql-struct-indexes');
+    container.innerHTML = '<div style="padding:30px; text-align:center; color:var(--text-muted);"><div class="spinner-sm"></div> Loading indexes...</div>';
+
+    try {
+        const baseUrl = getNodeApiBase(currentNodeId);
+        const resp = await fetch(`${baseUrl}/api/mysql/query`, {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                ...mysqlCreds, database: mysqlCurrentDb,
+                query: `SHOW INDEX FROM \`${mysqlCurrentDb.replace(/`/g, '``')}\`.\`${mysqlCurrentTable.replace(/`/g, '``')}\``
+            }),
+        });
+        const data = await resp.json();
+        if (data.error) { container.innerHTML = `<div style="padding:30px; text-align:center; color:#e74c3c;">${data.error}</div>`; return; }
+
+        const rows = data.rows || [];
+        const colIdx = {};
+        (data.columns || []).forEach((c, i) => colIdx[c] = i);
+
+        // Group by key name
+        const indexes = {};
+        for (const r of rows) {
+            const keyName = r[colIdx['Key_name']] || r[2];
+            if (!indexes[keyName]) indexes[keyName] = { name: keyName, unique: r[colIdx['Non_unique']] == 0 || r[1] == 0, columns: [], type: r[colIdx['Index_type']] || r[10] || 'BTREE' };
+            indexes[keyName].columns.push({ col: r[colIdx['Column_name']] || r[4], seq: r[colIdx['Seq_in_index']] || r[3] });
+        }
+
+        let html = `<div style="padding:10px 14px; display:flex; gap:8px; border-bottom:1px solid var(--border); align-items:center;">
+            <button onclick="mysqlAddIndexDialog()" style="background:var(--accent-primary); color:#fff; border:none; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px; font-weight:500;">➕ Add Index</button>
+            <div style="flex:1;"></div>
+            <span style="color:var(--text-muted); font-size:11px;">${Object.keys(indexes).length} index${Object.keys(indexes).length !== 1 ? 'es' : ''}</span>
+        </div>`;
+
+        html += `<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr>
+                <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Name</th>
+                <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Columns</th>
+                <th style="padding:10px 14px; text-align:center; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Type</th>
+                <th style="padding:10px 14px; text-align:center; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Unique</th>
+                <th style="padding:10px 14px; text-align:center; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; width:80px;">Actions</th>
+            </tr></thead><tbody>`;
+
+        let i = 0;
+        for (const [name, idx] of Object.entries(indexes)) {
+            const bg = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
+            const isPrimary = name === 'PRIMARY';
+            const badge = isPrimary
+                ? '<span style="background:rgba(241,196,15,0.2); color:#f1c40f; padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600;">PRIMARY</span>'
+                : idx.unique ? '<span style="background:rgba(52,152,219,0.2); color:#3498db; padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600;">UNIQUE</span>' : '';
+            const cols = idx.columns.sort((a, b) => a.seq - b.seq).map(c => escapeHtml(c.col)).join(', ');
+            html += `<tr style="background:${bg};">
+                <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); font-weight:500; color:var(--text-primary);">${escapeHtml(name)}</td>
+                <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:#e67e22;">${cols}</td>
+                <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center; color:var(--text-muted);">${escapeHtml(idx.type)}</td>
+                <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">${badge || '—'}</td>
+                <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">
+                    ${isPrimary ? '' : `<button onclick="mysqlDropIndex('${escapeHtml(name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop index">🗑️</button>`}
+                </td>
+            </tr>`;
+            i++;
+        }
+        html += '</tbody></table></div>';
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = `<div style="padding:30px; text-align:center; color:#e74c3c;">Error: ${e.message}</div>`;
+    }
+}
+
+function mysqlAddIndexDialog() {
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:10000;';
+    modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:24px; width:420px; max-width:90vw;">
+        <h3 style="margin:0 0 16px; font-size:16px; color:var(--text-primary);">🔑 Add Index to ${escapeHtml(mysqlCurrentTable)}</h3>
+        <div style="display:flex; flex-direction:column; gap:12px;">
+            <div>
+                <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">Index Name</label>
+                <input id="idx-name" type="text" placeholder="idx_column_name" style="width:100%; padding:8px 10px; font-size:13px; border:1px solid var(--border); border-radius:6px; background:var(--bg-primary); color:var(--text-primary); box-sizing:border-box;">
+            </div>
+            <div>
+                <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">Columns (comma-separated)</label>
+                <input id="idx-cols" type="text" placeholder="col1, col2" style="width:100%; padding:8px 10px; font-size:13px; font-family:var(--font-mono); border:1px solid var(--border); border-radius:6px; background:var(--bg-primary); color:var(--text-primary); box-sizing:border-box;">
+            </div>
+            <div>
+                <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">Index Type</label>
+                <select id="idx-type" style="width:100%; padding:8px 10px; font-size:13px; border:1px solid var(--border); border-radius:6px; background:var(--bg-primary); color:var(--text-primary);">
+                    <option value="INDEX">INDEX</option>
+                    <option value="UNIQUE">UNIQUE</option>
+                    <option value="FULLTEXT">FULLTEXT</option>
+                </select>
+            </div>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+            <button onclick="this.closest('div[style*=fixed]').remove()" style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px;">Cancel</button>
+            <button onclick="mysqlDoAddIndex(this.closest('div[style*=fixed]'))" style="background:var(--accent-primary); border:none; color:#fff; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px; font-weight:500;">Create Index</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('#idx-name').focus();
+}
+
+async function mysqlDoAddIndex(modal) {
+    const name = modal.querySelector('#idx-name').value.trim();
+    const cols = modal.querySelector('#idx-cols').value.trim();
+    const type = modal.querySelector('#idx-type').value;
+    if (!name || !cols) { showToast('Index name and columns are required', 'error'); return; }
+
+    const colList = cols.split(',').map(c => `\`${c.trim().replace(/`/g, '``')}\``).join(', ');
+    const sql = `CREATE ${type} \`${name.replace(/`/g, '``')}\` ON \`${mysqlCurrentDb.replace(/`/g, '``')}\`.\`${mysqlCurrentTable.replace(/`/g, '``')}\` (${colList})`;
+
+    modal.remove();
+
+    // Non-blocking: show spinner in indexes panel
+    const container = document.getElementById('mysql-struct-indexes');
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:absolute; inset:0; background:rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center; z-index:5;';
+    overlay.innerHTML = '<div style="background:var(--bg-secondary); padding:16px 24px; border-radius:8px; font-size:13px; color:var(--text-primary);"><div class="spinner-sm" style="display:inline-block; margin-right:8px;"></div>Creating index...</div>';
+    container.style.position = 'relative';
+    container.appendChild(overlay);
+
+    try {
+        await mysqlAlterTable(sql);
+        showToast(`Index '${name}' created`, 'success');
+        mysqlLoadIndexes();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+        overlay.remove();
+    }
+}
+
+async function mysqlDropIndex(indexName) {
+    const confirmed = await mysqlConfirmDestructive(
+        `Drop index <strong>${escapeHtml(indexName)}</strong> from <strong>${escapeHtml(mysqlCurrentTable)}</strong>?`,
+        `DROP INDEX \`${indexName}\` ON \`${mysqlCurrentDb}\`.\`${mysqlCurrentTable}\``
+    );
+    if (!confirmed) return;
+
+    const container = document.getElementById('mysql-struct-indexes');
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:absolute; inset:0; background:rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center; z-index:5;';
+    overlay.innerHTML = '<div style="background:var(--bg-secondary); padding:16px 24px; border-radius:8px; font-size:13px; color:var(--text-primary);"><div class="spinner-sm" style="display:inline-block; margin-right:8px;"></div>Dropping index...</div>';
+    container.style.position = 'relative';
+    container.appendChild(overlay);
+
+    try {
+        await mysqlAlterTable(`DROP INDEX \`${indexName.replace(/`/g, '``')}\` ON \`${mysqlCurrentDb.replace(/`/g, '``')}\`.\`${mysqlCurrentTable.replace(/`/g, '``')}\``);
+        showToast(`Index '${indexName}' dropped`, 'success');
+        mysqlLoadIndexes();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+        overlay.remove();
+    }
+}
+
+// ─── Triggers ───
+async function mysqlLoadTriggers() {
+    if (!mysqlCreds || !mysqlCurrentDb || !mysqlCurrentTable) return;
+    const container = document.getElementById('mysql-struct-triggers');
+    container.innerHTML = '<div style="padding:30px; text-align:center; color:var(--text-muted);"><div class="spinner-sm"></div> Loading triggers...</div>';
+
+    try {
+        const baseUrl = getNodeApiBase(currentNodeId);
+        const resp = await fetch(`${baseUrl}/api/mysql/query`, {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                ...mysqlCreds, database: mysqlCurrentDb,
+                query: `SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT, CREATED FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA = '${mysqlCurrentDb.replace(/'/g, "''")}' AND EVENT_OBJECT_TABLE = '${mysqlCurrentTable.replace(/'/g, "''")}' ORDER BY TRIGGER_NAME`
+            }),
+        });
+        const data = await resp.json();
+        if (data.error) { container.innerHTML = `<div style="padding:30px; text-align:center; color:#e74c3c;">${data.error}</div>`; return; }
+
+        const rows = data.rows || [];
+
+        let html = `<div style="padding:10px 14px; display:flex; gap:8px; border-bottom:1px solid var(--border); align-items:center;">
+            <button onclick="mysqlAddTriggerDialog()" style="background:var(--accent-primary); color:#fff; border:none; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px; font-weight:500;">➕ Add Trigger</button>
+            <div style="flex:1;"></div>
+            <span style="color:var(--text-muted); font-size:11px;">${rows.length} trigger${rows.length !== 1 ? 's' : ''}</span>
+        </div>`;
+
+        if (rows.length === 0) {
+            html += '<div style="padding:30px; text-align:center; color:var(--text-muted); font-size:13px;">No triggers on this table</div>';
+        } else {
+            html += `<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr>
+                    <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Name</th>
+                    <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Timing</th>
+                    <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Event</th>
+                    <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Statement</th>
+                    <th style="padding:10px 14px; text-align:center; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; width:80px;">Actions</th>
+                </tr></thead><tbody>`;
+
+            rows.forEach((r, i) => {
+                const bg = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
+                const name = r[0] || '', event = r[1] || '', timing = r[2] || '', stmt = r[3] || '';
+                const timingBadge = timing === 'BEFORE'
+                    ? '<span style="background:rgba(241,196,15,0.2); color:#f1c40f; padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600;">BEFORE</span>'
+                    : '<span style="background:rgba(46,204,113,0.2); color:#2ecc71; padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600;">AFTER</span>';
+                html += `<tr style="background:${bg};">
+                    <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); font-weight:500; color:var(--text-primary);">${escapeHtml(name)}</td>
+                    <td style="padding:8px 14px; border-bottom:1px solid var(--border);">${timingBadge}</td>
+                    <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:#e67e22;">${escapeHtml(event)}</td>
+                    <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:var(--text-muted); font-size:12px; max-width:400px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(stmt)}">${escapeHtml(stmt)}</td>
+                    <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">
+                        <button onclick="mysqlDropTrigger('${escapeHtml(name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop trigger">🗑️</button>
+                    </td>
+                </tr>`;
+            });
+            html += '</tbody></table></div>';
+        }
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = `<div style="padding:30px; text-align:center; color:#e74c3c;">Error: ${e.message}</div>`;
+    }
+}
+
+function mysqlAddTriggerDialog() {
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:10000;';
+    modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:24px; width:500px; max-width:90vw;">
+        <h3 style="margin:0 0 16px; font-size:16px; color:var(--text-primary);">⚡ Create Trigger on ${escapeHtml(mysqlCurrentTable)}</h3>
+        <div style="display:flex; flex-direction:column; gap:12px;">
+            <div>
+                <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">Trigger Name</label>
+                <input id="trg-name" type="text" placeholder="trg_before_insert" style="width:100%; padding:8px 10px; font-size:13px; border:1px solid var(--border); border-radius:6px; background:var(--bg-primary); color:var(--text-primary); box-sizing:border-box;">
+            </div>
+            <div style="display:flex; gap:12px;">
+                <div style="flex:1;">
+                    <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">Timing</label>
+                    <select id="trg-timing" style="width:100%; padding:8px 10px; font-size:13px; border:1px solid var(--border); border-radius:6px; background:var(--bg-primary); color:var(--text-primary);">
+                        <option value="BEFORE">BEFORE</option>
+                        <option value="AFTER">AFTER</option>
+                    </select>
+                </div>
+                <div style="flex:1;">
+                    <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">Event</label>
+                    <select id="trg-event" style="width:100%; padding:8px 10px; font-size:13px; border:1px solid var(--border); border-radius:6px; background:var(--bg-primary); color:var(--text-primary);">
+                        <option value="INSERT">INSERT</option>
+                        <option value="UPDATE">UPDATE</option>
+                        <option value="DELETE">DELETE</option>
+                    </select>
+                </div>
+            </div>
+            <div>
+                <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">Statement Body</label>
+                <textarea id="trg-body" placeholder="BEGIN\n  SET NEW.updated_at = NOW();\nEND" style="width:100%; height:120px; padding:8px 10px; font-size:13px; font-family:var(--font-mono); border:1px solid var(--border); border-radius:6px; background:var(--bg-primary); color:var(--text-primary); resize:vertical; box-sizing:border-box;"></textarea>
+            </div>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+            <button onclick="this.closest('div[style*=fixed]').remove()" style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px;">Cancel</button>
+            <button onclick="mysqlDoAddTrigger(this.closest('div[style*=fixed]'))" style="background:var(--accent-primary); border:none; color:#fff; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px; font-weight:500;">Create Trigger</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('#trg-name').focus();
+}
+
+async function mysqlDoAddTrigger(modal) {
+    const name = modal.querySelector('#trg-name').value.trim();
+    const timing = modal.querySelector('#trg-timing').value;
+    const event = modal.querySelector('#trg-event').value;
+    const body = modal.querySelector('#trg-body').value.trim();
+    if (!name || !body) { showToast('Trigger name and body are required', 'error'); return; }
+
+    const sql = `CREATE TRIGGER \`${name.replace(/`/g, '``')}\` ${timing} ${event} ON \`${mysqlCurrentDb.replace(/`/g, '``')}\`.\`${mysqlCurrentTable.replace(/`/g, '``')}\` FOR EACH ROW ${body}`;
+    modal.remove();
+
+    try {
+        await mysqlAlterTable(sql);
+        showToast(`Trigger '${name}' created`, 'success');
+        mysqlLoadTriggers();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function mysqlDropTrigger(triggerName) {
+    const confirmed = await mysqlConfirmDestructive(
+        `Drop trigger <strong>${escapeHtml(triggerName)}</strong> from <strong>${escapeHtml(mysqlCurrentTable)}</strong>?`,
+        `DROP TRIGGER \`${mysqlCurrentDb}\`.\`${triggerName}\``
+    );
+    if (!confirmed) return;
+
+    try {
+        await mysqlAlterTable(`DROP TRIGGER \`${mysqlCurrentDb.replace(/`/g, '``')}\`.\`${triggerName.replace(/`/g, '``')}\``);
+        showToast(`Trigger '${triggerName}' dropped`, 'success');
+        mysqlLoadTriggers();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+
 async function mysqlAlterTable(sql) {
     const baseUrl = getNodeApiBase(currentNodeId);
     const resp = await fetch(`${baseUrl}/api/mysql/query`, {

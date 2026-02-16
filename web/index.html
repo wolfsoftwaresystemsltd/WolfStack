@@ -1156,10 +1156,32 @@
                     </div>
 
                     <!-- Structure Tab -->
-                    <div id="mysql-tab-structure" style="flex:1; overflow:auto; display:none;">
-                        <div style="padding:40px; text-align:center; color:var(--text-muted);">
-                            Select a table to view its structure
+                    <div id="mysql-tab-structure" style="flex:1; overflow:auto; display:none; flex-direction:column;">
+                        <!-- Structure Sub-tabs -->
+                        <div
+                            style="display:flex; border-bottom:1px solid var(--border); background:var(--bg-tertiary);">
+                            <button class="mysql-struct-tab active" data-stab="columns"
+                                onclick="mysqlStructSwitchTab('columns')"
+                                style="padding:8px 16px; border:none; background:none; color:var(--text-primary); font-size:12px; font-weight:500; cursor:pointer; border-bottom:2px solid var(--accent-primary); transition:all 0.2s;">
+                                📋 Columns
+                            </button>
+                            <button class="mysql-struct-tab" data-stab="indexes"
+                                onclick="mysqlStructSwitchTab('indexes')"
+                                style="padding:8px 16px; border:none; background:none; color:var(--text-muted); font-size:12px; cursor:pointer; border-bottom:2px solid transparent; transition:all 0.2s;">
+                                🔑 Indexes
+                            </button>
+                            <button class="mysql-struct-tab" data-stab="triggers"
+                                onclick="mysqlStructSwitchTab('triggers')"
+                                style="padding:8px 16px; border:none; background:none; color:var(--text-muted); font-size:12px; cursor:pointer; border-bottom:2px solid transparent; transition:all 0.2s;">
+                                ⚡ Triggers
+                            </button>
                         </div>
+                        <div id="mysql-struct-columns" style="flex:1; overflow:auto;">
+                            <div style="padding:40px; text-align:center; color:var(--text-muted);">Select a table to
+                                view its structure</div>
+                        </div>
+                        <div id="mysql-struct-indexes" style="flex:1; overflow:auto; display:none;"></div>
+                        <div id="mysql-struct-triggers" style="flex:1; overflow:auto; display:none;"></div>
                     </div>
 
                     <!-- Query Tab -->
