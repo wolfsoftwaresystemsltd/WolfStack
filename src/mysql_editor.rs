@@ -129,11 +129,11 @@ async fn get_conn_with_timeout(
                 }
                 Ok(Err(e)) => {
                     info!("Unix socket {} failed ({}), falling back to TCP", sock, detailed_mysql_error(&e));
-                    let _ = pool.disconnect().await;
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), pool.disconnect()).await;
                 }
                 Err(_) => {
                     info!("Unix socket {} timed out, falling back to TCP", sock);
-                    let _ = pool.disconnect().await;
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), pool.disconnect()).await;
                 }
             }
         }
@@ -234,14 +234,18 @@ pub fn detect_mysql() -> serde_json::Value {
 /// Test a MySQL connection — returns the server version string on success
 /// Uses a timeout to prevent the UI from hanging on unreachable hosts.
 pub async fn test_connection(params: &ConnParams) -> Result<String, String> {
+    info!("test_connection: getting connection to {}:{}...", params.host, params.port);
     let (pool, mut conn) = get_conn_with_timeout(params).await?;
 
+    info!("test_connection: connected, querying version...");
     let version: Option<String> = conn
         .query_first("SELECT VERSION()")
         .await
-        .map_err(|e| format!("Query failed: {}", e))?;
+        .map_err(|e| format!("Connected but query failed: {}", detailed_mysql_error(&e)))?;
 
-    pool.disconnect().await.map_err(|e| format!("Disconnect error: {}", e))?;
+    info!("test_connection: version={:?}, disconnecting pool...", version);
+    // Don't let disconnect hang — fire and forget with a short timeout
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), pool.disconnect()).await;
 
     Ok(version.unwrap_or_else(|| "unknown".into()))
 }

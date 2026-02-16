@@ -1421,22 +1421,25 @@ pub async fn node_proxy(
     let content_type = req.headers().get("content-type").and_then(|ct| ct.to_str().ok()).unwrap_or("application/json").to_string();
     let body_vec = body.to_vec();
 
-    // Build URLs to try in order:
-    // 1. HTTP on internal port (port + 1) — used when TLS is enabled on the main port
-    // 2. HTTPS on the main port — for nodes running with TLS
-    // 3. HTTP on the main port — fallback for nodes without TLS
+    // Build URLs to try in order (security-first):
+    // 1. HTTPS on the main port — preferred, encrypted end-to-end
+    // 2. HTTP on internal port (port + 1) — only exists when TLS is on main port,
+    //    accessible only via WolfNet (encrypted tunnel) so still secure
+    // 3. HTTP on the main port — last resort (dev/local only)
     let internal_port = node.port + 1;
     let urls = vec![
-        format!("http://{}:{}/api/{}", node.address, internal_port, api_path),
         format!("https://{}:{}/api/{}", node.address, node.port, api_path),
+        format!("http://{}:{}/api/{}", node.address, internal_port, api_path),
         format!("http://{}:{}/api/{}", node.address, node.port, api_path),
     ];
 
     let timeout_secs = if method == actix_web::http::Method::POST || method == actix_web::http::Method::PUT { 300 } else { 120 };
 
     // Build a client that accepts self-signed certificates (inter-node traffic)
+    // Short connect_timeout so failed URL schemes fail fast without blocking
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(3))
         .danger_accept_invalid_certs(true)
         .build()
     {
@@ -4309,6 +4312,9 @@ pub async fn mysql_connect(
     body: web::Json<MysqlConnectRequest>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
+
+    info!("MySQL connect request: host={}, port={}, user={}", body.host, body.port, body.user);
+
     let params = crate::mysql_editor::ConnParams {
         host: body.host.clone(),
         port: body.port,
@@ -4316,15 +4322,36 @@ pub async fn mysql_connect(
         password: body.password.clone(),
         database: None,
     };
-    match crate::mysql_editor::test_connection(&params).await {
-        Ok(version) => HttpResponse::Ok().json(serde_json::json!({
-            "connected": true,
-            "version": version,
-        })),
-        Err(e) => HttpResponse::Ok().json(serde_json::json!({
-            "connected": false,
-            "error": e,
-        })),
+
+    // Wrap the entire connection test in a 10-second timeout so the handler
+    // ALWAYS returns a response — even if mysql_async hangs internally.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        crate::mysql_editor::test_connection(&params),
+    ).await;
+
+    match result {
+        Ok(Ok(version)) => {
+            info!("MySQL connection successful: version={}", version);
+            HttpResponse::Ok().json(serde_json::json!({
+                "connected": true,
+                "version": version,
+            }))
+        }
+        Ok(Err(e)) => {
+            error!("MySQL connection failed: {}", e);
+            HttpResponse::Ok().json(serde_json::json!({
+                "connected": false,
+                "error": e,
+            }))
+        }
+        Err(_) => {
+            error!("MySQL connect handler timed out after 10s for {}:{}", body.host, body.port);
+            HttpResponse::Ok().json(serde_json::json!({
+                "connected": false,
+                "error": format!("Connection to {}:{} timed out after 10 seconds. Possible causes: host unreachable, firewall blocking port {}, or MySQL not accepting connections.", body.host, body.port, body.port),
+            }))
+        }
     }
 }
 
