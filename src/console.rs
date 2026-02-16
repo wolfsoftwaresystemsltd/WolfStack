@@ -66,6 +66,14 @@ async fn console_session(
             let serial_sock = format!("/var/lib/wolfstack/vms/{}.serial.sock", name);
             cmd.arg(format!("socat -,raw,echo=0 UNIX-CONNECT:{}", serial_sock));
         }
+        "host" => {
+            // Host shell — open an interactive bash/sh session on this machine
+            cmd.arg("bash 2>/dev/null || sh");
+        }
+        "upgrade" => {
+            // WolfStack upgrade — re-run the setup script
+            cmd.arg("curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/main/setup.sh | bash");
+        }
         _ => {
             let _ = session.text("\r\n\x1b[31mUnknown container type\x1b[0m\r\n").await;
             let _ = session.close(None).await;
