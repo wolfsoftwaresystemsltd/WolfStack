@@ -477,16 +477,6 @@ impl ClusterState {
         }
     }
 
-    /// Set this node's cluster name and persist it
-    pub fn set_self_cluster_name(&self, name: &str) {
-        {
-            let mut nodes = self.nodes.write().unwrap();
-            if let Some(node) = nodes.get_mut(&self.self_id) {
-                node.cluster_name = Some(name.to_string());
-            }
-        }
-        Self::save_self_cluster_name(name);
-    }
 }
 
 /// Message exchanged between agents
