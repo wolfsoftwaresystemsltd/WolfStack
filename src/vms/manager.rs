@@ -885,9 +885,9 @@ impl VmManager {
             .args(["-C", "FORWARD", "-i", "wolfnet0", "-o", tap, "-j", "ACCEPT"]).output();
         if check.map(|o| !o.status.success()).unwrap_or(true) {
             let _ = Command::new("iptables")
-                .args(["-A", "FORWARD", "-i", "wolfnet0", "-o", tap, "-j", "ACCEPT"]).output();
+                .args(["-I", "FORWARD", "-i", "wolfnet0", "-o", tap, "-j", "ACCEPT"]).output();
             let _ = Command::new("iptables")
-                .args(["-A", "FORWARD", "-i", tap, "-o", "wolfnet0", "-j", "ACCEPT"]).output();
+                .args(["-I", "FORWARD", "-i", tap, "-o", "wolfnet0", "-j", "ACCEPT"]).output();
         }
 
         // Also allow TAP to reach the outside (masquerade)

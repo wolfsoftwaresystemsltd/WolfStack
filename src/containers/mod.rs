@@ -507,8 +507,8 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
     let check = Command::new("iptables")
         .args(["-C", "FORWARD", "-i", "wolfnet0", "-o", "docker0", "-j", "ACCEPT"]).output();
     if check.map(|o| !o.status.success()).unwrap_or(true) {
-        let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "wolfnet0", "-o", "docker0", "-j", "ACCEPT"]).output();
-        let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "docker0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
+        let _ = Command::new("iptables").args(["-I", "FORWARD", "-i", "wolfnet0", "-o", "docker0", "-j", "ACCEPT"]).output();
+        let _ = Command::new("iptables").args(["-I", "FORWARD", "-i", "docker0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
     }
 
     // 6. Add static ARP entry so the host can reach the WolfNet IP without ARP resolution.
@@ -625,8 +625,8 @@ pub fn ensure_lxc_bridge() {
         .args(["-C", "FORWARD", "-i", "lxcbr0", "-j", "ACCEPT"])
         .output();
     if fwd_check.map(|o| !o.status.success()).unwrap_or(true) {
-        let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "lxcbr0", "-j", "ACCEPT"]).output();
-        let _ = Command::new("iptables").args(["-A", "FORWARD", "-o", "lxcbr0", "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"]).output();
+        let _ = Command::new("iptables").args(["-I", "FORWARD", "-i", "lxcbr0", "-j", "ACCEPT"]).output();
+        let _ = Command::new("iptables").args(["-I", "FORWARD", "-o", "lxcbr0", "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"]).output();
     }
 }
 
@@ -816,8 +816,8 @@ fn lxc_apply_wolfnet(container: &str) {
         let check = Command::new("iptables")
             .args(["-C", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output();
         if check.map(|o| !o.status.success()).unwrap_or(true) {
-            let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output();
-            let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "lxcbr0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
+            let _ = Command::new("iptables").args(["-I", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output();
+            let _ = Command::new("iptables").args(["-I", "FORWARD", "-i", "lxcbr0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
         }
 
         info!("WolfNet ready: {} → wolfnet={}, iface={}", container, ip, wolfnet_iface);
