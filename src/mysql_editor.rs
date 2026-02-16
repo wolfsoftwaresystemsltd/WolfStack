@@ -81,6 +81,31 @@ impl ConnParams {
 /// Connection timeout in seconds for all MySQL operations
 const CONN_TIMEOUT_SECS: u64 = 5;
 
+/// Extract a detailed, human-readable message from a mysql_async error.
+/// The default Display impl can emit just "ERROR" for server errors;
+/// this digs into the variant to pull out the code + message.
+fn detailed_mysql_error(e: &mysql_async::Error) -> String {
+    match e {
+        mysql_async::Error::Server(server_err) => {
+            format!("MySQL error {}: {} (SQLSTATE {})",
+                server_err.code, server_err.message, server_err.state)
+        }
+        mysql_async::Error::Io(ref io_err) => {
+            format!("I/O error: {}", io_err)
+        }
+        other => {
+            // Use Debug for a more detailed fallback than Display
+            let display = format!("{}", other);
+            if display.len() <= 10 {
+                // If Display is too terse (e.g. just "ERROR"), use Debug
+                format!("{:?}", other)
+            } else {
+                display
+            }
+        }
+    }
+}
+
 /// Create a pool and get a connection with a timeout.
 /// For localhost connections, tries Unix socket first, then falls back to TCP.
 /// Returns (Pool, Conn) so callers can disconnect the pool when done.
@@ -103,7 +128,7 @@ async fn get_conn_with_timeout(
                     return Ok((pool, c));
                 }
                 Ok(Err(e)) => {
-                    info!("Unix socket {} failed ({}), falling back to TCP", sock, e);
+                    info!("Unix socket {} failed ({}), falling back to TCP", sock, detailed_mysql_error(&e));
                     let _ = pool.disconnect().await;
                 }
                 Err(_) => {
@@ -127,8 +152,9 @@ async fn get_conn_with_timeout(
             Ok((pool, c))
         }
         Ok(Err(e)) => {
-            error!("MySQL connection failed ({}:{}): {}", params.host, params.port, e);
-            Err(format!("Connection to {}:{} failed: {}", params.host, params.port, e))
+            let detail = detailed_mysql_error(&e);
+            error!("MySQL connection failed ({}:{}): {}", params.host, params.port, detail);
+            Err(format!("Connection to {}:{} failed: {}", params.host, params.port, detail))
         }
         Err(_) => {
             error!("MySQL connection timed out ({}:{})", params.host, params.port);
