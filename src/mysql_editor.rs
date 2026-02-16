@@ -7,7 +7,7 @@
 use mysql_async::prelude::*;
 use mysql_async::{Opts, OptsBuilder, Pool, Row, Value};
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{error, info};
 
 /// Connection parameters sent from the frontend
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -27,11 +27,46 @@ fn default_port() -> u16 {
     3306
 }
 
+/// Common Unix socket paths for MySQL/MariaDB
+const SOCKET_PATHS: &[&str] = &[
+    "/var/run/mysqld/mysqld.sock",
+    "/run/mysqld/mysqld.sock",
+    "/tmp/mysql.sock",
+    "/var/lib/mysql/mysql.sock",
+    "/var/run/mysql/mysql.sock",
+];
+
+/// Check if the host is a localhost address
+fn is_localhost(host: &str) -> bool {
+    let h = host.trim().to_lowercase();
+    h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
+/// Find a MySQL Unix socket on the local machine
+fn find_socket() -> Option<&'static str> {
+    SOCKET_PATHS.iter().copied().find(|p| std::path::Path::new(p).exists())
+}
+
 impl ConnParams {
-    fn to_opts(&self) -> Opts {
+    /// Build opts for TCP connection
+    fn to_tcp_opts(&self) -> Opts {
         let mut builder = OptsBuilder::default()
             .ip_or_hostname(&self.host)
             .tcp_port(self.port)
+            .user(Some(&self.user))
+            .pass(Some(&self.password));
+        if let Some(db) = &self.database {
+            if !db.is_empty() {
+                builder = builder.db_name(Some(db));
+            }
+        }
+        builder.into()
+    }
+
+    /// Build opts for Unix socket connection
+    fn to_socket_opts(&self, socket_path: &str) -> Opts {
+        let mut builder = OptsBuilder::default()
+            .socket(Some(socket_path))
             .user(Some(&self.user))
             .pass(Some(&self.password));
         if let Some(db) = &self.database {
@@ -47,18 +82,50 @@ impl ConnParams {
 const CONN_TIMEOUT_SECS: u64 = 5;
 
 /// Create a pool and get a connection with a timeout.
+/// For localhost connections, tries Unix socket first, then falls back to TCP.
 /// Returns (Pool, Conn) so callers can disconnect the pool when done.
 async fn get_conn_with_timeout(
     params: &ConnParams,
 ) -> Result<(Pool, mysql_async::Conn), String> {
-    let pool = Pool::new(params.to_opts());
+    // For localhost: try Unix socket first (most Linux MySQL installs default to socket-only)
+    if is_localhost(&params.host) {
+        if let Some(sock) = find_socket() {
+            info!("Trying MySQL Unix socket: {}", sock);
+            let pool = Pool::new(params.to_socket_opts(sock));
+            let conn_result = tokio::time::timeout(
+                std::time::Duration::from_secs(CONN_TIMEOUT_SECS),
+                pool.get_conn(),
+            )
+            .await;
+            match conn_result {
+                Ok(Ok(c)) => {
+                    info!("MySQL connected via Unix socket: {}", sock);
+                    return Ok((pool, c));
+                }
+                Ok(Err(e)) => {
+                    info!("Unix socket {} failed ({}), falling back to TCP", sock, e);
+                    let _ = pool.disconnect().await;
+                }
+                Err(_) => {
+                    info!("Unix socket {} timed out, falling back to TCP", sock);
+                    let _ = pool.disconnect().await;
+                }
+            }
+        }
+    }
+
+    // TCP connection (used for remote hosts, or as fallback for localhost)
+    let pool = Pool::new(params.to_tcp_opts());
     let conn_result = tokio::time::timeout(
         std::time::Duration::from_secs(CONN_TIMEOUT_SECS),
         pool.get_conn(),
     )
     .await;
     match conn_result {
-        Ok(Ok(c)) => Ok((pool, c)),
+        Ok(Ok(c)) => {
+            info!("MySQL connected via TCP to {}:{}", params.host, params.port);
+            Ok((pool, c))
+        }
         Ok(Err(e)) => {
             error!("MySQL connection failed ({}:{}): {}", params.host, params.port, e);
             Err(format!("Connection to {}:{} failed: {}", params.host, params.port, e))
