@@ -746,17 +746,27 @@ fn lxc_apply_wolfnet(container: &str) {
         let wolfnet_iface = if is_pve { "wn0" } else { "eth0" };
 
         if is_pve {
-            // Proxmox: wn0 is on lxcbr0, IP is set in pct config.
-            // Just add the WolfNet IP as a secondary /32 and ensure wn0 is up.
+            // Proxmox: wn0 is on lxcbr0 with NO IP/gateway in pct config.
+            // We assign a 10.0.3.x bridge IP for host routing and the WolfNet IP
+            // as a secondary /32. No gateway is set on wn0, so eth0's default
+            // route via vmbr0 stays intact.
+            let bridge_ip = get_container_bridge_ip(container, "wn0");
+            info!("Container {} → wn0 bridge={}, wolfnet={}", container, bridge_ip, ip);
+
+            // Bring wn0 up
             let _ = Command::new("lxc-attach")
                 .args(["-n", container, "--", "ip", "link", "set", "wn0", "up"])
                 .output();
+
+            // Assign bridge IP on wn0 for host-side routing (idempotent — addr add ignores dups)
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", bridge_ip), "dev", "wn0"])
+                .output();
+
+            // Add WolfNet IP as secondary /32 on wn0
             let _ = Command::new("lxc-attach")
                 .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "wn0"])
                 .output();
-
-            // Get the bridge IP of wn0 to use for host routing
-            let bridge_ip = get_container_bridge_ip(container, "wn0");
 
             // Host route — via bridge IP so traffic for WolfNet IP reaches container
             let _ = Command::new("ip").args(["route", "del", &format!("{}/32", ip)]).output();
@@ -2419,14 +2429,16 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
                     max + 1
                 });
 
-            // Add/update the wn0 NIC on lxcbr0 via pct set
-            let net_cfg = format!("name=wn0,bridge=lxcbr0,ip={}/24,gw=10.0.3.1", ip_trimmed);
+            // Add/update the wn0 NIC on lxcbr0 via pct set — NO ip/gw to avoid
+            // creating a second default gateway that conflicts with eth0 on vmbr0.
+            // lxc_apply_wolfnet will assign the bridge IP and WolfNet IP at runtime.
+            let net_cfg = "name=wn0,bridge=lxcbr0";
             let set_out = Command::new("pct")
-                .args(["set", container, &format!("--net{}", wn_index), &net_cfg])
+                .args(["set", container, &format!("--net{}", wn_index), net_cfg])
                 .output();
             match set_out {
                 Ok(ref o) if o.status.success() => {
-                    info!("Updated WolfNet NIC (net{}) on lxcbr0 with IP {} for VMID {}", wn_index, ip_trimmed, container);
+                    info!("Updated WolfNet NIC (net{}) on lxcbr0 for VMID {} (IP applied at runtime)", wn_index, container);
                 }
                 Ok(ref o) => {
                     error!("Failed to set WolfNet NIC on VMID {}: {}", container, String::from_utf8_lossy(&o.stderr));
@@ -3401,8 +3413,10 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
             // Ensure lxcbr0 bridge exists before adding NIC
             ensure_lxc_bridge();
 
-            // Add a second NIC on lxcbr0 for WolfNet traffic
-            let net1_cfg = format!("name=wn0,bridge=lxcbr0,ip={}/24,gw=10.0.3.1", ip);
+            // Add a second NIC on lxcbr0 for WolfNet traffic — NO ip/gw to avoid
+            // conflicting with eth0's default gateway on vmbr0.
+            // lxc_apply_wolfnet will assign bridge IP and WolfNet IP at runtime.
+            let net1_cfg = "name=wn0,bridge=lxcbr0".to_string();
             let set_out = Command::new("pct")
                 .args(["set", &vmid.to_string(), "--net1", &net1_cfg])
                 .output();
