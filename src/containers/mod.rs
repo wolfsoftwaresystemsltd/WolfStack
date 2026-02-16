@@ -10,7 +10,58 @@
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
+use std::sync::Mutex;
 use tracing::{info, error, warn};
+
+// ─── WolfNet Route Cache ───
+// Keep container→host route map in memory; only flush to disk when it changes.
+static WOLFNET_ROUTES: std::sync::LazyLock<Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| {
+        // Seed from existing routes file on startup
+        let mut map = std::collections::HashMap::new();
+        if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json") {
+            if let Ok(existing) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
+                map = existing;
+            }
+        }
+        Mutex::new(map)
+    });
+
+/// Merge new routes into the in-memory cache and flush to disk only if anything changed.
+/// Returns true if routes were updated.
+pub fn update_wolfnet_routes(new_routes: &std::collections::HashMap<String, String>) -> bool {
+    let mut cache = WOLFNET_ROUTES.lock().unwrap();
+    let mut changed = false;
+    for (k, v) in new_routes {
+        if cache.get(k) != Some(v) {
+            cache.insert(k.clone(), v.clone());
+            changed = true;
+        }
+    }
+    if changed {
+        flush_routes_to_disk(&cache);
+    }
+    changed
+}
+
+/// Write the route map to /var/run/wolfnet/routes.json and signal WolfNet to reload.
+fn flush_routes_to_disk(routes: &std::collections::HashMap<String, String>) {
+    let routes_path = "/var/run/wolfnet/routes.json";
+    let _ = std::fs::create_dir_all("/var/run/wolfnet");
+    if let Ok(json) = serde_json::to_string_pretty(routes) {
+        if std::fs::write(routes_path, &json).is_ok() {
+            info!("Routes changed — wrote {} route(s) to {}", routes.len(), routes_path);
+            // Signal WolfNet to reload (SIGHUP)
+            if let Ok(output) = Command::new("pidof").arg("wolfnet").output() {
+                let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !pid_str.is_empty() {
+                    let _ = Command::new("kill").args(["-HUP", &pid_str]).output();
+                    info!("Sent SIGHUP to WolfNet (pid {})", pid_str);
+                }
+            }
+        }
+    }
+}
 
 // ─── WolfNet Integration ───
 
@@ -358,35 +409,9 @@ pub async fn sync_wolfnet_peer_routes() {
         }
     }
 
-    // Merge new routes into existing routes file (poll_remote_nodes may also write routes)
+    // Update in-memory route cache; only flushes to disk + SIGHUP if anything changed
     if !subnet_routes.is_empty() {
-        let routes_path = "/var/run/wolfnet/routes.json";
-        let _ = std::fs::create_dir_all("/var/run/wolfnet");
-
-        // Read existing routes and merge (don't overwrite routes from poll_remote_nodes)
-        let mut merged: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        if let Ok(existing) = std::fs::read_to_string(routes_path) {
-            if let Ok(existing_map) = serde_json::from_str::<std::collections::HashMap<String, String>>(&existing) {
-                merged = existing_map;
-            }
-        }
-        for (k, v) in &subnet_routes {
-            merged.insert(k.clone(), v.clone());
-        }
-
-        if let Ok(json) = serde_json::to_string_pretty(&merged) {
-            if std::fs::write(routes_path, &json).is_ok() {
-                info!("Wrote {} WolfNet peer subnet route(s) to {} (merged)", merged.len(), routes_path);
-                // Signal WolfNet to reload routes (SIGHUP)
-                if let Ok(output) = Command::new("pidof").arg("wolfnet").output() {
-                    let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !pid_str.is_empty() {
-                        let _ = Command::new("kill").args(["-HUP", &pid_str]).output();
-                        info!("Sent SIGHUP to WolfNet (pid {}) to reload routes", pid_str);
-                    }
-                }
-            }
-        }
+        update_wolfnet_routes(&subnet_routes);
     }
     // Note: do NOT delete routes.json when no routes found — poll_remote_nodes may have written valid routes
 }
