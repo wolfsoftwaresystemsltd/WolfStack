@@ -483,6 +483,31 @@ pub fn lxc_attach_wolfnet(container: &str, ip: &str) -> Result<String, String> {
     Ok(format!("LXC container '{}' will use WolfNet IP {} on start", container, ip))
 }
 
+/// Get the bridge IP assigned to a container's interface (e.g. eth1)
+fn get_container_bridge_ip(container: &str, iface: &str) -> String {
+    if let Ok(output) = Command::new("lxc-attach")
+        .args(["-n", container, "--", "ip", "-4", "addr", "show", iface])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Parse "inet 10.0.3.x/24" from ip addr output
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("inet ") {
+                if let Some(addr) = rest.split('/').next() {
+                    if addr.starts_with("10.0.3.") {
+                        return addr.to_string();
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: assign a fresh bridge IP
+    warn!("Could not detect bridge IP for {}:{}, assigning new one", container, iface);
+    let last = find_free_bridge_ip();
+    format!("10.0.3.{}", last)
+}
+
 /// Apply WolfNet IP inside a running container (called after lxc-start)
 fn lxc_apply_wolfnet(container: &str) {
     let ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", container);
@@ -494,45 +519,77 @@ fn lxc_apply_wolfnet(container: &str) {
         // Wait for container to be ready
         std::thread::sleep(std::time::Duration::from_secs(2));
 
-        // Assign a unique bridge IP (scans existing containers)
-        let bridge_ip = assign_container_bridge_ip(container);
-        info!("Container {} → bridge={}, wolfnet={}", container, bridge_ip, ip);
+        // On Proxmox, WolfNet uses eth1 on lxcbr0 (eth0 stays on vmbr0).
+        // On standalone LXC, WolfNet uses a secondary IP on eth0 via lxcbr0.
+        let is_pve = is_proxmox();
+        let wolfnet_iface = if is_pve { "eth1" } else { "eth0" };
 
-        // Apply IPs via lxc-attach (immediate effect)
-        let _ = Command::new("lxc-attach")
-            .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", bridge_ip), "dev", "eth0"])
-            .output();
-        let _ = Command::new("lxc-attach")
-            .args(["-n", container, "--", "ip", "route", "replace", "default", "via", "10.0.3.1"])
-            .output();
-        // Restart networking (try all methods for distro compat)
-        let _ = Command::new("lxc-attach")
-            .args(["-n", container, "--", "sh", "-c",
-                "systemctl restart systemd-networkd 2>/dev/null; \
-                 netplan apply 2>/dev/null; \
-                 /etc/init.d/networking restart 2>/dev/null; \
-                 true"])
-            .output();
+        if is_pve {
+            // Proxmox: eth1 is on lxcbr0, IP is set in pct config.
+            // Just add the WolfNet IP as a secondary /32 and ensure eth1 is up.
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "ip", "link", "set", "eth1", "up"])
+                .output();
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "eth1"])
+                .output();
 
-        // Add WolfNet IP as secondary /32 on eth0
-        let _ = Command::new("lxc-attach")
-            .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "eth0"])
-            .output();
+            // Get the bridge IP of eth1 to use for host routing
+            let bridge_ip = get_container_bridge_ip(container, "eth1");
 
-        // Host route — via bridge IP so ARP resolves on lxcbr0
-        let _ = Command::new("ip").args(["route", "del", &format!("{}/32", ip)]).output();
-        let out = Command::new("ip")
-            .args(["route", "add", &format!("{}/32", ip), "via", &bridge_ip, "dev", "lxcbr0"])
-            .output();
-        if let Ok(ref o) = out {
-            if o.status.success() {
-                info!("Host route: {}/32 via {} dev lxcbr0", ip, bridge_ip);
-            } else {
-                error!("Host route failed: {}", String::from_utf8_lossy(&o.stderr));
+            // Host route — via bridge IP so traffic for WolfNet IP reaches container
+            let _ = Command::new("ip").args(["route", "del", &format!("{}/32", ip)]).output();
+            let out = Command::new("ip")
+                .args(["route", "add", &format!("{}/32", ip), "via", &bridge_ip, "dev", "lxcbr0"])
+                .output();
+            if let Ok(ref o) = out {
+                if o.status.success() {
+                    info!("Host route: {}/32 via {} dev lxcbr0", ip, bridge_ip);
+                } else {
+                    error!("Host route failed: {}", String::from_utf8_lossy(&o.stderr));
+                }
+            }
+        } else {
+            // Standalone LXC: original approach — bridge IP on eth0, WolfNet IP as secondary
+            let bridge_ip = assign_container_bridge_ip(container);
+            info!("Container {} → bridge={}, wolfnet={}", container, bridge_ip, ip);
+
+            // Apply IPs via lxc-attach (immediate effect)
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", bridge_ip), "dev", "eth0"])
+                .output();
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "ip", "route", "replace", "default", "via", "10.0.3.1"])
+                .output();
+            // Restart networking (try all methods for distro compat)
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "sh", "-c",
+                    "systemctl restart systemd-networkd 2>/dev/null; \
+                     netplan apply 2>/dev/null; \
+                     /etc/init.d/networking restart 2>/dev/null; \
+                     true"])
+                .output();
+
+            // Add WolfNet IP as secondary /32 on eth0
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "eth0"])
+                .output();
+
+            // Host route — via bridge IP so ARP resolves on lxcbr0
+            let _ = Command::new("ip").args(["route", "del", &format!("{}/32", ip)]).output();
+            let out = Command::new("ip")
+                .args(["route", "add", &format!("{}/32", ip), "via", &bridge_ip, "dev", "lxcbr0"])
+                .output();
+            if let Ok(ref o) = out {
+                if o.status.success() {
+                    info!("Host route: {}/32 via {} dev lxcbr0", ip, bridge_ip);
+                } else {
+                    error!("Host route failed: {}", String::from_utf8_lossy(&o.stderr));
+                }
             }
         }
 
-        // Forwarding + iptables
+        // Forwarding + iptables (common to both paths)
         let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.all.forwarding=1"]).output();
         let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.proxy_arp=1"]).output();
         let check = Command::new("iptables")
@@ -542,7 +599,7 @@ fn lxc_apply_wolfnet(container: &str) {
             let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "lxcbr0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
         }
 
-        info!("WolfNet ready: {} → wolfnet={}, bridge={}", container, ip, bridge_ip);
+        info!("WolfNet ready: {} → wolfnet={}, iface={}", container, ip, wolfnet_iface);
     }
 }
 
@@ -3013,7 +3070,7 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
         "--hostname".to_string(), name.to_string(),
         "--storage".to_string(), storage.to_string(),
         "--rootfs".to_string(), format!("{}:8", storage), // 8GB default rootfs
-        "--net0".to_string(), format!("name=eth0,bridge={},ip=dhcp", if wolfnet_ip.is_some() { "lxcbr0" } else { "vmbr0" }),
+        "--net0".to_string(), "name=eth0,bridge=vmbr0,ip=dhcp".to_string(),
         "--start".to_string(), "0".to_string(),
         "--unprivileged".to_string(), "1".to_string(),
     ];
@@ -3049,10 +3106,31 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
     if output.status.success() {
         info!("Proxmox container {} (VMID {}) created successfully", name, vmid);
 
-        // Attach WolfNet if an IP was requested
+        // Attach WolfNet: add eth1 on lxcbr0 with the WolfNet IP
         if let Some(ip) = wolfnet_ip {
+            // Ensure lxcbr0 bridge exists before adding NIC
+            ensure_lxc_bridge();
+
+            // Add a second NIC on lxcbr0 for WolfNet traffic
+            let net1_cfg = format!("name=eth1,bridge=lxcbr0,ip={}/24,gw=10.0.3.1", ip);
+            let set_out = Command::new("pct")
+                .args(["set", &vmid.to_string(), "--net1", &net1_cfg])
+                .output();
+            match set_out {
+                Ok(ref o) if o.status.success() => {
+                    info!("Added WolfNet NIC (eth1) on lxcbr0 with IP {} to VMID {}", ip, vmid);
+                }
+                Ok(ref o) => {
+                    error!("Failed to add WolfNet NIC to VMID {}: {}", vmid, String::from_utf8_lossy(&o.stderr));
+                }
+                Err(e) => {
+                    error!("Failed to run pct set for WolfNet NIC on VMID {}: {}", vmid, e);
+                }
+            }
+
+            // Save the WolfNet marker for lxc_apply_wolfnet (host routing setup at start)
             if let Err(e) = lxc_attach_wolfnet(&vmid.to_string(), ip) {
-                error!("WolfNet attachment warning for VMID {}: {}", vmid, e);
+                error!("WolfNet marker warning for VMID {}: {}", vmid, e);
             }
         }
 
