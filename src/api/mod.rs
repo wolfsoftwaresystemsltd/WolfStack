@@ -4385,9 +4385,14 @@ pub async fn mysql_databases(
     body: web::Json<MysqlCredsRequest>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    match crate::mysql_editor::list_databases(&body.to_params()).await {
-        Ok(dbs) => HttpResponse::Ok().json(serde_json::json!({ "databases": dbs })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        crate::mysql_editor::list_databases(&body.to_params()),
+    ).await;
+    match result {
+        Ok(Ok(dbs)) => HttpResponse::Ok().json(serde_json::json!({ "databases": dbs })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Database list request timed out after 15 seconds" })),
     }
 }
 
@@ -4415,9 +4420,14 @@ pub async fn mysql_tables(
         password: body.password.clone(),
         database: Some(body.database.clone()),
     };
-    match crate::mysql_editor::list_tables(&params, &body.database).await {
-        Ok(tables) => HttpResponse::Ok().json(serde_json::json!({ "tables": tables })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        crate::mysql_editor::list_tables(&params, &body.database),
+    ).await;
+    match result {
+        Ok(Ok(tables)) => HttpResponse::Ok().json(serde_json::json!({ "tables": tables })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Table list request timed out after 15 seconds" })),
     }
 }
 
@@ -4446,9 +4456,14 @@ pub async fn mysql_structure(
         password: body.password.clone(),
         database: Some(body.database.clone()),
     };
-    match crate::mysql_editor::table_structure(&params, &body.database, &body.table).await {
-        Ok(cols) => HttpResponse::Ok().json(serde_json::json!({ "columns": cols })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        crate::mysql_editor::table_structure(&params, &body.database, &body.table),
+    ).await;
+    match result {
+        Ok(Ok(cols)) => HttpResponse::Ok().json(serde_json::json!({ "columns": cols })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Structure request timed out after 15 seconds" })),
     }
 }
 
@@ -4483,9 +4498,18 @@ pub async fn mysql_data(
         password: body.password.clone(),
         database: Some(body.database.clone()),
     };
-    match crate::mysql_editor::table_data(&params, &body.database, &body.table, body.page, body.page_size).await {
-        Ok(data) => HttpResponse::Ok().json(data),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    let page = body.page;
+    let page_size = body.page_size;
+    let database = body.database.clone();
+    let table = body.table.clone();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        crate::mysql_editor::table_data(&params, &database, &table, page, page_size),
+    ).await;
+    match result {
+        Ok(Ok(data)) => HttpResponse::Ok().json(data),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Data request timed out after 30 seconds" })),
     }
 }
 
@@ -4533,9 +4557,14 @@ pub async fn mysql_query(
         password: body.password.clone(),
         database: if body.database.is_empty() { None } else { Some(body.database.clone()) },
     };
-    match crate::mysql_editor::execute_query(&params, &body.database, &body.query).await {
-        Ok(result) => HttpResponse::Ok().json(result),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        crate::mysql_editor::execute_query(&params, &body.database, &body.query),
+    ).await;
+    match result {
+        Ok(Ok(result)) => HttpResponse::Ok().json(result),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Query timed out after 30 seconds" })),
     }
 }
 

@@ -9447,10 +9447,17 @@ async function mysqlLoadDatabases() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(mysqlCreds),
         });
-        const data = await resp.json();
 
-        if (data.error) {
-            tree.innerHTML = `<div style="padding:16px; text-align:center; color:#e74c3c; font-size:12px;">${data.error}</div>`;
+        let data;
+        try {
+            data = await resp.json();
+        } catch (jsonErr) {
+            tree.innerHTML = `<div style="padding:16px; text-align:center; color:#e74c3c; font-size:12px;">Server returned non-JSON response (HTTP ${resp.status})</div>`;
+            return;
+        }
+
+        if (!resp.ok || data.error) {
+            tree.innerHTML = `<div style="padding:16px; text-align:center; color:#e74c3c; font-size:12px;">${data.error || 'Server error: HTTP ' + resp.status}</div>`;
             return;
         }
 

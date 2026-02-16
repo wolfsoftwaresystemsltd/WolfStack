@@ -257,9 +257,9 @@ pub async fn list_databases(params: &ConnParams) -> Result<Vec<String>, String> 
     let databases: Vec<String> = conn
         .query("SHOW DATABASES")
         .await
-        .map_err(|e| format!("Query failed: {}", e))?;
+        .map_err(|e| format!("SHOW DATABASES failed: {}", detailed_mysql_error(&e)))?;
 
-    pool.disconnect().await.ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), pool.disconnect()).await;
     Ok(databases)
 }
 
@@ -278,7 +278,7 @@ pub async fn list_tables(params: &ConnParams, database: &str) -> Result<Vec<serd
             database.replace('\'', "''")
         ))
         .await
-        .map_err(|e| format!("Query failed: {}", e))?;
+        .map_err(|e| format!("Tables query failed: {}", detailed_mysql_error(&e)))?;
 
     let mut tables = Vec::new();
     for row in rows {
@@ -295,7 +295,7 @@ pub async fn list_tables(params: &ConnParams, database: &str) -> Result<Vec<serd
         }));
     }
 
-    pool.disconnect().await.ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), pool.disconnect()).await;
     Ok(tables)
 }
 
@@ -320,7 +320,7 @@ pub async fn table_structure(
             table.replace('\'', "''")
         ))
         .await
-        .map_err(|e| format!("Query failed: {}", e))?;
+        .map_err(|e| format!("Structure query failed: {}", detailed_mysql_error(&e)))?;
 
     let mut columns = Vec::new();
     for row in rows {
@@ -341,7 +341,7 @@ pub async fn table_structure(
         }));
     }
 
-    pool.disconnect().await.ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), pool.disconnect()).await;
     Ok(columns)
 }
 
@@ -368,7 +368,7 @@ pub async fn table_data(
     let count_row: Option<u64> = conn
         .query_first(format!("SELECT COUNT(*) FROM {}", safe_table))
         .await
-        .map_err(|e| format!("Count query failed: {}", e))?;
+        .map_err(|e| format!("Count query failed: {}", detailed_mysql_error(&e)))?;
     let total_rows = count_row.unwrap_or(0);
 
     // Get column names
@@ -381,7 +381,7 @@ pub async fn table_data(
             table.replace('\'', "''")
         ))
         .await
-        .map_err(|e| format!("Column query failed: {}", e))?;
+        .map_err(|e| format!("Column query failed: {}", detailed_mysql_error(&e)))?;
 
     let columns: Vec<String> = col_rows.iter().map(|r| r.get::<String, _>(0).unwrap_or_default()).collect();
 
@@ -393,11 +393,11 @@ pub async fn table_data(
             safe_table, page_size, offset
         ))
         .await
-        .map_err(|e| format!("Data query failed: {}", e))?;
+        .map_err(|e| format!("Data query failed: {}", detailed_mysql_error(&e)))?;
 
     let rows = rows_to_json(&data_rows, &columns);
 
-    pool.disconnect().await.ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), pool.disconnect()).await;
 
     Ok(serde_json::json!({
         "columns": columns,
@@ -434,7 +434,7 @@ pub async fn execute_query(
         let rows: Vec<Row> = conn
             .query(query)
             .await
-            .map_err(|e| format!("Query error: {}", e))?;
+            .map_err(|e| format!("Query error: {}", detailed_mysql_error(&e)))?;
 
         // Extract column names from the first row
         let columns: Vec<String> = if let Some(first) = rows.first() {
@@ -445,7 +445,7 @@ pub async fn execute_query(
 
         let json_rows = rows_to_json(&rows, &columns);
 
-        pool.disconnect().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), pool.disconnect()).await;
 
         Ok(serde_json::json!({
             "type": "resultset",
@@ -457,14 +457,14 @@ pub async fn execute_query(
         let result = conn
             .query_iter(query)
             .await
-            .map_err(|e| format!("Query error: {}", e))?;
+            .map_err(|e| format!("Query error: {}", detailed_mysql_error(&e)))?;
 
         let affected = result.affected_rows();
         let last_insert_id = result.last_insert_id();
 
         // Drop the result to release the connection
         drop(result);
-        pool.disconnect().await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), pool.disconnect()).await;
 
         Ok(serde_json::json!({
             "type": "modification",
