@@ -1417,54 +1417,77 @@ pub async fn node_proxy(
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "Use local API for self node"}));
     }
 
-    // Forward to remote node
-    // Use HTTP for inter-node calls — WolfNet provides encryption at the transport layer.
-    // Internal HTTP API listens on port + 1 (8554 by default) when TLS is enabled.
-    let internal_port = node.port + 1;
-    let url = format!("http://{}:{}/api/{}", node.address, internal_port, api_path);
-
     let method = req.method().clone();
+    let content_type = req.headers().get("content-type").and_then(|ct| ct.to_str().ok()).unwrap_or("application/json").to_string();
+    let body_vec = body.to_vec();
 
+    // Build URLs to try in order:
+    // 1. HTTP on internal port (port + 1) — used when TLS is enabled on the main port
+    // 2. HTTPS on the main port — for nodes running with TLS
+    // 3. HTTP on the main port — fallback for nodes without TLS
+    let internal_port = node.port + 1;
+    let urls = vec![
+        format!("http://{}:{}/api/{}", node.address, internal_port, api_path),
+        format!("https://{}:{}/api/{}", node.address, node.port, api_path),
+        format!("http://{}:{}/api/{}", node.address, node.port, api_path),
+    ];
+
+    let timeout_secs = if method == actix_web::http::Method::POST || method == actix_web::http::Method::PUT { 300 } else { 120 };
+
+    // Build a client that accepts self-signed certificates (inter-node traffic)
     let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(
-            if method == actix_web::http::Method::POST || method == actix_web::http::Method::PUT { 300 } else { 120 }
-        ))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .danger_accept_invalid_certs(true)
         .build()
     {
         Ok(c) => c,
         Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("HTTP client error: {}", e)})),
     };
 
-    let mut builder = match method {
-        actix_web::http::Method::GET => client.get(&url),
-        actix_web::http::Method::POST => client.post(&url),
-        actix_web::http::Method::PUT => client.put(&url),
-        actix_web::http::Method::DELETE => client.delete(&url),
-        _ => client.get(&url),
-    };
+    let mut last_error = String::new();
 
-    // Forward content-type and body
-    if let Some(ct) = req.headers().get("content-type") {
-        builder = builder.header("content-type", ct.to_str().unwrap_or("application/json"));
-    }
-    // Cluster secret — remote node validates this instead of session cookie
-    builder = builder.header("X-WolfStack-Secret", state.cluster_secret.clone());
-    if !body.is_empty() {
-        builder = builder.body(body.to_vec());
-    }
+    for url in &urls {
+        let mut builder = match method {
+            actix_web::http::Method::GET => client.get(url),
+            actix_web::http::Method::POST => client.post(url),
+            actix_web::http::Method::PUT => client.put(url),
+            actix_web::http::Method::DELETE => client.delete(url),
+            _ => client.get(url),
+        };
 
-    match builder.send().await {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            match resp.bytes().await {
-                Ok(bytes) => HttpResponse::build(actix_web::http::StatusCode::from_u16(status).unwrap_or(actix_web::http::StatusCode::OK))
-                    .content_type("application/json")
-                    .body(bytes.to_vec()),
-                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Read error: {}", e)})),
+        builder = builder.header("content-type", &content_type);
+        builder = builder.header("X-WolfStack-Secret", state.cluster_secret.clone());
+        if !body_vec.is_empty() {
+            builder = builder.body(body_vec.clone());
+        }
+
+        match builder.send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                match resp.bytes().await {
+                    Ok(bytes) => {
+                        return HttpResponse::build(actix_web::http::StatusCode::from_u16(status).unwrap_or(actix_web::http::StatusCode::OK))
+                            .content_type("application/json")
+                            .body(bytes.to_vec());
+                    }
+                    Err(e) => {
+                        last_error = format!("Read error from {}: {}", url, e);
+                    }
+                }
+            }
+            Err(e) => {
+                last_error = format!("{}: {}", url, e);
+                // Try next URL
+                continue;
             }
         }
-        Err(e) => HttpResponse::BadGateway().json(serde_json::json!({"error": format!("Proxy error: {}. Is WolfStack running on {}:{}?", e, node.address, node.port)})),
     }
+
+    // All URLs failed
+    HttpResponse::BadGateway().json(serde_json::json!({
+        "error": format!("Could not reach node {} ({}:{}). Tried HTTP/HTTPS on ports {}/{} — last error: {}",
+            node.hostname, node.address, node.port, internal_port, node.port, last_error)
+    }))
 }
 
 // ─── Helpers ───

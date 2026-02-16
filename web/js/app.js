@@ -9344,7 +9344,29 @@ async function mysqlConnect() {
             signal: controller.signal,
         });
         clearTimeout(timeoutId);
-        const data = await resp.json();
+
+        // Try to parse JSON — handle non-200 responses too
+        let data;
+        try {
+            data = await resp.json();
+        } catch (jsonErr) {
+            const text = 'Server returned non-JSON response (HTTP ' + resp.status + ')';
+            badge.textContent = 'Error';
+            badge.style.background = 'rgba(231,76,60,0.15)';
+            badge.style.color = '#e74c3c';
+            showToast(text, 'error');
+            return;
+        }
+
+        // If the HTTP response itself failed (proxy error, server error, etc.)
+        if (!resp.ok) {
+            const errMsg = data.error || ('Server error: HTTP ' + resp.status);
+            badge.textContent = 'Connection failed';
+            badge.style.background = 'rgba(231,76,60,0.15)';
+            badge.style.color = '#e74c3c';
+            showToast(errMsg, 'error');
+            return;
+        }
 
         if (data.connected) {
             mysqlCreds = { host, port, user, password: pass };
@@ -9366,13 +9388,13 @@ async function mysqlConnect() {
             badge.textContent = 'Connection failed';
             badge.style.background = 'rgba(231,76,60,0.15)';
             badge.style.color = '#e74c3c';
-            showToast(data.error || 'Connection failed', 'error');
+            showToast(data.error || 'Connection failed — no details returned by server', 'error');
         }
     } catch (e) {
         clearTimeout(timeoutId);
         const msg = e.name === 'AbortError'
-            ? 'Connection timed out — check host/port and ensure MySQL is reachable'
-            : 'Connection error: ' + e.message;
+            ? 'Connection timed out after 8s — check host/port and ensure MySQL is reachable'
+            : 'Network error: ' + (e.message || e);
         badge.textContent = 'Error';
         badge.style.background = 'rgba(231,76,60,0.15)';
         badge.style.color = '#e74c3c';
