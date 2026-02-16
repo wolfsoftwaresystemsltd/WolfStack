@@ -9704,15 +9704,32 @@ async function mysqlLoadStructure() {
                 table: mysqlCurrentTable,
             }),
         });
-        const data = await resp.json();
 
-        if (data.error) {
-            container.innerHTML = `<div style="padding:40px; text-align:center; color:#e74c3c;">${data.error}</div>`;
+        let data;
+        try {
+            data = await resp.json();
+        } catch (jsonErr) {
+            container.innerHTML = `<div style="padding:40px; text-align:center; color:#e74c3c;">Server returned non-JSON response (HTTP ${resp.status})</div>`;
+            return;
+        }
+
+        if (!resp.ok || data.error) {
+            container.innerHTML = `<div style="padding:40px; text-align:center; color:#e74c3c;">${data.error || 'Server error: HTTP ' + resp.status}</div>`;
             return;
         }
 
         const cols = data.columns || [];
-        let html = `<table style="width:100%; border-collapse:collapse; font-size:13px;">
+
+        // Toolbar
+        let html = `<div style="padding:10px 14px; display:flex; gap:8px; border-bottom:1px solid var(--border); align-items:center;">
+            <button onclick="mysqlAddColumnDialog()" style="background:var(--accent-primary); color:#fff; border:none; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px; font-weight:500;">➕ Add Column</button>
+            <button onclick="mysqlRenameTableDialog()" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px;">✏️ Rename Table</button>
+            <div style="flex:1;"></div>
+            <span style="color:var(--text-muted); font-size:11px;">${cols.length} column${cols.length !== 1 ? 's' : ''} · ${mysqlCurrentDb}.${mysqlCurrentTable}</span>
+        </div>`;
+
+        // Table
+        html += `<div style="overflow-x:auto; flex:1;"><table style="width:100%; border-collapse:collapse; font-size:13px;">
             <thead>
                 <tr>
                     <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Column</th>
@@ -9721,6 +9738,7 @@ async function mysqlLoadStructure() {
                     <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Key</th>
                     <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Default</th>
                     <th style="padding:10px 14px; text-align:left; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Extra</th>
+                    <th style="padding:10px 14px; text-align:center; background:var(--bg-tertiary); border-bottom:2px solid var(--border); color:var(--text-secondary); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; width:120px;">Actions</th>
                 </tr>
             </thead>
             <tbody>`;
@@ -9733,6 +9751,7 @@ async function mysqlLoadStructure() {
                     : c.key === 'MUL' ? '<span style="background:rgba(155,89,182,0.2); color:#9b59b6; padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600;">MUL</span>'
                         : c.key || '';
 
+            const colJson = JSON.stringify(c).replace(/'/g, "\\'").replace(/"/g, '&quot;');
             html += `<tr style="background:${bgColor};">
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); font-weight:500; color:var(--text-primary);">${escapeHtml(c.name)}</td>
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:#e67e22;">${escapeHtml(c.type)}</td>
@@ -9740,15 +9759,179 @@ async function mysqlLoadStructure() {
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border);">${keyBadge}</td>
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:var(--text-muted);">${c.default != null ? escapeHtml(String(c.default)) : '<span style="font-style:italic;">NULL</span>'}</td>
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:var(--text-muted);">${escapeHtml(c.extra || '')}</td>
+                <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">
+                    <button onclick='mysqlModifyColumnDialog(${colJson})' style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px; margin-right:4px;" title="Modify column">✏️</button>
+                    <button onclick="mysqlDropColumn('${escapeHtml(c.name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop column">🗑️</button>
+                </td>
             </tr>`;
         }
 
-        html += '</tbody></table>';
+        html += '</tbody></table></div>';
         container.innerHTML = html;
 
     } catch (e) {
-        container.innerHTML = `<div style="padding:40px; text-align:center; color:#e74c3c;">Error: ${e.message}</div>`;
+        container.innerHTML = `<div style="padding:40px; text-align:center; color:#e74c3c;">Error: ${e.message || e}</div>`;
     }
+}
+
+// Helper to run ALTER TABLE via the query endpoint
+async function mysqlAlterTable(sql) {
+    const baseUrl = getNodeApiBase(currentNodeId);
+    const resp = await fetch(`${baseUrl}/api/mysql/query`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...mysqlCreds, database: mysqlCurrentDb, query: sql }),
+    });
+    let data;
+    try { data = await resp.json(); } catch { data = { error: 'Server returned non-JSON (HTTP ' + resp.status + ')' }; }
+    if (!resp.ok || data.error) throw new Error(data.error || 'HTTP ' + resp.status);
+    return data;
+}
+
+function mysqlAddColumnDialog() {
+    const db = mysqlCurrentDb, tbl = mysqlCurrentTable;
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:10000;';
+    modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:24px; width:420px; max-width:90vw;">
+        <h3 style="margin:0 0 16px; font-size:16px; color:var(--text-primary);">Add Column to ${escapeHtml(tbl)}</h3>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+            <div>
+                <label style="font-size:11px; color:var(--text-muted); display:block; margin-bottom:4px;">Column Name</label>
+                <input id="add-col-name" style="width:100%; padding:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); font-family:var(--font-mono); box-sizing:border-box;" placeholder="column_name">
+            </div>
+            <div>
+                <label style="font-size:11px; color:var(--text-muted); display:block; margin-bottom:4px;">Type</label>
+                <input id="add-col-type" style="width:100%; padding:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); font-family:var(--font-mono); box-sizing:border-box;" placeholder="VARCHAR(255)" value="VARCHAR(255)">
+            </div>
+            <div>
+                <label style="font-size:11px; color:var(--text-muted); display:block; margin-bottom:4px;">Default Value</label>
+                <input id="add-col-default" style="width:100%; padding:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); font-family:var(--font-mono); box-sizing:border-box;" placeholder="NULL">
+            </div>
+            <div style="display:flex; align-items:end; gap:12px; padding-bottom:4px;">
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:12px; color:var(--text-primary);">
+                    <input type="checkbox" id="add-col-nullable" checked> Nullable
+                </label>
+            </div>
+        </div>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:20px;">
+            <button onclick="this.closest('div[style*=fixed]').remove()" style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:8px 16px; border-radius:6px; cursor:pointer;">Cancel</button>
+            <button id="add-col-confirm" style="background:var(--accent-primary); color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:500;">Add Column</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('#add-col-name').focus();
+
+    modal.querySelector('#add-col-confirm').onclick = async () => {
+        const name = document.getElementById('add-col-name').value.trim();
+        const type = document.getElementById('add-col-type').value.trim();
+        const defVal = document.getElementById('add-col-default').value.trim();
+        const nullable = document.getElementById('add-col-nullable').checked;
+        if (!name || !type) { showToast('Name and type are required', 'error'); return; }
+
+        let sql = `ALTER TABLE \`${db}\`.\`${tbl}\` ADD COLUMN \`${name}\` ${type}`;
+        if (!nullable) sql += ' NOT NULL';
+        if (defVal && defVal.toUpperCase() !== 'NULL') sql += ` DEFAULT '${defVal.replace(/'/g, "''")}'`;
+        else if (nullable) sql += ' DEFAULT NULL';
+
+        try {
+            await mysqlAlterTable(sql);
+            modal.remove();
+            showToast(`Column '${name}' added`, 'success');
+            mysqlLoadStructure();
+        } catch (e) {
+            showToast('Error: ' + e.message, 'error');
+        }
+    };
+}
+
+function mysqlModifyColumnDialog(col) {
+    const db = mysqlCurrentDb, tbl = mysqlCurrentTable;
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:10000;';
+    modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:24px; width:440px; max-width:90vw;">
+        <h3 style="margin:0 0 16px; font-size:16px; color:var(--text-primary);">Modify Column: ${escapeHtml(col.name)}</h3>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+            <div>
+                <label style="font-size:11px; color:var(--text-muted); display:block; margin-bottom:4px;">Column Name</label>
+                <input id="mod-col-name" style="width:100%; padding:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); font-family:var(--font-mono); box-sizing:border-box;" value="${escapeHtml(col.name)}">
+            </div>
+            <div>
+                <label style="font-size:11px; color:var(--text-muted); display:block; margin-bottom:4px;">Type</label>
+                <input id="mod-col-type" style="width:100%; padding:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); font-family:var(--font-mono); box-sizing:border-box;" value="${escapeHtml(col.type)}">
+            </div>
+            <div>
+                <label style="font-size:11px; color:var(--text-muted); display:block; margin-bottom:4px;">Default Value</label>
+                <input id="mod-col-default" style="width:100%; padding:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); font-family:var(--font-mono); box-sizing:border-box;" value="${col.default != null ? escapeHtml(String(col.default)) : ''}" placeholder="NULL">
+            </div>
+            <div style="display:flex; align-items:end; gap:12px; padding-bottom:4px;">
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:12px; color:var(--text-primary);">
+                    <input type="checkbox" id="mod-col-nullable" ${col.nullable ? 'checked' : ''}> Nullable
+                </label>
+            </div>
+        </div>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:20px;">
+            <button onclick="this.closest('div[style*=fixed]').remove()" style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:8px 16px; border-radius:6px; cursor:pointer;">Cancel</button>
+            <button id="mod-col-confirm" style="background:var(--accent-primary); color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:500;">Save Changes</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+
+    modal.querySelector('#mod-col-confirm').onclick = async () => {
+        const newName = document.getElementById('mod-col-name').value.trim();
+        const newType = document.getElementById('mod-col-type').value.trim();
+        const defVal = document.getElementById('mod-col-default').value.trim();
+        const nullable = document.getElementById('mod-col-nullable').checked;
+        if (!newName || !newType) { showToast('Name and type are required', 'error'); return; }
+
+        // Use CHANGE if renaming, MODIFY if just changing type/properties
+        let sql;
+        if (newName !== col.name) {
+            sql = `ALTER TABLE \`${db}\`.\`${tbl}\` CHANGE COLUMN \`${col.name}\` \`${newName}\` ${newType}`;
+        } else {
+            sql = `ALTER TABLE \`${db}\`.\`${tbl}\` MODIFY COLUMN \`${col.name}\` ${newType}`;
+        }
+        if (!nullable) sql += ' NOT NULL';
+        if (defVal && defVal.toUpperCase() !== 'NULL') sql += ` DEFAULT '${defVal.replace(/'/g, "''")}'`;
+        else if (nullable) sql += ' DEFAULT NULL';
+
+        try {
+            await mysqlAlterTable(sql);
+            modal.remove();
+            showToast(`Column '${col.name}' modified`, 'success');
+            mysqlLoadStructure();
+        } catch (e) {
+            showToast('Error: ' + e.message, 'error');
+        }
+    };
+}
+
+async function mysqlDropColumn(colName) {
+    if (!confirm(`Drop column '${colName}' from ${mysqlCurrentTable}?\n\nThis will permanently delete the column and all its data. This cannot be undone.`)) return;
+
+    try {
+        await mysqlAlterTable(`ALTER TABLE \`${mysqlCurrentDb}\`.\`${mysqlCurrentTable}\` DROP COLUMN \`${colName}\``);
+        showToast(`Column '${colName}' dropped`, 'success');
+        mysqlLoadStructure();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+function mysqlRenameTableDialog() {
+    const db = mysqlCurrentDb, tbl = mysqlCurrentTable;
+    const newName = prompt(`Rename table '${tbl}' to:`, tbl);
+    if (!newName || newName === tbl) return;
+
+    mysqlAlterTable(`ALTER TABLE \`${db}\`.\`${tbl}\` RENAME TO \`${db}\`.\`${newName}\``)
+        .then(() => {
+            mysqlCurrentTable = newName;
+            showToast(`Table renamed to '${newName}'`, 'success');
+            mysqlLoadStructure();
+            // Refresh the table list in the sidebar
+            mysqlToggleDb(db);
+        })
+        .catch(e => showToast('Error: ' + e.message, 'error'));
 }
 
 async function mysqlExecuteQuery() {
