@@ -772,10 +772,22 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
     // Write subnet routes file for WolfNet and signal reload
     if !subnet_routes.is_empty() {
         let routes_path = "/var/run/wolfnet/routes.json";
-        if let Ok(json) = serde_json::to_string_pretty(&subnet_routes) {
-            let _ = std::fs::create_dir_all("/var/run/wolfnet");
+        let _ = std::fs::create_dir_all("/var/run/wolfnet");
+
+        // Merge with existing routes (sync_wolfnet_peer_routes may also write routes)
+        let mut merged: HashMap<String, String> = HashMap::new();
+        if let Ok(existing) = std::fs::read_to_string(routes_path) {
+            if let Ok(existing_map) = serde_json::from_str::<HashMap<String, String>>(&existing) {
+                merged = existing_map;
+            }
+        }
+        for (k, v) in &subnet_routes {
+            merged.insert(k.clone(), v.clone());
+        }
+
+        if let Ok(json) = serde_json::to_string_pretty(&merged) {
             if std::fs::write(routes_path, &json).is_ok() {
-                tracing::info!("Wrote {} subnet route(s) to {}: {}", subnet_routes.len(), routes_path, json.trim());
+                tracing::info!("Wrote {} subnet route(s) to {} (merged): {}", merged.len(), routes_path, json.trim());
                 // Signal WolfNet to reload routes (SIGHUP)
                 if let Ok(output) = std::process::Command::new("pidof").arg("wolfnet").output() {
                     let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
