@@ -1828,9 +1828,9 @@ pub async fn wolfnet_network_status(req: HttpRequest, state: web::Data<AppState>
     HttpResponse::Ok().json(status)
 }
 
-/// GET /api/wolfnet/used-ips — returns WolfNet IPs in use on this node (cluster-internal)
-pub async fn wolfnet_used_ips_endpoint(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
-    if let Err(e) = require_cluster_auth(&req, &state) { return e; }
+/// GET /api/wolfnet/used-ips — returns WolfNet IPs in use on this node
+/// No auth required — only returns IP addresses, needed by any WolfNet peer for route discovery
+pub async fn wolfnet_used_ips_endpoint(_req: HttpRequest, _state: web::Data<AppState>) -> HttpResponse {
     let ips = containers::wolfnet_used_ips();
     HttpResponse::Ok().json(ips)
 }
