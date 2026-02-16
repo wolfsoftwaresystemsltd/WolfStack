@@ -9235,14 +9235,10 @@ function loadMySQLEditor() {
     const banner = document.getElementById('mysql-detect-banner');
     banner.style.display = 'none';
 
-    // Auto-fill host with the current node's IP address
-    const node = currentNodeId ? allNodes.find(n => n.id === currentNodeId) : null;
+    // Always use localhost — API calls are proxied to the target node via
+    // /api/nodes/{id}/proxy/..., so the backend connects to MySQL locally.
     const hostInput = document.getElementById('mysql-host');
-    if (node && node.address && !node.is_self) {
-        hostInput.value = node.address;
-    } else {
-        hostInput.value = 'localhost';
-    }
+    hostInput.value = 'localhost';
     document.getElementById('mysql-port').value = '3306';
     document.getElementById('mysql-user').value = '';
     document.getElementById('mysql-pass').value = '';
@@ -9296,9 +9292,8 @@ function mysqlSelectContainer(idx) {
     const containerSelect = document.getElementById('mysql-container-select');
     const containers = containerSelect._containers || [];
     if (idx === '' || !containers[idx]) {
-        // "Manual connection" selected — reset to node IP
-        const node = currentNodeId ? allNodes.find(n => n.id === currentNodeId) : null;
-        document.getElementById('mysql-host').value = (node && node.address && !node.is_self) ? node.address : 'localhost';
+        // "Manual connection" selected — reset to localhost
+        document.getElementById('mysql-host').value = 'localhost';
         document.getElementById('mysql-port').value = '3306';
         return;
     }

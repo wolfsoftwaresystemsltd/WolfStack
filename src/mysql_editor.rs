@@ -7,6 +7,7 @@
 use mysql_async::prelude::*;
 use mysql_async::{Opts, OptsBuilder, Pool, Row, Value};
 use serde::{Deserialize, Serialize};
+use tracing::error;
 
 /// Connection parameters sent from the frontend
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -39,6 +40,36 @@ impl ConnParams {
             }
         }
         builder.into()
+    }
+}
+
+/// Connection timeout in seconds for all MySQL operations
+const CONN_TIMEOUT_SECS: u64 = 5;
+
+/// Create a pool and get a connection with a timeout.
+/// Returns (Pool, Conn) so callers can disconnect the pool when done.
+async fn get_conn_with_timeout(
+    params: &ConnParams,
+) -> Result<(Pool, mysql_async::Conn), String> {
+    let pool = Pool::new(params.to_opts());
+    let conn_result = tokio::time::timeout(
+        std::time::Duration::from_secs(CONN_TIMEOUT_SECS),
+        pool.get_conn(),
+    )
+    .await;
+    match conn_result {
+        Ok(Ok(c)) => Ok((pool, c)),
+        Ok(Err(e)) => {
+            error!("MySQL connection failed ({}:{}): {}", params.host, params.port, e);
+            Err(format!("Connection to {}:{} failed: {}", params.host, params.port, e))
+        }
+        Err(_) => {
+            error!("MySQL connection timed out ({}:{})", params.host, params.port);
+            Err(format!(
+                "Connection to {}:{} timed out after {} seconds",
+                params.host, params.port, CONN_TIMEOUT_SECS
+            ))
+        }
     }
 }
 
@@ -108,21 +139,9 @@ pub fn detect_mysql() -> serde_json::Value {
 }
 
 /// Test a MySQL connection — returns the server version string on success
-/// Uses a 5-second timeout to prevent the UI from hanging on unreachable hosts.
+/// Uses a timeout to prevent the UI from hanging on unreachable hosts.
 pub async fn test_connection(params: &ConnParams) -> Result<String, String> {
-    let pool = Pool::new(params.to_opts());
-
-    // Wrap connection attempt in a timeout so we don't hang forever
-    let conn_result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        pool.get_conn(),
-    ).await;
-
-    let mut conn = match conn_result {
-        Ok(Ok(c)) => c,
-        Ok(Err(e)) => return Err(format!("Connection failed: {}", e)),
-        Err(_) => return Err("Connection timed out after 5 seconds".to_string()),
-    };
+    let (pool, mut conn) = get_conn_with_timeout(params).await?;
 
     let version: Option<String> = conn
         .query_first("SELECT VERSION()")
@@ -136,11 +155,7 @@ pub async fn test_connection(params: &ConnParams) -> Result<String, String> {
 
 /// List all databases
 pub async fn list_databases(params: &ConnParams) -> Result<Vec<String>, String> {
-    let pool = Pool::new(params.to_opts());
-    let mut conn = pool
-        .get_conn()
-        .await
-        .map_err(|e| format!("Connection failed: {}", e))?;
+    let (pool, mut conn) = get_conn_with_timeout(params).await?;
 
     let databases: Vec<String> = conn
         .query("SHOW DATABASES")
@@ -156,11 +171,7 @@ pub async fn list_tables(params: &ConnParams, database: &str) -> Result<Vec<serd
     let mut p = params.clone();
     p.database = Some(database.to_string());
 
-    let pool = Pool::new(p.to_opts());
-    let mut conn = pool
-        .get_conn()
-        .await
-        .map_err(|e| format!("Connection failed: {}", e))?;
+    let (pool, mut conn) = get_conn_with_timeout(&p).await?;
 
     // Get table names and types
     let rows: Vec<Row> = conn
@@ -200,11 +211,7 @@ pub async fn table_structure(
     let mut p = params.clone();
     p.database = Some(database.to_string());
 
-    let pool = Pool::new(p.to_opts());
-    let mut conn = pool
-        .get_conn()
-        .await
-        .map_err(|e| format!("Connection failed: {}", e))?;
+    let (pool, mut conn) = get_conn_with_timeout(&p).await?;
 
     let rows: Vec<Row> = conn
         .query(format!(
@@ -252,11 +259,7 @@ pub async fn table_data(
     let mut p = params.clone();
     p.database = Some(database.to_string());
 
-    let pool = Pool::new(p.to_opts());
-    let mut conn = pool
-        .get_conn()
-        .await
-        .map_err(|e| format!("Connection failed: {}", e))?;
+    let (pool, mut conn) = get_conn_with_timeout(&p).await?;
 
     // Sanitize table name (backtick-quote it)
     let safe_table = format!("`{}`.`{}`",
@@ -320,11 +323,7 @@ pub async fn execute_query(
         p.database = Some(database.to_string());
     }
 
-    let pool = Pool::new(p.to_opts());
-    let mut conn = pool
-        .get_conn()
-        .await
-        .map_err(|e| format!("Connection failed: {}", e))?;
+    let (pool, mut conn) = get_conn_with_timeout(&p).await?;
 
     // Determine if it's a SELECT-like query (returns rows) or a modification
     let trimmed = query.trim_start().to_uppercase();
