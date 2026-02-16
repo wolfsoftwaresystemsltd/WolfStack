@@ -9,6 +9,8 @@ use actix_web::{web, HttpRequest, HttpResponse};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::Arc;
+use futures::StreamExt;
+use tokio_tungstenite::tungstenite;
 use tracing::{info, error};
 
 /// WebSocket console endpoint: /ws/console/{type}/{name}
@@ -174,4 +176,167 @@ async fn console_session(
     read_handle.abort();
     let _ = session.close(None).await;
     info!("Console session ended for {} {}", ctype, name);
+}
+
+/// WebSocket proxy endpoint: /ws/remote-console/{node_id}/{type}/{name}
+/// Bridges browser WS ↔ remote node's /ws/console/{type}/{name}
+pub async fn remote_console_ws(
+    req: HttpRequest,
+    path: web::Path<(String, String, String)>,
+    body: web::Payload,
+    state: web::Data<crate::api::AppState>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let (node_id, ctype, name) = path.into_inner();
+    info!("Remote console proxy: node={} type={} name={}", node_id, ctype, name);
+
+    // Look up the node
+    let node = match state.cluster.get_node(&node_id) {
+        Some(n) => n,
+        None => return Ok(HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" }))),
+    };
+
+    if node.is_self {
+        // Self node — use local console directly
+        return console_ws(req, web::Path::from((ctype, name)), body).await;
+    }
+
+    let (response, session, msg_stream) = actix_ws::handle(&req, body)?;
+    actix_rt::spawn(remote_console_bridge(session, msg_stream, node.address, node.port, ctype, name));
+    Ok(response)
+}
+
+/// Bridge browser WS ↔ remote node's console WS
+async fn remote_console_bridge(
+    mut session: actix_ws::Session,
+    mut msg_stream: actix_ws::MessageStream,
+    remote_host: String,
+    remote_port: u16,
+    ctype: String,
+    name: String,
+) {
+    // Simple percent-encode for URL path
+    let encoded_name: String = name.bytes().map(|b| {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+            format!("{}", b as char)
+        } else {
+            format!("%{:02X}", b)
+        }
+    }).collect();
+    let ws_path = format!("/ws/console/{}/{}", ctype, encoded_name);
+    let internal_port = remote_port + 1;
+
+    // URLs to try in order: wss main, ws internal, ws main
+    let urls = vec![
+        format!("wss://{}:{}{}", remote_host, remote_port, ws_path),
+        format!("ws://{}:{}{}", remote_host, internal_port, ws_path),
+        format!("ws://{}:{}{}", remote_host, remote_port, ws_path),
+    ];
+
+    // Build TLS connector that accepts self-signed certs
+    let tls_connector = {
+        let mut builder = native_tls::TlsConnector::builder();
+        builder.danger_accept_invalid_certs(true);
+        builder.danger_accept_invalid_hostnames(true);
+        match builder.build() {
+            Ok(c) => Some(tokio_tungstenite::Connector::NativeTls(c)),
+            Err(e) => {
+                error!("TLS connector error: {}", e);
+                let _ = session.text(format!("\r\n\x1b[31mTLS error: {}\x1b[0m\r\n", e)).await;
+                let _ = session.close(None).await;
+                return;
+            }
+        }
+    };
+
+    let mut remote_stream = None;
+
+    for url in &urls {
+        let ws_request = match tungstenite::client::IntoClientRequest::into_client_request(url.as_str()) {
+            Ok(req) => req,
+            Err(_) => continue,
+        };
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio_tungstenite::connect_async_tls_with_config(
+                ws_request,
+                None,
+                false,
+                tls_connector.clone(),
+            ),
+        ).await {
+            Ok(Ok((stream, _))) => {
+                info!("Remote console connected via {}", url);
+                remote_stream = Some(stream);
+                break;
+            }
+            Ok(Err(e)) => {
+                info!("Remote console {} failed: {}", url, e);
+            }
+            Err(_) => {
+                info!("Remote console {} timed out", url);
+            }
+        }
+    }
+
+    let remote_ws = match remote_stream {
+        Some(s) => s,
+        None => {
+            let _ = session.text(format!(
+                "\r\n\x1b[31mCould not connect to remote console on {}:{}\x1b[0m\r\n",
+                remote_host, remote_port
+            )).await;
+            let _ = session.close(None).await;
+            return;
+        }
+    };
+
+    let (mut remote_sink, mut remote_rx) = remote_ws.split();
+
+    // Bridge loop
+    loop {
+        tokio::select! {
+            // Remote → Browser
+            msg = remote_rx.next() => {
+                match msg {
+                    Some(Ok(tungstenite::Message::Text(text))) => {
+                        if session.text(text.to_string()).await.is_err() { break; }
+                    }
+                    Some(Ok(tungstenite::Message::Binary(data))) => {
+                        if session.binary(data.to_vec()).await.is_err() { break; }
+                    }
+                    Some(Ok(tungstenite::Message::Ping(data))) => {
+                        let _ = futures::SinkExt::send(&mut remote_sink,
+                            tungstenite::Message::Pong(data)).await;
+                    }
+                    Some(Ok(tungstenite::Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+
+            // Browser → Remote
+            msg = msg_stream.next() => {
+                match msg {
+                    Some(Ok(actix_ws::Message::Text(text))) => {
+                        if futures::SinkExt::send(&mut remote_sink,
+                            tungstenite::Message::Text(text.to_string())).await.is_err() { break; }
+                    }
+                    Some(Ok(actix_ws::Message::Binary(data))) => {
+                        if futures::SinkExt::send(&mut remote_sink,
+                            tungstenite::Message::Binary(data.to_vec())).await.is_err() { break; }
+                    }
+                    Some(Ok(actix_ws::Message::Ping(bytes))) => {
+                        let _ = session.pong(&bytes).await;
+                    }
+                    Some(Ok(actix_ws::Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Cleanup
+    let _ = futures::SinkExt::close(&mut remote_sink).await;
+    let _ = session.close(None).await;
+    info!("Remote console session ended for {} {} on {}", ctype, name, remote_host);
 }

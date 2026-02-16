@@ -7397,11 +7397,11 @@ let consoleFitAddon = null;
 
 function openConsole(type, name) {
     let url = '/console.html?type=' + encodeURIComponent(type) + '&name=' + encodeURIComponent(name);
-    // For remote nodes, pass the remote server's host so the WebSocket connects there
+    // For remote nodes, pass the node_id so the console proxies through the local server
     if (currentNodeId) {
         const node = allNodes.find(n => n.id === currentNodeId);
         if (node && !node.is_self) {
-            url += '&host=' + encodeURIComponent(node.address) + '&port=' + encodeURIComponent(node.port);
+            url += '&node_id=' + encodeURIComponent(node.id);
         }
     }
     window.open(url, 'console_' + name, 'width=960,height=600,menubar=no,toolbar=no');

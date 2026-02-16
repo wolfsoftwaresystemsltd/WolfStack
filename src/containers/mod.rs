@@ -196,12 +196,16 @@ pub fn wolfnet_used_ips() -> Vec<String> {
         .output()
     {
         let text = String::from_utf8_lossy(&output.stdout);
-        if let Some(ip) = text.lines()
-            .find(|l| l.contains("inet "))
-            .and_then(|l| l.trim().split_whitespace().nth(1))
-            .and_then(|s| s.split('/').next())
-        {
-            ips.push(ip.to_string());
+        if output.status.success() && !text.is_empty() {
+            if let Some(ip) = text.lines()
+                .find(|l| l.contains("inet "))
+                .and_then(|l| l.trim().split_whitespace().nth(1))
+                .and_then(|s| s.split('/').next())
+            {
+                ips.push(ip.to_string());
+            } else {
+                warn!("wolfnet0 interface exists but has NO IP address — WolfNet may have lost its IP. Routes and connectivity will be broken.");
+            }
         }
     }
 

@@ -4790,6 +4790,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups/{id}/restore", web::post().to(backup_restore))
         // Console WebSocket
         .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
+        // Remote Console WebSocket proxy (bridges browser ↔ remote node's console)
+        .route("/ws/remote-console/{node_id}/{type}/{name}", web::get().to(crate::console::remote_console_ws))
         // PVE Console WebSocket proxy
         .route("/ws/pve-console/{node_id}/{vmid}", web::get().to(pve_console::pve_console_ws))
         // MySQL Database Editor

@@ -95,6 +95,7 @@ pub struct ClusterState {
 impl ClusterState {
     const NODES_FILE: &'static str = "/etc/wolfstack/nodes.json";
     const DELETED_FILE: &'static str = "/etc/wolfstack/deleted_nodes.json";
+    const SELF_CLUSTER_FILE: &'static str = "/etc/wolfstack/self_cluster.json";
 
     pub fn new(self_id: String, self_address: String, port: u16) -> Self {
         let state = Self {
@@ -202,9 +203,10 @@ impl ClusterState {
     /// Update this node's own status
     pub fn update_self(&self, metrics: SystemMetrics, components: Vec<ComponentStatus>, docker_count: u32, lxc_count: u32, vm_count: u32, public_ip: Option<String>) {
         let mut nodes = self.nodes.write().unwrap();
-        // Fetch existing cluster_name to preserve it, or default to "WolfStack" if missing
+        // Fetch existing cluster_name: in-memory first, then persisted file, then default
         let cluster_name = nodes.get(&self.self_id)
             .and_then(|n| n.cluster_name.clone())
+            .or_else(|| Self::load_self_cluster_name())
             .or_else(|| Some("WolfStack".to_string()));
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
@@ -437,12 +439,53 @@ impl ClusterState {
                     node.pve_cluster_name = Some(name.clone());
                 }
             }
+            // If updating self node's cluster name, persist it so it survives reinstalls
+            let is_self = node.is_self;
+            let final_cluster = node.cluster_name.clone();
             drop(nodes);
             self.save_nodes();
+            if is_self {
+                if let Some(ref name) = final_cluster {
+                    Self::save_self_cluster_name(name);
+                }
+            }
             true
         } else {
             false
         }
+    }
+
+    /// Load persisted self cluster_name from disk
+    fn load_self_cluster_name() -> Option<String> {
+        if let Ok(data) = std::fs::read_to_string(Self::SELF_CLUSTER_FILE) {
+            if let Ok(name) = serde_json::from_str::<String>(&data) {
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+        }
+        None
+    }
+
+    /// Persist self cluster_name to disk (survives reinstalls)
+    fn save_self_cluster_name(name: &str) {
+        let _ = std::fs::create_dir_all("/etc/wolfstack");
+        if let Ok(json) = serde_json::to_string(name) {
+            if let Err(e) = std::fs::write(Self::SELF_CLUSTER_FILE, json) {
+                warn!("Failed to save self cluster name: {}", e);
+            }
+        }
+    }
+
+    /// Set this node's cluster name and persist it
+    pub fn set_self_cluster_name(&self, name: &str) {
+        {
+            let mut nodes = self.nodes.write().unwrap();
+            if let Some(node) = nodes.get_mut(&self.self_id) {
+                node.cluster_name = Some(name.to_string());
+            }
+        }
+        Self::save_self_cluster_name(name);
     }
 }
 
