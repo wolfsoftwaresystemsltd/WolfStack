@@ -724,51 +724,58 @@ fi
 
 # ─── Set up lxcbr0 bridge for LXC containers ────────────────────────────────
 if command -v lxc-ls &> /dev/null; then
-    echo ""
-    echo "Configuring LXC networking (lxc-net)..."
-    
-    # Ensure USE_LXC_BRIDGE="true" in /etc/default/lxc-net
-    if [ -f "/etc/default/lxc-net" ]; then
-        if grep -q "USE_LXC_BRIDGE" /etc/default/lxc-net; then
-            sed -i 's/^#\?USE_LXC_BRIDGE=.*/USE_LXC_BRIDGE="true"/' /etc/default/lxc-net
+    # Only configure lxc-net on fresh installs — restarting lxc-net on upgrades
+    # destroys lxcbr0 and all container kernel routes, breaking WolfNet routing.
+    # WolfStack's reapply_wolfnet_routes() handles route restoration on startup.
+    if ip link show lxcbr0 &>/dev/null && ip -4 addr show lxcbr0 2>/dev/null | grep -q "inet "; then
+        echo "✓ LXC networking already active (lxcbr0 up)"
+    else
+        echo ""
+        echo "Configuring LXC networking (lxc-net)..."
+        
+        # Ensure USE_LXC_BRIDGE="true" in /etc/default/lxc-net
+        if [ -f "/etc/default/lxc-net" ]; then
+            if grep -q "USE_LXC_BRIDGE" /etc/default/lxc-net; then
+                sed -i 's/^#\?USE_LXC_BRIDGE=.*/USE_LXC_BRIDGE="true"/' /etc/default/lxc-net
+            else
+                echo 'USE_LXC_BRIDGE="true"' >> /etc/default/lxc-net
+            fi
         else
-            echo 'USE_LXC_BRIDGE="true"' >> /etc/default/lxc-net
+            echo 'USE_LXC_BRIDGE="true"' > /etc/default/lxc-net
         fi
-    else
-        echo 'USE_LXC_BRIDGE="true"' > /etc/default/lxc-net
-    fi
 
-    # Enable and start lxc-net service
-    systemctl enable lxc-net 2>/dev/null || true
-    systemctl restart lxc-net 2>/dev/null || true
-    
-    # Check if dnsmasq is running on lxcbr0
-    sleep 2
-    if pgrep -f "dnsmasq.*lxcbr0" > /dev/null; then
-        echo "✓ LXC networking active (lxcbr0 + dnsmasq)"
-    else
-        echo "⚠ LXC networking service started but dnsmasq not detected on lxcbr0."
-        echo "  Attempting manual fallback..."
-        systemctl stop lxc-net 2>/dev/null || true
+        # Enable and start lxc-net service
+        systemctl enable lxc-net 2>/dev/null || true
+        systemctl restart lxc-net 2>/dev/null || true
         
-        ip link add lxcbr0 type bridge 2>/dev/null || true
-        ip addr add 10.0.3.1/24 dev lxcbr0 2>/dev/null || true
-        ip link set lxcbr0 up 2>/dev/null || true
-        
-        # NAT
-        echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
-        iptables -t nat -A POSTROUTING -s 10.0.3.0/24 ! -d 10.0.3.0/24 -j MASQUERADE 2>/dev/null || true
-        iptables -A FORWARD -i lxcbr0 -j ACCEPT 2>/dev/null || true
-        iptables -A FORWARD -o lxcbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-        
-        # DNSMasq
-        mkdir -p /run/lxc
-        dnsmasq --strict-order --bind-interfaces --pid-file=/run/lxc/dnsmasq.pid \
-            --listen-address 10.0.3.1 --dhcp-range 10.0.3.2,10.0.3.254 \
-            --dhcp-lease-max=253 --dhcp-no-override --except-interface=lo \
-            --interface=lxcbr0 --conf-file= 2>/dev/null || true
+        # Check if dnsmasq is running on lxcbr0
+        sleep 2
+        if pgrep -f "dnsmasq.*lxcbr0" > /dev/null; then
+            echo "✓ LXC networking active (lxcbr0 + dnsmasq)"
+        else
+            echo "⚠ LXC networking service started but dnsmasq not detected on lxcbr0."
+            echo "  Attempting manual fallback..."
+            systemctl stop lxc-net 2>/dev/null || true
             
-        echo "✓ Manually configured lxcbr0 and dnsmasq"
+            ip link add lxcbr0 type bridge 2>/dev/null || true
+            ip addr add 10.0.3.1/24 dev lxcbr0 2>/dev/null || true
+            ip link set lxcbr0 up 2>/dev/null || true
+            
+            # NAT
+            echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
+            iptables -t nat -A POSTROUTING -s 10.0.3.0/24 ! -d 10.0.3.0/24 -j MASQUERADE 2>/dev/null || true
+            iptables -A FORWARD -i lxcbr0 -j ACCEPT 2>/dev/null || true
+            iptables -A FORWARD -o lxcbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+            
+            # DNSMasq
+            mkdir -p /run/lxc
+            dnsmasq --strict-order --bind-interfaces --pid-file=/run/lxc/dnsmasq.pid \
+                --listen-address 10.0.3.1 --dhcp-range 10.0.3.2,10.0.3.254 \
+                --dhcp-lease-max=253 --dhcp-no-override --except-interface=lo \
+                --interface=lxcbr0 --conf-file= 2>/dev/null || true
+                
+            echo "✓ Manually configured lxcbr0 and dnsmasq"
+        fi
     fi
 fi
 
