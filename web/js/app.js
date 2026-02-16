@@ -9695,18 +9695,26 @@ async function mysqlLoadStructure() {
     const container = document.getElementById('mysql-tab-structure');
     container.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);"><div class="spinner-sm"></div> Loading structure...</div>';
 
+    const baseUrl = getNodeApiBase(currentNodeId);
+    const url = `${baseUrl}/api/mysql/structure`;
+    const reqBody = {
+        ...mysqlCreds,
+        database: mysqlCurrentDb,
+        table: mysqlCurrentTable,
+    };
+
     try {
-        const baseUrl = getNodeApiBase(currentNodeId);
-        const resp = await fetch(`${baseUrl}/api/mysql/structure`, {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 20000);
+
+        const resp = await fetch(url, {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                ...mysqlCreds,
-                database: mysqlCurrentDb,
-                table: mysqlCurrentTable,
-            }),
+            body: JSON.stringify(reqBody),
+            signal: controller.signal,
         });
+        clearTimeout(timeoutId);
 
         let data;
         try {
@@ -9773,7 +9781,16 @@ async function mysqlLoadStructure() {
         container.innerHTML = html;
 
     } catch (e) {
-        container.innerHTML = `<div style="padding:40px; text-align:center; color:#e74c3c;">Error: ${e.message || e}</div>`;
+        const isTimeout = e.name === 'AbortError';
+        const detail = isTimeout
+            ? 'Request timed out after 20 seconds.'
+            : `${e.message || e}`;
+        container.innerHTML = `<div style="padding:40px; text-align:center; color:#e74c3c;">
+            <div style="font-size:14px; font-weight:500; margin-bottom:8px;">${isTimeout ? 'Request Timed Out' : 'Connection Error'}</div>
+            <div style="font-size:12px; color:var(--text-muted); margin-bottom:12px;">${detail}</div>
+            <div style="font-size:11px; color:var(--text-muted); font-family:var(--font-mono);">URL: ${escapeHtml(url)}</div>
+            <button onclick="mysqlLoadStructure()" style="margin-top:12px; background:var(--accent-primary); color:#fff; border:none; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px;">🔄 Retry</button>
+        </div>`;
     }
 }
 
