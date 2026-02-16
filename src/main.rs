@@ -128,6 +128,9 @@ async fn main() -> std::io::Result<()> {
     info!("  Hostname:   {}", hostname);
     info!("  Dashboard:  http://{}:{}", cli.bind, cli.port);
 
+    // Ensure lxcbr0 bridge is up (needed for WolfNet container networking)
+    containers::ensure_lxc_bridge();
+
     // Load built-in cluster secret for inter-node authentication
     let cluster_secret = auth::load_cluster_secret();
 
