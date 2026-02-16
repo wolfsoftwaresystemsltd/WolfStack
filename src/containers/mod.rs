@@ -2392,10 +2392,60 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
         let ip_trimmed = wip.trim();
         if ip_trimmed.is_empty() {
             let _ = std::fs::remove_file(&wolfnet_ip_file);
+            // Remove the wn0 NIC from pct config if it exists
+            let current = lxc_parse_config(container).unwrap_or_default();
+            if let Some(wn_nic) = current.network_interfaces.iter().find(|n| n.name == "wn0" || n.link == "lxcbr0") {
+                let _ = Command::new("pct")
+                    .args(["set", container, &format!("--delete"), &format!("net{}", wn_nic.index)])
+                    .output();
+                info!("Removed WolfNet NIC (net{}) from VMID {}", wn_nic.index, container);
+            }
         } else {
             let _ = std::fs::create_dir_all(&wolfnet_dir);
             std::fs::write(&wolfnet_ip_file, ip_trimmed)
                 .map_err(|e| format!("Failed to write WolfNet IP: {}", e))?;
+
+            // Ensure lxcbr0 bridge exists
+            ensure_lxc_bridge();
+
+            // Find existing wn0 NIC index or use next free index
+            let current = lxc_parse_config(container).unwrap_or_default();
+            let wn_index = current.network_interfaces.iter()
+                .find(|n| n.name == "wn0" || n.link == "lxcbr0")
+                .map(|n| n.index)
+                .unwrap_or_else(|| {
+                    // Find next free net index
+                    let max = current.network_interfaces.iter().map(|n| n.index).max().unwrap_or(0);
+                    max + 1
+                });
+
+            // Add/update the wn0 NIC on lxcbr0 via pct set
+            let net_cfg = format!("name=wn0,bridge=lxcbr0,ip={}/24,gw=10.0.3.1", ip_trimmed);
+            let set_out = Command::new("pct")
+                .args(["set", container, &format!("--net{}", wn_index), &net_cfg])
+                .output();
+            match set_out {
+                Ok(ref o) if o.status.success() => {
+                    info!("Updated WolfNet NIC (net{}) on lxcbr0 with IP {} for VMID {}", wn_index, ip_trimmed, container);
+                }
+                Ok(ref o) => {
+                    error!("Failed to set WolfNet NIC on VMID {}: {}", container, String::from_utf8_lossy(&o.stderr));
+                }
+                Err(e) => {
+                    error!("Failed to run pct set for WolfNet NIC on VMID {}: {}", container, e);
+                }
+            }
+
+            // Apply live if the container is running
+            let running = Command::new("pct")
+                .args(["status", container])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).contains("running"))
+                .unwrap_or(false);
+            if running {
+                info!("Container {} is running — applying WolfNet IP {} live", container, ip_trimmed);
+                lxc_apply_wolfnet(container);
+            }
         }
     }
 
@@ -2644,6 +2694,17 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
             let _ = std::fs::create_dir_all(&wolfnet_dir);
             std::fs::write(&wolfnet_ip_file, ip_trimmed)
                 .map_err(|e| format!("Failed to write WolfNet IP: {}", e))?;
+
+            // Apply live if the container is running
+            let running = Command::new("lxc-info")
+                .args(["-n", container, "-sH"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_uppercase().contains("RUNNING"))
+                .unwrap_or(false);
+            if running {
+                info!("Container {} is running — applying WolfNet IP {} live", container, ip_trimmed);
+                lxc_apply_wolfnet(container);
+            }
         }
     }
 
