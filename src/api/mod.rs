@@ -22,6 +22,17 @@ use crate::auth::SessionManager;
 mod console;
 mod pve_console;
 
+/// Build ordered URLs to try for inter-node communication.
+/// Tries: HTTPS on main port, HTTP on internal port (port+1), HTTP on main port.
+/// This ensures both TLS-enabled and HTTP-only nodes are reachable.
+fn build_node_urls(address: &str, port: u16, path: &str) -> Vec<String> {
+    vec![
+        format!("https://{}:{}{}", address, port, path),
+        format!("http://{}:{}{}", address, port + 1, path),
+        format!("http://{}:{}{}", address, port, path),
+    ]
+}
+
 /// Progress state for PBS restore operations
 #[derive(Clone, Serialize, Default)]
 pub struct PbsRestoreProgress {
@@ -443,13 +454,16 @@ pub async fn remove_node(req: HttpRequest, state: web::Data<AppState>, path: web
                 .unwrap_or_default();
             for node in &nodes {
                 if node.is_self || !node.online { continue; }
-                // Try internal HTTP port (port+1 for TLS nodes, then original port)
-                for port in [node.port + 1, node.port] {
-                    let url = format!("http://{}:{}/api/nodes/{}", node.address, port, delete_id);
-                    let _ = client.delete(&url)
+                // Try HTTPS first, then HTTP on port+1, then HTTP on main port
+                let urls = build_node_urls(&node.address, node.port, &format!("/api/nodes/{}", delete_id));
+                for url in &urls {
+                    if let Ok(_) = client.delete(url)
                         .header("X-WolfStack-Secret", &secret)
                         .send()
-                        .await;
+                        .await
+                    {
+                        break; // Success, no need to try next URL
+                    }
                 }
             }
         });
@@ -576,42 +590,49 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                 }
             }
         } else {
-            // Fetch from remote node via HTTP
-            let internal_port = node.port + 1;
-            let url = format!("http://{}:{}/api/networking/wolfnet/local-info", node.address, internal_port);
-            match client.get(&url)
-                .header("X-WolfStack-Secret", &state.cluster_secret)
-                .send().await
-            {
-                Ok(resp) => {
-                    if let Ok(info) = resp.json::<serde_json::Value>().await {
-                        if info.get("error").is_some() {
-                            errors.push(format!("{}: {}", node.hostname, info["error"]));
-                            continue;
+            // Fetch from remote node — try HTTPS first, then HTTP fallback
+            let urls = build_node_urls(&node.address, node.port, "/api/networking/wolfnet/local-info");
+            let mut fetched = false;
+            for url in &urls {
+                match client.get(url)
+                    .header("X-WolfStack-Secret", &state.cluster_secret)
+                    .send().await
+                {
+                    Ok(resp) => {
+                        if let Ok(info) = resp.json::<serde_json::Value>().await {
+                            if info.get("error").is_some() {
+                                errors.push(format!("{}: {}", node.hostname, info["error"]));
+                                fetched = true;
+                                break;
+                            }
+                            let hostname = info["hostname"].as_str().unwrap_or("").to_string();
+                            let address = info["address"].as_str().unwrap_or("").to_string();
+                            let public_key = info["public_key"].as_str().unwrap_or("").to_string();
+                            let listen_port = info["listen_port"].as_u64().unwrap_or(9600) as u16;
+                            if address.is_empty() || public_key.is_empty() {
+                                errors.push(format!("{}: WolfNet not configured", node.hostname));
+                                fetched = true;
+                                break;
+                            }
+                            let endpoint = format!("{}:{}", node.address, listen_port);
+                            infos.push(NodeWnInfo {
+                                hostname,
+                                wolfnet_ip: address,
+                                public_key,
+                                endpoint,
+                                is_self: false,
+                                address: node.address.clone(),
+                                port: node.port,
+                            });
+                            fetched = true;
+                            break;
                         }
-                        let hostname = info["hostname"].as_str().unwrap_or("").to_string();
-                        let address = info["address"].as_str().unwrap_or("").to_string();
-                        let public_key = info["public_key"].as_str().unwrap_or("").to_string();
-                        let listen_port = info["listen_port"].as_u64().unwrap_or(9600) as u16;
-                        if address.is_empty() || public_key.is_empty() {
-                            errors.push(format!("{}: WolfNet not configured", node.hostname));
-                            continue;
-                        }
-                        let endpoint = format!("{}:{}", node.address, listen_port);
-                        infos.push(NodeWnInfo {
-                            hostname,
-                            wolfnet_ip: address,
-                            public_key,
-                            endpoint,
-                            is_self: false,
-                            address: node.address.clone(),
-                            port: node.port,
-                        });
                     }
+                    Err(_) => continue, // Try next URL
                 }
-                Err(e) => {
-                    errors.push(format!("{}: unreachable ({})", node.hostname, e));
-                }
+            }
+            if !fetched {
+                errors.push(format!("{}: unreachable on all ports/protocols", node.hostname));
             }
         }
     }
@@ -652,38 +673,43 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                     }
                 }
             } else {
-                // Add peer on remote node
-                let internal_port = target.port + 1;
-                let url = format!("http://{}:{}/api/networking/wolfnet/peers", target.address, internal_port);
+                // Add peer on remote node — try HTTPS first, then HTTP fallback
+                let urls = build_node_urls(&target.address, target.port, "/api/networking/wolfnet/peers");
                 let payload = serde_json::json!({
                     "name": peer.hostname,
                     "endpoint": peer.endpoint,
                     "ip": peer.wolfnet_ip,
                     "public_key": peer.public_key,
                 });
-                match client.post(&url)
-                    .header("X-WolfStack-Secret", &state.cluster_secret)
-                    .header("Content-Type", "application/json")
-                    .body(payload.to_string())
-                    .send().await
-                {
-                    Ok(resp) => {
-                        if let Ok(data) = resp.json::<serde_json::Value>().await {
-                            if data.get("error").is_some() {
-                                let err = data["error"].as_str().unwrap_or("unknown");
-                                if err.contains("already exists") {
-                                    skipped += 1;
+                let mut posted = false;
+                for url in &urls {
+                    match client.post(url)
+                        .header("X-WolfStack-Secret", &state.cluster_secret)
+                        .header("Content-Type", "application/json")
+                        .body(payload.to_string())
+                        .send().await
+                    {
+                        Ok(resp) => {
+                            if let Ok(data) = resp.json::<serde_json::Value>().await {
+                                if data.get("error").is_some() {
+                                    let err = data["error"].as_str().unwrap_or("unknown");
+                                    if err.contains("already exists") {
+                                        skipped += 1;
+                                    } else {
+                                        errors.push(format!("{} → {}: {}", target.hostname, peer.hostname, err));
+                                    }
                                 } else {
-                                    errors.push(format!("{} → {}: {}", target.hostname, peer.hostname, err));
+                                    synced += 1;
                                 }
-                            } else {
-                                synced += 1;
                             }
+                            posted = true;
+                            break;
                         }
+                        Err(_) => continue, // Try next URL
                     }
-                    Err(e) => {
-                        errors.push(format!("{} → {}: {}", target.hostname, peer.hostname, e));
-                    }
+                }
+                if !posted {
+                    errors.push(format!("{} → {}: unreachable on all ports/protocols", target.hostname, peer.hostname));
                 }
             }
         }
@@ -2081,8 +2107,8 @@ async fn lxc_remote_clone(
         }
     };
 
-    let internal_port = node.port + 1;
-    let import_url = format!("http://{}:{}/api/containers/lxc/import", node.address, internal_port);
+    // Build URLs to try — HTTPS first, then HTTP fallback
+    let import_urls = build_node_urls(&node.address, node.port, "/api/containers/lxc/import");
     let storage_val = storage.unwrap_or("").to_string();
 
     let client = reqwest::Client::builder()
@@ -2090,45 +2116,58 @@ async fn lxc_remote_clone(
         .build()
         .unwrap_or_default();
 
-    // Build multipart form
-    let form = reqwest::multipart::Form::new()
-        .text("new_name", new_name.to_string())
-        .text("storage", storage_val)
-        .text("meta", serde_json::to_string(&meta).unwrap_or_default())
-        .part("archive", reqwest::multipart::Part::bytes(archive_bytes)
-            .file_name(archive_path.file_name().unwrap_or_default().to_string_lossy().to_string()));
+    // Try each URL — rebuild multipart form for each attempt (forms are consumed on send)
+    let file_name = archive_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let meta_json = serde_json::to_string(&meta).unwrap_or_default();
+    let mut last_err: Option<String> = None;
 
-    let resp = client.post(&import_url)
-        .header("X-WolfStack-Secret", state.cluster_secret.clone())
-        .multipart(form)
-        .send()
-        .await;
+    for import_url in &import_urls {
+        let form = reqwest::multipart::Form::new()
+            .text("new_name", new_name.to_string())
+            .text("storage", storage_val.clone())
+            .text("meta", meta_json.clone())
+            .part("archive", reqwest::multipart::Part::bytes(archive_bytes.clone())
+                .file_name(file_name.clone()));
 
-    // Cleanup export
-    containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
-    let _ = containers::lxc_start(source); // restart source
+        match client.post(import_url)
+            .header("X-WolfStack-Secret", state.cluster_secret.clone())
+            .multipart(form)
+            .send()
+            .await
+        {
+            Ok(r) => {
+                // Cleanup export
+                containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
+                let _ = containers::lxc_start(source); // restart source
 
-    match resp {
-        Ok(r) => {
-            if r.status().is_success() {
-                match r.json::<serde_json::Value>().await {
-                    Ok(data) => HttpResponse::Ok().json(serde_json::json!({
-                        "message": format!("Container '{}' cloned to '{}' on node '{}'", source, new_name, target_node_id),
-                        "detail": data
-                    })),
-                    Err(_) => HttpResponse::Ok().json(serde_json::json!({
-                        "message": format!("Container '{}' cloned to '{}' on node '{}'", source, new_name, target_node_id)
-                    })),
+                if r.status().is_success() {
+                    return match r.json::<serde_json::Value>().await {
+                        Ok(data) => HttpResponse::Ok().json(serde_json::json!({
+                            "message": format!("Container '{}' cloned to '{}' on node '{}'", source, new_name, target_node_id),
+                            "detail": data
+                        })),
+                        Err(_) => HttpResponse::Ok().json(serde_json::json!({
+                            "message": format!("Container '{}' cloned to '{}' on node '{}'", source, new_name, target_node_id)
+                        })),
+                    };
+                } else {
+                    let err_text = r.text().await.unwrap_or_default();
+                    return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Import on target failed: {}", err_text)}));
                 }
-            } else {
-                let err_text = r.text().await.unwrap_or_default();
-                HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Import on target failed: {}", err_text)}))
+            }
+            Err(e) => {
+                last_err = Some(e.to_string());
+                continue; // Try next URL
             }
         }
-        Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
-            "error": format!("Transfer to {} failed: {}", node.address, e)
-        })),
     }
+
+    // All URLs failed
+    containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
+    let _ = containers::lxc_start(source); // restart source
+    HttpResponse::BadGateway().json(serde_json::json!({
+        "error": format!("Transfer to {} failed on all ports/protocols: {}", node.address, last_err.unwrap_or_default())
+    }))
 }
 
 /// POST /api/containers/lxc/{name}/export — export container as downloadable archive
