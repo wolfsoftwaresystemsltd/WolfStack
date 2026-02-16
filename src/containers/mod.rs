@@ -449,6 +449,9 @@ pub fn ensure_lxc_bridge() {
             .spawn(); // Run in background
     }
 
+    // ALWAYS force the bridge UP (it can exist but be DOWN if no interfaces are attached yet)
+    let _ = Command::new("ip").args(["link", "set", "lxcbr0", "up"]).output();
+
     // ALWAYS ensure NAT + forwarding for internet access (even if lxc-net is running)
     let _ = Command::new("sh").args(["-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"]).output();
     let nat_check = Command::new("iptables")
