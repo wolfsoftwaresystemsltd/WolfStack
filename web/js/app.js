@@ -9696,12 +9696,8 @@ async function mysqlLoadStructure() {
     container.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);"><div class="spinner-sm"></div> Loading structure...</div>';
 
     const baseUrl = getNodeApiBase(currentNodeId);
-    const url = `${baseUrl}/api/mysql/structure`;
-    const reqBody = {
-        ...mysqlCreds,
-        database: mysqlCurrentDb,
-        table: mysqlCurrentTable,
-    };
+    const url = `${baseUrl}/api/mysql/query`;
+    const structureQuery = `SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '${mysqlCurrentDb.replace(/'/g, "''")}' AND TABLE_NAME = '${mysqlCurrentTable.replace(/'/g, "''")}' ORDER BY ORDINAL_POSITION`;
 
     try {
         const controller = new AbortController();
@@ -9711,7 +9707,11 @@ async function mysqlLoadStructure() {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(reqBody),
+            body: JSON.stringify({
+                ...mysqlCreds,
+                database: mysqlCurrentDb,
+                query: structureQuery,
+            }),
             signal: controller.signal,
         });
         clearTimeout(timeoutId);
@@ -9729,7 +9729,16 @@ async function mysqlLoadStructure() {
             return;
         }
 
-        const cols = data.columns || [];
+        // Map query result rows to column objects
+        const rows = data.rows || [];
+        const cols = rows.map(r => ({
+            name: r[0] || '',
+            type: r[1] || '',
+            nullable: r[2] === 'YES',
+            key: r[3] || '',
+            default: r[4],
+            extra: r[5] || '',
+        }));
 
         // Toolbar
         let html = `<div style="padding:10px 14px; display:flex; gap:8px; border-bottom:1px solid var(--border); align-items:center;">
