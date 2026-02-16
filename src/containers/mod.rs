@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use tracing::{info, error};
+use tracing::{info, error, warn};
 
 // ─── WolfNet Integration ───
 
