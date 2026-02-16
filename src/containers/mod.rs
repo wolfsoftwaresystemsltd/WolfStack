@@ -255,6 +255,138 @@ pub fn wolfnet_used_ips() -> Vec<String> {
     ips
 }
 
+/// Sync container routes from all WolfNet peers.
+/// Reads /etc/wolfnet/config.toml to discover peers, calls each peer's
+/// WolfStack API for their container IPs, builds routes.json, and
+/// signals WolfNet to reload. Works without WolfStack cluster membership.
+pub async fn sync_wolfnet_peer_routes() {
+    // Load cluster secret for authenticating API requests
+    let cluster_secret = crate::auth::load_cluster_secret();
+
+    // Read WolfNet config to find peers
+    let config_path = "/etc/wolfnet/config.toml";
+    let config_str = match std::fs::read_to_string(config_path) {
+        Ok(s) => s,
+        Err(_) => return, // No WolfNet config
+    };
+
+    // Parse the TOML to extract peer info
+    let config: toml::Value = match config_str.parse() {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let peers = match config.get("peers").and_then(|p| p.as_array()) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .danger_accept_invalid_certs(true)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let mut subnet_routes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    for peer in peers {
+        let allowed_ip = match peer.get("allowed_ip").and_then(|v| v.as_str()) {
+            Some(ip) => ip.to_string(),
+            None => continue,
+        };
+        let endpoint = match peer.get("endpoint").and_then(|v| v.as_str()) {
+            Some(e) => e.to_string(),
+            None => continue,
+        };
+
+        // Extract hostname from endpoint (e.g., "cynthia.wolfterritories.org:9600" → "cynthia.wolfterritories.org")
+        let hostname = endpoint.split(':').next().unwrap_or(&endpoint);
+
+        // Try calling the peer's WolfStack API for used IPs
+        // Try common WolfStack ports: 8553 (default), 8552
+        let mut used_ips: Vec<String> = Vec::new();
+        for port in &[8553, 8552] {
+            for scheme in &["https", "http"] {
+                let url = format!("{}://{}:{}/api/wolfnet/used-ips", scheme, hostname, port);
+                if let Ok(resp) = client.get(&url)
+                    .header("X-WolfStack-Secret", &cluster_secret)
+                    .send().await {
+                    if let Ok(ips) = resp.json::<Vec<String>>().await {
+                        if !ips.is_empty() {
+                            used_ips = ips;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !used_ips.is_empty() { break; }
+        }
+
+        // Also try via WolfNet IP directly (in case DNS doesn't resolve but WolfNet tunnel works)
+        if used_ips.is_empty() {
+            for port in &[8553, 8552] {
+                let url = format!("http://{}:{}/api/wolfnet/used-ips", allowed_ip, port);
+                if let Ok(resp) = client.get(&url)
+                    .header("X-WolfStack-Secret", &cluster_secret)
+                    .send().await {
+                    if let Ok(ips) = resp.json::<Vec<String>>().await {
+                        if !ips.is_empty() {
+                            used_ips = ips;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if used_ips.is_empty() { continue; }
+
+        // First IP is the host WolfNet address, rest are container/VM IPs
+        // Map each container IP → host WolfNet IP (for routing)
+        let host_wn_ip = &used_ips[0];
+        for container_ip in &used_ips[1..] {
+            if !container_ip.is_empty() && container_ip != host_wn_ip {
+                subnet_routes.insert(container_ip.clone(), host_wn_ip.clone());
+            }
+        }
+    }
+
+    // Merge new routes into existing routes file (poll_remote_nodes may also write routes)
+    if !subnet_routes.is_empty() {
+        let routes_path = "/var/run/wolfnet/routes.json";
+        let _ = std::fs::create_dir_all("/var/run/wolfnet");
+
+        // Read existing routes and merge (don't overwrite routes from poll_remote_nodes)
+        let mut merged: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        if let Ok(existing) = std::fs::read_to_string(routes_path) {
+            if let Ok(existing_map) = serde_json::from_str::<std::collections::HashMap<String, String>>(&existing) {
+                merged = existing_map;
+            }
+        }
+        for (k, v) in &subnet_routes {
+            merged.insert(k.clone(), v.clone());
+        }
+
+        if let Ok(json) = serde_json::to_string_pretty(&merged) {
+            if std::fs::write(routes_path, &json).is_ok() {
+                info!("Wrote {} WolfNet peer subnet route(s) to {} (merged)", merged.len(), routes_path);
+                // Signal WolfNet to reload routes (SIGHUP)
+                if let Ok(output) = Command::new("pidof").arg("wolfnet").output() {
+                    let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !pid_str.is_empty() {
+                        let _ = Command::new("kill").args(["-HUP", &pid_str]).output();
+                        info!("Sent SIGHUP to WolfNet (pid {}) to reload routes", pid_str);
+                    }
+                }
+            }
+        }
+    }
+    // Note: do NOT delete routes.json when no routes found — poll_remote_nodes may have written valid routes
+}
+
 /// Ensure the Docker 'wolfnet' network exists (macvlan on wolfnet0)
 /// Ensure networking requirements (just forwarding)
 pub fn ensure_docker_wolfnet_network() -> Result<(), String> {

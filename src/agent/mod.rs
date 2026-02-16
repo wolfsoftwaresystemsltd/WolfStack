@@ -733,11 +733,14 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             // First IP = host WolfNet address, remaining = container/VM IPs
                             if wolfnet_ips.len() > 1 {
                                 let host_wn_ip = &wolfnet_ips[0];
+                                tracing::info!("Node {} wolfnet_ips: {:?} (host={}, {} container(s))", node.id, wolfnet_ips, host_wn_ip, wolfnet_ips.len() - 1);
                                 for container_ip in &wolfnet_ips[1..] {
                                     if !container_ip.is_empty() {
                                         subnet_routes.insert(container_ip.clone(), host_wn_ip.clone());
                                     }
                                 }
+                            } else if !wolfnet_ips.is_empty() {
+                                tracing::debug!("Node {} wolfnet_ips: {:?} (host only, no containers)", node.id, wolfnet_ips);
                             }
                         }
                     }
@@ -772,7 +775,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
         if let Ok(json) = serde_json::to_string_pretty(&subnet_routes) {
             let _ = std::fs::create_dir_all("/var/run/wolfnet");
             if std::fs::write(routes_path, &json).is_ok() {
-                tracing::debug!("Wrote {} subnet route(s) to {}", subnet_routes.len(), routes_path);
+                tracing::info!("Wrote {} subnet route(s) to {}: {}", subnet_routes.len(), routes_path, json.trim());
                 // Signal WolfNet to reload routes (SIGHUP)
                 if let Ok(output) = std::process::Command::new("pidof").arg("wolfnet").output() {
                     let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
