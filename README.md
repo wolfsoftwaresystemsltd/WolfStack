@@ -26,6 +26,7 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - **Install software** — install Docker, LXC, and Wolf suite components with one click
 - **Edit configs** — modify configuration files for any managed component directly in the browser
 - **View logs** — read live journal logs for any service or container
+- **Database editor** — built-in MariaDB/MySQL editor with table browser, data viewer, structure management (columns, indexes, triggers), and SQL query runner
 
 ## Features
 
@@ -142,6 +143,20 @@ WolfStack is the **central control plane** for your entire infrastructure. Inste
 - Request Let's Encrypt certificates via Certbot
 - One-click certificate provisioning
 
+### 🗄️ MariaDB/MySQL Database Editor
+- Built-in Navicat-style database editor accessible from the dashboard
+- **Auto-detects** local MySQL/MariaDB installations and Docker containers
+- Connect to any MariaDB/MySQL server with hostname, port, username, and password
+- **Database browser** — tree view of all databases and tables
+- **Data tab** — view and browse table data with pagination
+- **Structure tab** with sub-tabs:
+  - **Columns** — view column definitions, add/drop columns, rename tables
+  - **Indexes** — list, create (INDEX/UNIQUE/FULLTEXT), and drop indexes with non-blocking progress
+  - **Triggers** — list, create (BEFORE/AFTER × INSERT/UPDATE/DELETE), and drop triggers
+- **Query tab** — write and execute arbitrary SQL with result grid
+- Destructive operations require typing "YES" to confirm, showing the exact SQL
+- Compatible with MariaDB, MySQL, Percona, and Amazon RDS
+
 ### 🤖 AI Agent
 - Built-in AI assistant powered by **Claude** or **Gemini**
 - 🐺 Chat bubble in the bottom-right corner for instant help
@@ -250,6 +265,7 @@ wolfstack/
 │   ├── networking/mod.rs    # Network interfaces, VLANs, DNS, IP mapping
 │   ├── console.rs           # WebSocket PTY terminal for containers and host shells
 │   ├── containers/mod.rs    # Docker & LXC management
+│   ├── mysql_editor.rs      # MariaDB/MySQL database editor API
 │   ├── proxmox/mod.rs       # Proxmox VE API client & polling
 │   └── vms/                 # Virtual machine management
 │       ├── mod.rs            # Module exports
@@ -408,6 +424,16 @@ All endpoints require authentication (cookie-based session) except `/api/agent/s
 | GET | `/api/ai/status` | AI agent status (configured, provider, model, alerts) |
 | GET | `/api/ai/alerts` | Historical health check alerts |
 | GET | `/api/ai/models` | List available models for the configured provider |
+
+### MariaDB/MySQL Editor
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/mysql/connect` | Test connection to a MySQL/MariaDB server |
+| POST | `/api/mysql/databases` | List all databases on the server |
+| POST | `/api/mysql/tables` | List tables in a database |
+| POST | `/api/mysql/data` | Fetch paginated table data |
+| POST | `/api/mysql/query` | Execute an arbitrary SQL query |
 
 ### Agent (No Auth)
 

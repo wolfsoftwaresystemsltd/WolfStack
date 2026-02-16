@@ -467,6 +467,9 @@ pub enum AgentMessage {
         known_nodes: Vec<Node>,
         #[serde(default)]
         deleted_ids: Vec<String>,
+        /// WolfNet IPs in use on this node (host IP first, then container/VM IPs)
+        #[serde(default)]
+        wolfnet_ips: Vec<String>,
     },
     /// "Give me your status"
     StatusRequest,
@@ -491,6 +494,8 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
     };
 
     let nodes = cluster.get_all_nodes();
+    // Collect subnet routes from all remote nodes' wolfnet_ips
+    let mut subnet_routes: HashMap<String, String> = HashMap::new();
     for node in nodes {
         if node.is_self { continue; }
 
@@ -620,7 +625,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
             {
                 Ok(resp) => {
                     if let Ok(msg) = resp.json::<AgentMessage>().await {
-                        if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes, deleted_ids } = msg {
+                        if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes, deleted_ids, wolfnet_ips } = msg {
                             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                             cluster.update_remote(Node {
                                 id: node.id.clone(),
@@ -724,6 +729,16 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                     }
                                 }
                             }
+                            // Collect subnet routes from this node's wolfnet_ips
+                            // First IP = host WolfNet address, remaining = container/VM IPs
+                            if wolfnet_ips.len() > 1 {
+                                let host_wn_ip = &wolfnet_ips[0];
+                                for container_ip in &wolfnet_ips[1..] {
+                                    if !container_ip.is_empty() {
+                                        subnet_routes.insert(container_ip.clone(), host_wn_ip.clone());
+                                    }
+                                }
+                            }
                         }
                     }
                     poll_ok = true;
@@ -746,6 +761,25 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                 let mut nodes = cluster.nodes.write().unwrap();
                 if let Some(n) = nodes.get_mut(&node.id) {
                     n.last_seen = now;
+                }
+            }
+        }
+    }
+
+    // Write subnet routes file for WolfNet and signal reload
+    if !subnet_routes.is_empty() {
+        let routes_path = "/var/run/wolfnet/routes.json";
+        if let Ok(json) = serde_json::to_string_pretty(&subnet_routes) {
+            let _ = std::fs::create_dir_all("/var/run/wolfnet");
+            if std::fs::write(routes_path, &json).is_ok() {
+                tracing::debug!("Wrote {} subnet route(s) to {}", subnet_routes.len(), routes_path);
+                // Signal WolfNet to reload routes (SIGHUP)
+                if let Ok(output) = std::process::Command::new("pidof").arg("wolfnet").output() {
+                    let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !pid_str.is_empty() {
+                        let _ = std::process::Command::new("kill").args(["-HUP", &pid_str]).output();
+                        tracing::debug!("Sent SIGHUP to WolfNet (pid {})", pid_str);
+                    }
                 }
             }
         }

@@ -1391,6 +1391,7 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
         public_ip,
         known_nodes: state.cluster.get_all_nodes(),
         deleted_ids: state.cluster.get_deleted_ids(),
+        wolfnet_ips: containers::wolfnet_used_ips(),
     };
     HttpResponse::Ok().json(msg)
 }

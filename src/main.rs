@@ -243,6 +243,7 @@ async fn main() -> std::io::Result<()> {
                     public_ip: public_ip.clone(),
                     known_nodes,
                     deleted_ids,
+                    wolfnet_ips: containers::wolfnet_used_ips(),
                 };
                 if let Ok(json) = serde_json::to_value(&msg) {
                     if let Ok(mut cache) = cached_status_bg.write() {
