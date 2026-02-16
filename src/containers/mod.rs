@@ -715,42 +715,13 @@ pub fn reapply_wolfnet_routes() {
             .unwrap_or(false);
         if !running { continue; }
 
-        // Check if the host route already exists
-        let route_exists = Command::new("ip")
-            .args(["route", "show", &format!("{}/32", ip)])
-            .output()
-            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-            .unwrap_or(false);
-        if route_exists { continue; }
+        info!("Re-applying WolfNet config for running container {} (ip={})", container, ip);
 
-        // Get the container's bridge IP on the WolfNet interface
-        let is_pve = is_proxmox();
-        let iface = if is_pve { "wn0" } else { "eth0" };
-        let bridge_ip = get_container_bridge_ip(&container, iface);
-
-        // Add the host route
-        let out = Command::new("ip")
-            .args(["route", "add", &format!("{}/32", ip), "via", &bridge_ip, "dev", "lxcbr0"])
-            .output();
-        match out {
-            Ok(ref o) if o.status.success() => {
-                info!("Re-applied host route: {}/32 via {} dev lxcbr0 (container {})", ip, bridge_ip, container);
-            }
-            Ok(ref o) => {
-                warn!("Failed to re-apply route for {}: {}", ip, String::from_utf8_lossy(&o.stderr));
-            }
-            Err(e) => {
-                warn!("Failed to run ip route for {}: {}", ip, e);
-            }
-        }
-
-        // Ensure iptables forwarding between wolfnet0 and lxcbr0
-        let check = Command::new("iptables")
-            .args(["-C", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output();
-        if check.map(|o| !o.status.success()).unwrap_or(true) {
-            let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output();
-            let _ = Command::new("iptables").args(["-A", "FORWARD", "-i", "lxcbr0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
-        }
+        // Re-apply the WolfNet IP and routes INSIDE the container.
+        // This is critical: lxc-autostart and host reboots don't call lxc_apply_wolfnet(),
+        // so the container's WolfNet IP (/32 secondary on wn0/eth0) is lost after restart.
+        // lxc_apply_wolfnet handles: bring up wn0, add WolfNet IP, add host route, iptables.
+        lxc_apply_wolfnet(&container);
     }
 
     // Ensure forwarding is on
@@ -2875,9 +2846,17 @@ pub fn detect_network_conflicts() -> Vec<NetworkConflict> {
     conflicts
 }
 
-/// Autostart all enabled LXC containers
+/// Autostart all enabled LXC containers, then re-apply WolfNet networking.
+/// lxc-autostart doesn't call our lxc_apply_wolfnet(), so we do it afterwards.
 pub fn lxc_autostart_all() {
-    let _ = Command::new("lxc-autostart").spawn();
+    // Wait for autostart to complete so containers are running
+    let _ = Command::new("lxc-autostart").output();
+
+    // Give containers a moment to initialise their network interfaces
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    // Now re-apply WolfNet IPs and host routes for all running containers
+    reapply_wolfnet_routes();
 }
 
 fn run_lxc_cmd(args: &[&str]) -> Result<String, String> {
