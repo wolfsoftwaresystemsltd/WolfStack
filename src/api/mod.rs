@@ -4533,22 +4533,6 @@ pub async fn mysql_query(
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
 
-    // SQL safety guard — block dangerous DDL/DCL statements
-    let upper = body.query.trim().to_uppercase();
-    let blocked_patterns = [
-        "DROP DATABASE", "DROP SCHEMA",
-        "GRANT ", "REVOKE ",
-        "CREATE USER", "DROP USER", "ALTER USER",
-        "LOAD DATA", "LOAD_FILE",
-        "INTO OUTFILE", "INTO DUMPFILE",
-    ];
-    for pattern in &blocked_patterns {
-        if upper.contains(pattern) {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Blocked: '{}' statements are not allowed through the web editor for safety. Use a direct MySQL client instead.", pattern.trim()),
-            }));
-        }
-    }
 
     let params = crate::mysql_editor::ConnParams {
         host: body.host.clone(),
@@ -4565,6 +4549,49 @@ pub async fn mysql_query(
         Ok(Ok(result)) => HttpResponse::Ok().json(result),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Query timed out after 30 seconds" })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MysqlDumpRequest {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+    pub include_data: bool,
+}
+
+/// POST /api/mysql/dump — dump database to SQL
+pub async fn mysql_dump(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<MysqlDumpRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+
+    let params = crate::mysql_editor::ConnParams {
+        host: body.host.clone(),
+        port: body.port,
+        user: body.user.clone(),
+        password: body.password.clone(),
+        database: Some(body.database.clone()),
+    };
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        crate::mysql_editor::dump_database(&params, &body.database, body.include_data),
+    ).await;
+    match result {
+        Ok(Ok(sql)) => {
+            let filename = format!("{}{}.sql",
+                body.database,
+                if body.include_data { "_full" } else { "_structure" });
+            HttpResponse::Ok()
+                .content_type("application/sql")
+                .insert_header(("Content-Disposition", format!("attachment; filename=\"{}\"", filename)))
+                .body(sql)
+        }
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Dump timed out after 120 seconds" })),
     }
 }
 
@@ -4734,6 +4761,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/mysql/structure", web::post().to(mysql_structure))
         .route("/api/mysql/data", web::post().to(mysql_data))
         .route("/api/mysql/query", web::post().to(mysql_query))
+        .route("/api/mysql/dump", web::post().to(mysql_dump))
         // Agent (cluster-secret auth — inter-node communication)
         .route("/api/agent/status", web::get().to(agent_status))
         .route("/api/agent/storage/apply", web::post().to(agent_storage_apply))

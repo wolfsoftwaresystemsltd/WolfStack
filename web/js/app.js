@@ -9473,11 +9473,14 @@ async function mysqlLoadDatabases() {
         for (const db of mysqlDatabases) {
             const isSystem = ['information_schema', 'performance_schema', 'mysql', 'sys'].includes(db);
             html += `<div class="mysql-db-node" data-db="${db}">
-                <div onclick="mysqlToggleDb('${db}')" style="padding:5px 14px; cursor:pointer; display:flex; align-items:center; gap:6px; transition:background 0.15s;"
+                <div style="padding:5px 14px; cursor:pointer; display:flex; align-items:center; gap:6px; transition:background 0.15s;"
                      onmouseover="this.style.background='var(--bg-tertiary)'" onmouseout="this.style.background='none'">
-                    <span class="mysql-db-arrow" id="mysql-arrow-${db}" style="font-size:10px; transition:transform 0.2s; display:inline-block;">▶</span>
-                    <span style="font-size:14px;">${isSystem ? '🔧' : '📁'}</span>
-                    <span style="color:var(--text-primary); font-size:12px; ${isSystem ? 'opacity:0.6;' : ''}">${db}</span>
+                    <span onclick="mysqlToggleDb('${db}')" style="display:flex; align-items:center; gap:6px; flex:1;">
+                        <span class="mysql-db-arrow" id="mysql-arrow-${db}" style="font-size:10px; transition:transform 0.2s; display:inline-block;">▶</span>
+                        <span style="font-size:14px;">${isSystem ? '🔧' : '📁'}</span>
+                        <span style="color:var(--text-primary); font-size:12px; ${isSystem ? 'opacity:0.6;' : ''}">${db}</span>
+                    </span>
+                    <button onclick="event.stopPropagation(); mysqlDumpDatabase('${db}')" style="background:none; border:none; cursor:pointer; font-size:12px; opacity:0.5; padding:2px 4px;" title="Dump SQL" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">💾</button>
                 </div>
                 <div id="mysql-tables-${db}" style="display:none; padding-left:28px;"></div>
             </div>`;
@@ -9789,6 +9792,56 @@ async function mysqlAlterTable(sql) {
     return data;
 }
 
+// Nice confirmation dialog requiring user to type YES for destructive actions
+function mysqlConfirmDestructive(message, detail) {
+    return new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:10001;';
+        modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:24px; width:420px; max-width:90vw;">
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
+                <span style="font-size:28px;">⚠️</span>
+                <h3 style="margin:0; font-size:16px; color:#e74c3c;">Confirm Destructive Operation</h3>
+            </div>
+            <p style="color:var(--text-primary); font-size:13px; margin:0 0 8px; line-height:1.5;">${message}</p>
+            ${detail ? `<div style="background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; padding:10px 12px; margin:12px 0; font-family:var(--font-mono); font-size:12px; color:#e67e22; word-break:break-all; max-height:80px; overflow-y:auto;">${escapeHtml(detail)}</div>` : ''}
+            <p style="color:var(--text-muted); font-size:12px; margin:12px 0 8px;">Type <strong style="color:#e74c3c;">YES</strong> to confirm:</p>
+            <input id="confirm-destructive-input" style="width:100%; padding:10px; background:var(--bg-primary); border:2px solid var(--border); border-radius:6px; color:var(--text-primary); font-size:14px; font-weight:600; text-align:center; box-sizing:border-box; letter-spacing:2px;" placeholder="YES" autocomplete="off">
+            <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
+                <button id="confirm-destructive-cancel" style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:8px 20px; border-radius:6px; cursor:pointer; font-size:13px;">Cancel</button>
+                <button id="confirm-destructive-ok" style="background:#e74c3c; color:#fff; border:none; padding:8px 20px; border-radius:6px; cursor:pointer; font-size:13px; font-weight:500; opacity:0.4;" disabled>Confirm</button>
+            </div>
+        </div>`;
+        document.body.appendChild(modal);
+
+        const input = modal.querySelector('#confirm-destructive-input');
+        const okBtn = modal.querySelector('#confirm-destructive-ok');
+        input.focus();
+
+        input.addEventListener('input', () => {
+            const match = input.value.trim().toUpperCase() === 'YES';
+            okBtn.disabled = !match;
+            okBtn.style.opacity = match ? '1' : '0.4';
+        });
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && input.value.trim().toUpperCase() === 'YES') { modal.remove(); resolve(true); }
+            if (e.key === 'Escape') { modal.remove(); resolve(false); }
+        });
+        okBtn.addEventListener('click', () => { modal.remove(); resolve(true); });
+        modal.querySelector('#confirm-destructive-cancel').addEventListener('click', () => { modal.remove(); resolve(false); });
+    });
+}
+
+// Check if a SQL query is destructive
+function isMysqlDestructiveQuery(sql) {
+    const upper = sql.trim().toUpperCase();
+    const patterns = [
+        'DROP TABLE', 'DROP DATABASE', 'DROP SCHEMA', 'DROP INDEX', 'DROP VIEW',
+        'TRUNCATE', 'DELETE', 'ALTER TABLE',
+        'GRANT', 'REVOKE', 'CREATE USER', 'DROP USER', 'ALTER USER',
+    ];
+    return patterns.some(p => upper.startsWith(p) || upper.includes(p));
+}
+
 function mysqlAddColumnDialog() {
     const db = mysqlCurrentDb, tbl = mysqlCurrentTable;
     const modal = document.createElement('div');
@@ -9907,7 +9960,11 @@ function mysqlModifyColumnDialog(col) {
 }
 
 async function mysqlDropColumn(colName) {
-    if (!confirm(`Drop column '${colName}' from ${mysqlCurrentTable}?\n\nThis will permanently delete the column and all its data. This cannot be undone.`)) return;
+    const confirmed = await mysqlConfirmDestructive(
+        `Drop column <strong>${escapeHtml(colName)}</strong> from <strong>${escapeHtml(mysqlCurrentTable)}</strong>?<br>This will permanently delete the column and all its data.`,
+        `ALTER TABLE \`${mysqlCurrentDb}\`.\`${mysqlCurrentTable}\` DROP COLUMN \`${colName}\``
+    );
+    if (!confirmed) return;
 
     try {
         await mysqlAlterTable(`ALTER TABLE \`${mysqlCurrentDb}\`.\`${mysqlCurrentTable}\` DROP COLUMN \`${colName}\``);
@@ -9923,15 +9980,82 @@ function mysqlRenameTableDialog() {
     const newName = prompt(`Rename table '${tbl}' to:`, tbl);
     if (!newName || newName === tbl) return;
 
-    mysqlAlterTable(`ALTER TABLE \`${db}\`.\`${tbl}\` RENAME TO \`${db}\`.\`${newName}\``)
-        .then(() => {
+    mysqlConfirmDestructive(
+        `Rename table <strong>${escapeHtml(tbl)}</strong> to <strong>${escapeHtml(newName)}</strong>?<br>This may break queries, views, or stored procedures that reference this table.`,
+        `ALTER TABLE \`${db}\`.\`${tbl}\` RENAME TO \`${db}\`.\`${newName}\``
+    ).then(async (confirmed) => {
+        if (!confirmed) return;
+        try {
+            await mysqlAlterTable(`ALTER TABLE \`${db}\`.\`${tbl}\` RENAME TO \`${db}\`.\`${newName}\``);
             mysqlCurrentTable = newName;
             showToast(`Table renamed to '${newName}'`, 'success');
             mysqlLoadStructure();
-            // Refresh the table list in the sidebar
             mysqlToggleDb(db);
-        })
-        .catch(e => showToast('Error: ' + e.message, 'error'));
+        } catch (e) {
+            showToast('Error: ' + e.message, 'error');
+        }
+    });
+}
+
+function mysqlDumpDatabase(db) {
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:10000;';
+    modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:24px; width:380px; max-width:90vw;">
+        <h3 style="margin:0 0 16px; font-size:16px; color:var(--text-primary);">💾 Dump Database: ${escapeHtml(db)}</h3>
+        <p style="color:var(--text-muted); font-size:12px; margin:0 0 16px;">Choose what to include in the SQL dump file:</p>
+        <div style="display:flex; flex-direction:column; gap:8px;">
+            <button onclick="mysqlDoDump('${db}', false, this.closest('div[style*=fixed]'))" style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:14px 16px; border-radius:8px; cursor:pointer; text-align:left; transition:background 0.15s;" onmouseover="this.style.background='var(--bg-primary)'" onmouseout="this.style.background='var(--bg-tertiary)'">
+                <div style="font-size:13px; font-weight:500;">📐 Structure Only</div>
+                <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">CREATE TABLE statements only — no row data</div>
+            </button>
+            <button onclick="mysqlDoDump('${db}', true, this.closest('div[style*=fixed]'))" style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:14px 16px; border-radius:8px; cursor:pointer; text-align:left; transition:background 0.15s;" onmouseover="this.style.background='var(--bg-primary)'" onmouseout="this.style.background='var(--bg-tertiary)'">
+                <div style="font-size:13px; font-weight:500;">📦 Structure + Data</div>
+                <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Full dump with CREATE TABLE and INSERT statements</div>
+            </button>
+        </div>
+        <div style="display:flex; justify-content:flex-end; margin-top:16px;">
+            <button onclick="this.closest('div[style*=fixed]').remove()" style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px;">Cancel</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+}
+
+async function mysqlDoDump(db, includeData, modal) {
+    // Replace modal content with loading
+    const inner = modal.querySelector('div');
+    inner.innerHTML = `<div style="padding:40px; text-align:center;">
+        <div class="spinner-sm" style="margin:0 auto 12px;"></div>
+        <div style="color:var(--text-muted); font-size:13px;">Generating ${includeData ? 'full' : 'structure'} dump for ${escapeHtml(db)}...</div>
+    </div>`;
+
+    try {
+        const baseUrl = getNodeApiBase(currentNodeId);
+        const resp = await fetch(`${baseUrl}/api/mysql/dump`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...mysqlCreds, database: db, include_data: includeData }),
+        });
+
+        if (!resp.ok) {
+            let errMsg;
+            try { const err = await resp.json(); errMsg = err.error; } catch { errMsg = 'HTTP ' + resp.status; }
+            throw new Error(errMsg);
+        }
+
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${db}${includeData ? '_full' : '_structure'}.sql`;
+        a.click();
+        URL.revokeObjectURL(url);
+        modal.remove();
+        showToast(`SQL dump downloaded: ${a.download}`, 'success');
+    } catch (e) {
+        modal.remove();
+        showToast('Dump failed: ' + e.message, 'error');
+    }
 }
 
 async function mysqlExecuteQuery() {
@@ -9944,6 +10068,15 @@ async function mysqlExecuteQuery() {
     if (!query) {
         showToast('Please enter a SQL query', 'error');
         return;
+    }
+
+    // Check for destructive queries and require confirmation
+    if (isMysqlDestructiveQuery(query)) {
+        const confirmed = await mysqlConfirmDestructive(
+            'You are about to execute a potentially destructive SQL statement.',
+            query
+        );
+        if (!confirmed) return;
     }
 
     const db = document.getElementById('mysql-query-db').value || '';
