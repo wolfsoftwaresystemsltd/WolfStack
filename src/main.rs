@@ -268,6 +268,8 @@ async fn main() -> std::io::Result<()> {
             loop {
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 agent::poll_remote_nodes(cluster_poll.clone(), secret_poll.clone(), Some(ai_agent_poll.clone())).await;
+                // Sync container routes from WolfNet peers (works without cluster membership)
+                containers::sync_wolfnet_peer_routes().await;
             }
         });
 
