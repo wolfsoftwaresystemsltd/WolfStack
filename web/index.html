@@ -2529,96 +2529,98 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
 
         <!-- Create IP Mapping Modal -->
         <div class="modal-overlay" id="create-mapping-modal">
-            <div class="modal" style="max-width: 560px; width: 95%;">
+            <div class="modal" style="max-width: 860px; width: 95%;">
                 <div class="modal-header">
                     <h3>🌍 Create IP Mapping</h3>
                     <button class="modal-close" onclick="closeCreateMappingModal()">&times;</button>
                 </div>
-                <div class="modal-body">
-                    <div
-                        style="background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.2); border-radius:8px; padding:14px; margin-bottom:16px;">
-                        <h4 style="font-size:13px; color:var(--text-primary); margin-bottom:8px;">📖 What does this do?
-                        </h4>
-                        <p style="font-size:12px; color:var(--text-secondary); margin:0 0 10px 0; line-height:1.6;">
-                            IP Mapping creates <strong>iptables NAT rules</strong> that forward traffic from a
-                            <strong>public IP address</strong> on this server to a <strong>WolfNet IP</strong>
-                            belonging to a Docker container, LXC container, or VM.
-                        </p>
-                        <div style="font-size:12px; color:var(--text-secondary); margin-bottom:10px; line-height:1.7;">
-                            <strong>Step by step:</strong>
-                            <ol style="margin:4px 0 0 16px; padding:0;">
-                                <li>Choose the <strong>Public IP</strong> — the external IP that users will connect to
-                                </li>
-                                <li>Choose the <strong>WolfNet IP</strong> — the container/VM that should receive the
-                                    traffic</li>
-                                <li><em>Optionally</em> restrict to specific <strong>ports</strong> (e.g. 80,443 for
-                                    web) — leave blank = all traffic</li>
-                                <li>Select <strong>TCP</strong> or <strong>UDP</strong> if you specified ports (required
-                                    by iptables)</li>
-                            </ol>
+                <div class="modal-body"
+                    style="display:grid; grid-template-columns:1fr 1fr; gap:20px; align-items:start;">
+                    <!-- LEFT: Guide -->
+                    <div>
+                        <div
+                            style="background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.2); border-radius:8px; padding:14px; margin-bottom:12px;">
+                            <h4 style="font-size:13px; color:var(--text-primary); margin-bottom:8px;">📖 What does this
+                                do?</h4>
+                            <p style="font-size:12px; color:var(--text-secondary); margin:0 0 10px 0; line-height:1.6;">
+                                IP Mapping creates <strong>iptables NAT rules</strong> that forward traffic from a
+                                <strong>public IP</strong> on this server to a <strong>WolfNet IP</strong>
+                                belonging to a Docker container, LXC container, or VM.
+                            </p>
+                            <div style="font-size:12px; color:var(--text-secondary); line-height:1.7;">
+                                <strong>Step by step:</strong>
+                                <ol style="margin:4px 0 0 16px; padding:0;">
+                                    <li>Choose the <strong>Public IP</strong> — the external IP users connect to</li>
+                                    <li>Choose the <strong>WolfNet IP</strong> — the container/VM receiving traffic</li>
+                                    <li><em>Optionally</em> restrict to specific <strong>ports</strong> (e.g. 80,443)
+                                    </li>
+                                    <li>Select <strong>TCP</strong> or <strong>UDP</strong> when ports are specified
+                                    </li>
+                                </ol>
+                            </div>
                         </div>
                         <div
-                            style="background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.2); border-radius:6px; padding:8px 10px; font-size:11px; color:#ef4444; line-height:1.6;">
-                            ⚠️ <strong>Safety:</strong> Critical ports are blocked (SSH 22, Proxmox 8006, WolfStack
-                            8552, etc.)
-                            to prevent you from accidentally locking yourself out. Port conflicts will be shown below as
-                            you type.
+                            style="background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.2); border-radius:6px; padding:10px; font-size:11px; color:#ef4444; line-height:1.6; margin-bottom:12px;">
+                            ⚠️ <strong>Safety:</strong> Critical ports are blocked (SSH 22, Proxmox 8006/8443,
+                            WolfStack 8552, etc.) and any port currently in use on this server will be rejected
+                            to prevent you from breaking services.
                         </div>
+                        <div id="mapping-port-warnings"></div>
                     </div>
 
-                    <div class="form-group">
-                        <label>Public IP <span style="color:var(--danger)">*</span></label>
-                        <div style="display:flex; gap:8px;">
-                            <select id="mapping-public-ip-select" class="form-control"
-                                onchange="onMappingPublicIpSelect()" style="flex:1;">
-                                <option value="">— Select or enter manually —</option>
-                            </select>
-                            <input type="text" id="mapping-public-ip" class="form-control"
-                                placeholder="e.g. 203.0.113.4"
-                                style="flex:1; font-family:var(--font-mono); font-size:13px;">
+                    <!-- RIGHT: Form fields -->
+                    <div>
+                        <div class="form-group" style="margin-bottom:12px;">
+                            <label>Public IP <span style="color:var(--danger)">*</span></label>
+                            <div style="display:flex; gap:6px;">
+                                <select id="mapping-public-ip-select" class="form-control"
+                                    onchange="onMappingPublicIpSelect()" style="flex:1;">
+                                    <option value="">— Select —</option>
+                                </select>
+                                <input type="text" id="mapping-public-ip" class="form-control"
+                                    placeholder="e.g. 203.0.113.4"
+                                    style="flex:1; font-family:var(--font-mono); font-size:13px;">
+                            </div>
+                            <small style="color:var(--text-muted);">External IP on this server</small>
                         </div>
-                        <small style="color:var(--text-muted);">A public IP assigned to this server. Auto-detected IPs
-                            are shown in the dropdown.</small>
-                    </div>
 
-                    <div class="form-group">
-                        <label>WolfNet IP <span style="color:var(--danger)">*</span></label>
-                        <div style="display:flex; gap:8px;">
-                            <select id="mapping-wolfnet-ip-select" class="form-control"
-                                onchange="onMappingWolfnetIpSelect()" style="flex:1;">
-                                <option value="">— Select or enter manually —</option>
-                            </select>
-                            <input type="text" id="mapping-wolfnet-ip" class="form-control"
-                                placeholder="e.g. 10.10.10.104"
-                                style="flex:1; font-family:var(--font-mono); font-size:13px;">
+                        <div class="form-group" style="margin-bottom:12px;">
+                            <label>WolfNet IP <span style="color:var(--danger)">*</span></label>
+                            <div style="display:flex; gap:6px;">
+                                <select id="mapping-wolfnet-ip-select" class="form-control"
+                                    onchange="onMappingWolfnetIpSelect()" style="flex:1;">
+                                    <option value="">— Select —</option>
+                                </select>
+                                <input type="text" id="mapping-wolfnet-ip" class="form-control"
+                                    placeholder="e.g. 10.10.10.104"
+                                    style="flex:1; font-family:var(--font-mono); font-size:13px;">
+                            </div>
+                            <small style="color:var(--text-muted);">Container/VM to receive traffic</small>
                         </div>
-                        <small style="color:var(--text-muted);">The WolfNet IP of the container, VM, or LXC instance
-                            that should receive traffic.</small>
-                    </div>
 
-                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px;">
+                            <div class="form-group">
+                                <label>Ports <small style="color:var(--text-muted);">(optional)</small></label>
+                                <input type="text" id="mapping-ports" class="form-control" placeholder="e.g. 80,443"
+                                    oninput="onMappingPortsInput()"
+                                    style="font-family:var(--font-mono); font-size:13px;">
+                                <small style="color:var(--text-muted);">Blank = all</small>
+                            </div>
+                            <div class="form-group">
+                                <label>Protocol</label>
+                                <select id="mapping-protocol" class="form-control">
+                                    <option value="all">All (TCP + UDP)</option>
+                                    <option value="tcp">TCP only</option>
+                                    <option value="udp">UDP only</option>
+                                </select>
+                            </div>
+                        </div>
+
                         <div class="form-group">
-                            <label>Ports <small style="color:var(--text-muted);">(optional)</small></label>
-                            <input type="text" id="mapping-ports" class="form-control" placeholder="e.g. 80,443"
-                                oninput="onMappingPortsInput()" style="font-family:var(--font-mono); font-size:13px;">
-                            <small style="color:var(--text-muted);">Leave blank = all ports</small>
+                            <label>Label <small style="color:var(--text-muted);">(optional)</small></label>
+                            <input type="text" id="mapping-label" class="form-control"
+                                placeholder="e.g. Web server, Game server">
                         </div>
-                        <div class="form-group">
-                            <label>Protocol</label>
-                            <select id="mapping-protocol" class="form-control">
-                                <option value="all">All (TCP + UDP)</option>
-                                <option value="tcp">TCP only</option>
-                                <option value="udp">UDP only</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    <div id="mapping-port-warnings"></div>
-
-                    <div class="form-group">
-                        <label>Label <small style="color:var(--text-muted);">(optional)</small></label>
-                        <input type="text" id="mapping-label" class="form-control"
-                            placeholder="e.g. Web server, Game server">
                     </div>
                 </div>
                 <div class="modal-footer">
