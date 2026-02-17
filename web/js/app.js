@@ -4557,6 +4557,8 @@ function renderIpMappings(mappings) {
     }).join('');
 }
 
+let _mappingPortData = null; // cached listening + blocked ports
+
 async function showCreateMappingModal() {
     // Reset fields
     document.getElementById('mapping-public-ip').value = '';
@@ -4564,6 +4566,10 @@ async function showCreateMappingModal() {
     document.getElementById('mapping-ports').value = '';
     document.getElementById('mapping-protocol').value = 'all';
     document.getElementById('mapping-label').value = '';
+
+    // Clear any previous warnings
+    let warn = document.getElementById('mapping-port-warnings');
+    if (warn) warn.innerHTML = '';
 
     // Fetch available IPs for dropdowns
     try {
@@ -4589,6 +4595,14 @@ async function showCreateMappingModal() {
         console.error('Failed to fetch available IPs:', e);
     }
 
+    // Fetch listening/blocked ports for validation
+    try {
+        const resp = await fetch(apiUrl('/api/networking/listening-ports'));
+        if (resp.ok) _mappingPortData = await resp.json();
+    } catch (e) {
+        console.error('Failed to fetch listening ports:', e);
+    }
+
     document.getElementById('create-mapping-modal').classList.add('active');
 }
 
@@ -4606,6 +4620,79 @@ function onMappingWolfnetIpSelect() {
     if (val) document.getElementById('mapping-wolfnet-ip').value = val;
 }
 
+// Known blocked ports (mirrors backend BLOCKED_PORTS)
+const MAPPING_BLOCKED_PORTS = {
+    22: 'SSH', 111: 'NFS portmapper', 2049: 'NFS', 3128: 'Proxmox CONNECT proxy',
+    5900: 'Proxmox VNC', 5901: 'Proxmox VNC', 5902: 'Proxmox VNC', 5903: 'Proxmox VNC',
+    5999: 'Proxmox SPICE', 8006: 'Proxmox Web UI', 8007: 'Proxmox Spiceproxy',
+    8552: 'WolfStack API', 8553: 'WolfStack cluster', 9600: 'WolfNet',
+};
+
+/** Parse port string → array of port numbers, or null on error */
+function parseMappingPorts(str) {
+    const ports = [];
+    for (const part of str.split(',')) {
+        const s = part.trim();
+        if (!s) continue;
+        if (s.includes(':')) {
+            const [lo, hi] = s.split(':').map(x => parseInt(x.trim(), 10));
+            if (isNaN(lo) || isNaN(hi) || lo < 1 || hi > 65535 || lo > hi) return null;
+            if (hi - lo > 1000) return null;
+            for (let p = lo; p <= hi; p++) ports.push(p);
+        } else {
+            const p = parseInt(s, 10);
+            if (isNaN(p) || p < 1 || p > 65535) return null;
+            ports.push(p);
+        }
+    }
+    return ports;
+}
+
+/** Live-check ports as user types and show warnings */
+function onMappingPortsInput() {
+    const warnDiv = document.getElementById('mapping-port-warnings');
+    if (!warnDiv) return;
+    const portStr = document.getElementById('mapping-ports').value.trim();
+    if (!portStr) { warnDiv.innerHTML = ''; return; }
+
+    // Auto-switch protocol from 'all' to 'tcp' when ports are entered
+    const protoEl = document.getElementById('mapping-protocol');
+    if (protoEl.value === 'all') protoEl.value = 'tcp';
+
+    const ports = parseMappingPorts(portStr);
+    if (!ports) {
+        warnDiv.innerHTML = '<div style="color:#ef4444;font-size:12px;margin-top:6px;">⚠️ Invalid port format. Use: 80 or 80,443 or 8000:8100</div>';
+        return;
+    }
+
+    const warnings = [];
+    // Check blocked
+    for (const p of ports) {
+        if (MAPPING_BLOCKED_PORTS[p]) {
+            warnings.push(`🚫 Port <strong>${p}</strong> is used by <strong>${MAPPING_BLOCKED_PORTS[p]}</strong> — mapping will be rejected`);
+        }
+    }
+    // Check in-use
+    if (_mappingPortData && _mappingPortData.listening) {
+        const listening = _mappingPortData.listening;
+        for (const p of ports) {
+            if (MAPPING_BLOCKED_PORTS[p]) continue; // already warned
+            const match = listening.find(l => l.port === p);
+            if (match) {
+                warnings.push(`⚠️ Port <strong>${p}</strong> is in use by <strong>${match.process || 'unknown'}</strong> — traffic will be intercepted`);
+            }
+        }
+    }
+
+    if (warnings.length > 0) {
+        warnDiv.innerHTML = `<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);border-radius:6px;padding:8px 12px;margin-top:8px;font-size:12px;line-height:1.7;">
+            ${warnings.join('<br>')}
+        </div>`;
+    } else {
+        warnDiv.innerHTML = '<div style="color:#22c55e;font-size:12px;margin-top:6px;">✅ No port conflicts detected</div>';
+    }
+}
+
 async function createIpMapping() {
     const public_ip = document.getElementById('mapping-public-ip').value.trim();
     const wolfnet_ip = document.getElementById('mapping-wolfnet-ip').value.trim();
@@ -4615,6 +4702,26 @@ async function createIpMapping() {
 
     if (!public_ip) { showModal('Please enter a public IP address'); return; }
     if (!wolfnet_ip) { showModal('Please enter a WolfNet IP address'); return; }
+
+    // Client-side port validation
+    if (ports) {
+        const parsed = parseMappingPorts(ports);
+        if (!parsed) {
+            showModal('Invalid port format. Use: 80, 80,443, or 8000:8100');
+            return;
+        }
+        if (protocol === 'all') {
+            showModal('When specifying ports, you must select TCP or UDP (not "All"). iptables requires a specific protocol for port-based rules.');
+            return;
+        }
+        // Check for blocked ports
+        for (const p of parsed) {
+            if (MAPPING_BLOCKED_PORTS[p]) {
+                showModal(`Port ${p} is used by ${MAPPING_BLOCKED_PORTS[p]} and cannot be mapped. This would break critical system access.`);
+                return;
+            }
+        }
+    }
 
     try {
         const resp = await fetch(apiUrl('/api/networking/ip-mappings'), {

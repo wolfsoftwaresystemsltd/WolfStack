@@ -2592,7 +2592,7 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                         <div class="form-group">
                             <label>Ports <small style="color:var(--text-muted);">(optional)</small></label>
                             <input type="text" id="mapping-ports" class="form-control" placeholder="e.g. 80,443"
-                                style="font-family:var(--font-mono); font-size:13px;">
+                                oninput="onMappingPortsInput()" style="font-family:var(--font-mono); font-size:13px;">
                             <small style="color:var(--text-muted);">Leave blank = all ports</small>
                         </div>
                         <div class="form-group">
@@ -2604,6 +2604,8 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                             </select>
                         </div>
                     </div>
+
+                    <div id="mapping-port-warnings"></div>
 
                     <div class="form-group">
                         <label>Label <small style="color:var(--text-muted);">(optional)</small></label>

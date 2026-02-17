@@ -3498,6 +3498,17 @@ pub async fn net_available_ips(
     }))
 }
 
+/// GET /api/networking/listening-ports — ports currently in use on server
+pub async fn net_listening_ports(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(serde_json::json!({
+        "listening": networking::get_listening_ports(),
+        "blocked": networking::get_blocked_ports(),
+    }))
+}
+
 // ─── Backup API ───
 
 #[derive(Deserialize)]
@@ -4933,6 +4944,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/networking/ip-mappings", web::post().to(net_add_ip_mapping))
         .route("/api/networking/ip-mappings/{id}", web::delete().to(net_remove_ip_mapping))
         .route("/api/networking/available-ips", web::get().to(net_available_ips))
+        .route("/api/networking/listening-ports", web::get().to(net_listening_ports))
         // Backups
         .route("/api/backups", web::get().to(backup_list))
         .route("/api/backups", web::post().to(backup_create))

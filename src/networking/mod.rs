@@ -1243,6 +1243,57 @@ pub fn list_ip_mappings() -> Vec<IpMapping> {
     load_ip_mapping_config().mappings
 }
 
+/// Ports that must NEVER be mapped — doing so can lock users out of critical services.
+const BLOCKED_PORTS: &[(u16, &str)] = &[
+    (22,   "SSH"),
+    (111,  "NFS portmapper"),
+    (2049, "NFS"),
+    (3128, "Proxmox CONNECT proxy"),
+    (5900, "Proxmox VNC console"),
+    (5901, "Proxmox VNC console"),
+    (5902, "Proxmox VNC console"),
+    (5903, "Proxmox VNC console"),
+    (5999, "Proxmox SPICE console"),
+    (8006, "Proxmox Web UI"),
+    (8007, "Proxmox Spiceproxy"),
+    (8552, "WolfStack API"),
+    (8553, "WolfStack cluster"),
+    (9600, "WolfNet"),
+];
+
+/// Parse a port specification string into individual port numbers.
+/// Accepts: "80", "80,443", "8000:8100", "80,443,8000:8100"
+fn parse_port_list(ports_str: &str) -> Result<Vec<u16>, String> {
+    let mut result = Vec::new();
+    for part in ports_str.split(',') {
+        let part = part.trim();
+        if part.is_empty() { continue; }
+        if part.contains(':') {
+            // Range like 8000:8100
+            let bounds: Vec<&str> = part.split(':').collect();
+            if bounds.len() != 2 {
+                return Err(format!("Invalid port range: '{}'", part));
+            }
+            let lo: u16 = bounds[0].trim().parse()
+                .map_err(|_| format!("Invalid port number: '{}'", bounds[0].trim()))?;
+            let hi: u16 = bounds[1].trim().parse()
+                .map_err(|_| format!("Invalid port number: '{}'", bounds[1].trim()))?;
+            if lo > hi {
+                return Err(format!("Invalid port range: {} > {}", lo, hi));
+            }
+            if hi - lo > 1000 {
+                return Err(format!("Port range {}:{} is too large (max 1000 ports)", lo, hi));
+            }
+            for p in lo..=hi { result.push(p); }
+        } else {
+            let p: u16 = part.parse()
+                .map_err(|_| format!("Invalid port number: '{}'", part))?;
+            result.push(p);
+        }
+    }
+    Ok(result)
+}
+
 /// Add a new IP mapping and apply iptables rules
 pub fn add_ip_mapping(
     public_ip: &str,
@@ -1259,11 +1310,52 @@ pub fn add_ip_mapping(
         return Err(format!("Invalid WolfNet IP: {}", wolfnet_ip));
     }
 
+    // Self-mapping guard: don't route traffic to yourself
+    if let Some(gw) = detect_wolfnet_gateway_ip() {
+        if wolfnet_ip == gw {
+            return Err("Cannot map to this server's own WolfNet IP — this would create a routing loop".to_string());
+        }
+    }
+
+    // Protocol validation
+    if !["all", "tcp", "udp"].contains(&protocol) {
+        return Err(format!("Invalid protocol '{}' — must be 'all', 'tcp', or 'udp'", protocol));
+    }
+
+    // Port validation & blocked port check
+    if let Some(port_str) = ports {
+        let trimmed = port_str.trim();
+        if !trimmed.is_empty() {
+            // Protocol must be tcp or udp when specific ports are used (iptables requirement)
+            if protocol == "all" {
+                return Err("When specifying ports, you must select TCP or UDP (not 'All'). \
+                    iptables --dport requires a specific protocol.".to_string());
+            }
+
+            let port_list = parse_port_list(trimmed)?;
+
+            // Check against blocked ports
+            for &port in &port_list {
+                for &(blocked, service) in BLOCKED_PORTS {
+                    if port == blocked {
+                        return Err(format!(
+                            "Port {} is used by {} and cannot be mapped. \
+                             Redirecting this port would break critical system access.",
+                            port, service
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     let mut config = load_ip_mapping_config();
 
     // Check for duplicate
-    if config.mappings.iter().any(|m| m.public_ip == public_ip && m.wolfnet_ip == wolfnet_ip) {
-        return Err(format!("{} → {} already mapped", public_ip, wolfnet_ip));
+    if config.mappings.iter().any(|m| m.public_ip == public_ip && m.wolfnet_ip == wolfnet_ip
+        && m.ports == ports.map(|s| s.to_string()) && m.protocol == protocol)
+    {
+        return Err(format!("{} → {} already mapped with these ports/protocol", public_ip, wolfnet_ip));
     }
 
     let mapping = IpMapping {
@@ -1284,6 +1376,79 @@ pub fn add_ip_mapping(
 
     info!("Added IP mapping: {} → {} ({})", public_ip, wolfnet_ip, label);
     Ok(mapping)
+}
+
+/// Get list of TCP/UDP ports currently listening on this server (for conflict detection)
+pub fn get_listening_ports() -> Vec<serde_json::Value> {
+    let output = Command::new("ss")
+        .args(["-tlnp"])  // TCP listening, numeric, show processes
+        .output();
+
+    let mut ports = Vec::new();
+
+    if let Ok(o) = output {
+        if o.status.success() {
+            for line in String::from_utf8_lossy(&o.stdout).lines().skip(1) {
+                // Format: State  Recv-Q  Send-Q  Local Address:Port  Peer Address:Port  Process
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                if cols.len() >= 5 {
+                    let local = cols[3];
+                    // Extract port from the last colon-separated part
+                    if let Some(port_str) = local.rsplit(':').next() {
+                        if let Ok(port) = port_str.parse::<u16>() {
+                            let process = if cols.len() >= 6 { cols[5..].join(" ") } else { String::new() };
+                            // Extract process name from users:(("name",pid=N,fd=N))
+                            let proc_name = process.split('"').nth(1).unwrap_or("").to_string();
+                            ports.push(serde_json::json!({
+                                "port": port,
+                                "protocol": "tcp",
+                                "process": proc_name,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also get UDP
+    let output = Command::new("ss")
+        .args(["-ulnp"])
+        .output();
+
+    if let Ok(o) = output {
+        if o.status.success() {
+            for line in String::from_utf8_lossy(&o.stdout).lines().skip(1) {
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                if cols.len() >= 5 {
+                    let local = cols[4];
+                    if let Some(port_str) = local.rsplit(':').next() {
+                        if let Ok(port) = port_str.parse::<u16>() {
+                            let process = if cols.len() >= 6 { cols[5..].join(" ") } else { String::new() };
+                            let proc_name = process.split('"').nth(1).unwrap_or("").to_string();
+                            ports.push(serde_json::json!({
+                                "port": port,
+                                "protocol": "udp",
+                                "process": proc_name,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // De-duplicate by port+protocol
+    ports.sort_by_key(|p| (p["port"].as_u64().unwrap_or(0), p["protocol"].as_str().unwrap_or("").to_string()));
+    ports.dedup_by(|a, b| a["port"] == b["port"] && a["protocol"] == b["protocol"]);
+    ports
+}
+
+/// Get the list of blocked ports (for frontend display)
+pub fn get_blocked_ports() -> Vec<serde_json::Value> {
+    BLOCKED_PORTS.iter().map(|&(port, service)| {
+        serde_json::json!({ "port": port, "service": service })
+    }).collect()
 }
 
 /// Remove an IP mapping by ID and clean up iptables rules
