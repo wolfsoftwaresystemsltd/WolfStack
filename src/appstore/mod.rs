@@ -666,6 +666,137 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             user_inputs: vec![],
         },
 
+        AppManifest {
+            id: "mariadb".into(),
+            name: "MariaDB".into(),
+            icon: "🐬".into(),
+            category: "Database".into(),
+            description: "Community-developed fork of MySQL — fast, stable, and open source".into(),
+            website: Some("https://mariadb.org".into()),
+            docker: Some(DockerTarget {
+                image: "mariadb:11".into(),
+                ports: vec!["3306:3306".into()],
+                env: vec![
+                    "MYSQL_ROOT_PASSWORD=${DB_PASSWORD}".into(),
+                    "MYSQL_DATABASE=${DB_NAME}".into(),
+                ],
+                volumes: vec!["mariadb_data:/var/lib/mysql".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec!["mariadb-server".into()],
+                packages_redhat: vec!["mariadb-server".into()],
+                post_install: vec!["systemctl enable mariadb".into()],
+                service: Some("mariadb".into()),
+            }),
+            user_inputs: vec![
+                UserInput { id: "DB_PASSWORD".into(), label: "Root Password".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("Root password".into()), options: vec![] },
+                UserInput { id: "DB_NAME".into(), label: "Database Name".into(), input_type: "text".into(), default: Some("mydb".into()), required: false, placeholder: None, options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "mysql".into(),
+            name: "MySQL".into(),
+            icon: "🐬".into(),
+            category: "Database".into(),
+            description: "The world's most popular open-source relational database".into(),
+            website: Some("https://www.mysql.com".into()),
+            docker: Some(DockerTarget {
+                image: "mysql:8.4".into(),
+                ports: vec!["3307:3306".into()],
+                env: vec![
+                    "MYSQL_ROOT_PASSWORD=${DB_PASSWORD}".into(),
+                    "MYSQL_DATABASE=${DB_NAME}".into(),
+                ],
+                volumes: vec!["mysql_data:/var/lib/mysql".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec!["mysql-server".into()],
+                packages_redhat: vec!["mysql-server".into()],
+                post_install: vec!["systemctl enable mysqld".into()],
+                service: Some("mysqld".into()),
+            }),
+            user_inputs: vec![
+                UserInput { id: "DB_PASSWORD".into(), label: "Root Password".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("Root password".into()), options: vec![] },
+                UserInput { id: "DB_NAME".into(), label: "Database Name".into(), input_type: "text".into(), default: Some("mydb".into()), required: false, placeholder: None, options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "galera-cluster".into(),
+            name: "Galera Cluster".into(),
+            icon: "🔄".into(),
+            category: "Database".into(),
+            description: "Synchronous multi-master replication for MariaDB — true high availability".into(),
+            website: Some("https://galeracluster.com".into()),
+            docker: Some(DockerTarget {
+                image: "mariadb:11".into(),
+                ports: vec!["3306:3306".into(), "4567:4567".into(), "4568:4568".into(), "4444:4444".into()],
+                env: vec![
+                    "MYSQL_ROOT_PASSWORD=${DB_PASSWORD}".into(),
+                    "MYSQL_INITDB_SKIP_TZINFO=1".into(),
+                    "MARIADB_GALERA_CLUSTER_NAME=${CLUSTER_NAME}".into(),
+                    "MARIADB_GALERA_CLUSTER_ADDRESS=gcomm://".into(),
+                ],
+                volumes: vec!["galera_data:/var/lib/mysql".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "DB_PASSWORD".into(), label: "Root Password".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("Root password".into()), options: vec![] },
+                UserInput { id: "CLUSTER_NAME".into(), label: "Cluster Name".into(), input_type: "text".into(), default: Some("wolfstack_galera".into()), required: true, placeholder: None, options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "mongodb".into(),
+            name: "MongoDB".into(),
+            icon: "🍃".into(),
+            category: "Database".into(),
+            description: "Document-oriented NoSQL database for modern applications".into(),
+            website: Some("https://www.mongodb.com".into()),
+            docker: Some(DockerTarget {
+                image: "mongo:7".into(),
+                ports: vec!["27017:27017".into()],
+                env: vec![
+                    "MONGO_INITDB_ROOT_USERNAME=${DB_USER}".into(),
+                    "MONGO_INITDB_ROOT_PASSWORD=${DB_PASSWORD}".into(),
+                ],
+                volumes: vec!["mongo_data:/data/db".into(), "mongo_config:/data/configdb".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "DB_USER".into(), label: "Admin Username".into(), input_type: "text".into(), default: Some("admin".into()), required: true, placeholder: None, options: vec![] },
+                UserInput { id: "DB_PASSWORD".into(), label: "Admin Password".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("Admin password".into()), options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "sqlite-web".into(),
+            name: "SQLite Web".into(),
+            icon: "🪶".into(),
+            category: "Database".into(),
+            description: "Web-based SQLite database browser and manager in a container".into(),
+            website: Some("https://github.com/nicois/sqlite-web".into()),
+            docker: Some(DockerTarget {
+                image: "ghcr.io/nicois/sqlite-web:latest".into(),
+                ports: vec!["8085:8080".into()],
+                env: vec![],
+                volumes: vec!["sqlite_data:/data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
         // ── Networking ──
         AppManifest {
             id: "nginx".into(),
