@@ -1244,9 +1244,9 @@ body {
 }
 
 .appstore-card:hover {
-    border-color: rgba(139, 92, 246, 0.4);
+    border-color: rgba(220, 38, 38, 0.4);
     transform: translateY(-3px);
-    box-shadow: 0 8px 30px rgba(139, 92, 246, 0.12);
+    box-shadow: 0 8px 30px rgba(220, 38, 38, 0.12);
 }
 
 .appstore-card-header {
@@ -1263,8 +1263,8 @@ body {
     align-items: center;
     justify-content: center;
     font-size: 24px;
-    background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(59, 130, 246, 0.1));
-    border: 1px solid rgba(139, 92, 246, 0.2);
+    background: linear-gradient(135deg, rgba(220, 38, 38, 0.15), rgba(59, 130, 246, 0.1));
+    border: 1px solid rgba(220, 38, 38, 0.2);
     flex-shrink: 0;
 }
 
@@ -1278,8 +1278,8 @@ body {
     font-size: 11px;
     padding: 2px 8px;
     border-radius: 10px;
-    background: rgba(139, 92, 246, 0.12);
-    color: #a78bfa;
+    background: rgba(220, 38, 38, 0.12);
+    color: #f87171;
     font-weight: 500;
     display: inline-block;
 }
@@ -1318,7 +1318,7 @@ body {
     padding: 6px 14px;
     border-radius: 8px;
     border: none;
-    background: linear-gradient(135deg, #8b5cf6, #3b82f6);
+    background: linear-gradient(135deg, #dc2626, #ef4444);
     color: white;
     font-size: 12px;
     font-weight: 600;
@@ -1329,7 +1329,7 @@ body {
 
 .appstore-install-btn:hover {
     transform: scale(1.05);
-    box-shadow: 0 4px 16px rgba(139, 92, 246, 0.35);
+    box-shadow: 0 4px 16px rgba(220, 38, 38, 0.35);
 }
 
 .appstore-cat-btn {
@@ -1346,14 +1346,14 @@ body {
 }
 
 .appstore-cat-btn:hover {
-    border-color: rgba(139, 92, 246, 0.4);
+    border-color: rgba(220, 38, 38, 0.4);
     color: var(--text-primary);
 }
 
 .appstore-cat-btn.active {
-    background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(59, 130, 246, 0.15));
-    border-color: rgba(139, 92, 246, 0.5);
-    color: #c4b5fd;
+    background: linear-gradient(135deg, rgba(220, 38, 38, 0.2), rgba(59, 130, 246, 0.15));
+    border-color: rgba(220, 38, 38, 0.5);
+    color: #fca5a5;
 }
 
 .appstore-tab-btn {
@@ -1361,9 +1361,9 @@ body {
 }
 
 .appstore-tab-btn.active {
-    background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(59, 130, 246, 0.15));
-    border-color: rgba(139, 92, 246, 0.5);
-    color: #c4b5fd;
+    background: linear-gradient(135deg, rgba(220, 38, 38, 0.2), rgba(59, 130, 246, 0.15));
+    border-color: rgba(220, 38, 38, 0.5);
+    color: #fca5a5;
 }
 
 .appstore-target-pill {
@@ -1381,13 +1381,13 @@ body {
 }
 
 .appstore-target-pill:hover {
-    border-color: rgba(139, 92, 246, 0.4);
+    border-color: rgba(220, 38, 38, 0.4);
 }
 
 .appstore-target-pill.active {
-    border-color: #8b5cf6;
-    background: rgba(139, 92, 246, 0.12);
-    color: #c4b5fd;
+    border-color: #dc2626;
+    background: rgba(220, 38, 38, 0.12);
+    color: #fca5a5;
 }
 
 .appstore-installed-card {

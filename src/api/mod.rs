@@ -4730,7 +4730,7 @@ pub async fn appstore_list(
     let q = query.get("q").map(|s| s.as_str());
     let cat = query.get("category").map(|s| s.as_str());
     let apps = appstore::list_apps(q, cat);
-    HttpResponse::Ok().json(apps)
+    HttpResponse::Ok().json(serde_json::json!({ "apps": apps }))
 }
 
 /// GET /api/appstore/apps/{id} — get app details
@@ -4781,7 +4781,7 @@ pub async fn appstore_installed(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let apps = appstore::list_installed_apps();
-    HttpResponse::Ok().json(apps)
+    HttpResponse::Ok().json(serde_json::json!({ "installed": apps }))
 }
 
 /// DELETE /api/appstore/installed/{id} — uninstall an app
