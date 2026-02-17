@@ -571,13 +571,21 @@ if [ -d "$INSTALL_DIR" ]; then
     echo "  Updating existing installation..."
     cd "$INSTALL_DIR"
     git fetch origin
+    git checkout -B $BRANCH origin/$BRANCH
     git reset --hard origin/$BRANCH
 else
     git clone -b $BRANCH https://github.com/wolfsoftwaresystemsltd/WolfStack.git "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
 
-echo "✓ Repository cloned to $INSTALL_DIR"
+# Show what we're building
+BUILT_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+echo "✓ Repository ready ($INSTALL_DIR)"
+echo "  Branch: $BRANCH | Version: $BUILT_VERSION"
+
+# Force full rebuild to ensure the new version takes effect
+echo "  Cleaning previous build..."
+rm -rf target/release/wolfstack target/release/.fingerprint/wolfstack-*
 
 # ─── Build WolfStack ────────────────────────────────────────────────────────
 echo ""
