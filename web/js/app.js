@@ -47,6 +47,32 @@ function showModal(message, title) {
     btn.focus();
 }
 
+// ─── Page Loading Overlay (modern blur + spinner) ───
+function showPageLoadingOverlay(pageEl) {
+    // Remove any existing overlay first
+    hidePageLoadingOverlay(pageEl);
+    // Ensure parent is positioned for the absolute overlay
+    if (getComputedStyle(pageEl).position === 'static') {
+        pageEl.style.position = 'relative';
+    }
+    const overlay = document.createElement('div');
+    overlay.className = 'page-loading-overlay';
+    overlay.innerHTML = `
+        <div class="page-loading-spinner"></div>
+        <div class="page-loading-text">Loading...</div>
+    `;
+    pageEl.appendChild(overlay);
+}
+
+function hidePageLoadingOverlay(pageEl) {
+    if (!pageEl) return;
+    const overlay = pageEl.querySelector('.page-loading-overlay');
+    if (overlay) {
+        overlay.style.opacity = '0';
+        setTimeout(() => overlay.remove(), 200);
+    }
+}
+
 // ─── API URL helper — route through proxy for remote nodes ───
 function apiUrl(path) {
     if (!currentNodeId) return path; // datacenter view
@@ -132,26 +158,13 @@ function selectServerView(nodeId, view) {
     if (headerOs && node?.metrics?.os_name) headerOs.textContent = node.metrics.os_name;
 
     // Load data for the view
-    // Show loading state immediately for views that fetch data asynchronously,
-    // so stale content from a previous server doesn't linger.
+    // Show a modern loading overlay for views that fetch data asynchronously
     const asyncViews = ['components', 'services', 'containers', 'lxc', 'vms', 'storage', 'networking', 'backups', 'wolfnet', 'certificates', 'cron', 'pve-resources', 'mysql-editor'];
     if (asyncViews.includes(view) && el) {
-        const loadingHtml = `<div style="text-align:center; padding:60px; color:var(--text-muted);">
-            <div style="font-size:32px;margin-bottom:12px;">⏳</div>
-            <div style="font-size:14px;">Loading...</div>
-        </div>`;
         // Clear table bodies to prevent stale data showing
         el.querySelectorAll('tbody').forEach(tb => { tb.innerHTML = ''; });
-        // Only fill card-body with loading HTML if it does NOT contain a data-table
-        // (otherwise we destroy elements like #docker-empty, #lxc-empty that render functions need)
-        el.querySelectorAll('.card-body').forEach(cb => {
-            if (!cb.querySelector('.data-table')) {
-                cb.innerHTML = loadingHtml;
-            }
-        });
-        // For views with a single content div (like pve-resources), fill it directly
-        const contentDiv = el.querySelector('[id$="-content"]');
-        if (contentDiv) contentDiv.innerHTML = loadingHtml;
+        // Show blur overlay over the page content
+        showPageLoadingOverlay(el);
     }
     if (view === 'dashboard') {
         // Clear history for new server view to show fresh data
@@ -174,10 +187,9 @@ function selectServerView(nodeId, view) {
         // If it's the local node (is_self), we could fetch history, but for now we'll build it live
         if (node?.is_self) fetchMetricsHistory();
     }
-    if (view === 'components') loadComponents();
-    if (view === 'services') loadComponents();
-    if (view === 'containers') loadDockerContainers();
-    if (view === 'lxc') loadLxcContainers();
+    if (view === 'components' || view === 'services') loadComponents().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'containers') loadDockerContainers().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'lxc') loadLxcContainers().finally(() => hidePageLoadingOverlay(el));
 
     if (view === 'terminal') {
         // Open terminal inline in the content area
@@ -189,15 +201,15 @@ function selectServerView(nodeId, view) {
             openInlineTerminal('host', hostname);
         }
     }
-    if (view === 'vms') loadVms();
-    if (view === 'storage') loadStorageMounts();
-    if (view === 'networking') loadNetworking();
-    if (view === 'backups') loadBackups();
-    if (view === 'wolfnet') loadWolfNet();
-    if (view === 'certificates') loadCertificates();
-    if (view === 'cron') loadCronJobs();
-    if (view === 'pve-resources') renderPveResourcesView(nodeId);
-    if (view === 'mysql-editor') loadMySQLEditor();
+    if (view === 'vms') loadVms().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'storage') loadStorageMounts().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'networking') loadNetworking().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'backups') loadBackups().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'wolfnet') loadWolfNet().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'certificates') loadCertificates().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'cron') loadCronJobs().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'pve-resources') { renderPveResourcesView(nodeId); hidePageLoadingOverlay(el); }
+    if (view === 'mysql-editor') { loadMySQLEditor(); hidePageLoadingOverlay(el); }
 }
 
 // ─── Server Tree ───
