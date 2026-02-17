@@ -10976,17 +10976,17 @@ async function executeAppStoreInstall() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                name: name,
+                container_name: name,
                 target: appStoreInstallTarget,
-                user_inputs: userInputs,
+                inputs: userInputs,
             }),
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (res.ok) {
-            showToast(data.message || 'App installed successfully', 'success');
+            showToast(data.message || 'App deployed successfully (stopped)', 'success');
             closeAppStoreInstallModal();
         } else {
-            showToast(data.error || 'Installation failed', 'error');
+            showToast(data.error || `Installation failed (HTTP ${res.status})`, 'error');
         }
     } catch (e) {
         showToast('Installation failed: ' + e.message, 'error');
