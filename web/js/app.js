@@ -10833,6 +10833,8 @@ function renderAppStoreGrid() {
         if (app.lxc) targets.push('LXC');
         if (app.bare_metal) targets.push('Host');
 
+        const docsLink = app.website ? `<a href="${escapeHtml(app.website)}" target="_blank" rel="noopener" title="Documentation" style="color:var(--text-muted); font-size:16px; text-decoration:none; padding:4px 6px; border-radius:6px; transition:color 0.2s, background 0.2s;" onmouseover="this.style.color='var(--accent-light)'; this.style.background='var(--accent-glow)'" onmouseout="this.style.color='var(--text-muted)'; this.style.background='none'">🔗</a>` : '';
+
         return `<div class="appstore-card">
             <div class="appstore-card-header">
                 <div class="appstore-card-icon">${icon}</div>
@@ -10846,7 +10848,10 @@ function renderAppStoreGrid() {
                 <div class="appstore-card-targets">
                     ${targets.map(t => `<span class="appstore-target-badge">${t}</span>`).join('')}
                 </div>
-                <button class="appstore-install-btn" onclick="openAppStoreInstallModal('${app.id}')">Install</button>
+                <div style="display:flex; align-items:center; gap:6px;">
+                    ${docsLink}
+                    <button class="appstore-install-btn" onclick="openAppStoreInstallModal('${app.id}')">Install</button>
+                </div>
             </div>
         </div>`;
     }).join('');
