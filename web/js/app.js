@@ -10886,16 +10886,16 @@ function openAppStoreInstallModal(appId) {
     document.getElementById('appstore-install-title').textContent = `Install ${app.name}`;
     document.getElementById('appstore-install-name').value = app.id.replace(/_/g, '-');
 
-    // Populate host selector from allNodes
+    // Populate host selector from allNodes (show all, mark offline)
     const hostSelect = document.getElementById('appstore-install-host');
-    const onlineNodes = allNodes.filter(n => n.online);
-    const selfNode = onlineNodes.find(n => n.is_self);
-    hostSelect.innerHTML = onlineNodes.map(n => {
-        const label = `${n.hostname} (${n.address})${n.is_self ? ' — this server' : ''}`;
+    hostSelect.innerHTML = allNodes.map(n => {
+        const status = n.online ? '' : ' [offline]';
+        const self = n.is_self ? ' — this server' : '';
+        const label = `${n.hostname} (${n.address})${self}${status}`;
         return `<option value="${n.id}" ${n.is_self ? 'selected' : ''}>${escapeHtml(label)}</option>`;
     }).join('');
-    if (onlineNodes.length === 0) {
-        hostSelect.innerHTML = '<option value="">No servers online</option>';
+    if (allNodes.length === 0) {
+        hostSelect.innerHTML = '<option value="">No servers found</option>';
     }
 
     // Build target buttons
