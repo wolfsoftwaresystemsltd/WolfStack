@@ -1780,12 +1780,22 @@ function renderVms(vms) {
         const wolfnetIp = vm.wolfnet_ip || '—';
         const autostart = vm.auto_start ? 'checked' : '';
 
+        const extraDisksHtml = (vm.extra_disks && vm.extra_disks.length > 0)
+            ? vm.extra_disks.map(d => `<span style="margin-left:12px;">+ ${d.size_gb || '?'} GiB${d.path ? ` <span style="color:var(--text-muted);font-size:10px;">${d.path}</span>` : ''}</span>`).join('')
+            : '';
+        const storageSubRow = `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="7" style="padding:4px 16px 6px 24px;border-top:none;">
+            <div style="display:flex;align-items:center;gap:8px;font-size:11px;">
+                <span>💾</span>
+                <span>${vm.disk_size_gb} GiB primary</span>
+                ${extraDisksHtml}
+            </div>
+        </td></tr>`;
+
         return `
             <tr>
                 <td><strong>${vm.name}</strong>${vm.iso_path ? `<br><small style="color:var(--text-muted);">💿 ${vm.iso_path.split('/').pop()}</small>` : ''}</td>
                 <td><span style="color:${statusColor}">● ${statusText}</span></td>
                 <td>${vm.cpus} vCPU / ${vm.memory_mb} MB</td>
-                <td>${vm.disk_size_gb} GiB${(vm.extra_disks && vm.extra_disks.length > 0) ? ` <span class="badge" style="font-size:10px;">+${vm.extra_disks.length} vol${vm.extra_disks.length > 1 ? 's' : ''}</span>` : ''}</td>
                 <td>${wolfnetIp !== '—' ? `<span class="badge" style="background:var(--accent-bg); color:var(--accent);">${wolfnetIp}</span>` : '—'}</td>
                 <td>${vncText}</td>
                 <td><input type="checkbox" ${autostart} onchange="toggleVmAutostart('${vm.name}', this.checked)"></td>
@@ -1799,7 +1809,7 @@ function renderVms(vms) {
                          <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="deleteVm('${vm.name}')" title="Delete">🗑️</button>`
             }
                 </td>
-            </tr>
+            </tr>${storageSubRow}
         `;
     }).join('');
 }
@@ -5035,6 +5045,21 @@ function renderDockerContainers(containers) {
         const isPaused = c.state === 'paused';
         const stateColor = isRunning ? '#10b981' : (isPaused ? '#f59e0b' : '#6b7280');
         const ports = c.ports.length > 0 ? c.ports.join('<br>') : '-';
+        const hasStorage = c.disk_usage !== undefined && c.disk_total;
+        const pct = hasStorage ? Math.round((c.disk_usage / c.disk_total) * 100) : 0;
+        const barColor = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#10b981';
+        const fsLabel = c.fs_type ? `<span style="color:var(--text-muted);font-size:10px;margin-left:8px;">${c.fs_type}</span>` : '';
+        const pathLabel = c.storage_path ? `<span style="color:var(--text-muted);font-size:10px;" title="${c.storage_path}">${c.storage_path.length > 30 ? '...' + c.storage_path.slice(-27) : c.storage_path}</span>` : '';
+        const storageSubRow = hasStorage ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="9" style="padding:4px 16px 6px 24px;border-top:none;">
+            <div style="display:flex;align-items:center;gap:8px;font-size:11px;">
+                <span>💾</span>
+                <div style="flex:1;max-width:220px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">
+                    <div style="width:${pct}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.3s;"></div>
+                </div>
+                <span style="min-width:110px;">${formatBytes(c.disk_usage)} / ${formatBytes(c.disk_total)} (${pct}%)</span>
+                ${fsLabel}${pathLabel}
+            </div>
+        </td></tr>` : '';
 
         return `<tr data-name="${c.name}">
             <td><strong>${c.name}</strong><br><span style="font-size:11px;color:var(--text-muted)">${c.id.substring(0, 12)}</span></td>
@@ -5043,7 +5068,6 @@ function renderDockerContainers(containers) {
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
             <td class="cpu-cell">${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
             <td class="mem-cell">${s.memory_usage ? formatBytes(s.memory_usage) : '-'}</td>
-            <td style="font-size:11px;">${c.storage_path ? `<span title="${c.storage_path}">${c.storage_path.length > 25 ? '...' + c.storage_path.slice(-22) : c.storage_path}</span>` + (c.disk_usage !== undefined && c.disk_total ? `<br><span style="color:var(--text-muted);">${formatBytes(c.disk_usage)} / ${formatBytes(c.disk_total)}</span>` : '') : '-'}</td>
             <td style="font-size:11px;">${ports}</td>
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleDockerAutostart('${c.id}', this.checked)"></td>
             <td style="white-space:nowrap;">
@@ -5069,7 +5093,7 @@ function renderDockerContainers(containers) {
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>
             </td>
-        </tr>`;
+        </tr>${storageSubRow}`;
     }).join('');
 }
 
@@ -5282,6 +5306,21 @@ function renderLxcContainers(containers, stats) {
         const isRunning = c.state === 'running';
         const isFrozen = c.state === 'frozen';
         const stateColor = isRunning ? '#10b981' : isFrozen ? '#f59e0b' : '#6b7280';
+        const hasStorage = c.disk_usage !== undefined && c.disk_total;
+        const pct = hasStorage ? Math.round((c.disk_usage / c.disk_total) * 100) : 0;
+        const barColor = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#10b981';
+        const fsLabel = c.fs_type ? `<span style="color:var(--text-muted);font-size:10px;margin-left:8px;">${c.fs_type}</span>` : '';
+        const pathLabel = c.storage_path ? `<span style="color:var(--text-muted);font-size:10px;" title="${c.storage_path}">${c.storage_path.length > 30 ? '...' + c.storage_path.slice(-27) : c.storage_path}</span>` : '';
+        const storageSubRow = hasStorage ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="7" style="padding:4px 16px 6px 24px;border-top:none;">
+            <div style="display:flex;align-items:center;gap:8px;font-size:11px;">
+                <span>💾</span>
+                <div style="flex:1;max-width:220px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">
+                    <div style="width:${pct}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.3s;"></div>
+                </div>
+                <span style="min-width:110px;">${formatBytes(c.disk_usage)} / ${formatBytes(c.disk_total)} (${pct}%)</span>
+                ${fsLabel}${pathLabel}
+            </div>
+        </td></tr>` : '';
 
         return `<tr>
             <td><strong>${c.hostname || c.name}</strong>${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
@@ -5289,7 +5328,6 @@ function renderLxcContainers(containers, stats) {
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
             <td>${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
             <td>${s.memory_usage ? formatBytes(s.memory_usage) + (s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : '') : '-'}</td>
-            <td style="font-size:11px;">${c.storage_path ? `<span title="${c.storage_path}">${c.storage_path.length > 25 ? '...' + c.storage_path.slice(-22) : c.storage_path}</span>` + (c.disk_usage !== undefined && c.disk_total ? `<br><span style="color:var(--text-muted);">${formatBytes(c.disk_usage)} / ${formatBytes(c.disk_total)}</span>` : '') : '-'}</td>
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleLxcAutostart('${c.name}', this.checked)"></td>
             <td style="white-space:nowrap;">
                 <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'start')"` : ''} title="Start">▶️</button>
@@ -5304,7 +5342,7 @@ function renderLxcContainers(containers, stats) {
                 <button class="btn btn-sm" style="${btnStyle}" onclick="migrateLxcContainer('${c.name}')" title="Migrate">🚀</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="exportLxcContainer('${c.name}')" title="Export">📦</button>
             </td>
-        </tr>`;
+        </tr>${storageSubRow}`;
     }).join('');
 }
 

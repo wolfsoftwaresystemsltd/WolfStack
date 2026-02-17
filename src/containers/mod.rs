@@ -964,6 +964,8 @@ pub struct ContainerInfo {
     pub disk_usage: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fs_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1188,9 +1190,9 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
                             if s.is_empty() || s.contains("no value") { None } else { Some(s) }
                         });
-                    let (du, dt) = docker_rootfs.as_ref()
+                    let (du, dt, ft) = docker_rootfs.as_ref()
                         .map(|p| get_path_disk_usage(p))
-                        .unwrap_or((None, None));
+                        .unwrap_or((None, None, None));
 
                     ContainerInfo {
                         id: parts.first().unwrap_or(&"").to_string(),
@@ -1211,6 +1213,7 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                         storage_path: docker_rootfs,
                         disk_usage: du,
                         disk_total: dt,
+                        fs_type: ft,
                     }
                 })
                 .collect()
@@ -1520,7 +1523,7 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                     let storage_path = if std::path::Path::new(&rootfs_path).exists() {
                         Some(rootfs_path.clone())
                     } else { None };
-                    let (du, dt) = get_path_disk_usage(&rootfs_path);
+                    let (du, dt, ft) = get_path_disk_usage(&rootfs_path);
 
                     ContainerInfo {
                         id: name.clone(),
@@ -1537,6 +1540,7 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                         storage_path,
                         disk_usage: du,
                         disk_total: dt,
+                        fs_type: ft,
                     }
                 })
                 .collect()
@@ -1637,7 +1641,7 @@ fn pct_list_all() -> Vec<ContainerInfo> {
             } else if std::path::Path::new(&rootfs_path).exists() {
                 Some(rootfs_path.clone())
             } else { None };
-            let (du, dt) = get_path_disk_usage(&rootfs_path);
+            let (du, dt, ft) = get_path_disk_usage(&rootfs_path);
 
             Some(ContainerInfo {
                 id: vmid.clone(),
@@ -1654,24 +1658,26 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                 storage_path,
                 disk_usage: du,
                 disk_total: dt,
+                fs_type: ft,
             })
         })
         .collect()
 }
 
 /// Get disk usage for a path using df (returns used_bytes, total_bytes)
-fn get_path_disk_usage(path: &str) -> (Option<u64>, Option<u64>) {
-    // df --block-size=1 outputs bytes; columns: Filesystem 1B-blocks Used Available Use% Mounted
-    if let Ok(out) = Command::new("df").args(["--block-size=1", path]).output() {
+fn get_path_disk_usage(path: &str) -> (Option<u64>, Option<u64>, Option<String>) {
+    // df -T --block-size=1 outputs: Filesystem Type 1B-blocks Used Available Use% Mounted
+    if let Ok(out) = Command::new("df").args(["-T", "--block-size=1", path]).output() {
         let text = String::from_utf8_lossy(&out.stdout);
         if let Some(line) = text.lines().nth(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            let total = parts.get(1).and_then(|s| s.parse::<u64>().ok());
-            let used  = parts.get(2).and_then(|s| s.parse::<u64>().ok());
-            return (used, total);
+            let fs_type = parts.get(1).map(|s| s.to_string());
+            let total = parts.get(2).and_then(|s| s.parse::<u64>().ok());
+            let used  = parts.get(3).and_then(|s| s.parse::<u64>().ok());
+            return (used, total, fs_type);
         }
     }
-    (None, None)
+    (None, None, None)
 }
 
 /// Get LXC container stats
