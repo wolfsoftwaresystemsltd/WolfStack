@@ -1137,5 +1137,1015 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             }),
             user_inputs: vec![],
         },
+
+        // ── Container Orchestration ──
+        AppManifest {
+            id: "kubernetes".into(),
+            name: "Kubernetes (K3s)".into(),
+            icon: "☸️".into(),
+            category: "Container Orchestration".into(),
+            description: "Lightweight Kubernetes — production-ready K8s in a single binary".into(),
+            website: Some("https://k3s.io".into()),
+            docker: Some(DockerTarget {
+                image: "rancher/k3s:latest".into(),
+                ports: vec!["6443:6443".into(), "80:80".into(), "443:443".into()],
+                env: vec![
+                    "K3S_TOKEN=${K3S_TOKEN}".into(),
+                ],
+                volumes: vec!["k3s_data:/var/lib/rancher/k3s".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec![],
+                packages_redhat: vec![],
+                post_install: vec![
+                    "curl -sfL https://get.k3s.io | sh -".into(),
+                ],
+                service: Some("k3s".into()),
+            }),
+            user_inputs: vec![
+                UserInput { id: "K3S_TOKEN".into(), label: "Cluster Token".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("Shared secret for joining nodes".into()), options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "nomad".into(),
+            name: "Nomad".into(),
+            icon: "📦".into(),
+            category: "Container Orchestration".into(),
+            description: "HashiCorp workload orchestrator for containers and non-containerized apps".into(),
+            website: Some("https://www.nomadproject.io".into()),
+            docker: Some(DockerTarget {
+                image: "hashicorp/nomad:latest".into(),
+                ports: vec!["4646:4646".into(), "4647:4647".into(), "4648:4648".into()],
+                env: vec![],
+                volumes: vec!["nomad_data:/nomad/data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        // ── PaaS & Deployment ──
+        AppManifest {
+            id: "coolify".into(),
+            name: "Coolify".into(),
+            icon: "🧊".into(),
+            category: "PaaS".into(),
+            description: "Self-hosted Heroku/Netlify/Vercel alternative with Git push deploys".into(),
+            website: Some("https://coolify.io".into()),
+            docker: Some(DockerTarget {
+                image: "ghcr.io/coollabsio/coolify:latest".into(),
+                ports: vec!["8000:8000".into(), "6001:6001".into(), "6002:6002".into()],
+                env: vec![],
+                volumes: vec!["coolify_data:/data/coolify".into(), "/var/run/docker.sock:/var/run/docker.sock:ro".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "caprover".into(),
+            name: "CapRover".into(),
+            icon: "🚀".into(),
+            category: "PaaS".into(),
+            description: "Easy app/database deployment & server management — PaaS on your server".into(),
+            website: Some("https://caprover.com".into()),
+            docker: Some(DockerTarget {
+                image: "caprover/caprover:latest".into(),
+                ports: vec!["3000:3000".into(), "80:80".into(), "443:443".into()],
+                env: vec![],
+                volumes: vec!["/var/run/docker.sock:/var/run/docker.sock".into(), "/captain:/captain".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "dokku".into(),
+            name: "Dokku".into(),
+            icon: "🐳".into(),
+            category: "PaaS".into(),
+            description: "Open-source PaaS — mini Heroku on your own server".into(),
+            website: Some("https://dokku.com".into()),
+            docker: None,
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec![],
+                packages_redhat: vec![],
+                post_install: vec![
+                    "curl -fsSL https://packagecloud.io/dokku/dokku/gpgkey | gpg --dearmor -o /usr/share/keyrings/dokku-archive-keyring.gpg".into(),
+                    "echo 'deb [signed-by=/usr/share/keyrings/dokku-archive-keyring.gpg] https://packagecloud.io/dokku/dokku/ubuntu/ jammy main' | tee /etc/apt/sources.list.d/dokku.list".into(),
+                    "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y dokku".into(),
+                    "dokku plugin:install-dependencies --core".into(),
+                ],
+                service: None,
+            }),
+            user_inputs: vec![],
+        },
+
+        // ── CI/CD ──
+        AppManifest {
+            id: "drone".into(),
+            name: "Drone CI".into(),
+            icon: "🤖".into(),
+            category: "CI/CD".into(),
+            description: "Container-native continuous integration platform".into(),
+            website: Some("https://www.drone.io".into()),
+            docker: Some(DockerTarget {
+                image: "drone/drone:latest".into(),
+                ports: vec!["8180:80".into(), "8143:443".into()],
+                env: vec![
+                    "DRONE_SERVER_HOST=${DRONE_HOST}".into(),
+                    "DRONE_SERVER_PROTO=https".into(),
+                    "DRONE_RPC_SECRET=${RPC_SECRET}".into(),
+                ],
+                volumes: vec!["drone_data:/data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "DRONE_HOST".into(), label: "Server Hostname".into(), input_type: "text".into(), default: None, required: true, placeholder: Some("e.g. drone.example.com".into()), options: vec![] },
+                UserInput { id: "RPC_SECRET".into(), label: "RPC Secret".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("Shared secret between server and runners".into()), options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "woodpecker".into(),
+            name: "Woodpecker CI".into(),
+            icon: "🪶".into(),
+            category: "CI/CD".into(),
+            description: "Lightweight CI/CD engine with great extensibility".into(),
+            website: Some("https://woodpecker-ci.org".into()),
+            docker: Some(DockerTarget {
+                image: "woodpeckerci/woodpecker-server:latest".into(),
+                ports: vec!["8200:8000".into()],
+                env: vec![
+                    "WOODPECKER_OPEN=true".into(),
+                    "WOODPECKER_ADMIN=${ADMIN_USER}".into(),
+                ],
+                volumes: vec!["woodpecker_data:/var/lib/woodpecker".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "ADMIN_USER".into(), label: "Admin Username".into(), input_type: "text".into(), default: Some("admin".into()), required: true, placeholder: None, options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "gitlab-runner".into(),
+            name: "GitLab Runner".into(),
+            icon: "🦊".into(),
+            category: "CI/CD".into(),
+            description: "Run CI/CD jobs for GitLab pipelines".into(),
+            website: Some("https://docs.gitlab.com/runner/".into()),
+            docker: Some(DockerTarget {
+                image: "gitlab/gitlab-runner:latest".into(),
+                ports: vec![],
+                env: vec![],
+                volumes: vec!["gitlab_runner_config:/etc/gitlab-runner".into(), "/var/run/docker.sock:/var/run/docker.sock".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        // ── Automation ──
+        AppManifest {
+            id: "n8n".into(),
+            name: "n8n".into(),
+            icon: "⚡".into(),
+            category: "Automation".into(),
+            description: "Workflow automation platform — open-source Zapier alternative".into(),
+            website: Some("https://n8n.io".into()),
+            docker: Some(DockerTarget {
+                image: "n8nio/n8n:latest".into(),
+                ports: vec!["5678:5678".into()],
+                env: vec![
+                    "N8N_BASIC_AUTH_ACTIVE=true".into(),
+                    "N8N_BASIC_AUTH_USER=${ADMIN_USER}".into(),
+                    "N8N_BASIC_AUTH_PASSWORD=${ADMIN_PASSWORD}".into(),
+                ],
+                volumes: vec!["n8n_data:/home/node/.n8n".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "ADMIN_USER".into(), label: "Admin Username".into(), input_type: "text".into(), default: Some("admin".into()), required: true, placeholder: None, options: vec![] },
+                UserInput { id: "ADMIN_PASSWORD".into(), label: "Admin Password".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("Password for n8n UI".into()), options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "huginn".into(),
+            name: "Huginn".into(),
+            icon: "🤖".into(),
+            category: "Automation".into(),
+            description: "Build agents that perform automated tasks online — IFTTT on your server".into(),
+            website: Some("https://github.com/huginn/huginn".into()),
+            docker: Some(DockerTarget {
+                image: "ghcr.io/huginn/huginn:latest".into(),
+                ports: vec!["3003:3000".into()],
+                env: vec![],
+                volumes: vec!["huginn_data:/var/lib/mysql".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        // ── AI / ML ──
+        AppManifest {
+            id: "open-webui".into(),
+            name: "Open WebUI".into(),
+            icon: "🧠".into(),
+            category: "AI / ML".into(),
+            description: "ChatGPT-style interface for local LLMs — works with Ollama".into(),
+            website: Some("https://openwebui.com".into()),
+            docker: Some(DockerTarget {
+                image: "ghcr.io/open-webui/open-webui:main".into(),
+                ports: vec!["3004:8080".into()],
+                env: vec![],
+                volumes: vec!["open_webui_data:/app/backend/data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "ollama".into(),
+            name: "Ollama".into(),
+            icon: "🦙".into(),
+            category: "AI / ML".into(),
+            description: "Run large language models locally — Llama, Mistral, Gemma and more".into(),
+            website: Some("https://ollama.com".into()),
+            docker: Some(DockerTarget {
+                image: "ollama/ollama:latest".into(),
+                ports: vec!["11434:11434".into()],
+                env: vec![],
+                volumes: vec!["ollama_data:/root/.ollama".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec![],
+                packages_redhat: vec![],
+                post_install: vec![
+                    "curl -fsSL https://ollama.com/install.sh | sh".into(),
+                ],
+                service: Some("ollama".into()),
+            }),
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "flowise".into(),
+            name: "Flowise".into(),
+            icon: "🌊".into(),
+            category: "AI / ML".into(),
+            description: "Drag-and-drop LLM flow builder for chatbots and AI agents".into(),
+            website: Some("https://flowiseai.com".into()),
+            docker: Some(DockerTarget {
+                image: "flowiseai/flowise:latest".into(),
+                ports: vec!["3005:3000".into()],
+                env: vec![],
+                volumes: vec!["flowise_data:/root/.flowise".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "dify".into(),
+            name: "Dify".into(),
+            icon: "✨".into(),
+            category: "AI / ML".into(),
+            description: "LLM app development platform — build AI workflows visually".into(),
+            website: Some("https://dify.ai".into()),
+            docker: Some(DockerTarget {
+                image: "langgenius/dify-api:latest".into(),
+                ports: vec!["3006:5001".into()],
+                env: vec![
+                    "SECRET_KEY=${SECRET_KEY}".into(),
+                ],
+                volumes: vec!["dify_data:/app/api/storage".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "SECRET_KEY".into(), label: "Secret Key".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("Application secret key".into()), options: vec![] },
+            ],
+        },
+
+        // ── Analytics ──
+        AppManifest {
+            id: "plausible".into(),
+            name: "Plausible Analytics".into(),
+            icon: "📊".into(),
+            category: "Analytics".into(),
+            description: "Privacy-friendly Google Analytics alternative — no cookies".into(),
+            website: Some("https://plausible.io".into()),
+            docker: Some(DockerTarget {
+                image: "ghcr.io/plausible/community-edition:latest".into(),
+                ports: vec!["8282:8000".into()],
+                env: vec![
+                    "BASE_URL=${BASE_URL}".into(),
+                    "SECRET_KEY_BASE=${SECRET_KEY}".into(),
+                ],
+                volumes: vec!["plausible_data:/var/lib/plausible".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "BASE_URL".into(), label: "Base URL".into(), input_type: "text".into(), default: Some("http://localhost:8282".into()), required: true, placeholder: Some("e.g. https://analytics.example.com".into()), options: vec![] },
+                UserInput { id: "SECRET_KEY".into(), label: "Secret Key".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("64-character secret".into()), options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "umami".into(),
+            name: "Umami".into(),
+            icon: "📈".into(),
+            category: "Analytics".into(),
+            description: "Simple, fast, privacy-focused website analytics".into(),
+            website: Some("https://umami.is".into()),
+            docker: Some(DockerTarget {
+                image: "ghcr.io/umami-software/umami:postgresql-latest".into(),
+                ports: vec!["3007:3000".into()],
+                env: vec![
+                    "DATABASE_URL=postgresql://umami:${DB_PASSWORD}@${CONTAINER_NAME}-db:5432/umami".into(),
+                ],
+                volumes: vec![],
+                sidecars: vec![DockerSidecar {
+                    name_suffix: "db".into(),
+                    image: "postgres:16-alpine".into(),
+                    ports: vec![],
+                    env: vec![
+                        "POSTGRES_DB=umami".into(),
+                        "POSTGRES_USER=umami".into(),
+                        "POSTGRES_PASSWORD=${DB_PASSWORD}".into(),
+                    ],
+                    volumes: vec!["umami_db:/var/lib/postgresql/data".into()],
+                }],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "DB_PASSWORD".into(), label: "Database Password".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("PostgreSQL password".into()), options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "superset".into(),
+            name: "Apache Superset".into(),
+            icon: "🔬".into(),
+            category: "Analytics".into(),
+            description: "Enterprise business intelligence and data exploration platform".into(),
+            website: Some("https://superset.apache.org".into()),
+            docker: Some(DockerTarget {
+                image: "apache/superset:latest".into(),
+                ports: vec!["8088:8088".into()],
+                env: vec![
+                    "SUPERSET_SECRET_KEY=${SECRET_KEY}".into(),
+                ],
+                volumes: vec!["superset_data:/app/superset_home".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "SECRET_KEY".into(), label: "Secret Key".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("Application secret key".into()), options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "metabase".into(),
+            name: "Metabase".into(),
+            icon: "📉".into(),
+            category: "Analytics".into(),
+            description: "Business intelligence dashboards and data exploration for everyone".into(),
+            website: Some("https://www.metabase.com".into()),
+            docker: Some(DockerTarget {
+                image: "metabase/metabase:latest".into(),
+                ports: vec!["3008:3000".into()],
+                env: vec![],
+                volumes: vec!["metabase_data:/metabase-data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        // ── Security ──
+        AppManifest {
+            id: "vaultwarden".into(),
+            name: "Vaultwarden".into(),
+            icon: "🔐".into(),
+            category: "Security".into(),
+            description: "Bitwarden-compatible password manager — lightweight and self-hosted".into(),
+            website: Some("https://github.com/dani-garcia/vaultwarden".into()),
+            docker: Some(DockerTarget {
+                image: "vaultwarden/server:latest".into(),
+                ports: vec!["8383:80".into()],
+                env: vec![
+                    "ADMIN_TOKEN=${ADMIN_TOKEN}".into(),
+                ],
+                volumes: vec!["vaultwarden_data:/data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "ADMIN_TOKEN".into(), label: "Admin Token".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("Token for admin panel access".into()), options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "authentik".into(),
+            name: "Authentik".into(),
+            icon: "🛡️".into(),
+            category: "Security".into(),
+            description: "Identity provider with SSO, MFA, and user management".into(),
+            website: Some("https://goauthentik.io".into()),
+            docker: Some(DockerTarget {
+                image: "ghcr.io/goauthentik/server:latest".into(),
+                ports: vec!["9003:9000".into(), "9444:9443".into()],
+                env: vec![
+                    "AUTHENTIK_SECRET_KEY=${SECRET_KEY}".into(),
+                ],
+                volumes: vec!["authentik_media:/media".into(), "authentik_templates:/templates".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "SECRET_KEY".into(), label: "Secret Key".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("Long random string".into()), options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "keycloak".into(),
+            name: "Keycloak".into(),
+            icon: "🔑".into(),
+            category: "Security".into(),
+            description: "Enterprise identity and access management — SSO for your apps".into(),
+            website: Some("https://www.keycloak.org".into()),
+            docker: Some(DockerTarget {
+                image: "quay.io/keycloak/keycloak:latest".into(),
+                ports: vec!["8484:8080".into()],
+                env: vec![
+                    "KEYCLOAK_ADMIN=${ADMIN_USER}".into(),
+                    "KEYCLOAK_ADMIN_PASSWORD=${ADMIN_PASSWORD}".into(),
+                    "KC_HTTP_RELATIVE_PATH=/".into(),
+                ],
+                volumes: vec!["keycloak_data:/opt/keycloak/data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "ADMIN_USER".into(), label: "Admin Username".into(), input_type: "text".into(), default: Some("admin".into()), required: true, placeholder: None, options: vec![] },
+                UserInput { id: "ADMIN_PASSWORD".into(), label: "Admin Password".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("Keycloak admin password".into()), options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "crowdsec".into(),
+            name: "CrowdSec".into(),
+            icon: "🛡️".into(),
+            category: "Security".into(),
+            description: "Collaborative intrusion prevention — crowd-sourced threat intelligence".into(),
+            website: Some("https://www.crowdsec.net".into()),
+            docker: Some(DockerTarget {
+                image: "crowdsecurity/crowdsec:latest".into(),
+                ports: vec!["8585:8080".into(), "6060:6060".into()],
+                env: vec![],
+                volumes: vec!["crowdsec_data:/var/lib/crowdsec/data".into(), "crowdsec_config:/etc/crowdsec".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec![],
+                packages_redhat: vec![],
+                post_install: vec![
+                    "curl -s https://install.crowdsec.net | bash".into(),
+                ],
+                service: Some("crowdsec".into()),
+            }),
+            user_inputs: vec![],
+        },
+
+        // ── Communication ──
+        AppManifest {
+            id: "rocketchat".into(),
+            name: "Rocket.Chat".into(),
+            icon: "💬".into(),
+            category: "Communication".into(),
+            description: "Team communication platform — open-source Slack alternative".into(),
+            website: Some("https://rocket.chat".into()),
+            docker: Some(DockerTarget {
+                image: "rocketchat/rocket.chat:latest".into(),
+                ports: vec!["3009:3000".into()],
+                env: vec![
+                    "MONGO_URL=mongodb://${CONTAINER_NAME}-db:27017/rocketchat".into(),
+                    "ROOT_URL=${ROOT_URL}".into(),
+                ],
+                volumes: vec!["rocketchat_uploads:/app/uploads".into()],
+                sidecars: vec![DockerSidecar {
+                    name_suffix: "db".into(),
+                    image: "mongo:6".into(),
+                    ports: vec![],
+                    env: vec![],
+                    volumes: vec!["rocketchat_db:/data/db".into()],
+                }],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "ROOT_URL".into(), label: "Root URL".into(), input_type: "text".into(), default: Some("http://localhost:3009".into()), required: true, placeholder: Some("e.g. https://chat.example.com".into()), options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "mattermost".into(),
+            name: "Mattermost".into(),
+            icon: "💬".into(),
+            category: "Communication".into(),
+            description: "Secure messaging for teams — open-source and self-hosted".into(),
+            website: Some("https://mattermost.com".into()),
+            docker: Some(DockerTarget {
+                image: "mattermost/mattermost-team-edition:latest".into(),
+                ports: vec!["8065:8065".into()],
+                env: vec![
+                    "MM_SQLSETTINGS_DRIVERNAME=postgres".into(),
+                    "MM_SQLSETTINGS_DATASOURCE=postgres://mattermost:${DB_PASSWORD}@${CONTAINER_NAME}-db:5432/mattermost?sslmode=disable".into(),
+                ],
+                volumes: vec!["mattermost_data:/mattermost/data".into(), "mattermost_config:/mattermost/config".into()],
+                sidecars: vec![DockerSidecar {
+                    name_suffix: "db".into(),
+                    image: "postgres:16-alpine".into(),
+                    ports: vec![],
+                    env: vec![
+                        "POSTGRES_DB=mattermost".into(),
+                        "POSTGRES_USER=mattermost".into(),
+                        "POSTGRES_PASSWORD=${DB_PASSWORD}".into(),
+                    ],
+                    volumes: vec!["mattermost_db:/var/lib/postgresql/data".into()],
+                }],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "DB_PASSWORD".into(), label: "Database Password".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("PostgreSQL password".into()), options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "matrix-synapse".into(),
+            name: "Matrix (Synapse)".into(),
+            icon: "🔗".into(),
+            category: "Communication".into(),
+            description: "Decentralized, end-to-end encrypted messaging and collaboration".into(),
+            website: Some("https://matrix.org".into()),
+            docker: Some(DockerTarget {
+                image: "matrixdotorg/synapse:latest".into(),
+                ports: vec!["8008:8008".into(), "8448:8448".into()],
+                env: vec![
+                    "SYNAPSE_SERVER_NAME=${SERVER_NAME}".into(),
+                    "SYNAPSE_REPORT_STATS=no".into(),
+                ],
+                volumes: vec!["synapse_data:/data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "SERVER_NAME".into(), label: "Server Name".into(), input_type: "text".into(), default: None, required: true, placeholder: Some("e.g. matrix.example.com".into()), options: vec![] },
+            ],
+        },
+
+        // ── Project Management ──
+        AppManifest {
+            id: "plane".into(),
+            name: "Plane".into(),
+            icon: "✈️".into(),
+            category: "Project Management".into(),
+            description: "Open-source Jira/Linear alternative — issue tracking and project planning".into(),
+            website: Some("https://plane.so".into()),
+            docker: Some(DockerTarget {
+                image: "makeplane/plane-frontend:latest".into(),
+                ports: vec!["3010:3000".into()],
+                env: vec![],
+                volumes: vec!["plane_data:/app/data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "taiga".into(),
+            name: "Taiga".into(),
+            icon: "🌲".into(),
+            category: "Project Management".into(),
+            description: "Agile project management for cross-functional teams".into(),
+            website: Some("https://taiga.io".into()),
+            docker: Some(DockerTarget {
+                image: "taigaio/taiga-back:latest".into(),
+                ports: vec!["8686:8000".into()],
+                env: vec![],
+                volumes: vec!["taiga_data:/taiga-back/media".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "focalboard".into(),
+            name: "Focalboard".into(),
+            icon: "📋".into(),
+            category: "Project Management".into(),
+            description: "Open-source Trello/Notion/Asana alternative for project management".into(),
+            website: Some("https://www.focalboard.com".into()),
+            docker: Some(DockerTarget {
+                image: "mattermost/focalboard:latest".into(),
+                ports: vec!["8787:8000".into()],
+                env: vec![],
+                volumes: vec!["focalboard_data:/opt/focalboard/data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        // ── CMS & Publishing ──
+        AppManifest {
+            id: "ghost".into(),
+            name: "Ghost".into(),
+            icon: "👻".into(),
+            category: "CMS".into(),
+            description: "Professional publishing platform for blogs and newsletters".into(),
+            website: Some("https://ghost.org".into()),
+            docker: Some(DockerTarget {
+                image: "ghost:5-alpine".into(),
+                ports: vec!["2368:2368".into()],
+                env: vec![
+                    "url=${SITE_URL}".into(),
+                ],
+                volumes: vec!["ghost_data:/var/lib/ghost/content".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "SITE_URL".into(), label: "Site URL".into(), input_type: "text".into(), default: Some("http://localhost:2368".into()), required: true, placeholder: Some("e.g. https://blog.example.com".into()), options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "strapi".into(),
+            name: "Strapi".into(),
+            icon: "🚀".into(),
+            category: "CMS".into(),
+            description: "Leading open-source headless CMS — 100% JavaScript/TypeScript".into(),
+            website: Some("https://strapi.io".into()),
+            docker: Some(DockerTarget {
+                image: "strapi/strapi:latest".into(),
+                ports: vec!["1337:1337".into()],
+                env: vec![],
+                volumes: vec!["strapi_data:/srv/app".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        // ── Photo & Media ──
+        AppManifest {
+            id: "immich".into(),
+            name: "Immich".into(),
+            icon: "📷".into(),
+            category: "Media".into(),
+            description: "Self-hosted Google Photos alternative — fast, beautiful photo management".into(),
+            website: Some("https://immich.app".into()),
+            docker: Some(DockerTarget {
+                image: "ghcr.io/immich-app/immich-server:latest".into(),
+                ports: vec!["2283:2283".into()],
+                env: vec![
+                    "DB_PASSWORD=${DB_PASSWORD}".into(),
+                ],
+                volumes: vec!["immich_upload:/usr/src/app/upload".into()],
+                sidecars: vec![DockerSidecar {
+                    name_suffix: "db".into(),
+                    image: "tensorchord/pgvecto-rs:pg16-v0.2.1".into(),
+                    ports: vec![],
+                    env: vec![
+                        "POSTGRES_DB=immich".into(),
+                        "POSTGRES_USER=postgres".into(),
+                        "POSTGRES_PASSWORD=${DB_PASSWORD}".into(),
+                    ],
+                    volumes: vec!["immich_db:/var/lib/postgresql/data".into()],
+                }],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "DB_PASSWORD".into(), label: "Database Password".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("PostgreSQL password".into()), options: vec![] },
+            ],
+        },
+
+        // ── File Sync ──
+        AppManifest {
+            id: "syncthing".into(),
+            name: "Syncthing".into(),
+            icon: "🔄".into(),
+            category: "Other".into(),
+            description: "Continuous peer-to-peer file synchronization between devices".into(),
+            website: Some("https://syncthing.net".into()),
+            docker: Some(DockerTarget {
+                image: "syncthing/syncthing:latest".into(),
+                ports: vec!["8384:8384".into(), "22000:22000/tcp".into(), "22000:22000/udp".into(), "21027:21027/udp".into()],
+                env: vec![],
+                volumes: vec!["syncthing_data:/var/syncthing".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec!["syncthing".into()],
+                packages_redhat: vec!["syncthing".into()],
+                post_install: vec![],
+                service: Some("syncthing@root".into()),
+            }),
+            user_inputs: vec![],
+        },
+
+        // ── Backend / BaaS ──
+        AppManifest {
+            id: "supabase".into(),
+            name: "Supabase".into(),
+            icon: "⚡".into(),
+            category: "Dev Tools".into(),
+            description: "Firebase alternative — Postgres + Auth + Storage + Realtime APIs".into(),
+            website: Some("https://supabase.com".into()),
+            docker: Some(DockerTarget {
+                image: "supabase/studio:latest".into(),
+                ports: vec!["3011:3000".into()],
+                env: vec![],
+                volumes: vec!["supabase_data:/var/lib/supabase".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "appwrite".into(),
+            name: "Appwrite".into(),
+            icon: "🏗️".into(),
+            category: "Dev Tools".into(),
+            description: "Backend server for web, mobile, and Flutter developers".into(),
+            website: Some("https://appwrite.io".into()),
+            docker: Some(DockerTarget {
+                image: "appwrite/appwrite:latest".into(),
+                ports: vec!["8686:80".into()],
+                env: vec![],
+                volumes: vec!["appwrite_data:/storage".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "pocketbase".into(),
+            name: "PocketBase".into(),
+            icon: "📱".into(),
+            category: "Dev Tools".into(),
+            description: "Open-source backend in a single file — SQLite + Auth + Realtime".into(),
+            website: Some("https://pocketbase.io".into()),
+            docker: Some(DockerTarget {
+                image: "ghcr.io/muchobien/pocketbase:latest".into(),
+                ports: vec!["8090:8090".into()],
+                env: vec![],
+                volumes: vec!["pocketbase_data:/pb_data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        // ── Search ──
+        AppManifest {
+            id: "meilisearch".into(),
+            name: "Meilisearch".into(),
+            icon: "🔍".into(),
+            category: "Database".into(),
+            description: "Lightning fast, typo-tolerant search engine".into(),
+            website: Some("https://www.meilisearch.com".into()),
+            docker: Some(DockerTarget {
+                image: "getmeili/meilisearch:latest".into(),
+                ports: vec!["7700:7700".into()],
+                env: vec![
+                    "MEILI_MASTER_KEY=${MASTER_KEY}".into(),
+                ],
+                volumes: vec!["meilisearch_data:/meili_data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "MASTER_KEY".into(), label: "Master Key".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("API master key (min 16 chars)".into()), options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "elasticsearch".into(),
+            name: "Elasticsearch".into(),
+            icon: "🔎".into(),
+            category: "Database".into(),
+            description: "Distributed search and analytics engine for all types of data".into(),
+            website: Some("https://www.elastic.co/elasticsearch".into()),
+            docker: Some(DockerTarget {
+                image: "docker.elastic.co/elasticsearch/elasticsearch:8.13.0".into(),
+                ports: vec!["9200:9200".into(), "9300:9300".into()],
+                env: vec![
+                    "discovery.type=single-node".into(),
+                    "ELASTIC_PASSWORD=${ELASTIC_PASSWORD}".into(),
+                    "xpack.security.enabled=true".into(),
+                ],
+                volumes: vec!["es_data:/usr/share/elasticsearch/data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "ELASTIC_PASSWORD".into(), label: "Elastic Password".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("Password for elastic user".into()), options: vec![] },
+            ],
+        },
+
+        // ── Monitoring (additions) ──
+        AppManifest {
+            id: "netdata".into(),
+            name: "Netdata".into(),
+            icon: "📡".into(),
+            category: "Monitoring".into(),
+            description: "Real-time performance and health monitoring for systems and apps".into(),
+            website: Some("https://www.netdata.cloud".into()),
+            docker: Some(DockerTarget {
+                image: "netdata/netdata:latest".into(),
+                ports: vec!["19999:19999".into()],
+                env: vec![],
+                volumes: vec!["netdata_config:/etc/netdata".into(), "netdata_lib:/var/lib/netdata".into(), "netdata_cache:/var/cache/netdata".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec![],
+                packages_redhat: vec![],
+                post_install: vec![
+                    "curl -fsSL https://get.netdata.cloud/kickstart.sh | bash".into(),
+                ],
+                service: Some("netdata".into()),
+            }),
+            user_inputs: vec![],
+        },
+
+        // ── Dev Tools (additions) ──
+        AppManifest {
+            id: "hoppscotch".into(),
+            name: "Hoppscotch".into(),
+            icon: "🦗".into(),
+            category: "Dev Tools".into(),
+            description: "Open-source API development ecosystem — Postman alternative".into(),
+            website: Some("https://hoppscotch.io".into()),
+            docker: Some(DockerTarget {
+                image: "hoppscotch/hoppscotch:latest".into(),
+                ports: vec!["3012:3000".into()],
+                env: vec![],
+                volumes: vec!["hoppscotch_data:/app/data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "nocodb".into(),
+            name: "NocoDB".into(),
+            icon: "📊".into(),
+            category: "Dev Tools".into(),
+            description: "Open-source Airtable alternative — turn any database into a spreadsheet".into(),
+            website: Some("https://nocodb.com".into()),
+            docker: Some(DockerTarget {
+                image: "nocodb/nocodb:latest".into(),
+                ports: vec!["8686:8080".into()],
+                env: vec![],
+                volumes: vec!["nocodb_data:/usr/app/data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
+
+        // ── Networking (additions) ──
+        AppManifest {
+            id: "wireguard".into(),
+            name: "WireGuard".into(),
+            icon: "🔒".into(),
+            category: "Networking".into(),
+            description: "Fast, modern VPN using state-of-the-art cryptography".into(),
+            website: Some("https://www.wireguard.com".into()),
+            docker: None,
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec!["wireguard".into(), "wireguard-tools".into()],
+                packages_redhat: vec!["wireguard-tools".into()],
+                post_install: vec![
+                    "wg genkey | tee /etc/wireguard/privatekey | wg pubkey > /etc/wireguard/publickey".into(),
+                    "chmod 600 /etc/wireguard/privatekey".into(),
+                ],
+                service: Some("wg-quick@wg0".into()),
+            }),
+            user_inputs: vec![],
+        },
+
+        // ── Database (additions) ──
+        AppManifest {
+            id: "influxdb".into(),
+            name: "InfluxDB".into(),
+            icon: "📈".into(),
+            category: "Database".into(),
+            description: "Time-series database purpose-built for metrics, events, and IoT data".into(),
+            website: Some("https://www.influxdata.com".into()),
+            docker: Some(DockerTarget {
+                image: "influxdb:2".into(),
+                ports: vec!["8086:8086".into()],
+                env: vec![
+                    "DOCKER_INFLUXDB_INIT_MODE=setup".into(),
+                    "DOCKER_INFLUXDB_INIT_USERNAME=${ADMIN_USER}".into(),
+                    "DOCKER_INFLUXDB_INIT_PASSWORD=${ADMIN_PASSWORD}".into(),
+                    "DOCKER_INFLUXDB_INIT_ORG=${ORG_NAME}".into(),
+                    "DOCKER_INFLUXDB_INIT_BUCKET=${BUCKET_NAME}".into(),
+                ],
+                volumes: vec!["influxdb_data:/var/lib/influxdb2".into(), "influxdb_config:/etc/influxdb2".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![
+                UserInput { id: "ADMIN_USER".into(), label: "Admin Username".into(), input_type: "text".into(), default: Some("admin".into()), required: true, placeholder: None, options: vec![] },
+                UserInput { id: "ADMIN_PASSWORD".into(), label: "Admin Password".into(), input_type: "password".into(), default: None, required: true, placeholder: Some("Min 8 characters".into()), options: vec![] },
+                UserInput { id: "ORG_NAME".into(), label: "Organisation".into(), input_type: "text".into(), default: Some("wolfstack".into()), required: true, placeholder: None, options: vec![] },
+                UserInput { id: "BUCKET_NAME".into(), label: "Default Bucket".into(), input_type: "text".into(), default: Some("default".into()), required: true, placeholder: None, options: vec![] },
+            ],
+        },
+
+        AppManifest {
+            id: "cockroachdb".into(),
+            name: "CockroachDB".into(),
+            icon: "🪳".into(),
+            category: "Database".into(),
+            description: "Distributed SQL database for global, cloud-native applications".into(),
+            website: Some("https://www.cockroachlabs.com".into()),
+            docker: Some(DockerTarget {
+                image: "cockroachdb/cockroach:latest".into(),
+                ports: vec!["26257:26257".into(), "8888:8080".into()],
+                env: vec![],
+                volumes: vec!["cockroach_data:/cockroach/cockroach-data".into()],
+                sidecars: vec![],
+            }),
+            lxc: None,
+            bare_metal: None,
+            user_inputs: vec![],
+        },
     ]
 }
