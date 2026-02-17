@@ -236,6 +236,12 @@ fn install_docker(
     let docker = app.docker.as_ref()
         .ok_or("This app doesn't support Docker installation")?;
 
+    // Auto-allocate a WolfNet IP for this container
+    let wolfnet_ip = crate::containers::next_available_wolfnet_ip();
+    if let Some(ref ip) = wolfnet_ip {
+        info!("📦 App Store: allocated WolfNet IP {} for {}", ip, container_name);
+    }
+
     // Install sidecars first (e.g. database)
     for sidecar in &docker.sidecars {
         let sidecar_name = format!("{}-{}", container_name, sidecar.name_suffix);
@@ -256,7 +262,7 @@ fn install_docker(
             None,  // no storage limit
             &sidecar.volumes,
         )?;
-        crate::containers::docker_start(&sidecar_name)?;
+        // Don't start sidecars — user will start everything manually
         sidecar_names.push(sidecar_name);
     }
 
@@ -267,24 +273,24 @@ fn install_docker(
     // Substitute user inputs into env vars
     let env = substitute_inputs(&docker.env, user_inputs);
 
-    // Create the container
+    // Create the container (not started)
     info!("📦 App Store: creating container {}", container_name);
     crate::containers::docker_create(
         container_name,
         &docker.image,
         &docker.ports,
         &env,
-        None,  // WolfNet IP can be set later via settings
+        wolfnet_ip.as_deref(),
         None,
         None,
         None,
         &docker.volumes,
     )?;
 
-    // Start it
-    crate::containers::docker_start(container_name)?;
-
-    let mut msg = format!("{} installed as Docker container '{}'", app.name, container_name);
+    let mut msg = format!("{} configured as Docker container '{}' (stopped)", app.name, container_name);
+    if let Some(ref ip) = wolfnet_ip {
+        msg.push_str(&format!(" — WolfNet IP: {}", ip));
+    }
     if !sidecar_names.is_empty() {
         msg.push_str(&format!(" (with sidecars: {})", sidecar_names.join(", ")));
     }
@@ -294,12 +300,18 @@ fn install_docker(
 fn install_lxc(
     app: &AppManifest,
     container_name: &str,
-    user_inputs: &HashMap<String, String>,
+    _user_inputs: &HashMap<String, String>,
 ) -> Result<String, String> {
     let lxc = app.lxc.as_ref()
         .ok_or("This app doesn't support LXC installation")?;
 
-    // Create the container
+    // Auto-allocate a WolfNet IP
+    let wolfnet_ip = crate::containers::next_available_wolfnet_ip();
+    if let Some(ref ip) = wolfnet_ip {
+        info!("📦 App Store: allocated WolfNet IP {} for LXC {}", ip, container_name);
+    }
+
+    // Create the container (not started)
     info!("📦 App Store: creating LXC container {}", container_name);
     crate::containers::lxc_create(
         container_name,
@@ -309,29 +321,19 @@ fn install_lxc(
         None, // default storage
     )?;
 
-    // Start the container
-    crate::containers::lxc_start(container_name)?;
-
-    // Wait for the container to boot
-    std::thread::sleep(std::time::Duration::from_secs(3));
-
-    // Run setup commands inside the container
-    let commands = substitute_inputs(&lxc.setup_commands, user_inputs);
-    for cmd in &commands {
-        info!("📦 App Store: running in container: {}", cmd);
-        let output = std::process::Command::new("lxc-attach")
-            .args(["-n", container_name, "--", "sh", "-c", cmd])
-            .output()
-            .map_err(|e| format!("Failed to run setup command: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // Don't fail on non-zero exit — some setup commands are best-effort
-            info!("⚠️ App Store: command exited with {}: {}", output.status, stderr);
-        }
+    // Write WolfNet IP file so it's pre-assigned
+    if let Some(ref ip) = wolfnet_ip {
+        let wolfnet_dir = format!("/var/lib/lxc/{}/.wolfnet", container_name);
+        let _ = std::fs::create_dir_all(&wolfnet_dir);
+        let _ = std::fs::write(format!("{}/ip", wolfnet_dir), ip);
     }
 
-    Ok(format!("{} installed as LXC container '{}'", app.name, container_name))
+    let mut msg = format!("{} configured as LXC container '{}' (stopped)", app.name, container_name);
+    if let Some(ref ip) = wolfnet_ip {
+        msg.push_str(&format!(" — WolfNet IP: {}", ip));
+    }
+    msg.push_str(". Start the container to complete setup.");
+    Ok(msg)
 }
 
 fn install_bare_metal(

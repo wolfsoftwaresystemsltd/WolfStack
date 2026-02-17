@@ -10886,6 +10886,18 @@ function openAppStoreInstallModal(appId) {
     document.getElementById('appstore-install-title').textContent = `Install ${app.name}`;
     document.getElementById('appstore-install-name').value = app.id.replace(/_/g, '-');
 
+    // Populate host selector from allNodes
+    const hostSelect = document.getElementById('appstore-install-host');
+    const onlineNodes = allNodes.filter(n => n.online);
+    const selfNode = onlineNodes.find(n => n.is_self);
+    hostSelect.innerHTML = onlineNodes.map(n => {
+        const label = `${n.hostname} (${n.address})${n.is_self ? ' — this server' : ''}`;
+        return `<option value="${n.id}" ${n.is_self ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    }).join('');
+    if (onlineNodes.length === 0) {
+        hostSelect.innerHTML = '<option value="">No servers online</option>';
+    }
+
     // Build target buttons
     const targetsEl = document.getElementById('appstore-install-targets');
     let targetHtml = '';
@@ -10907,7 +10919,7 @@ function openAppStoreInstallModal(appId) {
             <div style="margin-bottom:12px;">
                 <label style="font-size:13px; font-weight:500; display:block; margin-bottom:4px; color:var(--text-secondary);">${escapeHtml(inp.label)}</label>
                 <input type="${inp.input_type === 'password' ? 'password' : 'text'}" class="form-control appstore-user-input"
-                    data-key="${escapeHtml(inp.key)}" placeholder="${escapeHtml(inp.default_value || '')}" value="${escapeHtml(inp.default_value || '')}">
+                    data-key="${escapeHtml(inp.id)}" placeholder="${escapeHtml(inp.placeholder || inp.default || '')}" value="${escapeHtml(inp.default || '')}">
             </div>
         `).join('');
     } else {
@@ -10948,7 +10960,19 @@ async function executeAppStoreInstall() {
     btn.disabled = true;
 
     try {
-        const res = await fetch(`/api/appstore/apps/${appStoreInstallAppId}/install`, {
+        // Determine the install URL based on selected host
+        const selectedNodeId = document.getElementById('appstore-install-host').value;
+        const selectedNode = allNodes.find(n => n.id === selectedNodeId);
+        let installUrl;
+        if (!selectedNode || selectedNode.is_self) {
+            // Local install
+            installUrl = `/api/appstore/apps/${appStoreInstallAppId}/install`;
+        } else {
+            // Remote install via proxy
+            installUrl = `/api/nodes/${selectedNodeId}/proxy/appstore/apps/${appStoreInstallAppId}/install`;
+        }
+
+        const res = await fetch(installUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({

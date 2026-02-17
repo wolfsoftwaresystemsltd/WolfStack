@@ -1225,6 +1225,10 @@ body {
 }
 
 /* ─── App Store ─── */
+#page-appstore>.card:first-child {
+    margin-top: 0;
+}
+
 .appstore-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
