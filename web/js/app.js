@@ -663,6 +663,27 @@ let mapNodePositions = {};   // node.id -> { lat, lon, cluster, isPve }
 let mapClusterLines = [];    // Leaflet polylines for cleanup
 let mapClusterLabels = [];   // Leaflet markers (labels) for cleanup
 
+// Vibrant palette for distinguishing clusters on the dark map
+const CLUSTER_COLORS = [
+    { marker: '#10b981', label: '#34d399', border: 'rgba(52,211,153,0.3)' },   // emerald
+    { marker: '#3b82f6', label: '#60a5fa', border: 'rgba(96,165,250,0.3)' },   // blue
+    { marker: '#f59e0b', label: '#fbbf24', border: 'rgba(251,191,36,0.3)' },   // amber
+    { marker: '#ef4444', label: '#f87171', border: 'rgba(248,113,113,0.3)' },  // red
+    { marker: '#a855f7', label: '#c084fc', border: 'rgba(192,132,252,0.3)' },  // purple
+    { marker: '#ec4899', label: '#f472b6', border: 'rgba(244,114,182,0.3)' },  // pink
+    { marker: '#14b8a6', label: '#2dd4bf', border: 'rgba(45,212,191,0.3)' },   // teal
+    { marker: '#f97316', label: '#fb923c', border: 'rgba(251,146,60,0.3)' },   // orange
+    { marker: '#06b6d4', label: '#22d3ee', border: 'rgba(34,211,238,0.3)' },   // cyan
+    { marker: '#84cc16', label: '#a3e635', border: 'rgba(163,230,53,0.3)' },   // lime
+];
+let clusterColorMap = {};  // clusterKey -> index
+function getClusterColor(clusterKey) {
+    if (!(clusterKey in clusterColorMap)) {
+        clusterColorMap[clusterKey] = Object.keys(clusterColorMap).length % CLUSTER_COLORS.length;
+    }
+    return CLUSTER_COLORS[clusterColorMap[clusterKey]];
+}
+
 function initMap() {
     if (worldMap) return;
     const mapEl = document.getElementById('world-map');
@@ -754,26 +775,26 @@ function updateMap(nodes) {
     nodes.forEach(node => {
         if (mapMarkers[node.id]) return;
 
-        // Color by type: green for WolfStack, blue for Proxmox
+        // Determine cluster and get unique color
         const isPve = node.node_type === 'proxmox';
-        const markerColor = isPve ? '#3b82f6' : '#10b981';
         const clusterKey = isPve
             ? (node.pve_cluster_name || node.cluster_name || node.address)
             : (node.cluster_name || 'WolfStack');
+        const cc = getClusterColor(clusterKey);
 
         // Function to place marker
         const placeMarker = (lat, lon) => {
             const icon = L.divIcon({
                 className: 'custom-map-marker',
-                html: `<div style="width:12px; height:12px; background:${markerColor}; border-radius:50%; border:2px solid #ffffff; box-shadow:0 0 10px ${markerColor};"></div>`,
+                html: `<div style="width:12px; height:12px; background:${cc.marker}; border-radius:50%; border:2px solid #ffffff; box-shadow:0 0 10px ${cc.marker};"></div>`,
                 iconSize: [12, 12]
             });
             const marker = L.marker([lat, lon], { icon: icon }).addTo(worldMap);
             let popupContent = `<b>${node.hostname}</b><br>${node.address}`;
             if (node.public_ip) popupContent += `<br>Public: ${node.public_ip}`;
-            popupContent += `<br><span style="color:${markerColor}">${isPve ? '● Proxmox' : '● WolfStack'}</span>`;
+            popupContent += `<br><span style="color:${cc.marker}">${isPve ? '● Proxmox' : '● WolfStack'}</span>`;
             popupContent += ` — ${node.online ? 'Online' : 'Offline'}`;
-            popupContent += `<br><span style="font-size:10px;color:#999;">Cluster: ${clusterKey}</span>`;
+            popupContent += `<br><span style="font-size:10px;color:${cc.label};">Cluster: ${clusterKey}</span>`;
             marker.bindPopup(popupContent);
             mapMarkers[node.id] = marker;
 
@@ -807,10 +828,10 @@ function drawClusterConnections() {
     });
 
     Object.entries(clusters).forEach(([clusterName, positions]) => {
-        const isPve = positions[0].isPve;
-        const lineColor = isPve ? '#3b82f6' : '#10b981';
-        const labelColor = isPve ? '#60a5fa' : '#34d399';
-        const borderColor = isPve ? 'rgba(96,165,250,0.3)' : 'rgba(52,211,153,0.3)';
+        const cc = getClusterColor(clusterName);
+        const lineColor = cc.marker;
+        const labelColor = cc.label;
+        const borderColor = cc.border;
 
         // Draw lines between all pairs (mesh) if >1 node
         if (positions.length >= 2) {
