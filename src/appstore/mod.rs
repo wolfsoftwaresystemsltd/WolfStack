@@ -300,7 +300,7 @@ fn install_docker(
 fn install_lxc(
     app: &AppManifest,
     container_name: &str,
-    _user_inputs: &HashMap<String, String>,
+    user_inputs: &HashMap<String, String>,
 ) -> Result<String, String> {
     let lxc = app.lxc.as_ref()
         .ok_or("This app doesn't support LXC installation")?;
@@ -311,7 +311,7 @@ fn install_lxc(
         info!("📦 App Store: allocated WolfNet IP {} for LXC {}", ip, container_name);
     }
 
-    // Create the container (not started)
+    // Create the container
     info!("📦 App Store: creating LXC container {}", container_name);
     crate::containers::lxc_create(
         container_name,
@@ -328,11 +328,37 @@ fn install_lxc(
         let _ = std::fs::write(format!("{}/ip", wolfnet_dir), ip);
     }
 
+    // Start the container temporarily to run setup commands
+    info!("📦 App Store: starting container to run setup...");
+    crate::containers::lxc_start(container_name)?;
+
+    // Wait for the container to boot
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    // Run setup commands inside the container
+    let commands = substitute_inputs(&lxc.setup_commands, user_inputs);
+    for cmd in &commands {
+        info!("📦 App Store: running in container: {}", cmd);
+        let output = std::process::Command::new("lxc-attach")
+            .args(["-n", container_name, "--", "sh", "-c", cmd])
+            .output()
+            .map_err(|e| format!("Failed to run setup command: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            info!("⚠️ App Store: command exited with {}: {}", output.status, stderr);
+        }
+    }
+
+    // Stop the container — it's configured but not running
+    info!("📦 App Store: setup complete, stopping container");
+    let _ = crate::containers::lxc_stop(container_name);
+
     let mut msg = format!("{} configured as LXC container '{}' (stopped)", app.name, container_name);
     if let Some(ref ip) = wolfnet_ip {
         msg.push_str(&format!(" — WolfNet IP: {}", ip));
     }
-    msg.push_str(". Start the container to complete setup.");
+    msg.push_str(". Start the container when ready.");
     Ok(msg)
 }
 
