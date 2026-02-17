@@ -346,6 +346,103 @@ impl PveClient {
     }
 
 
+    /// Upload a vzdump archive to Proxmox storage and restore it as a new LXC container.
+    /// Returns (new_vmid, message).
+    pub async fn upload_and_restore(
+        &self,
+        archive_bytes: Vec<u8>,
+        file_name: &str,
+        new_name: &str,
+        storage: Option<&str>,
+    ) -> Result<(u64, String), String> {
+        let storage_id = storage.unwrap_or("local");
+
+        // Build a long-timeout client for large file uploads
+        let upload_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(600)) // 10 min
+            .danger_accept_invalid_certs(true)
+            .build()
+            .map_err(|e| format!("Failed to build upload client: {}", e))?;
+
+        // Step 1: Upload the archive to storage via multipart form
+        //   POST /api2/json/nodes/{node}/storage/{storage}/upload
+        let upload_url = format!(
+            "{}/api2/json/nodes/{}/storage/{}/upload",
+            self.base_url, self.node_name, storage_id
+        );
+        info!("PVE: Uploading {} ({} bytes) to {}", file_name, archive_bytes.len(), upload_url);
+
+        let part = reqwest::multipart::Part::bytes(archive_bytes)
+            .file_name(file_name.to_string())
+            .mime_str("application/octet-stream")
+            .map_err(|e| format!("MIME error: {}", e))?;
+
+        let form = reqwest::multipart::Form::new()
+            .text("content", "vztmpl")
+            .part("filename", part);
+
+        let resp = upload_client.post(&upload_url)
+            .header("Authorization", self.auth_header())
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("PVE upload failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("PVE upload failed ({}): {}", status.as_u16(), body));
+        }
+        info!("PVE: Upload complete to {}:{}", storage_id, file_name);
+
+        // Step 2: Get the next available VMID
+        let vmid_data = self.get("/cluster/nextid").await
+            .map_err(|e| format!("Failed to get next VMID: {}", e))?;
+        let new_vmid: u64 = if let Some(s) = vmid_data.as_str() {
+            s.trim_matches('"').parse().map_err(|e| format!("Invalid VMID '{}': {}", s, e))?
+        } else if let Some(n) = vmid_data.as_u64() {
+            n
+        } else {
+            return Err(format!("Unexpected VMID response: {:?}", vmid_data));
+        };
+
+        // Step 3: Restore the container from the uploaded archive
+        //   POST /api2/json/nodes/{node}/lxc  with ostemplate, vmid, hostname, storage
+        let restore_url = format!(
+            "{}/api2/json/nodes/{}/lxc",
+            self.base_url, self.node_name
+        );
+        let ostemplate = format!("{}:vztmpl/{}", storage_id, file_name);
+        let restore_storage = storage.unwrap_or("local-lvm");
+
+        info!("PVE: Restoring VMID {} from {} as '{}' on storage {}", new_vmid, ostemplate, new_name, restore_storage);
+
+        let resp = upload_client.post(&restore_url)
+            .header("Authorization", self.auth_header())
+            .form(&[
+                ("vmid", new_vmid.to_string()),
+                ("ostemplate", ostemplate.clone()),
+                ("hostname", new_name.to_string()),
+                ("storage", restore_storage.to_string()),
+                ("start", "0".to_string()),
+                ("restore", "1".to_string()),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("PVE restore failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("PVE restore failed ({}): {}", status.as_u16(), body));
+        }
+
+        let msg = format!("Container '{}' restored as VMID {} on {} (storage: {})",
+            new_name, new_vmid, self.node_name, restore_storage);
+        info!("PVE: {}", msg);
+        Ok((new_vmid, msg))
+    }
+
     /// Get cluster name from /cluster/status
     pub async fn get_cluster_name(&self) -> Result<String, String> {
         let data = self.get("/cluster/status").await?;

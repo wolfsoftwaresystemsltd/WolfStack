@@ -2097,7 +2097,7 @@ async fn lxc_remote_clone(
         }
     };
 
-    // 4. Read archive and POST to target node's import endpoint
+    // 4. Read archive
     let archive_bytes = match std::fs::read(&archive_path) {
         Ok(b) => b,
         Err(e) => {
@@ -2107,16 +2107,28 @@ async fn lxc_remote_clone(
         }
     };
 
-    // Build URLs to try — HTTPS first, then HTTP fallback
-    let import_urls = build_node_urls(&node.address, node.port, "/api/containers/lxc/import");
+    // 5. Transfer to target
+    // For Proxmox-type nodes, WolfStack is also installed on the server but the
+    // node is registered with the PVE API port (8006), not the WolfStack port (8553).
+    // Build import URLs using the correct WolfStack port.
+    let import_urls = if node.node_type == "proxmox" {
+        // Proxmox nodes have WolfStack running on port 8553 — try that
+        let mut urls = build_node_urls(&node.address, 8553, "/api/containers/lxc/import");
+        // Also try 8552 as a fallback WolfStack port
+        urls.extend(build_node_urls(&node.address, 8552, "/api/containers/lxc/import"));
+        urls
+    } else {
+        build_node_urls(&node.address, node.port, "/api/containers/lxc/import")
+    };
+
     let storage_val = storage.unwrap_or("").to_string();
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600)) // 10 min for large transfers
+        .danger_accept_invalid_certs(true)
         .build()
         .unwrap_or_default();
 
-    // Try each URL — rebuild multipart form for each attempt (forms are consumed on send)
     let file_name = archive_path.file_name().unwrap_or_default().to_string_lossy().to_string();
     let meta_json = serde_json::to_string(&meta).unwrap_or_default();
     let mut last_err: Option<String> = None;

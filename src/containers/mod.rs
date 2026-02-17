@@ -958,6 +958,12 @@ pub struct ContainerInfo {
     pub autostart: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub hostname: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_usage: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_total: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1173,6 +1179,19 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                         .unwrap_or_default();
                     let autostart = !restart_policy.is_empty() && restart_policy != "no";
 
+                    // Get Docker storage info
+                    let docker_rootfs = Command::new("docker")
+                        .args(["inspect", "--format", "{{.GraphDriver.Data.MergedDir}}", &name])
+                        .output()
+                        .ok()
+                        .and_then(|o| {
+                            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                            if s.is_empty() || s.contains("no value") { None } else { Some(s) }
+                        });
+                    let (du, dt) = docker_rootfs.as_ref()
+                        .map(|p| get_path_disk_usage(p))
+                        .unwrap_or((None, None));
+
                     ContainerInfo {
                         id: parts.first().unwrap_or(&"").to_string(),
                         name,
@@ -1189,6 +1208,9 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                         ip_address: ip,
                         autostart,
                         hostname: String::new(),
+                        storage_path: docker_rootfs,
+                        disk_usage: du,
+                        disk_total: dt,
                     }
                 })
                 .collect()
@@ -1493,6 +1515,13 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                         .map(|s| s.trim().to_string())
                         .unwrap_or_default();
 
+                    // Get LXC rootfs path and disk usage
+                    let rootfs_path = format!("/var/lib/lxc/{}/rootfs", name);
+                    let storage_path = if std::path::Path::new(&rootfs_path).exists() {
+                        Some(rootfs_path.clone())
+                    } else { None };
+                    let (du, dt) = get_path_disk_usage(&rootfs_path);
+
                     ContainerInfo {
                         id: name.clone(),
                         name,
@@ -1505,6 +1534,9 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                         ip_address: ip,
                         autostart,
                         hostname,
+                        storage_path,
+                        disk_usage: du,
+                        disk_total: dt,
                     }
                 })
                 .collect()
@@ -1558,9 +1590,10 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                 }
             }
 
-            // Read hostname and autostart from pct config (Proxmox format)
+            // Read hostname, autostart, and rootfs from pct config (Proxmox format)
             let mut hostname = pct_name.clone();
             let mut autostart = false;
+            let mut rootfs_storage = String::new();
             if let Ok(cfg_out) = Command::new("pct").args(["config", &vmid]).output() {
                 let cfg_text = String::from_utf8_lossy(&cfg_out.stdout);
                 for cline in cfg_text.lines() {
@@ -1569,6 +1602,8 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                         hostname = cline.split(':').nth(1).unwrap_or("").trim().to_string();
                     } else if cline.starts_with("onboot:") {
                         autostart = cline.split(':').nth(1).unwrap_or("").trim() == "1";
+                    } else if cline.starts_with("rootfs:") {
+                        rootfs_storage = cline.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
                     }
                     // Also extract IPs from net* lines for stopped containers
                     if ip.is_empty() && cline.starts_with("net") && cline.contains("ip=") {
@@ -1596,6 +1631,14 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                 }
             }
 
+            let rootfs_path = format!("/var/lib/lxc/{}/rootfs", vmid);
+            let storage_path = if !rootfs_storage.is_empty() {
+                Some(rootfs_storage)
+            } else if std::path::Path::new(&rootfs_path).exists() {
+                Some(rootfs_path.clone())
+            } else { None };
+            let (du, dt) = get_path_disk_usage(&rootfs_path);
+
             Some(ContainerInfo {
                 id: vmid.clone(),
                 name: vmid,
@@ -1608,9 +1651,27 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                 ip_address: ip,
                 autostart,
                 hostname,
+                storage_path,
+                disk_usage: du,
+                disk_total: dt,
             })
         })
         .collect()
+}
+
+/// Get disk usage for a path using df (returns used_bytes, total_bytes)
+fn get_path_disk_usage(path: &str) -> (Option<u64>, Option<u64>) {
+    // df --block-size=1 outputs bytes; columns: Filesystem 1B-blocks Used Available Use% Mounted
+    if let Ok(out) = Command::new("df").args(["--block-size=1", path]).output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        if let Some(line) = text.lines().nth(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let total = parts.get(1).and_then(|s| s.parse::<u64>().ok());
+            let used  = parts.get(2).and_then(|s| s.parse::<u64>().ok());
+            return (used, total);
+        }
+    }
+    (None, None)
 }
 
 /// Get LXC container stats

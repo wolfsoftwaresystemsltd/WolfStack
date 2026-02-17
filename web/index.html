@@ -1248,6 +1248,7 @@
                                 <th>IP Address</th>
                                 <th>CPU</th>
                                 <th>Memory</th>
+                                <th>Storage</th>
                                 <th>Ports</th>
                                 <th>Autostart</th>
                                 <th>Actions</th>
@@ -1325,6 +1326,7 @@
                                 <th>IP Address</th>
                                 <th>CPU</th>
                                 <th>Memory</th>
+                                <th>Storage</th>
                                 <th>Autostart</th>
                                 <th>Actions</th>
                             </tr>
@@ -1336,6 +1338,27 @@
                         templates.
                     </p>
                 </div>
+            </div>
+        </div>
+
+        <!-- ═══ Inline Terminal Page ═══ -->
+        <div id="page-terminal" class="page-view" style="display:none;">
+            <div class="card" style="height: calc(100vh - 140px); display:flex; flex-direction:column;">
+                <div class="card-header"
+                    style="display:flex; justify-content:space-between; align-items:center; flex-shrink:0;">
+                    <div style="display:flex; align-items:center; gap:10px;">
+                        <h3>💻 Terminal</h3>
+                        <span id="inline-term-name" style="color:var(--text-muted); font-size:13px;"></span>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span id="inline-term-status"
+                            style="font-size:12px; padding:3px 10px; border-radius:12px; background:#333; color:#888;">Connecting...</span>
+                        <button class="btn btn-sm" onclick="openConsole(inlineTermType || 'host', inlineTermName || '')"
+                            title="Pop out to separate window">↗️ Pop Out</button>
+                    </div>
+                </div>
+                <div id="inline-terminal-container"
+                    style="flex:1; padding:4px; overflow:hidden; background:#0a0a0a; border-radius:0 0 8px 8px;"></div>
             </div>
         </div>
 

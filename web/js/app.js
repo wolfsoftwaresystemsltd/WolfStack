@@ -112,6 +112,7 @@ function selectServerView(nodeId, view) {
         cron: 'Cron Jobs',
         'pve-resources': 'VMs & Containers',
         'mysql-editor': 'MariaDB/MySQL',
+        'terminal': 'Terminal',
     };
     document.getElementById('page-title').textContent = `${hostname} — ${viewTitles[view] || view}`;
     document.getElementById('hostname-display').textContent = `${hostname} (${node?.address}:${node?.port})`;
@@ -158,16 +159,13 @@ function selectServerView(nodeId, view) {
     if (view === 'lxc') loadLxcContainers();
 
     if (view === 'terminal') {
-        // For Proxmox nodes, use PVE node shell proxy (vmid=0 = node shell)
-        if (currentNodeId) {
-            const node = allNodes.find(n => n.id === currentNodeId);
-            if (node && node.node_type === 'proxmox') {
-                openPveConsole(currentNodeId, 0, node.hostname || 'PVE Shell');
-            } else {
-                openConsole('host', hostname);
-            }
+        // Open terminal inline in the content area
+        const node = allNodes.find(n => n.id === currentNodeId);
+        const isPve = node && node.node_type === 'proxmox';
+        if (isPve) {
+            openInlineTerminal('pve', node.hostname || 'PVE Shell', { pve_node_id: currentNodeId, pve_vmid: 0 });
         } else {
-            openConsole('host', hostname);
+            openInlineTerminal('host', hostname);
         }
     }
     if (view === 'vms') loadVms();
@@ -5045,6 +5043,7 @@ function renderDockerContainers(containers) {
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
             <td class="cpu-cell">${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
             <td class="mem-cell">${s.memory_usage ? formatBytes(s.memory_usage) : '-'}</td>
+            <td style="font-size:11px;">${c.storage_path ? `<span title="${c.storage_path}">${c.storage_path.length > 25 ? '...' + c.storage_path.slice(-22) : c.storage_path}</span>` + (c.disk_usage !== undefined && c.disk_total ? `<br><span style="color:var(--text-muted);">${formatBytes(c.disk_usage)} / ${formatBytes(c.disk_total)}</span>` : '') : '-'}</td>
             <td style="font-size:11px;">${ports}</td>
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleDockerAutostart('${c.id}', this.checked)"></td>
             <td style="white-space:nowrap;">
@@ -5290,6 +5289,7 @@ function renderLxcContainers(containers, stats) {
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
             <td>${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
             <td>${s.memory_usage ? formatBytes(s.memory_usage) + (s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : '') : '-'}</td>
+            <td style="font-size:11px;">${c.storage_path ? `<span title="${c.storage_path}">${c.storage_path.length > 25 ? '...' + c.storage_path.slice(-22) : c.storage_path}</span>` + (c.disk_usage !== undefined && c.disk_total ? `<br><span style="color:var(--text-muted);">${formatBytes(c.disk_usage)} / ${formatBytes(c.disk_total)}</span>` : '') : '-'}</td>
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleLxcAutostart('${c.name}', this.checked)"></td>
             <td style="white-space:nowrap;">
                 <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'start')"` : ''} title="Start">▶️</button>
@@ -6079,7 +6079,9 @@ async function migrateDockerContainer(name) {
 
         let nodeOpts = '';
         if (nodes && nodes.length > 0) {
-            nodeOpts = nodes.map(n => `<option value="${n.url || 'http://' + n.address + ':8553'}">${n.name || n.address} (${n.address})</option>`).join('');
+            nodeOpts = nodes
+                .sort((a, b) => (a.name || a.address).localeCompare(b.name || b.address))
+                .map(n => `<option value="${n.url || 'http://' + n.address + ':8553'}">${n.name || n.address} (${n.address})</option>`).join('');
         }
 
         body.innerHTML = `
@@ -6093,6 +6095,12 @@ async function migrateDockerContainer(name) {
                     ${nodeOpts ? `<select id="migrate-target" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
                         ${nodeOpts}
                     </select>` : `<input id="migrate-target" type="text" placeholder="http://10.10.10.2:8553" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">`}
+                </div>
+                <div style="margin-bottom: 1rem;">
+                    <label style="display:block; margin-bottom:4px; font-weight:600;">Target Storage</label>
+                    <select id="docker-migrate-storage" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                        <option value="">Auto (default)</option>
+                    </select>
                 </div>
                 <div style="margin-bottom: 1rem;">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
@@ -6117,6 +6125,12 @@ async function migrateDockerContainer(name) {
                     <input id="migrate-target" type="text" placeholder="http://10.10.10.2:8553" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
                 </div>
                 <div style="margin-bottom: 1rem;">
+                    <label style="display:block; margin-bottom:4px; font-weight:600;">Target Storage</label>
+                    <select id="docker-migrate-storage" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                        <option value="">Auto (default)</option>
+                    </select>
+                </div>
+                <div style="margin-bottom: 1rem;">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
                         <input type="checkbox" id="migrate-remove" checked>
                         Remove container from this machine after migration
@@ -6136,6 +6150,7 @@ async function doMigrate(name) {
     const removeEl = document.getElementById('migrate-remove');
     const targetUrl = targetEl.value.trim();
     const removeSource = removeEl.checked;
+    const storageVal = document.getElementById('docker-migrate-storage')?.value || '';
 
     if (!targetUrl) {
         showToast('Please enter a target URL', 'error');
@@ -6146,10 +6161,12 @@ async function doMigrate(name) {
     showToast(`Migrating ${name} to ${targetUrl}... This may take a while.`, 'info');
 
     try {
+        const migrateBody = { target_url: targetUrl, remove_source: removeSource };
+        if (storageVal) migrateBody.storage = storageVal;
         const resp = await fetch(apiUrl(`/api/containers/docker/${name}/migrate`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ target_url: targetUrl, remove_source: removeSource }),
+            body: JSON.stringify(migrateBody),
         });
         const data = await resp.json();
         if (resp.ok) {
@@ -6187,7 +6204,7 @@ async function cloneLxcContainer(name) {
                 <div><label style="font-size:13px;color:var(--text-muted,#aaa);">Target Node</label>
                     <select id="clone-target-node" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
                         <option value="">This node (local clone)</option>
-                        ${nodes.filter(n => !n.is_self && n.online).map(n => `<option value="${n.id}">${n.hostname} (${n.address})</option>`).join('')}
+                        ${nodes.filter(n => !n.is_self && n.online).sort((a, b) => (a.hostname || a.address).localeCompare(b.hostname || b.address)).map(n => `<option value="${n.id}">${n.hostname} (${n.address})</option>`).join('')}
                     </select></div>
                 <div><label style="font-size:13px;color:var(--text-muted,#aaa);">Storage</label>
                     <select id="clone-storage" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
@@ -6308,7 +6325,8 @@ async function migrateLxcContainer(name) {
             nodes = Array.isArray(data) ? data : (data.nodes || []);
         }
     } catch (e) { }
-    const remoteNodes = nodes.filter(n => !n.is_self && n.online);
+    const remoteNodes = nodes.filter(n => !n.is_self && n.online)
+        .sort((a, b) => (a.hostname || a.address).localeCompare(b.hostname || b.address));
 
     const modal = document.createElement('div');
     modal.id = 'lxc-migrate-modal';
@@ -6327,6 +6345,11 @@ async function migrateLxcContainer(name) {
                         ${remoteNodes.map(n => `<option value="${n.id}">${n.hostname} (${n.address})</option>`).join('')}
                         <option value="__external__">External cluster...</option>
                     </select></div>
+                <div><label style="font-size:13px;color:var(--text-muted,#aaa);">Target Storage</label>
+                    <select id="migrate-storage" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
+                        <option value="">Auto (default)</option>
+                    </select>
+                    <span id="migrate-storage-hint" style="font-size:11px;color:var(--text-muted,#666);margin-top:2px;display:block;">Select a target node to load available storages</span></div>
                 <div id="migrate-external-fields" style="display:none;">
                     <div style="background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.3);border-radius:8px;padding:10px 12px;margin-bottom:12px;color:#60a5fa;font-size:0.82em;line-height:1.5;">
                         💡 <strong>Cross-cluster migration</strong> lets you move a container to a WolfStack instance on a different network.
@@ -6347,9 +6370,39 @@ async function migrateLxcContainer(name) {
     `;
     document.body.appendChild(modal);
 
-    // Show/hide external fields
-    document.getElementById('migrate-target').addEventListener('change', e => {
-        document.getElementById('migrate-external-fields').style.display = e.target.value === '__external__' ? 'block' : 'none';
+    // Show/hide external fields + fetch storages from selected target node
+    document.getElementById('migrate-target').addEventListener('change', async (e) => {
+        const val = e.target.value;
+        document.getElementById('migrate-external-fields').style.display = val === '__external__' ? 'block' : 'none';
+
+        // Fetch storages from the selected target node
+        const sel = document.getElementById('migrate-storage');
+        const hint = document.getElementById('migrate-storage-hint');
+        sel.innerHTML = '<option value="">Auto (default)</option>';
+        if (!val || val === '__external__') {
+            hint.textContent = 'Select a target node to load available storages';
+            return;
+        }
+        hint.textContent = 'Loading storages...';
+        try {
+            const resp = await fetch(`/api/nodes/${val}/proxy/storage/list`);
+            if (resp.ok) {
+                const data = await resp.json();
+                const storages = data.storages || [];
+                const suitable = storages.filter(s =>
+                    s.content && s.content.some(c => c === 'rootdir' || c === 'images')
+                );
+                (suitable.length ? suitable : storages.filter(s => s.status === 'active')).forEach(s => {
+                    const free = typeof formatBytes === 'function' ? formatBytes(s.available_bytes) : Math.round(s.available_bytes / 1073741824) + ' GB';
+                    sel.insertAdjacentHTML('beforeend', `<option value="${s.id}">${s.id} (${s.type || ''}, ${free} free)</option>`);
+                });
+                hint.textContent = '';
+            } else {
+                hint.textContent = 'Could not load storages from target node';
+            }
+        } catch (err) {
+            hint.textContent = 'Could not reach target node for storage list';
+        }
     });
 }
 
@@ -6360,6 +6413,7 @@ async function doMigrateLxc(name) {
     // Read values BEFORE removing the modal
     const extUrl = document.getElementById('migrate-ext-url')?.value.trim() || '';
     const extToken = document.getElementById('migrate-ext-token')?.value.trim() || '';
+    const migrateStorage = document.getElementById('migrate-storage')?.value || '';
     document.getElementById('lxc-migrate-modal')?.remove();
 
     const isExternal = target === '__external__';
@@ -6466,10 +6520,12 @@ async function doMigrateLxc(name) {
                 body: JSON.stringify({ target_url: extUrl, target_token: extToken, delete_source: true }),
             });
         } else {
+            const migrateBody = { target_node: target };
+            if (migrateStorage) migrateBody.storage = migrateStorage;
             resp = await fetch(apiUrl(`/api/containers/lxc/${name}/migrate`), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ target_node: target }),
+                body: JSON.stringify(migrateBody),
             });
         }
 
@@ -7407,9 +7463,90 @@ function openConsole(type, name) {
     window.open(url, 'console_' + name, 'width=960,height=600,menubar=no,toolbar=no');
 }
 
-function fitConsole() { }
-function consoleKeyHandler() { }
-function closeConsole() { }
+// ─── Inline Terminal (rendered inside the page content area) ───
+let inlineTerminal = null;
+let inlineTermWs = null;
+let inlineTermType = '';
+let inlineTermName = '';
+
+function openInlineTerminal(type, name, opts = {}) {
+    inlineTermType = type;
+    inlineTermName = name;
+
+    // Clean up previous terminal
+    if (inlineTermWs) { try { inlineTermWs.close(); } catch (e) { } inlineTermWs = null; }
+    if (inlineTerminal) { inlineTerminal.dispose(); inlineTerminal = null; }
+
+    const container = document.getElementById('inline-terminal-container');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const nameEl = document.getElementById('inline-term-name');
+    if (nameEl) nameEl.textContent = name + (type !== 'host' ? ` (${type})` : '');
+
+    const statusEl = document.getElementById('inline-term-status');
+    if (statusEl) { statusEl.textContent = 'Connecting...'; statusEl.style.background = '#333'; statusEl.style.color = '#888'; }
+
+    // Create xterm.js terminal
+    const term = new Terminal({
+        cursorBlink: true,
+        fontSize: 15,
+        fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", "Courier New", monospace',
+        theme: { background: '#0a0a0a', foreground: '#f0f0f0', cursor: '#10b981', selectionBackground: 'rgba(16, 185, 129, 0.3)' },
+        scrollback: 5000
+    });
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(container);
+    inlineTerminal = term;
+
+    function doFit() { try { fitAddon.fit(); } catch (e) { } }
+    setTimeout(doFit, 100);
+    window._inlineTermFitHandler = () => { if (currentPage === 'terminal') doFit(); };
+    window.addEventListener('resize', window._inlineTermFitHandler);
+
+    term.writeln('\x1b[33mConnecting to ' + type + ': ' + name + '...\x1b[0m');
+
+    // Build WebSocket URL
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    let wsUrl;
+    if (opts.pve_node_id && opts.pve_vmid !== undefined) {
+        wsUrl = protocol + '//' + window.location.host + '/ws/pve-console/' + opts.pve_node_id + '/' + opts.pve_vmid;
+    } else if (currentNodeId) {
+        const node = allNodes.find(n => n.id === currentNodeId);
+        if (node && !node.is_self) {
+            wsUrl = protocol + '//' + window.location.host + '/ws/remote-console/' + encodeURIComponent(currentNodeId) + '/' + type + '/' + encodeURIComponent(name);
+        } else {
+            wsUrl = protocol + '//' + window.location.host + '/ws/console/' + type + '/' + encodeURIComponent(name);
+        }
+    } else {
+        wsUrl = protocol + '//' + window.location.host + '/ws/console/' + type + '/' + encodeURIComponent(name);
+    }
+
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+    inlineTermWs = ws;
+
+    ws.onopen = () => {
+        if (statusEl) { statusEl.textContent = 'Connected'; statusEl.style.background = 'rgba(16,185,129,0.15)'; statusEl.style.color = '#10b981'; }
+        term.writeln('\x1b[32mConnected!\x1b[0m\r\n');
+        doFit();
+        term.focus();
+    };
+    ws.onmessage = (event) => {
+        if (typeof event.data === 'string') term.write(event.data);
+        else term.write(new Uint8Array(event.data));
+    };
+    ws.onclose = () => {
+        if (statusEl) { statusEl.textContent = 'Disconnected'; statusEl.style.background = 'rgba(239,68,68,0.15)'; statusEl.style.color = '#ef4444'; }
+        term.writeln('\r\n\x1b[31mConnection closed.\x1b[0m');
+    };
+    ws.onerror = () => {
+        if (statusEl) { statusEl.textContent = 'Error'; statusEl.style.background = 'rgba(239,68,68,0.15)'; statusEl.style.color = '#ef4444'; }
+        term.writeln('\r\n\x1b[31mWebSocket connection failed.\x1b[0m');
+    };
+    term.onData(data => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
+}
 
 function openLxcConsole(vmidOrName, displayName) {
     // For Proxmox nodes, use PVE console proxy with the VMID
