@@ -2977,15 +2977,21 @@ async function renderPveResourcesView(nodeId) {
                     <div style="font-size:10px;color:var(--text-muted);margin-top:2px;">${formatBytes(g.mem)} / ${formatBytes(g.maxmem)}</div>
                 </div>
                 <div>
-                    <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Disk</div>
-                    ${progressBar(g.disk, g.maxdisk)}
-                    <div style="font-size:10px;color:var(--text-muted);margin-top:2px;">${formatBytes(g.disk)} / ${formatBytes(g.maxdisk)}</div>
-                </div>
-                <div>
                     <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Uptime</div>
                     <div style="font-size:13px;font-weight:500;">${formatUptime(g.uptime)}</div>
                 </div>
             </div>
+            ${g.maxdisk > 0 ? (() => {
+                const diskPct = Math.round((g.disk / g.maxdisk) * 100);
+                const diskBarColor = diskPct > 90 ? '#ef4444' : diskPct > 70 ? '#f59e0b' : '#10b981';
+                return `<div style="display:flex;align-items:center;gap:8px;font-size:11px;padding:8px 0 0;border-top:1px solid var(--border);margin-top:4px;">
+                    <span>💾</span>
+                    <div style="flex:1;max-width:220px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">
+                        <div style="width:${diskPct}%;height:100%;background:${diskBarColor};border-radius:4px;transition:width 0.3s;"></div>
+                    </div>
+                    <span style="min-width:110px;">${formatBytes(g.disk)} / ${formatBytes(g.maxdisk)} (${diskPct}%)</span>
+                </div>`;
+            })() : ''}
             <div style="display:flex;gap:6px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:10px;">
                 ${actionBtns}
             </div>
