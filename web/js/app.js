@@ -968,9 +968,9 @@ function updateDashboard(m) {
         <tr>
             <td style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">${d.mount_point}</td>
             <td>${d.fs_type}</td>
-            <td>${formatBytes(d.total_bytes)}</td>
             <td>${formatBytes(d.used_bytes)}</td>
             <td>${formatBytes(d.available_bytes)}</td>
+            <td>${formatBytes(d.total_bytes)}</td>
             <td>
                 <div style="display: flex; align-items: center; gap: 8px;">
                     <div class="progress-bar" style="width: 100px; margin: 0;">
