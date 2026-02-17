@@ -10983,8 +10983,46 @@ async function executeAppStoreInstall() {
         });
         const data = await res.json().catch(() => ({}));
         if (res.ok) {
-            showToast(data.message || 'App deployed successfully (stopped)', 'success');
             closeAppStoreInstallModal();
+            // Show a nice success alert
+            const selectedNodeId = document.getElementById('appstore-install-host').value;
+            const selectedNode = allNodes.find(n => n.id === selectedNodeId);
+            const hostName = selectedNode ? selectedNode.hostname : 'this server';
+            const targetLabel = appStoreInstallTarget === 'docker' ? '🐳 Docker' : appStoreInstallTarget === 'lxc' ? '📦 LXC' : '🖥️ Host';
+            const message = data.message || 'App deployed successfully';
+
+            const alertOverlay = document.createElement('div');
+            alertOverlay.className = 'modal-overlay active';
+            alertOverlay.style.cssText = 'display:flex; z-index:10001;';
+            alertOverlay.innerHTML = `
+                <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:440px; width:90%; text-align:center; box-shadow:0 20px 60px rgba(0,0,0,0.5); animation: modalSlideIn 0.3s ease;">
+                    <div style="width:72px; height:72px; background:linear-gradient(135deg, #10b981, #34d399); border-radius:50%; display:flex; align-items:center; justify-content:center; margin:0 auto 20px; font-size:36px; box-shadow:0 4px 20px rgba(16,185,129,0.4);">✅</div>
+                    <h3 style="color:var(--text-primary); font-size:20px; margin-bottom:8px; font-weight:700;">Deployed Successfully</h3>
+                    <p style="color:var(--text-secondary); font-size:14px; margin-bottom:20px; line-height:1.6;">${escapeHtml(message)}</p>
+                    <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:24px; text-align:left;">
+                        <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
+                            <span style="color:var(--text-muted); font-size:12px;">Container</span>
+                            <span style="color:var(--text-primary); font-size:12px; font-weight:600;">${escapeHtml(name)}</span>
+                        </div>
+                        <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
+                            <span style="color:var(--text-muted); font-size:12px;">Host</span>
+                            <span style="color:var(--text-primary); font-size:12px; font-weight:600;">${escapeHtml(hostName)}</span>
+                        </div>
+                        <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
+                            <span style="color:var(--text-muted); font-size:12px;">Target</span>
+                            <span style="color:var(--text-primary); font-size:12px; font-weight:600;">${targetLabel}</span>
+                        </div>
+                        <div style="display:flex; justify-content:space-between;">
+                            <span style="color:var(--text-muted); font-size:12px;">Status</span>
+                            <span style="color:#f59e0b; font-size:12px; font-weight:600;">⏸ Stopped — ready to start</span>
+                        </div>
+                    </div>
+                    <button onclick="this.closest('.modal-overlay').remove()" style="background:linear-gradient(135deg, #10b981, #34d399); color:white; border:none; padding:10px 40px; border-radius:10px; font-size:14px; font-weight:600; cursor:pointer; font-family:inherit; transition:transform 0.15s, box-shadow 0.15s; box-shadow:0 4px 15px rgba(16,185,129,0.3);"
+                        onmouseover="this.style.transform='translateY(-1px)'; this.style.boxShadow='0 6px 20px rgba(16,185,129,0.4)'"
+                        onmouseout="this.style.transform=''; this.style.boxShadow='0 4px 15px rgba(16,185,129,0.3)'">👍 Got it</button>
+                </div>
+            `;
+            document.body.appendChild(alertOverlay);
         } else {
             showToast(data.error || `Installation failed (HTTP ${res.status})`, 'error');
         }
