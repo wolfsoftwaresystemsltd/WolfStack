@@ -18,6 +18,7 @@ use crate::networking;
 use crate::backup;
 use crate::agent::{ClusterState, AgentMessage};
 use crate::auth::SessionManager;
+use crate::appstore;
 
 mod console;
 mod pve_console;
@@ -4717,6 +4718,86 @@ pub async fn mysql_dump(
     }
 }
 
+// ─── App Store ───
+
+/// GET /api/appstore/apps?q=<query>&category=<cat> — list/search available apps
+pub async fn appstore_list(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let q = query.get("q").map(|s| s.as_str());
+    let cat = query.get("category").map(|s| s.as_str());
+    let apps = appstore::list_apps(q, cat);
+    HttpResponse::Ok().json(apps)
+}
+
+/// GET /api/appstore/apps/{id} — get app details
+pub async fn appstore_get(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    match appstore::get_app(&id) {
+        Some(app) => HttpResponse::Ok().json(app),
+        None => HttpResponse::NotFound().json(serde_json::json!({ "error": format!("App '{}' not found", id) })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AppInstallRequest {
+    pub target: String,                              // "docker", "lxc", "bare"
+    pub container_name: String,                      // name for the container
+    #[serde(default)]
+    pub inputs: std::collections::HashMap<String, String>,  // user input values
+}
+
+/// POST /api/appstore/apps/{id}/install — install an app
+pub async fn appstore_install(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<AppInstallRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let mut inputs = body.inputs.clone();
+    // Inject CONTAINER_NAME for ${CONTAINER_NAME} substitution in manifests
+    inputs.insert("CONTAINER_NAME".to_string(), body.container_name.clone());
+
+    match appstore::install_app(&id, &body.target, &body.container_name, &inputs) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/appstore/installed — list installed apps
+pub async fn appstore_installed(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let apps = appstore::list_installed_apps();
+    HttpResponse::Ok().json(apps)
+}
+
+/// DELETE /api/appstore/installed/{id} — uninstall an app
+pub async fn appstore_uninstall(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let install_id = path.into_inner();
+    match appstore::uninstall_app(&install_id) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -4892,6 +4973,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/wolfnet/used-ips", web::get().to(wolfnet_used_ips_endpoint))
         // Geolocation proxy (ip-api.com is HTTP-only, browsers block mixed content on HTTPS pages)
         .route("/api/geolocate", web::get().to(geolocate))
+        // App Store
+        .route("/api/appstore/apps", web::get().to(appstore_list))
+        .route("/api/appstore/apps/{id}", web::get().to(appstore_get))
+        .route("/api/appstore/apps/{id}/install", web::post().to(appstore_install))
+        .route("/api/appstore/installed", web::get().to(appstore_installed))
+        .route("/api/appstore/installed/{id}", web::delete().to(appstore_uninstall))
         // System
         .route("/api/config/export", web::get().to(config_export))
         .route("/api/config/import", web::post().to(config_import))

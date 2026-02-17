@@ -61,6 +61,9 @@
                 <a class="nav-item active" data-page="datacenter" onclick="selectView('datacenter')">
                     <span class="icon">🏢</span> Datacenter
                 </a>
+                <a class="nav-item" data-page="appstore" onclick="selectView('appstore')">
+                    <span class="icon">🛍️</span> App Store
+                </a>
             </div>
             <div class="nav-section">
                 <div class="nav-section-title">Servers</div>
@@ -493,7 +496,105 @@
 
         </div>
 
-        <!-- ═══ Components Page ═══ -->
+        <!-- ═══ App Store Page ═══ -->
+        <div id="page-appstore" class="page-view" style="display:none;">
+            <!-- Header -->
+            <div class="card"
+                style="margin-bottom:20px; background:linear-gradient(135deg, rgba(139,92,246,0.12), rgba(59,130,246,0.08)); border-color:rgba(139,92,246,0.25);">
+                <div class="card-body"
+                    style="display:flex; align-items:center; justify-content:space-between; padding:28px 32px;">
+                    <div style="display:flex; align-items:center; gap:20px;">
+                        <div
+                            style="width:64px; height:64px; background:linear-gradient(135deg,#8b5cf6,#3b82f6); border-radius:16px; display:flex; align-items:center; justify-content:center; font-size:32px; box-shadow:0 4px 20px rgba(139,92,246,0.3);">
+                            🛍️</div>
+                        <div>
+                            <h2 style="font-size:24px; margin-bottom:4px; color:var(--text-primary); font-weight:700;">
+                                App Store</h2>
+                            <p style="color:var(--text-secondary); font-size:13px; margin:0;">One-click install popular
+                                applications as Docker containers, LXC containers, or directly on the host.</p>
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn appstore-tab-btn active" onclick="switchAppStoreTab('browse')"
+                            id="appstore-tab-browse">📦 Browse</button>
+                        <button class="btn appstore-tab-btn" onclick="switchAppStoreTab('installed')"
+                            id="appstore-tab-installed">✅ Installed</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Browse Tab -->
+            <div id="appstore-browse-tab">
+                <!-- Search & Filter Bar -->
+                <div style="display:flex; gap:12px; margin-bottom:20px; flex-wrap:wrap; align-items:center;">
+                    <input type="text" id="appstore-search" placeholder="🔍 Search apps..." oninput="filterAppStore()"
+                        style="flex:1; min-width:200px; padding:10px 16px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:10px; color:var(--text-primary); font-size:14px; outline:none; font-family:inherit; transition:border-color 0.2s;"
+                        onfocus="this.style.borderColor='rgba(139,92,246,0.5)'"
+                        onblur="this.style.borderColor='var(--border)'">
+                    <div id="appstore-categories" style="display:flex; gap:6px; flex-wrap:wrap;">
+                        <button class="appstore-cat-btn active" onclick="filterAppStoreCategory('All')">All</button>
+                        <button class="appstore-cat-btn" onclick="filterAppStoreCategory('Web')">🌐 Web</button>
+                        <button class="appstore-cat-btn" onclick="filterAppStoreCategory('Database')">🗄️
+                            Database</button>
+                        <button class="appstore-cat-btn" onclick="filterAppStoreCategory('Monitoring')">📊
+                            Monitoring</button>
+                        <button class="appstore-cat-btn" onclick="filterAppStoreCategory('Media')">🎬 Media</button>
+                        <button class="appstore-cat-btn" onclick="filterAppStoreCategory('Dev Tools')">💻 Dev
+                            Tools</button>
+                        <button class="appstore-cat-btn" onclick="filterAppStoreCategory('Networking')">🔀
+                            Networking</button>
+                        <button class="appstore-cat-btn" onclick="filterAppStoreCategory('Other')">📦 Other</button>
+                    </div>
+                </div>
+                <!-- App Grid -->
+                <div id="appstore-grid" class="appstore-grid">
+                    <div style="padding:40px; text-align:center; color:var(--text-muted); grid-column:1/-1;">Loading
+                        apps...</div>
+                </div>
+            </div>
+
+            <!-- Installed Tab -->
+            <div id="appstore-installed-tab" style="display:none;">
+                <div id="appstore-installed-list">
+                    <div style="padding:40px; text-align:center; color:var(--text-muted);">Loading installed apps...
+                    </div>
+                </div>
+            </div>
+
+            <!-- Install Modal -->
+            <div id="appstore-install-modal" class="modal-overlay" style="display:none;">
+                <div class="modal" style="max-width:520px; width:90%;">
+                    <div class="modal-header">
+                        <h3 id="appstore-install-title">Install App</h3>
+                        <button class="modal-close" onclick="closeAppStoreInstallModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div style="margin-bottom:16px;">
+                            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Container
+                                Name</label>
+                            <input type="text" id="appstore-install-name" class="form-control" placeholder="my-app">
+                        </div>
+                        <div style="margin-bottom:16px;">
+                            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Install
+                                Target</label>
+                            <div style="display:flex; gap:8px;" id="appstore-install-targets">
+                                <!-- Target buttons injected by JS -->
+                            </div>
+                        </div>
+                        <div id="appstore-install-inputs">
+                            <!-- Dynamic user inputs injected by JS -->
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" onclick="closeAppStoreInstallModal()">Cancel</button>
+                        <button class="btn btn-primary" id="appstore-install-btn" onclick="executeAppStoreInstall()">🚀
+                            Install</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Documentation Page ═══ -->
         <div id="page-components" class="page-view" style="display:none;">
             <div class="components-grid" id="components-grid"></div>
 

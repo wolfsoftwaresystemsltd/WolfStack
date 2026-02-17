@@ -97,7 +97,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', 'ai-settings': 'AI Agent', docs: 'Help & Documentation' };
+    const titles = { datacenter: 'Datacenter', 'ai-settings': 'AI Agent', docs: 'Help & Documentation', appstore: 'App Store' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -106,6 +106,8 @@ function selectView(page) {
         loadAiConfig();
         loadAiStatus();
         loadAiAlerts();
+    } else if (page === 'appstore') {
+        loadAppStoreApps();
     }
 }
 
@@ -10778,4 +10780,245 @@ async function mysqlExecuteQuery() {
 function escapeHtml(str) {
     if (str == null) return '';
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ═══════════════════════════════════════════════
+// ─── App Store ───
+// ═══════════════════════════════════════════════
+let appStoreApps = [];
+let appStoreCategory = 'All';
+let appStoreInstallAppId = null;
+let appStoreInstallTarget = 'docker';
+
+const APP_ICONS = {
+    'wordpress': '📝', 'nextcloud': '☁️', 'gitea': '🦊', 'grafana': '📊',
+    'prometheus': '🔥', 'postgresql': '🐘', 'mariadb': '🗄️', 'redis': '⚡',
+    'nginx': '🌐', 'traefik': '🔀', 'pihole': '🛡️', 'jellyfin': '🎬',
+    'portainer': '🐳', 'minio': '💾', 'code-server': '💻', 'homeassistant': '🏠',
+};
+
+async function loadAppStoreApps() {
+    try {
+        const res = await fetch('/api/appstore/apps');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        appStoreApps = data.apps || [];
+        renderAppStoreGrid();
+    } catch (e) {
+        const grid = document.getElementById('appstore-grid');
+        if (grid) grid.innerHTML = `<div style="padding:40px; text-align:center; color:var(--text-muted); grid-column:1/-1;">Failed to load apps: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderAppStoreGrid() {
+    const grid = document.getElementById('appstore-grid');
+    if (!grid) return;
+
+    const query = (document.getElementById('appstore-search')?.value || '').toLowerCase();
+    const filtered = appStoreApps.filter(app => {
+        if (appStoreCategory !== 'All' && app.category !== appStoreCategory) return false;
+        if (query && !app.name.toLowerCase().includes(query) && !app.description.toLowerCase().includes(query)) return false;
+        return true;
+    });
+
+    if (filtered.length === 0) {
+        grid.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted); grid-column:1/-1;">No apps match your search.</div>';
+        return;
+    }
+
+    grid.innerHTML = filtered.map(app => {
+        const icon = APP_ICONS[app.id] || '📦';
+        const targets = [];
+        if (app.docker) targets.push('Docker');
+        if (app.lxc) targets.push('LXC');
+        if (app.bare_metal) targets.push('Host');
+
+        return `<div class="appstore-card">
+            <div class="appstore-card-header">
+                <div class="appstore-card-icon">${icon}</div>
+                <div>
+                    <div class="appstore-card-title">${escapeHtml(app.name)}</div>
+                    <span class="appstore-card-category">${escapeHtml(app.category)}</span>
+                </div>
+            </div>
+            <div class="appstore-card-desc">${escapeHtml(app.description)}</div>
+            <div class="appstore-card-footer">
+                <div class="appstore-card-targets">
+                    ${targets.map(t => `<span class="appstore-target-badge">${t}</span>`).join('')}
+                </div>
+                <button class="appstore-install-btn" onclick="openAppStoreInstallModal('${app.id}')">Install</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function filterAppStore() {
+    renderAppStoreGrid();
+}
+
+function filterAppStoreCategory(cat) {
+    appStoreCategory = cat;
+    document.querySelectorAll('.appstore-cat-btn').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+    renderAppStoreGrid();
+}
+
+function switchAppStoreTab(tab) {
+    document.querySelectorAll('.appstore-tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById(`appstore-tab-${tab}`)?.classList.add('active');
+
+    if (tab === 'browse') {
+        document.getElementById('appstore-browse-tab').style.display = '';
+        document.getElementById('appstore-installed-tab').style.display = 'none';
+    } else {
+        document.getElementById('appstore-browse-tab').style.display = 'none';
+        document.getElementById('appstore-installed-tab').style.display = '';
+        loadInstalledApps();
+    }
+}
+
+// ─── Install Modal ───
+function openAppStoreInstallModal(appId) {
+    appStoreInstallAppId = appId;
+    const app = appStoreApps.find(a => a.id === appId);
+    if (!app) return;
+
+    document.getElementById('appstore-install-title').textContent = `Install ${app.name}`;
+    document.getElementById('appstore-install-name').value = app.id.replace(/_/g, '-');
+
+    // Build target buttons
+    const targetsEl = document.getElementById('appstore-install-targets');
+    let targetHtml = '';
+    const targets = [];
+    if (app.docker) targets.push({ key: 'docker', label: '🐳 Docker' });
+    if (app.lxc) targets.push({ key: 'lxc', label: '📦 LXC' });
+    if (app.bare_metal) targets.push({ key: 'bare_metal', label: '🖥️ Host' });
+
+    appStoreInstallTarget = targets[0]?.key || 'docker';
+    targetHtml = targets.map(t =>
+        `<button class="appstore-target-pill ${t.key === appStoreInstallTarget ? 'active' : ''}" onclick="selectInstallTarget('${t.key}')">${t.label}</button>`
+    ).join('');
+    targetsEl.innerHTML = targetHtml;
+
+    // Build user input fields
+    const inputsEl = document.getElementById('appstore-install-inputs');
+    if (app.user_inputs && app.user_inputs.length > 0) {
+        inputsEl.innerHTML = app.user_inputs.map(inp => `
+            <div style="margin-bottom:12px;">
+                <label style="font-size:13px; font-weight:500; display:block; margin-bottom:4px; color:var(--text-secondary);">${escapeHtml(inp.label)}</label>
+                <input type="${inp.input_type === 'password' ? 'password' : 'text'}" class="form-control appstore-user-input"
+                    data-key="${escapeHtml(inp.key)}" placeholder="${escapeHtml(inp.default_value || '')}" value="${escapeHtml(inp.default_value || '')}">
+            </div>
+        `).join('');
+    } else {
+        inputsEl.innerHTML = '';
+    }
+
+    // Show modal
+    const modal = document.getElementById('appstore-install-modal');
+    modal.style.display = 'flex';
+    setTimeout(() => modal.classList.add('active'), 10);
+}
+
+function selectInstallTarget(target) {
+    appStoreInstallTarget = target;
+    document.querySelectorAll('#appstore-install-targets .appstore-target-pill').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+}
+
+function closeAppStoreInstallModal() {
+    const modal = document.getElementById('appstore-install-modal');
+    modal.classList.remove('active');
+    setTimeout(() => modal.style.display = 'none', 200);
+}
+
+async function executeAppStoreInstall() {
+    const name = document.getElementById('appstore-install-name').value.trim();
+    if (!name) { showToast('Please enter a container name', 'error'); return; }
+
+    // Gather user inputs
+    const userInputs = {};
+    document.querySelectorAll('.appstore-user-input').forEach(el => {
+        userInputs[el.dataset.key] = el.value;
+    });
+
+    const btn = document.getElementById('appstore-install-btn');
+    const origText = btn.textContent;
+    btn.textContent = '⏳ Installing...';
+    btn.disabled = true;
+
+    try {
+        const res = await fetch(`/api/appstore/apps/${appStoreInstallAppId}/install`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: name,
+                target: appStoreInstallTarget,
+                user_inputs: userInputs,
+            }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+            showToast(data.message || 'App installed successfully', 'success');
+            closeAppStoreInstallModal();
+        } else {
+            showToast(data.error || 'Installation failed', 'error');
+        }
+    } catch (e) {
+        showToast('Installation failed: ' + e.message, 'error');
+    } finally {
+        btn.textContent = origText;
+        btn.disabled = false;
+    }
+}
+
+// ─── Installed Apps ───
+async function loadInstalledApps() {
+    const listEl = document.getElementById('appstore-installed-list');
+    if (!listEl) return;
+
+    try {
+        const res = await fetch('/api/appstore/installed');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const installed = data.installed || [];
+
+        if (installed.length === 0) {
+            listEl.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);">No apps installed yet. Browse the store and install your first app!</div>';
+            return;
+        }
+
+        listEl.innerHTML = installed.map(app => {
+            const icon = APP_ICONS[app.app_id] || '📦';
+            const date = new Date(app.installed_at).toLocaleString();
+            return `<div class="appstore-installed-card">
+                <div style="font-size:28px;">${icon}</div>
+                <div style="flex:1;">
+                    <div style="font-weight:600; font-size:14px;">${escapeHtml(app.name)}</div>
+                    <div style="font-size:12px; color:var(--text-muted);">
+                        ${escapeHtml(app.app_id)} · ${escapeHtml(app.target)} · Installed ${date}
+                    </div>
+                </div>
+                <button class="btn btn-danger btn-sm" onclick="uninstallApp('${escapeHtml(app.id)}', '${escapeHtml(app.name)}')">🗑️ Uninstall</button>
+            </div>`;
+        }).join('');
+    } catch (e) {
+        listEl.innerHTML = `<div style="padding:40px; text-align:center; color:var(--text-muted);">Failed to load: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function uninstallApp(installId, name) {
+    if (!confirm(`Uninstall ${name}? This will remove the container or service.`)) return;
+    try {
+        const res = await fetch(`/api/appstore/installed/${installId}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (res.ok) {
+            showToast(data.message || `${name} uninstalled`, 'success');
+            loadInstalledApps();
+        } else {
+            showToast(data.error || 'Uninstall failed', 'error');
+        }
+    } catch (e) {
+        showToast('Uninstall failed: ' + e.message, 'error');
+    }
 }
