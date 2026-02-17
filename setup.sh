@@ -9,9 +9,18 @@
 # Supported: Ubuntu/Debian, Fedora/RHEL/CentOS, SLES/openSUSE, IBM Power (ppc64le)
 #
 # Usage: curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash
+#        curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/beta/setup.sh | sudo bash -s -- --beta
 #
 
 set -e
+
+# ─── Parse arguments ─────────────────────────────────────────────────────────
+BRANCH="master"
+for arg in "$@"; do
+    case "$arg" in
+        --beta) BRANCH="beta" ;;
+    esac
+done
 
 # Allow git to operate on repos owned by other users (setup.sh runs as root
 # but repos may have been cloned by a regular user)
@@ -23,6 +32,9 @@ echo ""
 echo "  🐺 WolfStack Installer"
 echo "  ─────────────────────────────────────"
 echo "  Server Management Platform"
+if [ "$BRANCH" != "master" ]; then
+    echo "  Branch: $BRANCH"
+fi
 echo ""
 
 # ─── Must run as root ────────────────────────────────────────────────────────
@@ -559,9 +571,9 @@ if [ -d "$INSTALL_DIR" ]; then
     echo "  Updating existing installation..."
     cd "$INSTALL_DIR"
     git fetch origin
-    git reset --hard origin/master
+    git reset --hard origin/$BRANCH
 else
-    git clone https://github.com/wolfsoftwaresystemsltd/WolfStack.git "$INSTALL_DIR"
+    git clone -b $BRANCH https://github.com/wolfsoftwaresystemsltd/WolfStack.git "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
 
