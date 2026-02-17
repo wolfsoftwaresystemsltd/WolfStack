@@ -132,6 +132,21 @@ function selectServerView(nodeId, view) {
     if (headerOs && node?.metrics?.os_name) headerOs.textContent = node.metrics.os_name;
 
     // Load data for the view
+    // Show loading state immediately for views that fetch data asynchronously,
+    // so stale content from a previous server doesn't linger.
+    const asyncViews = ['components', 'services', 'containers', 'lxc', 'vms', 'storage', 'networking', 'backups', 'wolfnet', 'certificates', 'cron', 'pve-resources', 'mysql-editor'];
+    if (asyncViews.includes(view) && el) {
+        const loadingHtml = `<div style="text-align:center; padding:60px; color:var(--text-muted);">
+            <div style="font-size:32px;margin-bottom:12px;">⏳</div>
+            <div style="font-size:14px;">Loading...</div>
+        </div>`;
+        // Clear table bodies and card containers to prevent stale data showing
+        el.querySelectorAll('tbody').forEach(tb => { tb.innerHTML = ''; });
+        el.querySelectorAll('.card-body').forEach(cb => { cb.innerHTML = loadingHtml; });
+        // For views with a single content div (like pve-resources), fill it directly
+        const contentDiv = el.querySelector('[id$="-content"]');
+        if (contentDiv) contentDiv.innerHTML = loadingHtml;
+    }
     if (view === 'dashboard') {
         // Clear history for new server view to show fresh data
         cpuHistory = [];
