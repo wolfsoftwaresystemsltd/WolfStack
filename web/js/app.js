@@ -659,6 +659,9 @@ let worldMap = null;
 let mapMarkers = {};
 let geoCache = {};
 let fetchingGeo = {};
+let mapNodePositions = {};   // node.id -> { lat, lon, cluster, isPve }
+let mapClusterLines = [];    // Leaflet polylines for cleanup
+let mapClusterLabels = [];   // Leaflet markers (labels) for cleanup
 
 function initMap() {
     if (worldMap) return;
@@ -754,6 +757,9 @@ function updateMap(nodes) {
         // Color by type: green for WolfStack, blue for Proxmox
         const isPve = node.node_type === 'proxmox';
         const markerColor = isPve ? '#3b82f6' : '#10b981';
+        const clusterKey = isPve
+            ? (node.pve_cluster_name || node.cluster_name || node.address)
+            : (node.cluster_name || 'WolfStack');
 
         // Function to place marker
         const placeMarker = (lat, lon) => {
@@ -767,14 +773,70 @@ function updateMap(nodes) {
             if (node.public_ip) popupContent += `<br>Public: ${node.public_ip}`;
             popupContent += `<br><span style="color:${markerColor}">${isPve ? '● Proxmox' : '● WolfStack'}</span>`;
             popupContent += ` — ${node.online ? 'Online' : 'Offline'}`;
+            popupContent += `<br><span style="font-size:10px;color:#999;">Cluster: ${clusterKey}</span>`;
             marker.bindPopup(popupContent);
             mapMarkers[node.id] = marker;
 
-            // Auto-fit map to show all markers
+            // Track position for cluster lines
+            mapNodePositions[node.id] = { lat, lon, cluster: clusterKey, isPve };
+
+            // Auto-fit map and redraw cluster connections
             fitMapToMarkers();
+            drawClusterConnections();
         };
 
         resolveAndPlace(node, placeMarker);
+    });
+}
+
+// Draw lines between nodes in the same cluster + cluster labels
+function drawClusterConnections() {
+    if (!worldMap) return;
+
+    // Remove old lines and labels
+    mapClusterLines.forEach(l => worldMap.removeLayer(l));
+    mapClusterLabels.forEach(l => worldMap.removeLayer(l));
+    mapClusterLines = [];
+    mapClusterLabels = [];
+
+    // Group node positions by cluster
+    const clusters = {};
+    Object.values(mapNodePositions).forEach(pos => {
+        if (!clusters[pos.cluster]) clusters[pos.cluster] = [];
+        clusters[pos.cluster].push(pos);
+    });
+
+    Object.entries(clusters).forEach(([clusterName, positions]) => {
+        const isPve = positions[0].isPve;
+        const lineColor = isPve ? '#3b82f6' : '#10b981';
+        const labelColor = isPve ? '#60a5fa' : '#34d399';
+        const borderColor = isPve ? 'rgba(96,165,250,0.3)' : 'rgba(52,211,153,0.3)';
+
+        // Draw lines between all pairs (mesh) if >1 node
+        if (positions.length >= 2) {
+            for (let i = 0; i < positions.length; i++) {
+                for (let j = i + 1; j < positions.length; j++) {
+                    const line = L.polyline(
+                        [[positions[i].lat, positions[i].lon], [positions[j].lat, positions[j].lon]],
+                        { color: lineColor, weight: 1.5, opacity: 0.5, dashArray: '6, 4', interactive: false }
+                    ).addTo(worldMap);
+                    mapClusterLines.push(line);
+                }
+            }
+        }
+
+        // Place cluster label at centroid
+        const centLat = positions.reduce((s, p) => s + p.lat, 0) / positions.length;
+        const centLon = positions.reduce((s, p) => s + p.lon, 0) / positions.length;
+        const countText = positions.length > 1 ? ` (${positions.length})` : '';
+        const labelIcon = L.divIcon({
+            className: 'cluster-label',
+            html: `<div style="background:rgba(0,0,0,0.7);color:${labelColor};font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px;border:1px solid ${borderColor};white-space:nowrap;text-shadow:0 1px 3px rgba(0,0,0,0.5);pointer-events:none;">${clusterName}${countText}</div>`,
+            iconSize: [0, 0],
+            iconAnchor: [0, -14]
+        });
+        const label = L.marker([centLat, centLon], { icon: labelIcon, interactive: false }).addTo(worldMap);
+        mapClusterLabels.push(label);
     });
 }
 
