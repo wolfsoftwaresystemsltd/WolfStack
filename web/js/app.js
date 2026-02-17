@@ -4523,37 +4523,41 @@ async function wolfnetAction(action) {
 // ─── Public IP Mappings ───
 
 function renderIpMappings(mappings) {
-    const tbody = document.getElementById('ip-mappings-table');
+    const grid = document.getElementById('ip-mappings-grid');
     const empty = document.getElementById('ip-mappings-empty');
-    if (!tbody) return;
+    if (!grid) return;
 
     if (!mappings || mappings.length === 0) {
-        tbody.innerHTML = '';
+        grid.innerHTML = '';
         if (empty) empty.style.display = '';
         return;
     }
     if (empty) empty.style.display = 'none';
 
-    tbody.innerHTML = mappings.map(m => {
+    grid.innerHTML = mappings.map(m => {
         const statusBadge = m.enabled
-            ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e; font-size:11px;">Active</span>'
-            : '<span class="badge" style="background:rgba(107,114,128,0.2); color:#6b7280; font-size:11px;">Disabled</span>';
+            ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e; font-size:10px;">Active</span>'
+            : '<span class="badge" style="background:rgba(107,114,128,0.2); color:#6b7280; font-size:10px;">Disabled</span>';
 
         const portsLabel = m.ports || '<span style="color:var(--text-muted);">all</span>';
         const protoLabel = m.protocol === 'all' ? 'TCP+UDP' : m.protocol.toUpperCase();
-        const label = m.label || '<span style="color:var(--text-muted);">—</span>';
+        const label = m.label || '';
 
-        return `<tr>
-            <td style="font-family:var(--font-mono); font-size:13px; font-weight:600;">${m.public_ip}</td>
-            <td style="font-family:var(--font-mono); font-size:13px;">${m.wolfnet_ip}</td>
-            <td style="font-family:var(--font-mono); font-size:12px;">${portsLabel}</td>
-            <td style="font-size:12px;">${protoLabel}</td>
-            <td style="font-size:12px;">${label}</td>
-            <td>${statusBadge}</td>
-            <td>
-                <button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;" onclick="removeIpMapping('${m.id}', '${m.public_ip}', '${m.wolfnet_ip}')" title="Remove mapping">🗑️</button>
-            </td>
-        </tr>`;
+        return `<div class="card" style="padding:12px; position:relative;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <div style="font-size:11px; font-weight:600; color:var(--text-muted);">${label || 'IP Mapping'}</div>
+                <div style="display:flex; align-items:center; gap:6px;">
+                    ${statusBadge}
+                    <button class="btn btn-sm btn-danger" style="font-size:10px; padding:1px 6px;" onclick="removeIpMapping('${m.id}', '${m.public_ip}', '${m.wolfnet_ip}')" title="Remove">🗑️</button>
+                </div>
+            </div>
+            <div style="font-family:var(--font-mono); font-size:13px; font-weight:600; margin-bottom:6px;">
+                ${m.public_ip} <span style="color:var(--accent);">→</span> ${m.wolfnet_ip}
+            </div>
+            <div style="font-size:11px; color:var(--text-muted);">
+                Ports: <span style="font-family:var(--font-mono);">${portsLabel}</span> · ${protoLabel}
+            </div>
+        </div>`;
     }).join('');
 }
 
@@ -4625,7 +4629,7 @@ const MAPPING_BLOCKED_PORTS = {
     22: 'SSH', 111: 'NFS portmapper', 2049: 'NFS', 3128: 'Proxmox CONNECT proxy',
     5900: 'Proxmox VNC', 5901: 'Proxmox VNC', 5902: 'Proxmox VNC', 5903: 'Proxmox VNC',
     5999: 'Proxmox SPICE', 8006: 'Proxmox Web UI', 8007: 'Proxmox Spiceproxy',
-    8552: 'WolfStack API', 8553: 'WolfStack cluster', 9600: 'WolfNet',
+    8443: 'Proxmox API', 8552: 'WolfStack API', 8553: 'WolfStack cluster', 9600: 'WolfNet',
 };
 
 /** Parse port string → array of port numbers, or null on error */

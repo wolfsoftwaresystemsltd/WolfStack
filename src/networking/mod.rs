@@ -1256,6 +1256,7 @@ const BLOCKED_PORTS: &[(u16, &str)] = &[
     (5999, "Proxmox SPICE console"),
     (8006, "Proxmox Web UI"),
     (8007, "Proxmox Spiceproxy"),
+    (8443, "Proxmox API"),
     (8552, "WolfStack API"),
     (8553, "WolfStack cluster"),
     (9600, "WolfNet"),
@@ -1334,7 +1335,7 @@ pub fn add_ip_mapping(
 
             let port_list = parse_port_list(trimmed)?;
 
-            // Check against blocked ports
+            // Check against blocked ports (hardcoded safety list)
             for &port in &port_list {
                 for &(blocked, service) in BLOCKED_PORTS {
                     if port == blocked {
@@ -1344,6 +1345,21 @@ pub fn add_ip_mapping(
                             port, service
                         ));
                     }
+                }
+            }
+
+            // Live scan: also reject ports currently in use on this server
+            let listening = get_listening_ports();
+            for &port in &port_list {
+                if let Some(entry) = listening.iter().find(|e| e["port"].as_u64() == Some(port as u64)) {
+                    let proc_name = entry["process"].as_str().unwrap_or("unknown");
+                    // Skip if it's already covered by blocked ports above
+                    if BLOCKED_PORTS.iter().any(|&(bp, _)| bp == port) { continue; }
+                    return Err(format!(
+                        "Port {} is currently in use by '{}'. \
+                         Mapping this port would intercept traffic meant for that service.",
+                        port, proc_name
+                    ));
                 }
             }
         }

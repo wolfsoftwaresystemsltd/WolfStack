@@ -2044,20 +2044,8 @@
                         the internet.
                         WolfStack automatically manages the iptables DNAT/SNAT rules.
                     </p>
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Public IP</th>
-                                <th>→ WolfNet IP</th>
-                                <th>Ports</th>
-                                <th>Protocol</th>
-                                <th>Label</th>
-                                <th>Status</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="ip-mappings-table"></tbody>
-                    </table>
+                    <div id="ip-mappings-grid" style="display:grid; grid-template-columns:repeat(2, 1fr); gap:12px;">
+                    </div>
                     <p id="ip-mappings-empty"
                         style="display:none; text-align:center; padding:20px; color:var(--text-muted);">
                         No IP mappings configured. Click <strong>+ Add Mapping</strong> to route a public IP to a
