@@ -1018,5 +1018,124 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             bare_metal: None,
             user_inputs: vec![],
         },
+
+        // ── Wolf Products ──
+        AppManifest {
+            id: "wolfnet".into(),
+            name: "WolfNet".into(),
+            icon: "🐺".into(),
+            category: "Wolf".into(),
+            description: "Mesh VPN with automatic peer discovery — secure inter-node networking".into(),
+            website: Some("https://wolf.uk.com".into()),
+            docker: None,
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec![],
+                packages_redhat: vec![],
+                post_install: vec![
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | bash -s -- --component wolfnet".into(),
+                ],
+                service: Some("wolfnet".into()),
+            }),
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "wolfproxy".into(),
+            name: "WolfProxy".into(),
+            icon: "🐺".into(),
+            category: "Wolf".into(),
+            description: "Reverse proxy with built-in firewall and automatic SSL via Let's Encrypt".into(),
+            website: Some("https://wolf.uk.com".into()),
+            docker: None,
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec![],
+                packages_redhat: vec![],
+                post_install: vec![
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfProxy/main/setup.sh | bash".into(),
+                ],
+                service: Some("wolfproxy".into()),
+            }),
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "wolfserve".into(),
+            name: "WolfServe".into(),
+            icon: "🐺".into(),
+            category: "Wolf".into(),
+            description: "High-performance web server for static sites and applications".into(),
+            website: Some("https://wolf.uk.com".into()),
+            docker: None,
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec![],
+                packages_redhat: vec![],
+                post_install: vec![
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfServe/main/setup.sh | bash".into(),
+                ],
+                service: Some("wolfserve".into()),
+            }),
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "wolfdisk".into(),
+            name: "WolfDisk".into(),
+            icon: "🐺".into(),
+            category: "Wolf".into(),
+            description: "Distributed filesystem for seamless storage across your cluster".into(),
+            website: Some("https://wolf.uk.com".into()),
+            docker: None,
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec![],
+                packages_redhat: vec![],
+                post_install: vec![
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | bash -s -- --component wolfdisk".into(),
+                ],
+                service: Some("wolfdisk".into()),
+            }),
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "wolfscale".into(),
+            name: "WolfScale".into(),
+            icon: "🐺".into(),
+            category: "Wolf".into(),
+            description: "MariaDB-compatible distributed database with automatic replication".into(),
+            website: Some("https://wolf.uk.com".into()),
+            docker: None,
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec![],
+                packages_redhat: vec![],
+                post_install: vec![
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | bash -s -- --component wolfscale".into(),
+                ],
+                service: Some("wolfscale".into()),
+            }),
+            user_inputs: vec![],
+        },
+
+        AppManifest {
+            id: "certbot".into(),
+            name: "Certbot".into(),
+            icon: "🔒".into(),
+            category: "Wolf".into(),
+            description: "Let's Encrypt certificate manager — free automatic HTTPS for your domains".into(),
+            website: Some("https://certbot.eff.org".into()),
+            docker: None,
+            lxc: None,
+            bare_metal: Some(BareMetalTarget {
+                packages_debian: vec!["certbot".into()],
+                packages_redhat: vec!["certbot".into()],
+                post_install: vec![],
+                service: None,
+            }),
+            user_inputs: vec![],
+        },
     ]
 }

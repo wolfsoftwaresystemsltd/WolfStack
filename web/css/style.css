@@ -1225,6 +1225,10 @@ body {
 }
 
 /* ─── App Store ─── */
+#page-appstore {
+    padding-top: 0 !important;
+}
+
 #page-appstore>.card:first-child {
     margin-top: 0;
 }
