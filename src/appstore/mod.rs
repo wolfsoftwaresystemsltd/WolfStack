@@ -1019,28 +1019,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             user_inputs: vec![],
         },
 
-        // ── Wolf Products ──
-        AppManifest {
-            id: "wolfnet".into(),
-            name: "WolfNet".into(),
-            icon: "🐺".into(),
-            category: "Wolf".into(),
-            description: "Mesh VPN with automatic peer discovery — secure inter-node networking".into(),
-            website: Some("https://wolf.uk.com".into()),
-            docker: None,
-            lxc: None,
-            bare_metal: Some(BareMetalTarget {
-                packages_debian: vec![],
-                packages_redhat: vec![],
-                post_install: vec![
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | bash -s -- --component wolfnet".into(),
-                ],
-                service: Some("wolfnet".into()),
-            }),
-            user_inputs: vec![],
-        },
-
-        AppManifest {
+        // ── Wolf Products ──\n        AppManifest {
             id: "wolfproxy".into(),
             name: "WolfProxy".into(),
             icon: "🐺".into(),
@@ -1048,7 +1027,16 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             description: "Reverse proxy with built-in firewall and automatic SSL via Let's Encrypt".into(),
             website: Some("https://wolf.uk.com".into()),
             docker: None,
-            lxc: None,
+            lxc: Some(LxcTarget {
+                distribution: "debian".into(),
+                release: "bookworm".into(),
+                architecture: "amd64".into(),
+                setup_commands: vec![
+                    "apt-get update && apt-get install -y curl".into(),
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfProxy/main/setup.sh | bash".into(),
+                    "systemctl enable wolfproxy".into(),
+                ],
+            }),
             bare_metal: Some(BareMetalTarget {
                 packages_debian: vec![],
                 packages_redhat: vec![],
@@ -1068,7 +1056,16 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             description: "High-performance web server for static sites and applications".into(),
             website: Some("https://wolf.uk.com".into()),
             docker: None,
-            lxc: None,
+            lxc: Some(LxcTarget {
+                distribution: "debian".into(),
+                release: "bookworm".into(),
+                architecture: "amd64".into(),
+                setup_commands: vec![
+                    "apt-get update && apt-get install -y curl".into(),
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfServe/main/setup.sh | bash".into(),
+                    "systemctl enable wolfserve".into(),
+                ],
+            }),
             bare_metal: Some(BareMetalTarget {
                 packages_debian: vec![],
                 packages_redhat: vec![],
@@ -1088,7 +1085,16 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             description: "Distributed filesystem for seamless storage across your cluster".into(),
             website: Some("https://wolf.uk.com".into()),
             docker: None,
-            lxc: None,
+            lxc: Some(LxcTarget {
+                distribution: "debian".into(),
+                release: "bookworm".into(),
+                architecture: "amd64".into(),
+                setup_commands: vec![
+                    "apt-get update && apt-get install -y curl".into(),
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | bash -s -- --component wolfdisk".into(),
+                    "systemctl enable wolfdisk".into(),
+                ],
+            }),
             bare_metal: Some(BareMetalTarget {
                 packages_debian: vec![],
                 packages_redhat: vec![],
@@ -1108,7 +1114,16 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             description: "MariaDB-compatible distributed database with automatic replication".into(),
             website: Some("https://wolf.uk.com".into()),
             docker: None,
-            lxc: None,
+            lxc: Some(LxcTarget {
+                distribution: "debian".into(),
+                release: "bookworm".into(),
+                architecture: "amd64".into(),
+                setup_commands: vec![
+                    "apt-get update && apt-get install -y curl".into(),
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | bash -s -- --component wolfscale".into(),
+                    "systemctl enable wolfscale".into(),
+                ],
+            }),
             bare_metal: Some(BareMetalTarget {
                 packages_debian: vec![],
                 packages_redhat: vec![],
@@ -1128,7 +1143,14 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             description: "Let's Encrypt certificate manager — free automatic HTTPS for your domains".into(),
             website: Some("https://certbot.eff.org".into()),
             docker: None,
-            lxc: None,
+            lxc: Some(LxcTarget {
+                distribution: "debian".into(),
+                release: "bookworm".into(),
+                architecture: "amd64".into(),
+                setup_commands: vec![
+                    "apt-get update && apt-get install -y certbot".into(),
+                ],
+            }),
             bare_metal: Some(BareMetalTarget {
                 packages_debian: vec!["certbot".into()],
                 packages_redhat: vec!["certbot".into()],
