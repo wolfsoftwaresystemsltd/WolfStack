@@ -1645,7 +1645,7 @@ pub fn detect_wolfnet_ips() -> Vec<serde_json::Value> {
 
     // This node's WolfNet IP
     if let Some(gw) = detect_wolfnet_gateway_ip() {
-        ips.push(serde_json::json!({ "ip": gw, "source": "this-node" }));
+        ips.push(serde_json::json!({ "ip": gw, "source": "this-node (gateway)" }));
     }
 
     // Peers from config
@@ -1656,6 +1656,86 @@ pub fn detect_wolfnet_ips() -> Vec<serde_json::Value> {
             ips.push(serde_json::json!({ "ip": ip, "source": format!("peer: {}", peer.name) }));
         }
     }
+
+    // Docker containers with WolfNet IPs (label wolfnet.ip)
+    if let Ok(output) = Command::new("docker")
+        .args(["ps", "-a", "--format", "{{.Names}}|{{.Label \"wolfnet.ip\"}}"])
+        .output()
+    {
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let parts: Vec<&str> = line.splitn(2, '|').collect();
+                if parts.len() == 2 {
+                    let name = parts[0].trim();
+                    let wip = parts[1].trim();
+                    if !wip.is_empty() && wip != "<no value>" {
+                        if wip.parse::<std::net::Ipv4Addr>().is_ok() {
+                            ips.push(serde_json::json!({
+                                "ip": wip,
+                                "source": format!("docker: {}", name)
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // LXC containers with WolfNet IPs (/var/lib/lxc/<name>/.wolfnet/ip)
+    if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", name);
+            if let Ok(ip) = std::fs::read_to_string(&ip_file) {
+                let ip = ip.trim().to_string();
+                if !ip.is_empty() && ip.parse::<std::net::Ipv4Addr>().is_ok() {
+                    ips.push(serde_json::json!({
+                        "ip": ip,
+                        "source": format!("lxc: {}", name)
+                    }));
+                }
+            }
+        }
+    }
+
+    // Proxmox LXC containers — check pct configs for wn0 IPs
+    if std::path::Path::new("/etc/pve").exists() {
+        if let Ok(entries) = std::fs::read_dir("/etc/pve/lxc") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "conf").unwrap_or(false) {
+                    let vmid = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    if let Ok(conf) = std::fs::read_to_string(&path) {
+                        for line in conf.lines() {
+                            // net lines look like: net1: name=wn0,bridge=lxcbr0,ip=10.10.10.x/24,...
+                            if line.contains("name=wn0") {
+                                if let Some(ip_part) = line.split(',').find(|p| p.starts_with("ip=")) {
+                                    let ip = ip_part.trim_start_matches("ip=")
+                                        .split('/')
+                                        .next()
+                                        .unwrap_or("")
+                                        .to_string();
+                                    if !ip.is_empty() && ip.parse::<std::net::Ipv4Addr>().is_ok() {
+                                        ips.push(serde_json::json!({
+                                            "ip": ip,
+                                            "source": format!("pve-lxc: CT{}", vmid)
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // De-duplicate by IP
+    let mut seen = std::collections::HashSet::new();
+    ips.retain(|v| {
+        let ip = v["ip"].as_str().unwrap_or("").to_string();
+        seen.insert(ip)
+    });
 
     ips
 }
