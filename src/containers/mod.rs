@@ -1637,11 +1637,36 @@ fn pct_list_all() -> Vec<ContainerInfo> {
 
             let rootfs_path = format!("/var/lib/lxc/{}/rootfs", vmid);
             let storage_path = if !rootfs_storage.is_empty() {
-                Some(rootfs_storage)
+                Some(rootfs_storage.clone())
             } else if std::path::Path::new(&rootfs_path).exists() {
                 Some(rootfs_path.clone())
             } else { None };
-            let (du, dt, ft) = get_path_disk_usage(&rootfs_path);
+
+            // For Proxmox containers, get per-container disk usage instead of pool-level stats.
+            // Running: use `pct exec {vmid} -- df -T --block-size=1 /` to get rootfs usage inside the CT.
+            // Stopped: parse the allocated size from rootfs config (e.g. "size=32G").
+            let (du, dt, ft) = if state == "running" {
+                // Try to get actual disk usage from inside the container
+                match Command::new("pct").args(["exec", &vmid, "--", "df", "-T", "--block-size=1", "/"]).output() {
+                    Ok(out) if out.status.success() => {
+                        let text = String::from_utf8_lossy(&out.stdout);
+                        if let Some(line) = text.lines().nth(1) {
+                            let p: Vec<&str> = line.split_whitespace().collect();
+                            let fs = p.get(1).map(|s| s.to_string());
+                            let total = p.get(2).and_then(|s| s.parse::<u64>().ok());
+                            let used  = p.get(3).and_then(|s| s.parse::<u64>().ok());
+                            (used, total, fs)
+                        } else {
+                            (None, None, None)
+                        }
+                    }
+                    _ => (None, None, None),
+                }
+            } else {
+                // Stopped container — parse allocated size from rootfs config
+                let alloc_bytes = parse_pct_rootfs_size(&rootfs_storage);
+                (Some(0), alloc_bytes, None)
+            };
 
             Some(ContainerInfo {
                 id: vmid.clone(),
@@ -1678,6 +1703,34 @@ fn get_path_disk_usage(path: &str) -> (Option<u64>, Option<u64>, Option<String>)
         }
     }
     (None, None, None)
+}
+
+/// Parse the allocated rootfs size from a Proxmox rootfs config string.
+/// Example input: "local-lvm:vm-101-disk-0,size=32G" → Some(34359738368)
+fn parse_pct_rootfs_size(rootfs_cfg: &str) -> Option<u64> {
+    // Look for "size=NNN[GMTK]" in the rootfs config
+    for part in rootfs_cfg.split(',') {
+        let p = part.trim();
+        if p.starts_with("size=") {
+            let size_str = p.trim_start_matches("size=");
+            // Parse number + optional suffix (G, M, T, K)
+            let (num_part, multiplier) = if size_str.ends_with('T') {
+                (&size_str[..size_str.len()-1], 1024u64 * 1024 * 1024 * 1024)
+            } else if size_str.ends_with('G') {
+                (&size_str[..size_str.len()-1], 1024u64 * 1024 * 1024)
+            } else if size_str.ends_with('M') {
+                (&size_str[..size_str.len()-1], 1024u64 * 1024)
+            } else if size_str.ends_with('K') {
+                (&size_str[..size_str.len()-1], 1024u64)
+            } else {
+                (size_str, 1024u64 * 1024 * 1024) // Default to GiB
+            };
+            if let Ok(n) = num_part.parse::<f64>() {
+                return Some((n * multiplier as f64) as u64);
+            }
+        }
+    }
+    None
 }
 
 /// Get LXC container stats
