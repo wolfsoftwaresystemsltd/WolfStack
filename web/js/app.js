@@ -696,15 +696,14 @@ function updateMap(nodes) {
     // Helper: resolve a node's location, then call placeMarker
     const resolveAndPlace = (node, placeMarker) => {
         // Priority: public_ip > node.address (if public) > selfPublicIp > London fallback
+        // NOTE: Do NOT use hostname for geolocation — names like "Sophie" return random locations
         let ipToGeolocate = node.public_ip;
         if (!ipToGeolocate && node.address && !isPrivateIp(node.address)) {
             ipToGeolocate = node.address;
         }
-        if (!ipToGeolocate && node.hostname) {
-            // ip-api.com accepts hostnames too — try the hostname for DNS resolution
-            ipToGeolocate = node.hostname;
-        }
         if (!ipToGeolocate) {
+            // Node is on the same LAN or has no public IP — use self node's public IP
+            // so it appears at the correct datacenter location
             ipToGeolocate = selfPublicIp;
         }
 
