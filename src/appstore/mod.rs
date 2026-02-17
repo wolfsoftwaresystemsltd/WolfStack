@@ -683,7 +683,16 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 volumes: vec!["mariadb_data:/var/lib/mysql".into()],
                 sidecars: vec![],
             }),
-            lxc: None,
+            lxc: Some(LxcTarget {
+                distribution: "debian".into(),
+                release: "bookworm".into(),
+                architecture: "amd64".into(),
+                setup_commands: vec![
+                    "apt-get update && apt-get install -y mariadb-server".into(),
+                    "sed -i 's/bind-address.*=.*/bind-address = 0.0.0.0/' /etc/mysql/mariadb.conf.d/50-server.cnf".into(),
+                    "systemctl enable mariadb".into(),
+                ],
+            }),
             bare_metal: Some(BareMetalTarget {
                 packages_debian: vec!["mariadb-server".into()],
                 packages_redhat: vec!["mariadb-server".into()],
@@ -713,7 +722,16 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 volumes: vec!["mysql_data:/var/lib/mysql".into()],
                 sidecars: vec![],
             }),
-            lxc: None,
+            lxc: Some(LxcTarget {
+                distribution: "debian".into(),
+                release: "bookworm".into(),
+                architecture: "amd64".into(),
+                setup_commands: vec![
+                    "apt-get update && apt-get install -y default-mysql-server".into(),
+                    "sed -i 's/bind-address.*=.*/bind-address = 0.0.0.0/' /etc/mysql/mariadb.conf.d/50-server.cnf || true".into(),
+                    "systemctl enable mysql".into(),
+                ],
+            }),
             bare_metal: Some(BareMetalTarget {
                 packages_debian: vec!["mysql-server".into()],
                 packages_redhat: vec!["mysql-server".into()],
