@@ -3917,14 +3917,17 @@ pub struct DockerSearchResult {
 }
 
 /// Search Docker Hub for images
+/// Tries the Docker CLI first; if docker is not installed or fails,
+/// falls back to the Docker Hub REST API (works on Proxmox without Docker).
 pub fn docker_search(query: &str) -> Vec<DockerSearchResult> {
+    // Try CLI first
     let output = Command::new("docker")
-        .args(["search", "--format", "{{.Name}}\\t{{.Description}}\\t{{.StarCount}}\\t{{.IsOfficial}}", "--limit", "100", query])
+        .args(["search", "--format", "{{.Name}}\t{{.Description}}\t{{.StarCount}}\t{{.IsOfficial}}", "--limit", "100", query])
         .output();
 
     match output {
         Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout)
+            let results: Vec<DockerSearchResult> = String::from_utf8_lossy(&o.stdout)
                 .lines()
                 .filter(|l| !l.is_empty())
                 .map(|line| {
@@ -3936,9 +3939,64 @@ pub fn docker_search(query: &str) -> Vec<DockerSearchResult> {
                         official: parts.get(3).unwrap_or(&"") == &"[OK]",
                     }
                 })
-                .collect()
+                .collect();
+            if !results.is_empty() {
+                return results;
+            }
         }
-        _ => vec![],
+        _ => {}
+    }
+
+    // Fallback: Docker Hub REST API (no Docker required)
+    info!("docker search CLI failed or returned empty — trying Docker Hub REST API for '{}'", query);
+    docker_search_hub_api(query)
+}
+
+/// Query Docker Hub REST API directly (no Docker daemon needed)
+fn docker_search_hub_api(query: &str) -> Vec<DockerSearchResult> {
+    // Use curl -G --data-urlencode to safely encode the query parameter
+    let output = Command::new("curl")
+        .args(["-s", "--max-time", "10", "-G",
+               "--data-urlencode", &format!("query={}", query),
+               "--data-urlencode", "page_size=50",
+               "https://hub.docker.com/v2/search/repositories/"])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let body = String::from_utf8_lossy(&o.stdout);
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                if let Some(results) = json.get("results").and_then(|r| r.as_array()) {
+                    return results.iter().filter_map(|r| {
+                        let name = r.get("repo_name")
+                            .or_else(|| r.get("slug"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if name.is_empty() { return None; }
+                        Some(DockerSearchResult {
+                            name,
+                            description: r.get("short_description")
+                                .or_else(|| r.get("description"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            stars: r.get("star_count")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0) as u32,
+                            official: r.get("is_official")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                        })
+                    }).collect();
+                }
+            }
+            vec![]
+        }
+        _ => {
+            info!("Docker Hub API fallback also failed");
+            vec![]
+        }
     }
 }
 

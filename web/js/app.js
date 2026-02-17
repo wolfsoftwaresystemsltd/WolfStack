@@ -5214,6 +5214,7 @@ function renderDockerContainers(containers) {
                 `}
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs">📜</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewDockerVolumes('${c.name}')" title="Volumes">📁</button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openDockerSettings('${c.name}')" title="Settings">⚙️</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>
             </td>
@@ -5374,6 +5375,277 @@ async function viewDockerVolumes(container) {
         }
     } catch (e) {
         body.innerHTML = `<p style="color:#ef4444;">Failed to load volumes: ${e.message}</p>`;
+    }
+}
+
+// ─── Docker Settings Editor ───
+
+var _dockerSettingsTab = 1;
+
+function switchDockerTab(tab) {
+    _dockerSettingsTab = tab;
+    document.querySelectorAll('.docker-tab-page').forEach(p => p.style.display = 'none');
+    document.querySelectorAll('.docker-tab-btn').forEach(b => {
+        b.style.borderBottomColor = 'transparent';
+        b.style.color = 'var(--text-muted)';
+    });
+    var page = document.getElementById('docker-tab-' + tab);
+    var btn = document.querySelector('.docker-tab-btn[data-dtab="' + tab + '"]');
+    if (page) page.style.display = 'block';
+    if (btn) { btn.style.borderBottomColor = 'var(--accent)'; btn.style.color = 'var(--text-primary)'; }
+}
+
+async function openDockerSettings(name) {
+    const modal = document.getElementById('container-detail-modal');
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+
+    title.textContent = `${name} — Settings`;
+    body.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:40px;">Loading config...</p>';
+    modal.classList.add('active');
+    _dockerSettingsTab = 1;
+
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/docker/${encodeURIComponent(name)}/inspect`));
+        if (!resp.ok) throw new Error('Failed to load config');
+        const cfg = await resp.json();
+
+        // Extract useful fields from docker inspect JSON
+        const hostname = cfg.Config?.Hostname || '';
+        const image = cfg.Config?.Image || '';
+        const restartPolicy = cfg.HostConfig?.RestartPolicy?.Name || 'no';
+        const isAutostart = restartPolicy === 'always' || restartPolicy === 'unless-stopped';
+        const memoryBytes = cfg.HostConfig?.Memory || 0;
+        const memoryMb = memoryBytes > 0 ? Math.round(memoryBytes / 1048576) : '';
+        const nanoCpus = cfg.HostConfig?.NanoCpus || 0;
+        const cpus = nanoCpus > 0 ? (nanoCpus / 1e9).toFixed(1) : '';
+        const cpuShares = cfg.HostConfig?.CpuShares || 0;
+        const cpusetCpus = cfg.HostConfig?.CpusetCpus || '';
+        const env = (cfg.Config?.Env || []);
+        const ports = cfg.HostConfig?.PortBindings || {};
+        const networks = cfg.NetworkSettings?.Networks || {};
+
+        // Format port bindings for display
+        var portRows = '';
+        for (const [containerPort, bindings] of Object.entries(ports)) {
+            if (bindings && bindings.length > 0) {
+                bindings.forEach(b => {
+                    const hostPort = b.HostPort || '';
+                    const hostIp = b.HostIp || '0.0.0.0';
+                    portRows += `<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;margin-bottom:4px;background:var(--bg-primary);border-radius:6px;border:1px solid var(--border);">
+                        <code style="font-size:12px;color:var(--accent);">${hostIp}:${hostPort}</code>
+                        <span style="color:var(--text-muted);font-size:12px;">→</span>
+                        <code style="font-size:12px;color:var(--text-primary);">${containerPort}</code>
+                    </div>`;
+                });
+            }
+        }
+        if (!portRows) portRows = '<div style="color:var(--text-muted);font-size:12px;padding:8px;">No port mappings configured</div>';
+
+        // Format network info
+        var networkRows = '';
+        for (const [netName, netInfo] of Object.entries(networks)) {
+            networkRows += `<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;margin-bottom:4px;background:var(--bg-primary);border-radius:6px;border:1px solid var(--border);">
+                <span style="font-size:14px;">🔌</span>
+                <div style="flex:1;">
+                    <div style="font-weight:600;font-size:12px;">${escapeHtml(netName)}</div>
+                    <div style="font-size:11px;color:var(--text-muted);font-family:monospace;">
+                        IP: ${netInfo.IPAddress || '-'} · MAC: ${netInfo.MacAddress || '-'} · Gateway: ${netInfo.Gateway || '-'}
+                    </div>
+                </div>
+            </div>`;
+        }
+        if (!networkRows) networkRows = '<div style="color:var(--text-muted);font-size:12px;padding:8px;">No networks connected</div>';
+
+        // Format env vars for display
+        var envRows = env.filter(e => !e.startsWith('PATH=')).slice(0, 20).map(e => {
+            const [key, ...val] = e.split('=');
+            return `<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;margin-bottom:2px;background:var(--bg-primary);border-radius:4px;">
+                <code style="font-size:11px;color:var(--accent);min-width:120px;">${escapeHtml(key)}</code>
+                <code style="font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(val.join('='))}</code>
+            </div>`;
+        }).join('');
+        if (!envRows) envRows = '<div style="color:var(--text-muted);font-size:12px;padding:8px;">No environment variables</div>';
+
+        // WolfNet IP from labels
+        const labels = cfg.Config?.Labels || {};
+        const wolfnetIp = labels['wolfnet.ip'] || '';
+
+        var tabBtnStyle = 'flex:1;padding:10px 12px;border:none;background:none;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;';
+
+        body.innerHTML = `
+            <!-- Tab Bar -->
+            <div style="display:flex;border-bottom:1px solid var(--border);background:var(--bg-secondary);margin:-24px -24px 16px -24px;">
+                <button class="docker-tab-btn" data-dtab="1" onclick="switchDockerTab(1)"
+                    style="${tabBtnStyle}border-bottom:2px solid var(--accent);color:var(--text-primary);">
+                    ⚙️ General
+                </button>
+                <button class="docker-tab-btn" data-dtab="2" onclick="switchDockerTab(2)"
+                    style="${tabBtnStyle}border-bottom:2px solid transparent;color:var(--text-muted);">
+                    🌐 Network
+                </button>
+                <button class="docker-tab-btn" data-dtab="3" onclick="switchDockerTab(3)"
+                    style="${tabBtnStyle}border-bottom:2px solid transparent;color:var(--text-muted);">
+                    💻 Resources
+                </button>
+            </div>
+
+            <!-- ═══ Tab 1: General ═══ -->
+            <div class="docker-tab-page" id="docker-tab-1">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div class="form-group">
+                        <label>Container Name</label>
+                        <input type="text" class="form-control" value="${escapeHtml(name)}" readonly
+                            style="opacity:0.7;cursor:not-allowed;">
+                    </div>
+                    <div class="form-group">
+                        <label>Image</label>
+                        <input type="text" class="form-control" value="${escapeHtml(image)}" readonly
+                            style="opacity:0.7;cursor:not-allowed;">
+                    </div>
+                    <div class="form-group">
+                        <label>Hostname</label>
+                        <input type="text" class="form-control" value="${escapeHtml(hostname)}" readonly
+                            style="opacity:0.7;cursor:not-allowed;">
+                        <small style="color:var(--text-muted);margin-top:4px;display:block;">Set automatically by Docker</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Restart Policy</label>
+                        <select id="docker-restart-policy" class="form-control">
+                            <option value="no" ${restartPolicy === 'no' ? 'selected' : ''}>No (manual only)</option>
+                            <option value="always" ${restartPolicy === 'always' ? 'selected' : ''}>Always</option>
+                            <option value="unless-stopped" ${restartPolicy === 'unless-stopped' ? 'selected' : ''}>Unless Stopped</option>
+                            <option value="on-failure" ${restartPolicy === 'on-failure' ? 'selected' : ''}>On Failure</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
+                    <h4 style="margin:0 0 8px 0;font-size:13px;color:var(--text-primary);">📦 Environment Variables (${env.filter(e => !e.startsWith('PATH=')).length})</h4>
+                    <div style="max-height:160px;overflow-y:auto;">
+                        ${envRows}
+                    </div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">⚠️ Environment variables can only be changed by recreating the container.</div>
+                </div>
+            </div>
+
+            <!-- ═══ Tab 2: Network ═══ -->
+            <div class="docker-tab-page" id="docker-tab-2" style="display:none;">
+                <div style="padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);margin-bottom:12px;">
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">🔌 Networks</h4>
+                    ${networkRows}
+                </div>
+                <div style="padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);margin-bottom:12px;">
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">🔗 Port Mappings</h4>
+                    ${portRows}
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">⚠️ Port mappings can only be changed by recreating the container.</div>
+                </div>
+                <div style="padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">🐺 WolfNet</h4>
+                    <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end;">
+                        <div class="form-group" style="margin:0;">
+                            <label>WolfNet IP</label>
+                            <input type="text" id="docker-wolfnet-ip" class="form-control" value="${escapeHtml(wolfnetIp)}"
+                                placeholder="e.g. 10.10.10.50 (leave blank for none)">
+                        </div>
+                        <div style="display:flex;gap:4px;padding-bottom:2px;">
+                            <button class="btn btn-sm" onclick="findNextWolfnetIp()" title="Find next available WolfNet IP"
+                                style="padding:6px 10px;font-size:11px;">🔍 Next Available</button>
+                        </div>
+                    </div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">WolfNet IP is applied at container start time via host routing.</div>
+                </div>
+            </div>
+
+            <!-- ═══ Tab 3: Resources ═══ -->
+            <div class="docker-tab-page" id="docker-tab-3" style="display:none;">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div class="form-group">
+                        <label>Memory Limit (MB)</label>
+                        <input type="number" id="docker-memory" class="form-control" value="${memoryMb}"
+                            placeholder="Leave blank for unlimited" min="0">
+                        <small style="color:var(--text-muted);margin-top:4px;display:block;">Enter value in MB. Leave blank for unlimited. Can be changed live.</small>
+                    </div>
+                    <div class="form-group">
+                        <label>CPU Limit (cores)</label>
+                        <input type="number" id="docker-cpus" class="form-control" value="${cpus}"
+                            placeholder="Leave blank for unlimited" min="0" step="0.1">
+                        <small style="color:var(--text-muted);margin-top:4px;display:block;">e.g. 2.0 for 2 cores. Can be changed live.</small>
+                    </div>
+                    <div class="form-group">
+                        <label>CPU Shares</label>
+                        <input type="text" class="form-control" value="${cpuShares || 'Default (1024)'}" readonly
+                            style="opacity:0.7;cursor:not-allowed;">
+                    </div>
+                    <div class="form-group">
+                        <label>CPU Set (pinned cores)</label>
+                        <input type="text" class="form-control" value="${escapeHtml(cpusetCpus) || 'All cores'}" readonly
+                            style="opacity:0.7;cursor:not-allowed;">
+                    </div>
+                </div>
+
+                <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
+                    <details>
+                        <summary style="cursor:pointer;color:var(--accent);font-size:12px;margin-bottom:8px;">
+                            📝 Raw Docker Inspect (JSON)
+                        </summary>
+                        <pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;
+                            font-family:'JetBrains Mono',monospace;font-size:11px;max-height:300px;overflow-y:auto;
+                            color:var(--text-primary);white-space:pre-wrap;word-break:break-all;">${escapeHtml(JSON.stringify(cfg, null, 2))}</pre>
+                    </details>
+                </div>
+            </div>
+
+            <!-- Save/Cancel Bar -->
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;padding-top:12px;border-top:1px solid var(--border);">
+                <button class="btn btn-sm" onclick="closeContainerDetail()">Cancel</button>
+                <button class="btn btn-sm btn-primary" onclick="saveDockerSettings('${name}')">💾 Save Settings</button>
+            </div>
+        `;
+    } catch (e) {
+        body.innerHTML = `<p style="color:#ef4444;">Failed to load config: ${e.message}</p>`;
+    }
+}
+
+async function saveDockerSettings(name) {
+    var restartPolicy = (document.getElementById('docker-restart-policy') || {}).value || 'no';
+    var autostart = restartPolicy === 'always' || restartPolicy === 'unless-stopped';
+    var memoryStr = (document.getElementById('docker-memory') || {}).value || '';
+    var cpusStr = (document.getElementById('docker-cpus') || {}).value || '';
+
+    var memoryMb = memoryStr ? parseInt(memoryStr) : null;
+    var cpus = cpusStr ? parseFloat(cpusStr) : null;
+
+    // Validate
+    if (memoryMb !== null && (isNaN(memoryMb) || memoryMb < 0)) {
+        showToast('Invalid memory value', 'error');
+        return;
+    }
+    if (cpus !== null && (isNaN(cpus) || cpus < 0)) {
+        showToast('Invalid CPU value', 'error');
+        return;
+    }
+
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/docker/${encodeURIComponent(name)}/config`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                autostart: autostart,
+                memory_mb: memoryMb,
+                cpus: cpus,
+            })
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast('Settings saved — changes applied immediately', 'success');
+            closeContainerDetail();
+            if (typeof loadDockerContainers === 'function') loadDockerContainers();
+        } else {
+            showToast(data.error || 'Failed to save settings', 'error');
+        }
+    } catch (e) {
+        showToast('Error saving settings: ' + e.message, 'error');
     }
 }
 
