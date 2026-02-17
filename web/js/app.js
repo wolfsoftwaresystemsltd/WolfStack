@@ -140,9 +140,15 @@ function selectServerView(nodeId, view) {
             <div style="font-size:32px;margin-bottom:12px;">⏳</div>
             <div style="font-size:14px;">Loading...</div>
         </div>`;
-        // Clear table bodies and card containers to prevent stale data showing
+        // Clear table bodies to prevent stale data showing
         el.querySelectorAll('tbody').forEach(tb => { tb.innerHTML = ''; });
-        el.querySelectorAll('.card-body').forEach(cb => { cb.innerHTML = loadingHtml; });
+        // Only fill card-body with loading HTML if it does NOT contain a data-table
+        // (otherwise we destroy elements like #docker-empty, #lxc-empty that render functions need)
+        el.querySelectorAll('.card-body').forEach(cb => {
+            if (!cb.querySelector('.data-table')) {
+                cb.innerHTML = loadingHtml;
+            }
+        });
         // For views with a single content div (like pve-resources), fill it directly
         const contentDiv = el.querySelector('[id$="-content"]');
         if (contentDiv) contentDiv.innerHTML = loadingHtml;
@@ -5134,13 +5140,14 @@ async function refreshDockerStats() {
 function renderDockerContainers(containers) {
     const table = document.getElementById('docker-containers-table');
     const empty = document.getElementById('docker-empty');
+    if (!table) return;
 
     if (containers.length === 0) {
         table.innerHTML = '';
-        empty.style.display = '';
+        if (empty) empty.style.display = '';
         return;
     }
-    empty.style.display = 'none';
+    if (empty) empty.style.display = 'none';
 
     table.innerHTML = containers.map(c => {
         const s = dockerStats[c.name] || {};
@@ -5393,13 +5400,14 @@ async function loadLxcContainers() {
 function renderLxcContainers(containers, stats) {
     const table = document.getElementById('lxc-containers-table');
     const empty = document.getElementById('lxc-empty');
+    if (!table) return;
 
     if (containers.length === 0) {
         table.innerHTML = '';
-        empty.style.display = '';
+        if (empty) empty.style.display = '';
         return;
     }
-    empty.style.display = 'none';
+    if (empty) empty.style.display = 'none';
 
     const btnStyle = 'margin:2px;font-size:20px;line-height:1;padding:4px 6px;';
     const disStyle = 'margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;opacity:0.4;cursor:not-allowed;pointer-events:none;';
