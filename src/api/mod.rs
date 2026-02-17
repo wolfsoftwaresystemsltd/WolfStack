@@ -1422,6 +1422,76 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
     HttpResponse::Ok().json(msg)
 }
 
+/// GET /api/geolocate?ip={address} — server-side geolocation proxy
+/// Proxies requests to ip-api.com because their free tier is HTTP-only,
+/// and browsers block HTTP requests from HTTPS pages (mixed content).
+/// Also resolves domain names to IPs before lookup.
+pub async fn geolocate(req: HttpRequest, state: web::Data<AppState>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let ip_or_host = match query.get("ip") {
+        Some(v) if !v.is_empty() => v.clone(),
+        _ => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing ip parameter" })),
+    };
+
+    // If it's a domain name (not an IP), resolve it to an IP first
+    let ip = if ip_or_host.parse::<std::net::IpAddr>().is_ok() {
+        ip_or_host
+    } else {
+        // DNS lookup
+        match tokio::net::lookup_host(format!("{}:0", ip_or_host)).await {
+            Ok(mut addrs) => {
+                if let Some(addr) = addrs.next() {
+                    addr.ip().to_string()
+                } else {
+                    return HttpResponse::Ok().json(serde_json::json!({
+                        "status": "fail",
+                        "message": "DNS resolution returned no addresses",
+                        "query": ip_or_host
+                    }));
+                }
+            }
+            Err(e) => {
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "status": "fail",
+                    "message": format!("DNS resolution failed: {}", e),
+                    "query": ip_or_host
+                }));
+            }
+        }
+    };
+
+    // Call ip-api.com server-side (HTTP is fine from backend)
+    let url = format!("http://ip-api.com/json/{}", ip);
+    match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => {
+            match client.get(&url).send().await {
+                Ok(resp) => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(data) => HttpResponse::Ok().json(data),
+                        Err(e) => HttpResponse::Ok().json(serde_json::json!({
+                            "status": "fail",
+                            "message": format!("Failed to parse response: {}", e),
+                            "query": ip
+                        })),
+                    }
+                }
+                Err(e) => HttpResponse::Ok().json(serde_json::json!({
+                    "status": "fail",
+                    "message": format!("Request failed: {}", e),
+                    "query": ip
+                })),
+            }
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("HTTP client error: {}", e)
+        })),
+    }
+}
+
 /// GET/POST /api/nodes/{id}/proxy/{path:.*} — proxy API calls to a remote node
 pub async fn node_proxy(
     req: HttpRequest,
@@ -4820,6 +4890,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/agent/status", web::get().to(agent_status))
         .route("/api/agent/storage/apply", web::post().to(agent_storage_apply))
         .route("/api/wolfnet/used-ips", web::get().to(wolfnet_used_ips_endpoint))
+        // Geolocation proxy (ip-api.com is HTTP-only, browsers block mixed content on HTTPS pages)
+        .route("/api/geolocate", web::get().to(geolocate))
         // System
         .route("/api/config/export", web::get().to(config_export))
         .route("/api/config/import", web::post().to(config_import))

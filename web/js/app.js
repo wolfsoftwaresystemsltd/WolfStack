@@ -758,7 +758,7 @@ function updateMap(nodes) {
             // Fetch geolocation if not already fetching
             if (!fetchingGeo[ipToGeolocate]) {
                 fetchingGeo[ipToGeolocate] = true;
-                fetch(`http://ip-api.com/json/${ipToGeolocate}`)
+                fetch(apiUrl(`/api/geolocate?ip=${encodeURIComponent(ipToGeolocate)}`))
                     .then(r => r.json())
                     .then(data => {
                         if (data.status === 'success') {
