@@ -1747,7 +1747,13 @@
                 <div class="card-body">
                     <!-- Breadcrumb navigation -->
                     <div id="file-breadcrumb"
-                        style="display:flex; align-items:center; gap:4px; padding:8px 0; font-size:13px; flex-wrap:wrap; margin-bottom:8px;">
+                        style="display:flex; align-items:center; gap:4px; padding:8px 0; font-size:14px; flex-wrap:wrap; margin-bottom:8px;">
+                    </div>
+                    <!-- Search -->
+                    <div style="margin-bottom:12px;">
+                        <input type="text" id="file-search-input" placeholder="🔍 Search files and folders..."
+                            oninput="filterFileList(this.value)"
+                            style="width:100%; max-width:400px; padding:6px 12px; font-size:14px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary); color:var(--text-primary); outline:none;">
                     </div>
                     <!-- File listing table -->
                     <table class="data-table">

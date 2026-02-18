@@ -2397,7 +2397,17 @@ function renderFileBreadcrumb(path) {
     bc.innerHTML = html;
 }
 
+let cachedFileEntries = [];
+
 function renderFileList(entries) {
+    const table = document.getElementById('file-list-table');
+    if (!table) return;
+
+    cachedFileEntries = entries;
+    renderFilteredFileList(entries);
+}
+
+function renderFilteredFileList(entries) {
     const table = document.getElementById('file-list-table');
     if (!table) return;
 
@@ -2406,21 +2416,31 @@ function renderFileList(entries) {
         const sizeStr = e.is_dir ? '—' : formatFileSize(e.size);
         const modStr = e.modified ? new Date(e.modified * 1000).toLocaleString() : '—';
         const nameClick = e.is_dir
-            ? `onclick="navigateToDir('${e.path.replace(/'/g, "\\'")}')" style="cursor:pointer;color:var(--accent);font-weight:600;"`
+            ? `onclick="navigateToDir('${e.path.replace(/'/g, "\\'")}')" style="cursor:pointer;color:#f5b731;font-weight:600;"`
             : '';
 
         return `<tr>
-            <td><span ${nameClick}>${icon} ${escapeHtml(e.name)}</span></td>
-            <td style="font-size:12px;color:var(--text-muted);">${sizeStr}</td>
-            <td style="font-size:12px;color:var(--text-muted);">${modStr}</td>
-            <td style="font-family:var(--font-mono);font-size:12px;">${escapeHtml(e.permissions)}</td>
+            <td style="font-size:14px;"><span ${nameClick}>${icon} ${escapeHtml(e.name)}</span></td>
+            <td style="font-size:13px;color:var(--text-muted);">${sizeStr}</td>
+            <td style="font-size:13px;color:var(--text-muted);">${modStr}</td>
+            <td style="font-family:var(--font-mono);font-size:13px;">${escapeHtml(e.permissions)}</td>
             <td style="white-space:nowrap;">
-                ${!e.is_dir ? `<button class="btn btn-sm" style="font-size:11px;padding:2px 6px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="downloadFile('${e.path.replace(/'/g, "\\'")}')">⬇️</button>` : ''}
-                <button class="btn btn-sm" style="font-size:11px;padding:2px 6px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="renameFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">✏️</button>
-                <button class="btn btn-sm" style="font-size:11px;padding:2px 6px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);" onclick="deleteFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">🗑️</button>
+                ${!e.is_dir ? `<button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="downloadFile('${e.path.replace(/'/g, "\\'")}')">⬇️</button>` : ''}
+                <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="renameFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">✏️</button>
+                <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);" onclick="deleteFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">🗑️</button>
             </td>
         </tr>`;
     }).join('');
+}
+
+function filterFileList(query) {
+    if (!query || query.trim() === '') {
+        renderFilteredFileList(cachedFileEntries);
+        return;
+    }
+    const q = query.toLowerCase();
+    const filtered = cachedFileEntries.filter(e => e.name.toLowerCase().includes(q));
+    renderFilteredFileList(filtered);
 }
 
 function getFileIcon(name) {
@@ -2445,6 +2465,8 @@ function formatFileSize(bytes) {
 }
 
 function navigateToDir(path) {
+    const searchInput = document.getElementById('file-search-input');
+    if (searchInput) searchInput.value = '';
     loadFiles(path);
 }
 
