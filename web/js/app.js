@@ -3927,7 +3927,7 @@ function upgradeNode(nodeId) {
     // Open console popup with type=upgrade
     let url = '/console.html?type=upgrade&name=wolfstack';
     if (!node.is_self) {
-        url += '&host=' + encodeURIComponent(node.address) + '&port=' + encodeURIComponent(node.port);
+        url += '&node_id=' + encodeURIComponent(node.id);
     }
     window.open(url, 'upgrade_console_' + nodeId, 'width=960,height=600,menubar=no,toolbar=no');
 
