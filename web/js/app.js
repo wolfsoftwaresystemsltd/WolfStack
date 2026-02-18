@@ -4619,7 +4619,13 @@ function renderIpMappings(mappings) {
             ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e; font-size:10px;">Active</span>'
             : '<span class="badge" style="background:rgba(107,114,128,0.2); color:#6b7280; font-size:10px;">Disabled</span>';
 
-        const portsLabel = m.ports || '<span style="color:var(--text-muted);">all</span>';
+        const portsLabel = (() => {
+            const src = m.ports || '';
+            const dst = m.dest_ports || '';
+            if (!src) return '<span style="color:var(--text-muted);">all</span>';
+            if (dst && dst !== src) return `${src} → ${dst}`;
+            return src;
+        })();
         const protoLabel = m.protocol === 'all' ? 'TCP+UDP' : m.protocol.toUpperCase();
         const label = m.label || '';
 
@@ -4648,6 +4654,7 @@ async function showCreateMappingModal() {
     document.getElementById('mapping-public-ip').value = '';
     document.getElementById('mapping-wolfnet-ip').value = '';
     document.getElementById('mapping-ports').value = '';
+    document.getElementById('mapping-dest-ports').value = '';
     document.getElementById('mapping-protocol').value = 'all';
     document.getElementById('mapping-label').value = '';
 
@@ -4781,6 +4788,7 @@ async function createIpMapping() {
     const public_ip = document.getElementById('mapping-public-ip').value.trim();
     const wolfnet_ip = document.getElementById('mapping-wolfnet-ip').value.trim();
     const ports = document.getElementById('mapping-ports').value.trim() || null;
+    const dest_ports = document.getElementById('mapping-dest-ports').value.trim() || null;
     const protocol = document.getElementById('mapping-protocol').value;
     const label = document.getElementById('mapping-label').value.trim() || null;
 
@@ -4807,11 +4815,28 @@ async function createIpMapping() {
         }
     }
 
+    // Validate dest_ports if provided
+    if (dest_ports) {
+        if (!ports) {
+            showModal('Destination ports require source ports to be specified too.');
+            return;
+        }
+        const parsedDest = parseMappingPorts(dest_ports);
+        if (!parsedDest) {
+            showModal('Invalid destination port format. Use: 80, 80,443, or 8000:8100');
+            return;
+        }
+        if (parsedDest.length !== parsed.length) {
+            showModal(`Source ports (${parsed.length}) and destination ports (${parsedDest.length}) must have the same count.`);
+            return;
+        }
+    }
+
     try {
         const resp = await fetch(apiUrl('/api/networking/ip-mappings'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ public_ip, wolfnet_ip, ports, protocol, label }),
+            body: JSON.stringify({ public_ip, wolfnet_ip, ports, dest_ports, protocol, label }),
         });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Failed to create mapping');

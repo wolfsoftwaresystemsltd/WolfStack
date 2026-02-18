@@ -3530,6 +3530,7 @@ pub struct CreateIpMappingRequest {
     pub public_ip: String,
     pub wolfnet_ip: String,
     pub ports: Option<String>,
+    pub dest_ports: Option<String>,
     pub protocol: Option<String>,
     pub label: Option<String>,
 }
@@ -3554,6 +3555,7 @@ pub async fn net_add_ip_mapping(
         &body.public_ip,
         &body.wolfnet_ip,
         body.ports.as_deref(),
+        body.dest_ports.as_deref(),
         protocol,
         label,
     ) {

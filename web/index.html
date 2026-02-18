@@ -2600,11 +2600,11 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
 
                         <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px;">
                             <div class="form-group">
-                                <label>Ports <small style="color:var(--text-muted);">(optional)</small></label>
-                                <input type="text" id="mapping-ports" class="form-control" placeholder="e.g. 80,443"
+                                <label>Source Port(s) <small style="color:var(--text-muted);">(optional)</small></label>
+                                <input type="text" id="mapping-ports" class="form-control" placeholder="e.g. 8080,443"
                                     oninput="onMappingPortsInput()"
                                     style="font-family:var(--font-mono); font-size:13px;">
-                                <small style="color:var(--text-muted);">Blank = all</small>
+                                <small style="color:var(--text-muted);">Incoming port(s). Blank = all</small>
                             </div>
                             <div class="form-group">
                                 <label>Protocol</label>
@@ -2614,6 +2614,15 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                                     <option value="udp">UDP only</option>
                                 </select>
                             </div>
+                        </div>
+
+                        <div class="form-group" style="margin-bottom:12px;">
+                            <label>Destination Port(s) <small
+                                    style="color:var(--text-muted);">(optional)</small></label>
+                            <input type="text" id="mapping-dest-ports" class="form-control" placeholder="e.g. 80,443"
+                                style="font-family:var(--font-mono); font-size:13px;">
+                            <small style="color:var(--text-muted);">Port on the container/VM. Blank = same as
+                                source</small>
                         </div>
 
                         <div class="form-group">

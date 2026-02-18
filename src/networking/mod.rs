@@ -1210,8 +1210,9 @@ pub struct IpMapping {
     pub id: String,
     pub public_ip: String,
     pub wolfnet_ip: String,
-    pub ports: Option<String>,   // None = all ports, Some("80,443") = specific
-    pub protocol: String,        // "all", "tcp", "udp"
+    pub ports: Option<String>,      // None = all ports, Some("80,443") = specific source ports
+    pub dest_ports: Option<String>, // None = same as source, Some("80") = different dest port
+    pub protocol: String,           // "all", "tcp", "udp"
     pub label: String,
     pub enabled: bool,
 }
@@ -1300,6 +1301,7 @@ pub fn add_ip_mapping(
     public_ip: &str,
     wolfnet_ip: &str,
     ports: Option<&str>,
+    dest_ports: Option<&str>,
     protocol: &str,
     label: &str,
 ) -> Result<IpMapping, String> {
@@ -1365,6 +1367,28 @@ pub fn add_ip_mapping(
         }
     }
 
+    // Validate dest_ports if provided
+    let dest_ports_clean: Option<&str> = match dest_ports {
+        Some(s) if !s.trim().is_empty() => Some(s),
+        _ => None,
+    };
+    if let Some(dp_str) = dest_ports_clean {
+        if ports.map(|s| s.trim().is_empty()).unwrap_or(true) {
+            return Err("Destination ports require source ports to be specified too.".to_string());
+        }
+        if protocol == "all" {
+            return Err("When specifying ports, you must select TCP or UDP (not 'All').".to_string());
+        }
+        let dp_list = parse_port_list(dp_str)?;
+        let sp_list = parse_port_list(ports.unwrap())?;
+        if dp_list.len() != sp_list.len() {
+            return Err(format!(
+                "Source ports ({}) and destination ports ({}) must have the same count.",
+                sp_list.len(), dp_list.len()
+            ));
+        }
+    }
+
     let mut config = load_ip_mapping_config();
 
     // Check for duplicate
@@ -1379,6 +1403,7 @@ pub fn add_ip_mapping(
         public_ip: public_ip.to_string(),
         wolfnet_ip: wolfnet_ip.to_string(),
         ports: ports.map(|s| s.to_string()),
+        dest_ports: dest_ports_clean.map(|s| s.to_string()),
         protocol: protocol.to_string(),
         label: label.to_string(),
         enabled: true,
@@ -1496,7 +1521,8 @@ fn apply_mapping_rules(m: &IpMapping) -> Result<(), String> {
         vec![]
     };
 
-    let port_args: Vec<String> = if let Some(ref ports) = m.ports {
+    // Source port args (for matching incoming traffic in PREROUTING)
+    let src_port_args: Vec<String> = if let Some(ref ports) = m.ports {
         if !ports.is_empty() && m.protocol != "all" {
             vec!["--dport".into(), ports.clone()]
         } else {
@@ -1506,20 +1532,47 @@ fn apply_mapping_rules(m: &IpMapping) -> Result<(), String> {
         vec![]
     };
 
-    // DNAT: redirect incoming traffic to WolfNet IP
+    // Build DNAT destination — include port if dest_ports differs from source
+    let dnat_dest = if let Some(ref dp) = m.dest_ports {
+        if !dp.is_empty() {
+            format!("{}:{}", m.wolfnet_ip, dp)
+        } else {
+            m.wolfnet_ip.clone()
+        }
+    } else {
+        m.wolfnet_ip.clone()
+    };
+
+    // Dest port args (for matching translated traffic in POSTROUTING/FORWARD)
+    // After DNAT, the destination port is the dest_port, so use that for matching
+    let dest_port_args: Vec<String> = {
+        let effective_ports = m.dest_ports.as_ref().or(m.ports.as_ref());
+        if let Some(ports) = effective_ports {
+            if !ports.is_empty() && m.protocol != "all" {
+                vec!["--dport".into(), ports.clone()]
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        }
+    };
+
+    // DNAT: redirect incoming traffic to WolfNet IP (with optional port translation)
     run_iptables(&[
         "-t", "nat", "-A", "PREROUTING", "-d", &m.public_ip,
-    ], &proto_args, &port_args, &["-j", "DNAT", "--to-destination", &m.wolfnet_ip])?;
+    ], &proto_args, &src_port_args, &["-j", "DNAT", "--to-destination", &dnat_dest])?;
 
     // SNAT: ensure return traffic goes back through this gateway
+    // After DNAT, destination port is the translated one
     run_iptables(&[
         "-t", "nat", "-A", "POSTROUTING", "-d", &m.wolfnet_ip,
-    ], &proto_args, &port_args, &["-j", "SNAT", "--to-source", &gateway_ip])?;
+    ], &proto_args, &dest_port_args, &["-j", "SNAT", "--to-source", &gateway_ip])?;
 
     // FORWARD: allow DNAT'd traffic
     run_iptables(&[
         "-A", "FORWARD", "-d", &m.wolfnet_ip,
-    ], &proto_args, &port_args, &["-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"])?;
+    ], &proto_args, &dest_port_args, &["-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"])?;
 
     info!("Applied iptables rules for {} → {}", m.public_ip, m.wolfnet_ip);
     Ok(())
@@ -1534,7 +1587,8 @@ fn remove_mapping_rules(m: &IpMapping) {
     } else {
         vec![]
     };
-    let port_args: Vec<String> = if let Some(ref ports) = m.ports {
+
+    let src_port_args: Vec<String> = if let Some(ref ports) = m.ports {
         if !ports.is_empty() && m.protocol != "all" {
             vec!["--dport".into(), ports.clone()]
         } else {
@@ -1544,18 +1598,41 @@ fn remove_mapping_rules(m: &IpMapping) {
         vec![]
     };
 
+    let dnat_dest = if let Some(ref dp) = m.dest_ports {
+        if !dp.is_empty() {
+            format!("{}:{}", m.wolfnet_ip, dp)
+        } else {
+            m.wolfnet_ip.clone()
+        }
+    } else {
+        m.wolfnet_ip.clone()
+    };
+
+    let dest_port_args: Vec<String> = {
+        let effective_ports = m.dest_ports.as_ref().or(m.ports.as_ref());
+        if let Some(ports) = effective_ports {
+            if !ports.is_empty() && m.protocol != "all" {
+                vec!["--dport".into(), ports.clone()]
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        }
+    };
+
     // Best-effort removal — ignore errors
     let _ = run_iptables(&[
         "-t", "nat", "-D", "PREROUTING", "-d", &m.public_ip,
-    ], &proto_args, &port_args, &["-j", "DNAT", "--to-destination", &m.wolfnet_ip]);
+    ], &proto_args, &src_port_args, &["-j", "DNAT", "--to-destination", &dnat_dest]);
 
     let _ = run_iptables(&[
         "-t", "nat", "-D", "POSTROUTING", "-d", &m.wolfnet_ip,
-    ], &proto_args, &port_args, &["-j", "SNAT", "--to-source", &gateway_ip]);
+    ], &proto_args, &dest_port_args, &["-j", "SNAT", "--to-source", &gateway_ip]);
 
     let _ = run_iptables(&[
         "-D", "FORWARD", "-d", &m.wolfnet_ip,
-    ], &proto_args, &port_args, &["-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"]);
+    ], &proto_args, &dest_port_args, &["-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"]);
 
     info!("Removed iptables rules for {} → {}", m.public_ip, m.wolfnet_ip);
 }
