@@ -310,6 +310,10 @@ body {
     padding: 28px 32px;
 }
 
+#page-terminal {
+    padding-top: 0 !important;
+}
+
 /* Ensure page-views outside .page-content still get padding */
 .main-content>.page-view {
     padding: 28px 32px;

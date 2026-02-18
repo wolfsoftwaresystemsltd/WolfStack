@@ -84,6 +84,13 @@ function apiUrl(path) {
     return `/api/nodes/${currentNodeId}/proxy/${cleanPath}`;
 }
 
+// ─── Open Terminal for the current server (called from Dashboard button) ───
+function openTerminalForCurrentNode() {
+    if (currentNodeId) {
+        selectServerView(currentNodeId, 'terminal');
+    }
+}
+
 // ─── Page Navigation ───
 function selectView(page) {
     currentPage = page;
