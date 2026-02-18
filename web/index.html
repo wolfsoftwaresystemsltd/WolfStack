@@ -53,7 +53,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v8.4.0</span>
+                <span class="version">v9.8.6</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -63,6 +63,9 @@
                 </a>
                 <a class="nav-item" data-page="appstore" onclick="selectView('appstore')">
                     <span class="icon">🛍️</span> App Store
+                </a>
+                <a class="nav-item" data-page="issues" onclick="selectView('issues')">
+                    <span class="icon">⚠️</span> Issues
                 </a>
             </div>
             <div class="nav-section">
@@ -586,6 +589,92 @@
                         <button class="btn" onclick="closeAppStoreInstallModal()">Cancel</button>
                         <button class="btn btn-primary" id="appstore-install-btn" onclick="executeAppStoreInstall()">🚀
                             Install</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Issues Page ═══ -->
+        <div id="page-issues" class="page-view" style="display:none;">
+            <!-- Header -->
+            <div class="card"
+                style="margin-bottom:20px; background:linear-gradient(135deg, rgba(234,179,8,0.12), rgba(220,38,38,0.08)); border-color:rgba(234,179,8,0.25);">
+                <div class="card-body"
+                    style="display:flex; align-items:center; justify-content:space-between; padding:28px 32px; flex-wrap:wrap; gap:16px;">
+                    <div style="display:flex; align-items:center; gap:20px;">
+                        <div
+                            style="width:64px; height:64px; background:linear-gradient(135deg,#eab308,#f59e0b); border-radius:16px; display:flex; align-items:center; justify-content:center; font-size:32px; box-shadow:0 4px 20px rgba(234,179,8,0.3);">
+                            ⚠️</div>
+                        <div>
+                            <h2 style="font-size:24px; margin-bottom:4px; color:var(--text-primary); font-weight:700;">
+                                Issues Scanner</h2>
+                            <p style="color:var(--text-secondary); font-size:13px; margin:0;">Scan all nodes for
+                                potential problems — CPU, memory, disk, services, and containers.</p>
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:10px; align-items:center;">
+                        <span id="issues-ai-badge"
+                            style="display:none; padding:4px 10px; border-radius:6px; font-size:11px; font-weight:600;
+                            background:rgba(99,102,241,0.15); color:rgba(129,140,248,1); border:1px solid rgba(99,102,241,0.3);">
+                            🤖 AI Enhanced</span>
+                        <button class="btn btn-primary" onclick="scanForIssues()" id="issues-scan-btn">
+                            🔄 Scan Now
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Summary Counters -->
+            <div class="stats-grid" style="margin-bottom:20px;">
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Critical</span>
+                        <div class="stat-icon" style="background:rgba(239,68,68,0.15); color:#ef4444;">🔴</div>
+                    </div>
+                    <div class="stat-value" id="issues-count-critical" style="color:#ef4444;">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Warnings</span>
+                        <div class="stat-icon" style="background:rgba(234,179,8,0.15); color:#eab308;">🟡</div>
+                    </div>
+                    <div class="stat-value" id="issues-count-warning" style="color:#eab308;">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Info</span>
+                        <div class="stat-icon" style="background:rgba(59,130,246,0.15); color:#3b82f6;">🔵</div>
+                    </div>
+                    <div class="stat-value" id="issues-count-info" style="color:#3b82f6;">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Nodes Scanned</span>
+                        <div class="stat-icon" style="background:rgba(16,185,129,0.15); color:#10b981;">🖥️</div>
+                    </div>
+                    <div class="stat-value" id="issues-count-nodes">0</div>
+                </div>
+            </div>
+
+            <!-- Scan Results -->
+            <div id="issues-list">
+                <div class="card">
+                    <div class="card-body" style="padding:48px; text-align:center; color:var(--text-muted);">
+                        <div style="font-size:48px; margin-bottom:12px;">🔍</div>
+                        <p style="font-size:14px; margin:0;">Click <strong>Scan Now</strong> to check all nodes for
+                            issues.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AI Analysis (populated after scan) -->
+            <div id="issues-ai-section" style="display:none; margin-top:20px;">
+                <div class="card" style="border-color:rgba(99,102,241,0.3);">
+                    <div class="card-header">
+                        <h3>🤖 AI Analysis</h3>
+                    </div>
+                    <div class="card-body">
+                        <div id="issues-ai-content" style="font-size:13px; line-height:1.7; color:var(--text);"></div>
                     </div>
                 </div>
             </div>

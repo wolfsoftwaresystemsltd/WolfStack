@@ -5988,6 +5988,194 @@ pub async fn appstore_uninstall(
     }
 }
 
+// ─── Issues Scanner ───
+
+#[derive(Serialize)]
+struct Issue {
+    severity: String,   // "critical", "warning", "info"
+    category: String,   // "cpu", "memory", "disk", "swap", "load", "service", "container"
+    title: String,
+    detail: String,
+}
+
+/// GET /api/issues/scan — scan system for issues
+pub async fn scan_issues(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let metrics = state.monitor.lock().unwrap().collect();
+    let mut issues: Vec<Issue> = Vec::new();
+
+    // ── CPU check ──
+    if metrics.cpu_usage_percent > 90.0 {
+        issues.push(Issue {
+            severity: "critical".into(),
+            category: "cpu".into(),
+            title: "CPU usage critically high".into(),
+            detail: format!("CPU at {:.1}% — system may be unresponsive", metrics.cpu_usage_percent),
+        });
+    } else if metrics.cpu_usage_percent > 75.0 {
+        issues.push(Issue {
+            severity: "warning".into(),
+            category: "cpu".into(),
+            title: "CPU usage elevated".into(),
+            detail: format!("CPU at {:.1}% — monitor for sustained load", metrics.cpu_usage_percent),
+        });
+    }
+
+    // ── Memory check ──
+    let mem_pct = metrics.memory_percent;
+    if mem_pct > 90.0 {
+        issues.push(Issue {
+            severity: "critical".into(),
+            category: "memory".into(),
+            title: "Memory usage critically high".into(),
+            detail: format!("Memory at {:.1}% — OOM risk", mem_pct),
+        });
+    } else if mem_pct > 80.0 {
+        issues.push(Issue {
+            severity: "warning".into(),
+            category: "memory".into(),
+            title: "Memory usage elevated".into(),
+            detail: format!("Memory at {:.1}%", mem_pct),
+        });
+    }
+
+    // ── Disk checks ──
+    for disk in &metrics.disks {
+        if disk.usage_percent > 95.0 {
+            issues.push(Issue {
+                severity: "critical".into(),
+                category: "disk".into(),
+                title: format!("Disk {} almost full", disk.mount_point),
+                detail: format!("{} at {:.1}% usage", disk.mount_point, disk.usage_percent),
+            });
+        } else if disk.usage_percent > 85.0 {
+            issues.push(Issue {
+                severity: "warning".into(),
+                category: "disk".into(),
+                title: format!("Disk {} usage high", disk.mount_point),
+                detail: format!("{} at {:.1}% usage", disk.mount_point, disk.usage_percent),
+            });
+        }
+    }
+
+    // ── Swap check ──
+    if metrics.swap_total_bytes > 0 {
+        let swap_pct = (metrics.swap_used_bytes as f64 / metrics.swap_total_bytes as f64) * 100.0;
+        if swap_pct > 50.0 {
+            issues.push(Issue {
+                severity: "warning".into(),
+                category: "swap".into(),
+                title: "Significant swap usage".into(),
+                detail: format!("Swap at {:.1}% — system may be low on RAM", swap_pct),
+            });
+        }
+    }
+
+    // ── Load average check ──
+    let cpu_count = metrics.cpu_count.max(1) as f64;
+    if metrics.load_avg.one > cpu_count * 2.0 {
+        issues.push(Issue {
+            severity: "critical".into(),
+            category: "load".into(),
+            title: "Load average extremely high".into(),
+            detail: format!("Load {:.2} ({:.1}× CPU count {})", metrics.load_avg.one, metrics.load_avg.one / cpu_count, metrics.cpu_count),
+        });
+    } else if metrics.load_avg.one > cpu_count {
+        issues.push(Issue {
+            severity: "warning".into(),
+            category: "load".into(),
+            title: "Load average high".into(),
+            detail: format!("Load {:.2} (>{} CPUs)", metrics.load_avg.one, metrics.cpu_count),
+        });
+    }
+
+    // ── Failed systemd services ──
+    if let Ok(output) = std::process::Command::new("systemctl")
+        .args(["--failed", "--no-legend", "--plain"])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(unit) = parts.first() {
+                if !unit.is_empty() {
+                    issues.push(Issue {
+                        severity: "warning".into(),
+                        category: "service".into(),
+                        title: format!("Service {} failed", unit),
+                        detail: format!("systemd unit {} is in failed state", unit),
+                    });
+                }
+            }
+        }
+    }
+
+    // ── Stopped Docker containers ──
+    if let Ok(output) = std::process::Command::new("docker")
+        .args(["ps", "-a", "--filter", "status=exited", "--format", "{{.Names}}"])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stopped: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+        if !stopped.is_empty() {
+            issues.push(Issue {
+                severity: "info".into(),
+                category: "container".into(),
+                title: format!("{} stopped Docker container(s)", stopped.len()),
+                detail: format!("Stopped: {}", stopped.join(", ")),
+            });
+        }
+    }
+
+    // ── Stopped LXC containers ──
+    if let Ok(output) = std::process::Command::new("lxc-ls")
+        .args(["--stopped"])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stopped: Vec<&str> = stdout.split_whitespace().filter(|l| !l.is_empty()).collect();
+        if !stopped.is_empty() {
+            issues.push(Issue {
+                severity: "info".into(),
+                category: "container".into(),
+                title: format!("{} stopped LXC container(s)", stopped.len()),
+                detail: format!("Stopped: {}", stopped.join(", ")),
+            });
+        }
+    }
+
+    // ── AI analysis (if configured) ──
+    let ai_analysis = {
+        let config = state.ai_agent.config.lock().unwrap().clone();
+        if config.is_configured() {
+            // Build a metrics summary for the AI
+            let summary = format!(
+                "Hostname: {}\nCPU: {:.1}% ({} cores, {})\nMemory: {:.1}% ({}/{} MB)\nSwap: {}/{} MB\nLoad: {:.2} {:.2} {:.2}\nDisks: {}\nProcesses: {}",
+                metrics.hostname,
+                metrics.cpu_usage_percent, metrics.cpu_count, metrics.cpu_model,
+                mem_pct, metrics.memory_used_bytes / 1048576, metrics.memory_total_bytes / 1048576,
+                metrics.swap_used_bytes / 1048576, metrics.swap_total_bytes / 1048576,
+                metrics.load_avg.one, metrics.load_avg.five, metrics.load_avg.fifteen,
+                metrics.disks.iter().map(|d| format!("{}: {:.1}%", d.mount_point, d.usage_percent)).collect::<Vec<_>>().join(", "),
+                metrics.processes,
+            );
+            state.ai_agent.health_check(&summary).await
+        } else {
+            None
+        }
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "hostname": metrics.hostname,
+        "issues": issues,
+        "ai_analysis": ai_analysis,
+    }))
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -6205,6 +6393,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/config/export", web::get().to(config_export))
         .route("/api/config/import", web::post().to(config_import))
         .route("/api/upgrade", web::post().to(system_upgrade))
+        // Issues Scanner
+        .route("/api/issues/scan", web::get().to(scan_issues))
         // Node proxy — forward API calls to remote nodes (must be last — wildcard path)
         .route("/api/nodes/{id}/proxy/{path:.*}", web::get().to(node_proxy))
         .route("/api/nodes/{id}/proxy/{path:.*}", web::post().to(node_proxy))

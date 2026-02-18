@@ -97,7 +97,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', 'ai-settings': 'AI Agent', docs: 'Help & Documentation', appstore: 'App Store' };
+    const titles = { datacenter: 'Datacenter', 'ai-settings': 'AI Agent', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -108,6 +108,8 @@ function selectView(page) {
         loadAiAlerts();
     } else if (page === 'appstore') {
         loadAppStoreApps();
+    } else if (page === 'issues') {
+        checkIssuesAiBadge();
     }
 }
 
@@ -11847,6 +11849,152 @@ async function mysqlExecuteQuery() {
 function escapeHtml(str) {
     if (str == null) return '';
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ═══════════════════════════════════════════════
+// ═══════════════════════════════════════════════
+// ─── Issues Scanner ───
+// ═══════════════════════════════════════════════
+
+async function checkIssuesAiBadge() {
+    try {
+        var resp = await fetch('/api/ai/status');
+        var status = await resp.json();
+        var badge = document.getElementById('issues-ai-badge');
+        if (badge) badge.style.display = status.configured ? 'inline-block' : 'none';
+    } catch (e) {
+        // silently ignore
+    }
+}
+
+async function scanForIssues() {
+    var btn = document.getElementById('issues-scan-btn');
+    var listEl = document.getElementById('issues-list');
+    if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Scanning...'; }
+    if (listEl) listEl.innerHTML = '<div class="card"><div class="card-body" style="padding:48px; text-align:center; color:var(--text-muted);"><div style="font-size:48px; margin-bottom:12px;">⏳</div><p style="font-size:14px; margin:0;">Scanning nodes for issues...</p></div></div>';
+
+    // Hide AI section while scanning
+    var aiSection = document.getElementById('issues-ai-section');
+    if (aiSection) aiSection.style.display = 'none';
+
+    var results = []; // Array of { hostname, issues, ai_analysis }
+
+    // Scan local node
+    try {
+        var resp = await fetch('/api/issues/scan');
+        var data = await resp.json();
+        results.push(data);
+    } catch (e) {
+        results.push({ hostname: 'local', issues: [{ severity: 'warning', category: 'scan', title: 'Scan failed', detail: e.message }], ai_analysis: null });
+    }
+
+    // Scan remote WolfStack nodes
+    if (typeof allNodes !== 'undefined' && allNodes.length) {
+        var remoteNodes = allNodes.filter(function (n) { return n.type === 'wolfstack' && !n.is_local; });
+        var promises = remoteNodes.map(function (node) {
+            return fetch('/api/nodes/' + encodeURIComponent(node.id) + '/proxy/issues/scan')
+                .then(function (r) { return r.json(); })
+                .catch(function (e) {
+                    return { hostname: node.hostname || node.id, issues: [{ severity: 'info', category: 'scan', title: 'Could not scan', detail: e.message }], ai_analysis: null };
+                });
+        });
+        var remoteResults = await Promise.all(promises);
+        results = results.concat(remoteResults);
+    }
+
+    // Aggregate counts
+    var counts = { critical: 0, warning: 0, info: 0 };
+    results.forEach(function (r) {
+        (r.issues || []).forEach(function (issue) {
+            if (counts[issue.severity] !== undefined) counts[issue.severity]++;
+        });
+    });
+
+    var critEl = document.getElementById('issues-count-critical');
+    var warnEl = document.getElementById('issues-count-warning');
+    var infoEl = document.getElementById('issues-count-info');
+    var nodesEl = document.getElementById('issues-count-nodes');
+    if (critEl) critEl.textContent = counts.critical;
+    if (warnEl) warnEl.textContent = counts.warning;
+    if (infoEl) infoEl.textContent = counts.info;
+    if (nodesEl) nodesEl.textContent = results.length;
+
+    // Render results
+    renderIssueResults(results);
+
+    // Show AI analysis if any node returned one
+    var aiTexts = results.map(function (r) {
+        if (r.ai_analysis) return '**' + escapeHtml(r.hostname) + ':** ' + r.ai_analysis;
+        return null;
+    }).filter(Boolean);
+
+    if (aiTexts.length > 0) {
+        if (aiSection) {
+            aiSection.style.display = 'block';
+            var aiContent = document.getElementById('issues-ai-content');
+            if (aiContent) aiContent.innerHTML = aiTexts.map(function (t) { return formatAiResponse(t); }).join('<hr style="border-color:var(--border); margin:16px 0;">');
+        }
+    }
+
+    if (btn) { btn.disabled = false; btn.innerHTML = '🔄 Scan Now'; }
+}
+
+function renderIssueResults(results) {
+    var listEl = document.getElementById('issues-list');
+    if (!listEl) return;
+
+    var totalIssues = 0;
+    results.forEach(function (r) { totalIssues += (r.issues || []).length; });
+
+    if (totalIssues === 0) {
+        listEl.innerHTML = '<div class="card"><div class="card-body" style="padding:48px; text-align:center; color:var(--text-muted);"><div style="font-size:48px; margin-bottom:12px;">✅</div><p style="font-size:16px; font-weight:600; margin:0 0 4px;">All Clear</p><p style="font-size:13px; margin:0;">No issues detected across ' + results.length + ' node(s).</p></div></div>';
+        return;
+    }
+
+    var severityColors = {
+        critical: { bg: 'rgba(239,68,68,0.1)', border: 'rgba(239,68,68,0.3)', text: '#ef4444', icon: '🔴' },
+        warning: { bg: 'rgba(234,179,8,0.1)', border: 'rgba(234,179,8,0.3)', text: '#eab308', icon: '🟡' },
+        info: { bg: 'rgba(59,130,246,0.1)', border: 'rgba(59,130,246,0.3)', text: '#3b82f6', icon: '🔵' }
+    };
+
+    var categoryIcons = {
+        cpu: '⚡', memory: '🧠', disk: '💾', swap: '🔄', load: '📈',
+        service: '⚙️', container: '📦', scan: '🔍'
+    };
+
+    var html = '';
+    results.forEach(function (r) {
+        if (!r.issues || r.issues.length === 0) return;
+
+        html += '<div class="card" style="margin-bottom:16px;">';
+        html += '<div class="card-header"><h3>🖥️ ' + escapeHtml(r.hostname || 'Unknown') + '</h3>';
+        html += '<span style="font-size:12px; color:var(--text-muted);">' + r.issues.length + ' issue(s)</span></div>';
+        html += '<div class="card-body" style="display:grid; gap:10px;">';
+
+        // Sort: critical first, then warning, then info
+        var order = { critical: 0, warning: 1, info: 2 };
+        var sorted = r.issues.slice().sort(function (a, b) { return (order[a.severity] || 9) - (order[b.severity] || 9); });
+
+        sorted.forEach(function (issue) {
+            var c = severityColors[issue.severity] || severityColors.info;
+            var catIcon = categoryIcons[issue.category] || '❓';
+
+            html += '<div style="display:flex; align-items:flex-start; gap:12px; padding:12px 16px; border-radius:10px; background:' + c.bg + '; border:1px solid ' + c.border + ';">';
+            html += '<span style="font-size:18px; flex-shrink:0; margin-top:1px;">' + catIcon + '</span>';
+            html += '<div style="flex:1; min-width:0;">';
+            html += '<div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">';
+            html += '<span style="font-size:10px;">' + c.icon + '</span>';
+            html += '<span style="font-weight:600; font-size:13px; color:' + c.text + '; text-transform:uppercase; letter-spacing:0.5px;">' + escapeHtml(issue.severity) + '</span>';
+            html += '</div>';
+            html += '<div style="font-weight:600; font-size:14px; color:var(--text-primary); margin-bottom:4px;">' + escapeHtml(issue.title) + '</div>';
+            html += '<div style="font-size:12px; color:var(--text-secondary); line-height:1.5;">' + escapeHtml(issue.detail) + '</div>';
+            html += '</div></div>';
+        });
+
+        html += '</div></div>';
+    });
+
+    listEl.innerHTML = html;
 }
 
 // ═══════════════════════════════════════════════
