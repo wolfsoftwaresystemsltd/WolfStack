@@ -966,6 +966,8 @@ pub struct ContainerInfo {
     pub disk_total: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fs_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1214,6 +1216,7 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                         disk_usage: du,
                         disk_total: dt,
                         fs_type: ft,
+                        version: None,
                     }
                 })
                 .collect()
@@ -1525,6 +1528,8 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                     } else { None };
                     let (du, dt, ft) = get_path_disk_usage(&rootfs_path);
 
+                    let version = lxc_read_os_version(&rootfs_path);
+
                     ContainerInfo {
                         id: name.clone(),
                         name,
@@ -1541,6 +1546,7 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                         disk_usage: du,
                         disk_total: dt,
                         fs_type: ft,
+                        version,
                     }
                 })
                 .collect()
@@ -1668,6 +1674,9 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                 (Some(0), alloc_bytes, None)
             };
 
+            let pve_rootfs_path = format!("/var/lib/lxc/{}/rootfs", vmid);
+            let version = lxc_read_os_version(&pve_rootfs_path);
+
             Some(ContainerInfo {
                 id: vmid.clone(),
                 name: vmid,
@@ -1684,9 +1693,52 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                 disk_usage: du,
                 disk_total: dt,
                 fs_type: ft,
+                version,
             })
         })
         .collect()
+}
+
+/// Read OS version from an LXC container's rootfs (e.g. "Ubuntu 22.04.3 LTS")
+fn lxc_read_os_version(rootfs_path: &str) -> Option<String> {
+    // Try /etc/os-release first (standard on modern distros)
+    let os_release_path = format!("{}/etc/os-release", rootfs_path);
+    if let Ok(content) = std::fs::read_to_string(&os_release_path) {
+        // Look for PRETTY_NAME first, then NAME + VERSION
+        let mut pretty_name = None;
+        let mut name = None;
+        let mut version = None;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with("PRETTY_NAME=") {
+                pretty_name = Some(line.trim_start_matches("PRETTY_NAME=")
+                    .trim_matches('"').to_string());
+            } else if line.starts_with("NAME=") {
+                name = Some(line.trim_start_matches("NAME=")
+                    .trim_matches('"').to_string());
+            } else if line.starts_with("VERSION=") {
+                version = Some(line.trim_start_matches("VERSION=")
+                    .trim_matches('"').to_string());
+            }
+        }
+        if let Some(pn) = pretty_name {
+            if !pn.is_empty() { return Some(pn); }
+        }
+        if let (Some(n), Some(v)) = (name, version) {
+            return Some(format!("{} {}", n, v));
+        }
+    }
+    // Fallback: try /etc/lsb-release
+    let lsb_path = format!("{}/etc/lsb-release", rootfs_path);
+    if let Ok(content) = std::fs::read_to_string(&lsb_path) {
+        for line in content.lines() {
+            if line.starts_with("DISTRIB_DESCRIPTION=") {
+                return Some(line.trim_start_matches("DISTRIB_DESCRIPTION=")
+                    .trim_matches('"').to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Get disk usage for a path using df (returns used_bytes, total_bytes)

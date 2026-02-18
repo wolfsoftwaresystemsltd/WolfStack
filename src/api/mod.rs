@@ -4109,6 +4109,508 @@ pub async fn storage_sync_s3(
     }
 }
 
+// ─── ZFS Storage ───
+
+/// GET /api/storage/zfs/status — check if ZFS is available and return overview
+pub async fn zfs_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+
+    let available = std::process::Command::new("which").arg("zfs").output()
+        .map(|o| o.status.success()).unwrap_or(false);
+
+    if !available {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "available": false,
+            "pools": []
+        }));
+    }
+
+    // Get pool summary
+    let pools = zfs_get_pools();
+    HttpResponse::Ok().json(serde_json::json!({
+        "available": true,
+        "pools": pools
+    }))
+}
+
+/// GET /api/storage/zfs/pools — list all ZFS pools with usage stats
+pub async fn zfs_pools(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(zfs_get_pools())
+}
+
+/// GET /api/storage/zfs/datasets?pool=POOL — list datasets for a pool
+pub async fn zfs_datasets(req: HttpRequest, state: web::Data<AppState>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let pool = query.get("pool").cloned().unwrap_or_default();
+    if pool.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'pool' parameter" }));
+    }
+    // Validate pool name (alphanumeric, dash, underscore, dot only)
+    if !pool.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid pool name" }));
+    }
+
+    let output = std::process::Command::new("zfs")
+        .args(["list", "-H", "-r", "-o", "name,used,avail,refer,mountpoint,compression,compressratio", &pool])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let datasets: Vec<serde_json::Value> = text.lines()
+                .filter(|l| !l.is_empty())
+                .map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    serde_json::json!({
+                        "name": parts.get(0).unwrap_or(&""),
+                        "used": parts.get(1).unwrap_or(&""),
+                        "available": parts.get(2).unwrap_or(&""),
+                        "refer": parts.get(3).unwrap_or(&""),
+                        "mountpoint": parts.get(4).unwrap_or(&""),
+                        "compression": parts.get(5).unwrap_or(&""),
+                        "compressratio": parts.get(6).unwrap_or(&""),
+                    })
+                })
+                .collect();
+            HttpResponse::Ok().json(datasets)
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/storage/zfs/snapshots?dataset=DATASET — list snapshots
+pub async fn zfs_snapshots(req: HttpRequest, state: web::Data<AppState>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let dataset = query.get("dataset").cloned().unwrap_or_default();
+
+    let mut args = vec!["list", "-t", "snapshot", "-H", "-o", "name,creation,used,refer"];
+    if !dataset.is_empty() {
+        if !dataset.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/' || c == '@') {
+            return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid dataset name" }));
+        }
+        args.push("-r");
+        args.push(&dataset);
+    }
+
+    let output = std::process::Command::new("zfs").args(&args).output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let snapshots: Vec<serde_json::Value> = text.lines()
+                .filter(|l| !l.is_empty())
+                .map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    serde_json::json!({
+                        "name": parts.get(0).unwrap_or(&""),
+                        "creation": parts.get(1).unwrap_or(&""),
+                        "used": parts.get(2).unwrap_or(&""),
+                        "refer": parts.get(3).unwrap_or(&""),
+                    })
+                })
+                .collect();
+            HttpResponse::Ok().json(snapshots)
+        }
+        Ok(out) => {
+            let _err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::Ok().json(Vec::<serde_json::Value>::new()) // empty list if no snapshots
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/storage/zfs/snapshot — create a snapshot
+pub async fn zfs_create_snapshot(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let dataset = body.get("dataset").and_then(|v| v.as_str()).unwrap_or("");
+    let snap_name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
+
+    if dataset.is_empty() || snap_name.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'dataset' or 'name'" }));
+    }
+    // Validate names
+    let valid_chars = |s: &str| s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/');
+    if !valid_chars(dataset) || !valid_chars(snap_name) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid characters in dataset or snapshot name" }));
+    }
+
+    let snapshot_full = format!("{}@{}", dataset, snap_name);
+    let output = std::process::Command::new("zfs")
+        .args(["snapshot", &snapshot_full])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            HttpResponse::Ok().json(serde_json::json!({ "message": format!("Snapshot '{}' created", snapshot_full) }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// DELETE /api/storage/zfs/snapshot — delete a snapshot
+pub async fn zfs_delete_snapshot(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let snapshot = body.get("snapshot").and_then(|v| v.as_str()).unwrap_or("");
+
+    if snapshot.is_empty() || !snapshot.contains('@') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid snapshot name (must contain @)" }));
+    }
+    if !snapshot.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/' || c == '@') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid characters in snapshot name" }));
+    }
+
+    let output = std::process::Command::new("zfs")
+        .args(["destroy", snapshot])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            HttpResponse::Ok().json(serde_json::json!({ "message": format!("Snapshot '{}' deleted", snapshot) }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// Helper: parse zpool list output into JSON
+fn zfs_get_pools() -> Vec<serde_json::Value> {
+    let output = std::process::Command::new("zpool")
+        .args(["list", "-H", "-o", "name,size,alloc,free,health,fragmentation,capacity"])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout).lines()
+                .filter(|l| !l.is_empty())
+                .map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    serde_json::json!({
+                        "name": parts.get(0).unwrap_or(&""),
+                        "size": parts.get(1).unwrap_or(&""),
+                        "alloc": parts.get(2).unwrap_or(&""),
+                        "free": parts.get(3).unwrap_or(&""),
+                        "health": parts.get(4).unwrap_or(&""),
+                        "fragmentation": parts.get(5).unwrap_or(&""),
+                        "capacity": parts.get(6).unwrap_or(&""),
+                    })
+                })
+                .collect()
+        }
+        _ => vec![],
+    }
+}
+
+// ─── File Manager ───
+
+/// Validate and normalize a file path — prevent traversal attacks
+fn sanitize_file_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let p = std::path::Path::new(path);
+    // Must be absolute
+    if !p.is_absolute() {
+        return Err("Path must be absolute".into());
+    }
+    // Canonicalize to resolve .. and symlinks
+    match p.canonicalize() {
+        Ok(canonical) => Ok(canonical),
+        Err(_) => {
+            // For paths that don't exist yet (e.g., mkdir), check the parent
+            if let Some(parent) = p.parent() {
+                if let Ok(canonical_parent) = parent.canonicalize() {
+                    let file_name = p.file_name().ok_or("Invalid path")?;
+                    Ok(canonical_parent.join(file_name))
+                } else {
+                    Err("Parent directory does not exist".into())
+                }
+            } else {
+                Err("Invalid path".into())
+            }
+        }
+    }
+}
+
+/// GET /api/files/browse?path=/some/path — list directory contents
+pub async fn files_browse(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let path = query.get("path").cloned().unwrap_or_else(|| "/".into());
+
+    let canonical = match sanitize_file_path(&path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+
+    if !canonical.is_dir() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Not a directory" }));
+    }
+
+    let mut entries = Vec::new();
+    match std::fs::read_dir(&canonical) {
+        Ok(dir) => {
+            for entry in dir.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let meta = entry.metadata().ok();
+                let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let modified = meta.as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                // Unix permissions
+                #[cfg(unix)]
+                let permissions = {
+                    use std::os::unix::fs::PermissionsExt;
+                    meta.as_ref()
+                        .map(|m| format!("{:o}", m.permissions().mode() & 0o7777))
+                        .unwrap_or_default()
+                };
+                #[cfg(not(unix))]
+                let permissions = String::new();
+
+                let entry_path = canonical.join(&name);
+                entries.push(serde_json::json!({
+                    "name": name,
+                    "path": entry_path.to_string_lossy(),
+                    "is_dir": is_dir,
+                    "size": if is_dir { 0 } else { size },
+                    "modified": modified,
+                    "permissions": permissions,
+                }));
+            }
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Cannot read directory: {}", e)
+            }));
+        }
+    }
+
+    // Sort: directories first, then alphabetically
+    entries.sort_by(|a, b| {
+        let a_dir = a["is_dir"].as_bool().unwrap_or(false);
+        let b_dir = b["is_dir"].as_bool().unwrap_or(false);
+        match (a_dir, b_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a["name"].as_str().unwrap_or("")
+                .to_lowercase()
+                .cmp(&b["name"].as_str().unwrap_or("").to_lowercase()),
+        }
+    });
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "path": canonical.to_string_lossy(),
+        "entries": entries,
+    }))
+}
+
+/// POST /api/files/mkdir — create directory
+pub async fn files_mkdir(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" }));
+    }
+
+    let canonical = match sanitize_file_path(path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+
+    match std::fs::create_dir_all(&canonical) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Directory created: {}", canonical.display())
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to create directory: {}", e)
+        })),
+    }
+}
+
+/// POST /api/files/delete — delete file or directory
+pub async fn files_delete(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" }));
+    }
+
+    let canonical = match sanitize_file_path(path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+
+    // Prevent deleting critical system paths
+    let critical = ["/", "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/proc", "/sys", "/dev", "/var", "/root"];
+    if critical.contains(&canonical.to_string_lossy().as_ref()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Cannot delete system directory" }));
+    }
+
+    let result = if canonical.is_dir() {
+        std::fs::remove_dir_all(&canonical)
+    } else {
+        std::fs::remove_file(&canonical)
+    };
+
+    match result {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Deleted: {}", canonical.display())
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to delete: {}", e)
+        })),
+    }
+}
+
+/// POST /api/files/rename — rename / move a file or directory
+pub async fn files_rename(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let from = body.get("from").and_then(|v| v.as_str()).unwrap_or("");
+    let to = body.get("to").and_then(|v| v.as_str()).unwrap_or("");
+    if from.is_empty() || to.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'from' or 'to'" }));
+    }
+
+    let from_path = match sanitize_file_path(from) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+    let to_path = match sanitize_file_path(to) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+
+    match std::fs::rename(&from_path, &to_path) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Renamed to {}", to_path.display())
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to rename: {}", e)
+        })),
+    }
+}
+
+/// POST /api/files/upload?path=/some/dir — upload file(s) via multipart
+pub async fn files_upload(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+    mut payload: actix_multipart::Multipart,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let dir = query.get("path").cloned().unwrap_or_else(|| "/tmp".into());
+
+    let canonical_dir = match sanitize_file_path(&dir) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+
+    if !canonical_dir.is_dir() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Target is not a directory" }));
+    }
+
+    use futures::StreamExt;
+    let mut uploaded = Vec::new();
+
+    while let Some(Ok(mut field)) = payload.next().await {
+        let filename = field.content_disposition()
+            .and_then(|cd| cd.get_filename().map(|s| s.to_string()))
+            .unwrap_or_else(|| "upload".to_string());
+
+        // Sanitize filename
+        let safe_name = filename.replace("..", "").replace("/", "").replace("\\", "");
+        if safe_name.is_empty() { continue; }
+
+        let file_path = canonical_dir.join(&safe_name);
+        let mut file = match std::fs::File::create(&file_path) {
+            Ok(f) => f,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Cannot create file {}: {}", safe_name, e)
+                }));
+            }
+        };
+
+        use std::io::Write;
+        while let Some(Ok(chunk)) = field.next().await {
+            if file.write_all(&chunk).is_err() {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to write file {}", safe_name)
+                }));
+            }
+        }
+        uploaded.push(safe_name);
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": format!("Uploaded {} file(s)", uploaded.len()),
+        "files": uploaded,
+    }))
+}
+
+/// GET /api/files/download?path=/some/file — download a file
+pub async fn files_download(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let path = query.get("path").cloned().unwrap_or_default();
+    if path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" }));
+    }
+
+    let canonical = match sanitize_file_path(&path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+
+    if !canonical.is_file() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Not a file" }));
+    }
+
+    let filename = canonical.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".into());
+
+    match std::fs::read(&canonical) {
+        Ok(data) => HttpResponse::Ok()
+            .insert_header(("Content-Disposition", format!("attachment; filename=\"{}\"", filename)))
+            .insert_header(("Content-Type", "application/octet-stream"))
+            .body(data),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Cannot read file: {}", e)
+        })),
+    }
+}
+
 /// POST /api/agent/storage/apply — receive and apply a mount config from another node (cluster-auth)
 pub async fn agent_storage_apply(
     req: HttpRequest,
@@ -4920,6 +5422,20 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/storage/mounts/{id}/unmount", web::post().to(storage_do_unmount))
         .route("/api/storage/mounts/{id}/sync", web::post().to(storage_sync_mount))
         .route("/api/storage/mounts/{id}/sync-s3", web::post().to(storage_sync_s3))
+        // ZFS
+        .route("/api/storage/zfs/status", web::get().to(zfs_status))
+        .route("/api/storage/zfs/pools", web::get().to(zfs_pools))
+        .route("/api/storage/zfs/datasets", web::get().to(zfs_datasets))
+        .route("/api/storage/zfs/snapshots", web::get().to(zfs_snapshots))
+        .route("/api/storage/zfs/snapshot", web::post().to(zfs_create_snapshot))
+        .route("/api/storage/zfs/snapshot", web::delete().to(zfs_delete_snapshot))
+        // File Manager
+        .route("/api/files/browse", web::get().to(files_browse))
+        .route("/api/files/mkdir", web::post().to(files_mkdir))
+        .route("/api/files/delete", web::post().to(files_delete))
+        .route("/api/files/rename", web::post().to(files_rename))
+        .route("/api/files/upload", web::post().to(files_upload))
+        .route("/api/files/download", web::get().to(files_download))
         // Networking
         .route("/api/networking/interfaces", web::get().to(net_list_interfaces))
         .route("/api/networking/dns", web::get().to(net_get_dns))

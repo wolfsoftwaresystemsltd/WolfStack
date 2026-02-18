@@ -134,6 +134,7 @@ function selectServerView(nodeId, view) {
         containers: 'Docker',
         lxc: 'LXC',
         storage: 'Storage',
+        files: 'File Manager',
         networking: 'Networking',
         wolfnet: 'WolfNet',
         certificates: 'Certificates',
@@ -204,7 +205,8 @@ function selectServerView(nodeId, view) {
         }
     }
     if (view === 'vms') loadVms().finally(() => hidePageLoadingOverlay(el));
-    if (view === 'storage') loadStorageMounts().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'storage') Promise.all([loadStorageMounts(), loadZfsStatus()]).finally(() => hidePageLoadingOverlay(el));
+    if (view === 'files') loadFiles().finally(() => hidePageLoadingOverlay(el));
     if (view === 'networking') loadNetworking().finally(() => hidePageLoadingOverlay(el));
     if (view === 'backups') loadBackups().finally(() => hidePageLoadingOverlay(el));
     if (view === 'wolfnet') loadWolfNet().finally(() => hidePageLoadingOverlay(el));
@@ -326,6 +328,9 @@ function buildServerTree(nodes) {
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="storage" onclick="selectServerView('${node.id}', 'storage')">
                             <span class="icon">💾</span> Storage
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="files" onclick="selectServerView('${node.id}', 'files')">
+                            <span class="icon">📂</span> Files
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="networking" onclick="selectServerView('${node.id}', 'networking')">
                             <span class="icon">🌐</span> Networking
@@ -2338,6 +2343,390 @@ async function importRcloneConfig() {
         loadStorageMounts();
     } catch (e) {
         showModal('Import error: ' + e.message);
+    }
+}
+
+// ─── File Manager ───
+
+let currentFilePath = '/';
+
+async function loadFiles(path) {
+    if (path !== undefined) currentFilePath = path;
+    const table = document.getElementById('file-list-table');
+    const empty = document.getElementById('file-empty');
+    if (!table) return;
+
+    try {
+        const resp = await fetch(apiUrl(`/api/files/browse?path=${encodeURIComponent(currentFilePath)}`));
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast(data.error || 'Failed to browse', 'error');
+            return;
+        }
+
+        currentFilePath = data.path || currentFilePath;
+        renderFileBreadcrumb(currentFilePath);
+
+        const entries = data.entries || [];
+        if (entries.length === 0) {
+            table.innerHTML = '';
+            if (empty) empty.style.display = '';
+            return;
+        }
+        if (empty) empty.style.display = 'none';
+        renderFileList(entries);
+    } catch (e) {
+        console.error('File browse failed:', e);
+        showToast('Failed to load files', 'error');
+    }
+}
+
+function renderFileBreadcrumb(path) {
+    const bc = document.getElementById('file-breadcrumb');
+    if (!bc) return;
+
+    const parts = path.split('/').filter(Boolean);
+    let html = `<a href="#" onclick="navigateToDir('/');return false;" style="color:var(--accent);text-decoration:none;font-weight:600;">🏠 /</a>`;
+    let accumulated = '';
+    for (const part of parts) {
+        accumulated += '/' + part;
+        const p = accumulated;
+        html += `<span style="color:var(--text-muted);">/</span>`;
+        html += `<a href="#" onclick="navigateToDir('${p.replace(/'/g, "\\'")}');return false;" style="color:var(--accent);text-decoration:none;">${escapeHtml(part)}</a>`;
+    }
+    bc.innerHTML = html;
+}
+
+function renderFileList(entries) {
+    const table = document.getElementById('file-list-table');
+    if (!table) return;
+
+    table.innerHTML = entries.map(e => {
+        const icon = e.is_dir ? '📁' : getFileIcon(e.name);
+        const sizeStr = e.is_dir ? '—' : formatFileSize(e.size);
+        const modStr = e.modified ? new Date(e.modified * 1000).toLocaleString() : '—';
+        const nameClick = e.is_dir
+            ? `onclick="navigateToDir('${e.path.replace(/'/g, "\\'")}')" style="cursor:pointer;color:var(--accent);font-weight:600;"`
+            : '';
+
+        return `<tr>
+            <td><span ${nameClick}>${icon} ${escapeHtml(e.name)}</span></td>
+            <td style="font-size:12px;color:var(--text-muted);">${sizeStr}</td>
+            <td style="font-size:12px;color:var(--text-muted);">${modStr}</td>
+            <td style="font-family:var(--font-mono);font-size:12px;">${escapeHtml(e.permissions)}</td>
+            <td style="white-space:nowrap;">
+                ${!e.is_dir ? `<button class="btn btn-sm" style="font-size:11px;padding:2px 6px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="downloadFile('${e.path.replace(/'/g, "\\'")}')">⬇️</button>` : ''}
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 6px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="renameFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">✏️</button>
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 6px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);" onclick="deleteFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">🗑️</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function getFileIcon(name) {
+    const ext = name.split('.').pop().toLowerCase();
+    const icons = {
+        'js': '📜', 'ts': '📜', 'rs': '🦀', 'py': '🐍', 'go': '🔵',
+        'html': '🌐', 'css': '🎨', 'json': '📋', 'xml': '📋', 'yaml': '📋', 'yml': '📋', 'toml': '📋',
+        'md': '📝', 'txt': '📄', 'log': '📄', 'conf': '⚙️', 'cfg': '⚙️', 'ini': '⚙️',
+        'sh': '⚡', 'bash': '⚡', 'zsh': '⚡',
+        'png': '🖼️', 'jpg': '🖼️', 'jpeg': '🖼️', 'gif': '🖼️', 'svg': '🖼️', 'webp': '🖼️',
+        'zip': '📦', 'tar': '📦', 'gz': '📦', 'bz2': '📦', 'xz': '📦', 'rar': '📦',
+        'db': '🗃️', 'sql': '🗃️', 'sqlite': '🗃️',
+    };
+    return icons[ext] || '📄';
+}
+
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+}
+
+function navigateToDir(path) {
+    loadFiles(path);
+}
+
+function downloadFile(path) {
+    window.open(apiUrl(`/api/files/download?path=${encodeURIComponent(path)}`), '_blank');
+}
+
+async function deleteFile(path, name) {
+    if (!confirm(`Delete '${name}'?\n\nThis cannot be undone.`)) return;
+    try {
+        const resp = await fetch(apiUrl('/api/files/delete'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Deleted', 'success');
+            loadFiles();
+        } else {
+            showToast(data.error || 'Failed to delete', 'error');
+        }
+    } catch (e) { showToast(`Failed: ${e.message}`, 'error'); }
+}
+
+async function renameFile(path, oldName) {
+    const newName = prompt(`Rename '${oldName}' to:`, oldName);
+    if (!newName || newName === oldName) return;
+    const parentDir = path.substring(0, path.lastIndexOf('/'));
+    const newPath = parentDir + '/' + newName;
+    try {
+        const resp = await fetch(apiUrl('/api/files/rename'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ from: path, to: newPath }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Renamed', 'success');
+            loadFiles();
+        } else {
+            showToast(data.error || 'Failed to rename', 'error');
+        }
+    } catch (e) { showToast(`Failed: ${e.message}`, 'error'); }
+}
+
+function showNewFolderModal() {
+    const name = prompt('Enter folder name:');
+    if (!name) return;
+    createNewFolder(name);
+}
+
+async function createNewFolder(name) {
+    const path = currentFilePath.endsWith('/') ? currentFilePath + name : currentFilePath + '/' + name;
+    try {
+        const resp = await fetch(apiUrl('/api/files/mkdir'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Folder created', 'success');
+            loadFiles();
+        } else {
+            showToast(data.error || 'Failed to create folder', 'error');
+        }
+    } catch (e) { showToast(`Failed: ${e.message}`, 'error'); }
+}
+
+function triggerFileUpload() {
+    document.getElementById('file-upload-input').click();
+}
+
+async function uploadFiles(files) {
+    if (!files || files.length === 0) return;
+    const formData = new FormData();
+    for (const file of files) {
+        formData.append('file', file, file.name);
+    }
+    try {
+        const resp = await fetch(apiUrl(`/api/files/upload?path=${encodeURIComponent(currentFilePath)}`), {
+            method: 'POST',
+            body: formData,
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Uploaded', 'success');
+            loadFiles();
+        } else {
+            showToast(data.error || 'Upload failed', 'error');
+        }
+    } catch (e) { showToast(`Upload failed: ${e.message}`, 'error'); }
+    // Reset the input
+    document.getElementById('file-upload-input').value = '';
+}
+
+// ─── ZFS Storage ───
+
+async function loadZfsStatus() {
+    try {
+        const resp = await fetch(apiUrl('/api/storage/zfs/status'));
+        const data = await resp.json();
+        const section = document.getElementById('zfs-section');
+        if (!section) return;
+
+        if (!data.available) {
+            section.style.display = 'none';
+            return;
+        }
+        section.style.display = '';
+        renderZfsPools(data.pools || []);
+    } catch (e) {
+        console.error('Failed to load ZFS status:', e);
+        const section = document.getElementById('zfs-section');
+        if (section) section.style.display = 'none';
+    }
+}
+
+function renderZfsPools(pools) {
+    const table = document.getElementById('zfs-pools-table');
+    if (!table) return;
+
+    if (pools.length === 0) {
+        table.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);">No ZFS pools found</td></tr>';
+        return;
+    }
+
+    table.innerHTML = pools.map(p => {
+        const healthColor = p.health === 'ONLINE' ? '#10b981' : p.health === 'DEGRADED' ? '#f59e0b' : '#ef4444';
+        return `<tr>
+            <td><strong>${escapeHtml(p.name)}</strong></td>
+            <td>${escapeHtml(p.size)}</td>
+            <td>${escapeHtml(p.alloc)}</td>
+            <td>${escapeHtml(p.free)}</td>
+            <td><span style="color:${healthColor};font-weight:600;">● ${escapeHtml(p.health)}</span></td>
+            <td>${escapeHtml(p.fragmentation)}</td>
+            <td>${escapeHtml(p.capacity)}</td>
+            <td>
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="expandZfsPool('${escapeHtml(p.name)}')">📂 Datasets</button>
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsSnapshots('${escapeHtml(p.name)}')">📸 Snapshots</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+async function expandZfsPool(pool) {
+    const detailSection = document.getElementById('zfs-detail-section');
+    if (!detailSection) return;
+
+    detailSection.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading datasets...</div>';
+
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/zfs/datasets?pool=${encodeURIComponent(pool)}`));
+        const datasets = await resp.json();
+
+        if (!Array.isArray(datasets) || datasets.length === 0) {
+            detailSection.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">No datasets found</div>';
+            return;
+        }
+
+        detailSection.innerHTML = `
+            <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <h4 style="margin:0;font-size:14px;">📁 Datasets — ${escapeHtml(pool)}</h4>
+                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                </div>
+                <table class="data-table">
+                    <thead><tr><th>Name</th><th>Used</th><th>Available</th><th>Refer</th><th>Mountpoint</th><th>Compression</th><th>Ratio</th><th>Actions</th></tr></thead>
+                    <tbody>
+                    ${datasets.map(d => `<tr>
+                        <td style="font-family:var(--font-mono);font-size:12px;">${escapeHtml(d.name)}</td>
+                        <td>${escapeHtml(d.used)}</td>
+                        <td>${escapeHtml(d.available)}</td>
+                        <td>${escapeHtml(d.refer)}</td>
+                        <td style="font-family:var(--font-mono);font-size:12px;">${escapeHtml(d.mountpoint)}</td>
+                        <td>${escapeHtml(d.compression)}</td>
+                        <td>${escapeHtml(d.compressratio)}</td>
+                        <td>
+                            <button class="btn btn-sm btn-primary" style="font-size:11px;padding:2px 8px;" onclick="createZfsSnapshot('${escapeHtml(d.name)}')">📸 Snapshot</button>
+                        </td>
+                    </tr>`).join('')}
+                    </tbody>
+                </table>
+            </div>`;
+    } catch (e) {
+        detailSection.innerHTML = `<div style="text-align:center;padding:20px;color:#ef4444;">Failed to load datasets: ${e.message}</div>`;
+    }
+}
+
+async function showZfsSnapshots(pool) {
+    const detailSection = document.getElementById('zfs-detail-section');
+    if (!detailSection) return;
+
+    detailSection.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading snapshots...</div>';
+
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/zfs/snapshots?dataset=${encodeURIComponent(pool)}`));
+        const snapshots = await resp.json();
+
+        if (!Array.isArray(snapshots) || snapshots.length === 0) {
+            detailSection.innerHTML = `
+                <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                        <h4 style="margin:0;font-size:14px;">📸 Snapshots — ${escapeHtml(pool)}</h4>
+                        <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                    </div>
+                    <div style="text-align:center;padding:20px;color:var(--text-muted);">No snapshots found for this pool</div>
+                </div>`;
+            return;
+        }
+
+        detailSection.innerHTML = `
+            <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <h4 style="margin:0;font-size:14px;">📸 Snapshots — ${escapeHtml(pool)} (${snapshots.length})</h4>
+                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                </div>
+                <table class="data-table">
+                    <thead><tr><th>Snapshot</th><th>Created</th><th>Used</th><th>Refer</th><th>Actions</th></tr></thead>
+                    <tbody>
+                    ${snapshots.map(s => `<tr>
+                        <td style="font-family:var(--font-mono);font-size:12px;">${escapeHtml(s.name)}</td>
+                        <td style="font-size:12px;">${escapeHtml(s.creation)}</td>
+                        <td>${escapeHtml(s.used)}</td>
+                        <td>${escapeHtml(s.refer)}</td>
+                        <td>
+                            <button class="btn btn-sm btn-danger" style="font-size:11px;padding:2px 8px;" onclick="deleteZfsSnapshot('${escapeHtml(s.name)}')">🗑️ Delete</button>
+                        </td>
+                    </tr>`).join('')}
+                    </tbody>
+                </table>
+            </div>`;
+    } catch (e) {
+        detailSection.innerHTML = `<div style="text-align:center;padding:20px;color:#ef4444;">Failed to load snapshots: ${e.message}</div>`;
+    }
+}
+
+async function createZfsSnapshot(dataset) {
+    const name = prompt(`Create snapshot for ${dataset}\n\nEnter snapshot name:`, `snap-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`);
+    if (!name) return;
+
+    try {
+        const resp = await fetch(apiUrl('/api/storage/zfs/snapshot'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dataset, name }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Snapshot created', 'success');
+            // Refresh the pool's snapshot list
+            const pool = dataset.split('/')[0];
+            showZfsSnapshots(pool);
+        } else {
+            showToast(data.error || 'Failed to create snapshot', 'error');
+        }
+    } catch (e) {
+        showToast(`Failed: ${e.message}`, 'error');
+    }
+}
+
+async function deleteZfsSnapshot(snapshot) {
+    if (!confirm(`Delete ZFS snapshot '${snapshot}'?\n\nThis cannot be undone.`)) return;
+
+    try {
+        const resp = await fetch(apiUrl('/api/storage/zfs/snapshot'), {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ snapshot }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Snapshot deleted', 'success');
+            // Refresh
+            const pool = snapshot.split('@')[0].split('/')[0];
+            showZfsSnapshots(pool);
+        } else {
+            showToast(data.error || 'Failed to delete snapshot', 'error');
+        }
+    } catch (e) {
+        showToast(`Failed: ${e.message}`, 'error');
     }
 }
 
@@ -5819,7 +6208,7 @@ function renderLxcContainers(containers, stats) {
         const barColor = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#10b981';
         const fsLabel = c.fs_type ? `<span style="color:var(--text-muted);font-size:10px;margin-left:8px;">${c.fs_type}</span>` : '';
         const pathLabel = c.storage_path ? `<span style="color:var(--text-muted);font-size:10px;" title="${c.storage_path}">${c.storage_path.length > 30 ? '...' + c.storage_path.slice(-27) : c.storage_path}</span>` : '';
-        const storageSubRow = hasStorage ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="7" style="padding:4px 16px 6px 24px;border-top:none;">
+        const storageSubRow = hasStorage ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="8" style="padding:4px 16px 6px 24px;border-top:none;">
             <div style="display:flex;align-items:center;gap:8px;font-size:11px;">
                 <span>💾</span>
                 <div style="flex:1;max-width:220px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">
@@ -5832,6 +6221,7 @@ function renderLxcContainers(containers, stats) {
 
         return `<tr>
             <td><strong>${c.hostname || c.name}</strong>${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
+            <td style="font-size:12px;color:var(--text-secondary);">${c.version || '<span style="color:var(--text-muted)">—</span>'}</td>
             <td><span style="color:${stateColor}">●</span> ${c.state}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
             <td>${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
