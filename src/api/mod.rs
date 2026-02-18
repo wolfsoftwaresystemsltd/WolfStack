@@ -4351,7 +4351,7 @@ pub async fn zfs_pool_scrub(
     if let Err(e) = require_auth(&req, &state) { return e; }
     let pool = body.get("pool").and_then(|v| v.as_str()).unwrap_or("").trim();
     let stop = body.get("stop").and_then(|v| v.as_bool()).unwrap_or(false);
-    if pool.is_empty() || !pool.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/') {
+    if pool.is_empty() || pool.contains("..") {
         return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid pool name" }));
     }
 
@@ -4382,8 +4382,8 @@ pub async fn zfs_pool_status(
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
     let pool = query.get("pool").cloned().unwrap_or_default();
-    let pool = pool.trim();
-    if pool.is_empty() || !pool.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/') {
+    let pool = pool.trim().to_string();
+    if pool.is_empty() || pool.contains("..") {
         return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid pool name" }));
     }
 
@@ -4412,8 +4412,8 @@ pub async fn zfs_pool_iostat(
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
     let pool = query.get("pool").cloned().unwrap_or_default();
-    let pool = pool.trim();
-    if pool.is_empty() || !pool.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/') {
+    let pool = pool.trim().to_string();
+    if pool.is_empty() || pool.contains("..") {
         return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid pool name" }));
     }
 
