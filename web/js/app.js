@@ -2365,9 +2365,7 @@ function browseContainerFiles(type, name, storagePath) {
     window._skipFileReset = true;
 
     // Switch to files view (this triggers loadFiles via selectServerView)
-    if (typeof selectServerView === 'function') {
-        selectServerView('files');
-    }
+    selectServerView(currentNodeId, 'files');
 }
 
 async function loadFiles(path) {
