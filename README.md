@@ -4,7 +4,7 @@ The flagship management dashboard from [Wolf Software Systems](https://wolf.uk.c
 
 **[Reddit Community (r/WolfStack)](https://www.reddit.com/r/WolfStack/)** • **[Discord](https://discord.gg/q9qMjHjUQY)** • **[Patreon](https://www.patreon.com/15362110/join)**
 
-![WolfStack Dashboard](screenshot.png)
+![WolfStack Dashboard](https://wolfstack.org/images/screenshot.png)
 
 ## Install
 
