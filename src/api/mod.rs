@@ -5073,6 +5073,221 @@ pub async fn files_docker_download(
     }
 }
 
+// ─── LXC File Manager ───
+
+/// Detect if Proxmox `pct` is available, and use `pct exec` if so; else `lxc-attach`.
+fn lxc_exec_cmd(container: &str, cmd_args: &[&str]) -> std::process::Command {
+    let is_proxmox = std::process::Command::new("which").arg("pct").output()
+        .map(|o| o.status.success()).unwrap_or(false);
+    let mut cmd;
+    if is_proxmox {
+        cmd = std::process::Command::new("pct");
+        cmd.arg("exec").arg(container).arg("--");
+    } else {
+        cmd = std::process::Command::new("lxc-attach");
+        cmd.arg("-n").arg(container).arg("--");
+    }
+    for a in cmd_args { cmd.arg(a); }
+    cmd
+}
+
+/// GET /api/files/lxc/browse?container=NAME&path=/ — browse files inside an LXC container
+pub async fn files_lxc_browse(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = query.get("container").cloned().unwrap_or_default();
+    let path = query.get("path").cloned().unwrap_or_else(|| "/".into());
+
+    if container.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container'" }));
+    }
+
+    // Use a POSIX shell one-liner that works everywhere (BusyBox, Alpine, Debian, etc.)
+    // Output format per line: TYPE<tab>SIZE<tab>NAME
+    // TYPE: d = directory, f = file, l = link
+    let script = format!(
+        "cd '{}' 2>/dev/null && for f in .* *; do [ \"$f\" = '.' ] || [ \"$f\" = '..' ] || [ \"$f\" = '.*' ] || [ \"$f\" = '*' ] && continue; if [ -L \"$f\" ]; then printf 'l\\t0\\t%s\\n' \"$f\"; elif [ -d \"$f\" ]; then printf 'd\\t0\\t%s\\n' \"$f\"; else s=$(stat -c%s \"$f\" 2>/dev/null || echo 0); printf 'f\\t'\"$s\"'\\t%s\\n' \"$f\"; fi; done",
+        path.replace('\'', "'\\''")
+    );
+
+    let output = lxc_exec_cmd(&container, &["sh", "-c", &script]).output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let mut entries: Vec<serde_json::Value> = stdout
+                .lines()
+                .filter(|l| !l.is_empty())
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.splitn(3, '\t').collect();
+                    if parts.len() < 3 { return None; }
+
+                    let file_type = parts[0];
+                    let size: u64 = parts[1].parse().unwrap_or(0);
+                    let name = parts[2].to_string();
+
+                    if name.is_empty() { return None; }
+
+                    let is_dir = file_type == "d" || file_type == "l";
+                    let entry_path = if path.ends_with('/') {
+                        format!("{}{}", path, name)
+                    } else {
+                        format!("{}/{}", path, name)
+                    };
+
+                    Some(serde_json::json!({
+                        "name": name,
+                        "path": entry_path,
+                        "is_dir": is_dir,
+                        "size": if is_dir { 0 } else { size },
+                        "modified": 0,
+                        "permissions": "",
+                    }))
+                })
+                .collect();
+
+            entries.sort_by(|a, b| {
+                let a_dir = a["is_dir"].as_bool().unwrap_or(false);
+                let b_dir = b["is_dir"].as_bool().unwrap_or(false);
+                match (a_dir, b_dir) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a["name"].as_str().unwrap_or("")
+                        .to_lowercase()
+                        .cmp(&b["name"].as_str().unwrap_or("").to_lowercase()),
+                }
+            });
+
+            HttpResponse::Ok().json(serde_json::json!({
+                "path": path,
+                "container": container,
+                "entries": entries,
+            }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            info!("LXC browse failed for container={} path={}: stderr={} stdout={}", container, path, err.trim(), stdout.trim());
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to list directory: {}", err.trim())
+            }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to exec into container: {}", e)
+        })),
+    }
+}
+
+/// POST /api/files/lxc/mkdir — create directory inside LXC container
+pub async fn files_lxc_mkdir(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if container.is_empty() || path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container' or 'path'" }));
+    }
+
+    let output = lxc_exec_cmd(container, &["mkdir", "-p", path]).output();
+
+    match output {
+        Ok(out) if out.status.success() => HttpResponse::Ok().json(serde_json::json!({ "message": format!("Directory created: {}", path) })),
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/files/lxc/delete — delete file/dir inside LXC container
+pub async fn files_lxc_delete(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if container.is_empty() || path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container' or 'path'" }));
+    }
+
+    let critical = ["/", "/etc", "/usr", "/bin", "/sbin", "/lib", "/boot", "/proc", "/sys", "/dev", "/var"];
+    if critical.contains(&path) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Cannot delete system directory" }));
+    }
+
+    let output = lxc_exec_cmd(container, &["rm", "-rf", path]).output();
+
+    match output {
+        Ok(out) if out.status.success() => HttpResponse::Ok().json(serde_json::json!({ "message": format!("Deleted: {}", path) })),
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/files/lxc/rename — rename file/dir inside LXC container
+pub async fn files_lxc_rename(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
+    let from = body.get("from").and_then(|v| v.as_str()).unwrap_or("");
+    let to = body.get("to").and_then(|v| v.as_str()).unwrap_or("");
+    if container.is_empty() || from.is_empty() || to.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing fields" }));
+    }
+
+    let output = lxc_exec_cmd(container, &["mv", from, to]).output();
+
+    match output {
+        Ok(out) if out.status.success() => HttpResponse::Ok().json(serde_json::json!({ "message": format!("Renamed to {}", to) })),
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/files/lxc/download?container=NAME&path=/file — download file from LXC container
+pub async fn files_lxc_download(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = query.get("container").cloned().unwrap_or_default();
+    let path = query.get("path").cloned().unwrap_or_default();
+    if container.is_empty() || path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container' or 'path'" }));
+    }
+
+    // Use lxc-attach cat to stream the file content
+    let output = lxc_exec_cmd(&container, &["cat", &path]).output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let filename = std::path::Path::new(&path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "download".into());
+
+            HttpResponse::Ok()
+                .insert_header(("Content-Disposition", format!("attachment; filename=\"{}\"", filename)))
+                .insert_header(("Content-Type", "application/octet-stream"))
+                .body(out.stdout)
+        }
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to read file: {}", String::from_utf8_lossy(&out.stderr).trim())
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
 /// POST /api/agent/storage/apply — receive and apply a mount config from another node (cluster-auth)
 pub async fn agent_storage_apply(
     req: HttpRequest,
@@ -5909,6 +6124,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/files/docker/delete", web::post().to(files_docker_delete))
         .route("/api/files/docker/rename", web::post().to(files_docker_rename))
         .route("/api/files/docker/download", web::get().to(files_docker_download))
+        // LXC File Manager
+        .route("/api/files/lxc/browse", web::get().to(files_lxc_browse))
+        .route("/api/files/lxc/mkdir", web::post().to(files_lxc_mkdir))
+        .route("/api/files/lxc/delete", web::post().to(files_lxc_delete))
+        .route("/api/files/lxc/rename", web::post().to(files_lxc_rename))
+        .route("/api/files/lxc/download", web::get().to(files_lxc_download))
         // Networking
         .route("/api/networking/interfaces", web::get().to(net_list_interfaces))
         .route("/api/networking/dns", web::get().to(net_get_dns))

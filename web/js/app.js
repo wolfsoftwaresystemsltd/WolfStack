@@ -2352,10 +2352,10 @@ let currentFilePath = '/';
 let containerFileMode = null;  // null = host, {type:'docker', name:'xxx'} or {type:'lxc', name:'xxx', rootfs:'/path'}
 
 function browseContainerFiles(type, name, storagePath) {
-    // For LXC, browse the host filesystem at the rootfs path
+    // Always browse inside the container's filesystem starting at /
     if (type === 'lxc') {
         containerFileMode = { type: 'lxc', name };
-        currentFilePath = storagePath || `/var/lib/lxc/${name}/rootfs`;
+        currentFilePath = '/';
     } else {
         containerFileMode = { type: 'docker', name };
         currentFilePath = '/';
@@ -2390,6 +2390,8 @@ async function loadFiles(path) {
         let resp;
         if (containerFileMode && containerFileMode.type === 'docker') {
             resp = await fetch(apiUrl(`/api/files/docker/browse?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(currentFilePath)}`));
+        } else if (containerFileMode && containerFileMode.type === 'lxc') {
+            resp = await fetch(apiUrl(`/api/files/lxc/browse?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(currentFilePath)}`));
         } else {
             resp = await fetch(apiUrl(`/api/files/browse?path=${encodeURIComponent(currentFilePath)}`));
         }
@@ -2502,8 +2504,9 @@ async function bulkDeleteFiles() {
     for (const p of paths) {
         try {
             const endpoint = containerFileMode && containerFileMode.type === 'docker'
-                ? '/api/files/docker/delete' : '/api/files/delete';
-            const body = containerFileMode && containerFileMode.type === 'docker'
+                ? '/api/files/docker/delete' : containerFileMode && containerFileMode.type === 'lxc'
+                    ? '/api/files/lxc/delete' : '/api/files/delete';
+            const body = (containerFileMode && (containerFileMode.type === 'docker' || containerFileMode.type === 'lxc'))
                 ? { container: containerFileMode.name, path: p } : { path: p };
             await fetch(apiUrl(endpoint), {
                 method: 'POST',
@@ -2571,8 +2574,8 @@ function filterFileList(query) {
     fileSearchTimer = setTimeout(async () => {
         try {
             let resp;
-            if (containerFileMode && containerFileMode.type === 'docker') {
-                // For Docker, do client-side filter (no find utility inside container)
+            if (containerFileMode && (containerFileMode.type === 'docker' || containerFileMode.type === 'lxc')) {
+                // For containers, do client-side filter (find may not be available)
                 const q = query.toLowerCase();
                 const filtered = cachedFileEntries.filter(e => e.name.toLowerCase().includes(q));
                 renderFilteredFileList(filtered, false);
@@ -2619,6 +2622,8 @@ function navigateToDir(path) {
 function downloadFile(path) {
     if (containerFileMode && containerFileMode.type === 'docker') {
         window.open(apiUrl(`/api/files/docker/download?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(path)}`), '_blank');
+    } else if (containerFileMode && containerFileMode.type === 'lxc') {
+        window.open(apiUrl(`/api/files/lxc/download?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(path)}`), '_blank');
     } else {
         window.open(apiUrl(`/api/files/download?path=${encodeURIComponent(path)}`), '_blank');
     }
@@ -2630,6 +2635,12 @@ async function deleteFile(path, name) {
         let resp;
         if (containerFileMode && containerFileMode.type === 'docker') {
             resp = await fetch(apiUrl('/api/files/docker/delete'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ container: containerFileMode.name, path }),
+            });
+        } else if (containerFileMode && containerFileMode.type === 'lxc') {
+            resp = await fetch(apiUrl('/api/files/lxc/delete'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ container: containerFileMode.name, path }),
@@ -2664,6 +2675,12 @@ async function renameFile(path, oldName) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ container: containerFileMode.name, from: path, to: newPath }),
             });
+        } else if (containerFileMode && containerFileMode.type === 'lxc') {
+            resp = await fetch(apiUrl('/api/files/lxc/rename'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ container: containerFileMode.name, from: path, to: newPath }),
+            });
         } else {
             resp = await fetch(apiUrl('/api/files/rename'), {
                 method: 'POST',
@@ -2693,6 +2710,12 @@ async function createNewFolder(name) {
         let resp;
         if (containerFileMode && containerFileMode.type === 'docker') {
             resp = await fetch(apiUrl('/api/files/docker/mkdir'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ container: containerFileMode.name, path }),
+            });
+        } else if (containerFileMode && containerFileMode.type === 'lxc') {
+            resp = await fetch(apiUrl('/api/files/lxc/mkdir'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ container: containerFileMode.name, path }),
