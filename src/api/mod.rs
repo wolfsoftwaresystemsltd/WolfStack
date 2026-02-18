@@ -4610,6 +4610,140 @@ pub async fn files_download(
         })),
     }
 }
+
+/// GET /api/files/search?path=/start&query=pattern — recursive search using find
+pub async fn files_search(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let search_path = query.get("path").cloned().unwrap_or_else(|| "/".into());
+    let search_query = query.get("query").cloned().unwrap_or_default();
+
+    if search_query.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'query'" }));
+    }
+
+    let canonical = match sanitize_file_path(&search_path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+
+    // Use find with -iname for case-insensitive matching, limit results
+    let output = std::process::Command::new("find")
+        .args([canonical.to_str().unwrap_or("/"), "-maxdepth", "8",
+               "-iname", &format!("*{}*", search_query),
+               "-printf", "%y\t%s\t%T@\t%m\t%p\n"])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let mut entries: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .take(100) // cap results
+                .map(|line| {
+                    let parts: Vec<&str> = line.splitn(5, '\t').collect();
+                    let file_type = parts.get(0).unwrap_or(&"f");
+                    let size: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let modified: f64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let permissions = parts.get(3).unwrap_or(&"").to_string();
+                    let full_path = parts.get(4).unwrap_or(&"").to_string();
+                    let name = std::path::Path::new(&full_path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| full_path.clone());
+                    let is_dir = *file_type == "d";
+
+                    serde_json::json!({
+                        "name": name,
+                        "path": full_path,
+                        "is_dir": is_dir,
+                        "size": if is_dir { 0 } else { size },
+                        "modified": modified as u64,
+                        "permissions": permissions,
+                    })
+                })
+                .collect();
+
+            entries.sort_by(|a, b| {
+                let ad = a["is_dir"].as_bool().unwrap_or(false);
+                let bd = b["is_dir"].as_bool().unwrap_or(false);
+                match (ad, bd) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a["name"].as_str().unwrap_or("").to_lowercase()
+                        .cmp(&b["name"].as_str().unwrap_or("").to_lowercase()),
+                }
+            });
+
+            HttpResponse::Ok().json(serde_json::json!({
+                "path": search_path,
+                "query": search_query,
+                "entries": entries,
+            }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::Ok().json(serde_json::json!({
+                "path": search_path,
+                "query": search_query,
+                "entries": [],
+                "warning": err.trim(),
+            }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/files/chmod — change permissions on a file or files
+pub async fn files_chmod(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+    let paths: Vec<String> = body.get("paths")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    if mode.is_empty() || paths.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'mode' or 'paths'" }));
+    }
+
+    // Validate mode (must be octal like 755 or symbolic like u+x)
+    if mode.len() > 10 || mode.contains("..") {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid mode" }));
+    }
+
+    let mut results = Vec::new();
+    for path in &paths {
+        let canonical = match sanitize_file_path(path) {
+            Ok(p) => p,
+            Err(e) => { results.push(serde_json::json!({"path": path, "error": e})); continue; }
+        };
+        let output = std::process::Command::new("chmod")
+            .args([mode, canonical.to_str().unwrap_or("")])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                results.push(serde_json::json!({"path": path, "ok": true}));
+            }
+            Ok(out) => {
+                results.push(serde_json::json!({"path": path, "error": String::from_utf8_lossy(&out.stderr).trim().to_string()}));
+            }
+            Err(e) => {
+                results.push(serde_json::json!({"path": path, "error": format!("{}", e)}));
+            }
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({ "results": results }))
+}
+
 /// GET /api/files/docker/browse?container=ID&path=/ — browse files inside a Docker container
 pub async fn files_docker_browse(
     req: HttpRequest,
@@ -5640,6 +5774,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/files/rename", web::post().to(files_rename))
         .route("/api/files/upload", web::post().to(files_upload))
         .route("/api/files/download", web::get().to(files_download))
+        .route("/api/files/search", web::get().to(files_search))
+        .route("/api/files/chmod", web::post().to(files_chmod))
         // Docker File Manager
         .route("/api/files/docker/browse", web::get().to(files_docker_browse))
         .route("/api/files/docker/mkdir", web::post().to(files_docker_mkdir))

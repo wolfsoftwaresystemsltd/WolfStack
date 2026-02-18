@@ -206,7 +206,7 @@ function selectServerView(nodeId, view) {
     }
     if (view === 'vms') loadVms().finally(() => hidePageLoadingOverlay(el));
     if (view === 'storage') Promise.all([loadStorageMounts(), loadZfsStatus()]).finally(() => hidePageLoadingOverlay(el));
-    if (view === 'files') { containerFileMode = null; currentFilePath = '/'; loadFiles().finally(() => hidePageLoadingOverlay(el)); }
+    if (view === 'files') { if (!window._skipFileReset) { containerFileMode = null; currentFilePath = '/'; } window._skipFileReset = false; loadFiles().finally(() => hidePageLoadingOverlay(el)); }
     if (view === 'networking') loadNetworking().finally(() => hidePageLoadingOverlay(el));
     if (view === 'backups') loadBackups().finally(() => hidePageLoadingOverlay(el));
     if (view === 'wolfnet') loadWolfNet().finally(() => hidePageLoadingOverlay(el));
@@ -2352,23 +2352,22 @@ let currentFilePath = '/';
 let containerFileMode = null;  // null = host, {type:'docker', name:'xxx'} or {type:'lxc', name:'xxx', rootfs:'/path'}
 
 function browseContainerFiles(type, name, storagePath) {
-    containerFileMode = type === 'docker'
-        ? { type: 'docker', name }
-        : { type: 'lxc', name, rootfs: storagePath || `/var/lib/lxc/${name}/rootfs` };
-
     // For LXC, browse the host filesystem at the rootfs path
     if (type === 'lxc') {
-        containerFileMode = null; // use host mode
+        containerFileMode = null;
         currentFilePath = storagePath || `/var/lib/lxc/${name}/rootfs`;
     } else {
+        containerFileMode = { type: 'docker', name };
         currentFilePath = '/';
     }
 
-    // Switch to files view
+    // Set flag so selectServerView doesn't reset our state
+    window._skipFileReset = true;
+
+    // Switch to files view (this triggers loadFiles via selectServerView)
     if (typeof selectServerView === 'function') {
         selectServerView('files');
     }
-    loadFiles(currentFilePath);
 }
 
 async function loadFiles(path) {
@@ -2434,16 +2433,17 @@ function renderFileBreadcrumb(path) {
 }
 
 let cachedFileEntries = [];
+let fileSearchTimer = null;
 
 function renderFileList(entries) {
     const table = document.getElementById('file-list-table');
     if (!table) return;
 
     cachedFileEntries = entries;
-    renderFilteredFileList(entries);
+    renderFilteredFileList(entries, false);
 }
 
-function renderFilteredFileList(entries) {
+function renderFilteredFileList(entries, isSearch) {
     const table = document.getElementById('file-list-table');
     if (!table) return;
 
@@ -2454,12 +2454,14 @@ function renderFilteredFileList(entries) {
         const nameClick = e.is_dir
             ? `onclick="navigateToDir('${e.path.replace(/'/g, "\\'")}')" style="cursor:pointer;color:#f5b731;font-weight:600;"`
             : '';
+        const displayName = isSearch ? e.path : e.name;
 
         return `<tr>
-            <td style="font-size:14px;"><span ${nameClick}>${icon} ${escapeHtml(e.name)}</span></td>
+            <td style="font-size:14px;"><input type="checkbox" class="file-checkbox" data-path="${escapeHtml(e.path)}" onchange="updateFileSelection()"></td>
+            <td style="font-size:14px;"><span ${nameClick}>${icon} ${escapeHtml(displayName)}</span></td>
             <td style="font-size:13px;color:var(--text-muted);">${sizeStr}</td>
             <td style="font-size:13px;color:var(--text-muted);">${modStr}</td>
-            <td style="font-family:var(--font-mono);font-size:13px;">${escapeHtml(e.permissions)}</td>
+            <td style="font-family:var(--font-mono);font-size:13px;cursor:pointer;color:var(--accent);" onclick="changePermissions('${e.path.replace(/'/g, "\\'")}')" title="Click to change permissions">${escapeHtml(e.permissions)}</td>
             <td style="white-space:nowrap;">
                 ${!e.is_dir ? `<button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="downloadFile('${e.path.replace(/'/g, "\\'")}')">⬇️</button>` : ''}
                 <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="renameFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">✏️</button>
@@ -2467,16 +2469,124 @@ function renderFilteredFileList(entries) {
             </td>
         </tr>`;
     }).join('');
+
+    updateFileSelection();
+}
+
+function toggleSelectAll(cb) {
+    document.querySelectorAll('.file-checkbox').forEach(c => c.checked = cb.checked);
+    updateFileSelection();
+}
+
+function getSelectedFiles() {
+    return Array.from(document.querySelectorAll('.file-checkbox:checked')).map(c => c.dataset.path);
+}
+
+function updateFileSelection() {
+    const selected = getSelectedFiles();
+    const bar = document.getElementById('file-selection-bar');
+    if (bar) {
+        if (selected.length > 0) {
+            bar.style.display = 'flex';
+            bar.querySelector('.sel-count').textContent = `${selected.length} selected`;
+        } else {
+            bar.style.display = 'none';
+        }
+    }
+}
+
+async function bulkDeleteFiles() {
+    const paths = getSelectedFiles();
+    if (paths.length === 0) return;
+    if (!confirm(`Delete ${paths.length} item(s)?\n\nThis cannot be undone.`)) return;
+    for (const p of paths) {
+        try {
+            const endpoint = containerFileMode && containerFileMode.type === 'docker'
+                ? '/api/files/docker/delete' : '/api/files/delete';
+            const body = containerFileMode && containerFileMode.type === 'docker'
+                ? { container: containerFileMode.name, path: p } : { path: p };
+            await fetch(apiUrl(endpoint), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+        } catch (e) { /* continue */ }
+    }
+    showToast(`Deleted ${paths.length} item(s)`, 'success');
+    loadFiles();
+}
+
+async function bulkChmod() {
+    const paths = getSelectedFiles();
+    if (paths.length === 0) return;
+    const mode = prompt(`Set permissions for ${paths.length} item(s):\n\nExamples: 755, 644, u+x, go-w`, '644');
+    if (!mode) return;
+    try {
+        const resp = await fetch(apiUrl('/api/files/chmod'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode, paths }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            const errs = (data.results || []).filter(r => r.error);
+            if (errs.length > 0) {
+                showToast(`${paths.length - errs.length} OK, ${errs.length} failed`, 'warning');
+            } else {
+                showToast(`Permissions set to ${mode}`, 'success');
+            }
+            loadFiles();
+        } else {
+            showToast(data.error || 'Failed', 'error');
+        }
+    } catch (e) { showToast(`Failed: ${e.message}`, 'error'); }
+}
+
+async function changePermissions(path) {
+    const mode = prompt(`Set permissions for this item:\n\nExamples: 755, 644, u+x, go-w`, '644');
+    if (!mode) return;
+    try {
+        const resp = await fetch(apiUrl('/api/files/chmod'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode, paths: [path] }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`Permissions set to ${mode}`, 'success');
+            loadFiles();
+        } else {
+            showToast(data.error || 'Failed', 'error');
+        }
+    } catch (e) { showToast(`Failed: ${e.message}`, 'error'); }
 }
 
 function filterFileList(query) {
+    clearTimeout(fileSearchTimer);
     if (!query || query.trim() === '') {
-        renderFilteredFileList(cachedFileEntries);
+        renderFilteredFileList(cachedFileEntries, false);
         return;
     }
-    const q = query.toLowerCase();
-    const filtered = cachedFileEntries.filter(e => e.name.toLowerCase().includes(q));
-    renderFilteredFileList(filtered);
+    // Debounce 400ms then call server-side recursive search
+    fileSearchTimer = setTimeout(async () => {
+        try {
+            let resp;
+            if (containerFileMode && containerFileMode.type === 'docker') {
+                // For Docker, do client-side filter (no find utility inside container)
+                const q = query.toLowerCase();
+                const filtered = cachedFileEntries.filter(e => e.name.toLowerCase().includes(q));
+                renderFilteredFileList(filtered, false);
+                return;
+            }
+            resp = await fetch(apiUrl(`/api/files/search?path=${encodeURIComponent(currentFilePath)}&query=${encodeURIComponent(query)}`));
+            const data = await resp.json();
+            if (resp.ok) {
+                renderFilteredFileList(data.entries || [], true);
+            }
+        } catch (e) {
+            console.error('Search failed:', e);
+        }
+    }, 400);
 }
 
 function getFileIcon(name) {

@@ -1755,11 +1755,24 @@
                             oninput="filterFileList(this.value)"
                             style="width:100%; max-width:400px; padding:6px 12px; font-size:14px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary); color:var(--text-primary); outline:none;">
                     </div>
+                    <!-- Multi-select toolbar -->
+                    <div id="file-selection-bar"
+                        style="display:none; align-items:center; gap:12px; padding:8px 12px; margin-bottom:8px; background:var(--bg-tertiary); border-radius:6px; border:1px solid var(--accent);">
+                        <span class="sel-count" style="font-size:13px; font-weight:600; color:var(--accent);"></span>
+                        <button class="btn btn-sm"
+                            style="font-size:12px;padding:4px 10px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);"
+                            onclick="bulkChmod()">🔒 Set Permissions</button>
+                        <button class="btn btn-sm"
+                            style="font-size:12px;padding:4px 10px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);"
+                            onclick="bulkDeleteFiles()">🗑️ Delete Selected</button>
+                    </div>
                     <!-- File listing table -->
                     <table class="data-table">
                         <thead>
                             <tr>
-                                <th style="width:40%;">Name</th>
+                                <th style="width:30px;"><input type="checkbox" onchange="toggleSelectAll(this)"
+                                        title="Select all"></th>
+                                <th style="width:38%;">Name</th>
                                 <th>Size</th>
                                 <th>Modified</th>
                                 <th>Permissions</th>
