@@ -79,6 +79,55 @@ if command -v pveversion &> /dev/null || [ -f /etc/pve/.version ] || dpkg -l pro
     echo "  Skipping packages already provided by Proxmox (QEMU, LXC)"
 fi
 
+# ─── Virtualization options ──────────────────────────────────────────────────
+# On upgrades (wolfstack service already exists), auto-detect what's installed
+# and skip the prompts entirely.
+if systemctl list-unit-files wolfstack.service &>/dev/null 2>&1 && [ -f "/etc/systemd/system/wolfstack.service" ]; then
+    # Upgrade mode — detect current state
+    if command -v qemu-system-x86_64 &>/dev/null || command -v qemu-system-ppc64 &>/dev/null || command -v qemu-system-aarch64 &>/dev/null || [ "$IS_PROXMOX" = true ]; then
+        INSTALL_KVM="Y"
+    else
+        INSTALL_KVM="n"
+    fi
+    if command -v docker &>/dev/null; then
+        INSTALL_DOCKER="Y"
+    else
+        INSTALL_DOCKER="n"
+    fi
+    if command -v lxc-ls &>/dev/null || [ "$IS_PROXMOX" = true ]; then
+        INSTALL_LXC="Y"
+    else
+        INSTALL_LXC="n"
+    fi
+else
+    echo ""
+    echo "  ──────────────────────────────────────────────────"
+    echo "  Virtualization Setup"
+    echo "  ──────────────────────────────────────────────────"
+    echo ""
+    echo "  WolfStack can manage KVM virtual machines, Docker"
+    echo "  containers, and LXC system containers."
+    echo ""
+    echo "  If you just want to monitor a small server you can"
+    echo "  say no to these and save resources — you can always"
+    echo "  install them later."
+    echo ""
+
+    echo -n "  Install KVM (virtual machines)? [Y/n]: "
+    read INSTALL_KVM < /dev/tty
+    INSTALL_KVM=${INSTALL_KVM:-Y}
+
+    echo -n "  Install Docker (containers)? [Y/n]: "
+    read INSTALL_DOCKER < /dev/tty
+    INSTALL_DOCKER=${INSTALL_DOCKER:-Y}
+
+    echo -n "  Install LXC (system containers)? [Y/n]: "
+    read INSTALL_LXC < /dev/tty
+    INSTALL_LXC=${INSTALL_LXC:-Y}
+
+    echo ""
+fi
+
 # ─── Install system dependencies ────────────────────────────────────────────
 echo ""
 echo "Installing system dependencies..."
@@ -108,23 +157,41 @@ if [ "$PKG_MANAGER" = "apt" ]; then
             fi
         done
     else
-        # Select architecture-appropriate QEMU package
-        ARCH=$(uname -m)
-        if [ "$ARCH" = "ppc64le" ] || [ "$ARCH" = "ppc64" ]; then
-            QEMU_PKG="qemu-system-ppc qemu-utils"
-        elif [ "$ARCH" = "aarch64" ]; then
-            QEMU_PKG="qemu-system-arm qemu-utils"
-        else
-            QEMU_PKG="qemu-system-x86 qemu-utils"
+        # Build the package list based on user choices
+        APT_PKGS="git curl build-essential pkg-config libssl-dev libcrypt-dev dnsmasq-base bridge-utils socat s3fs nfs-common fuse3"
+
+        if [[ "$INSTALL_KVM" =~ ^[Yy] ]]; then
+            ARCH=$(uname -m)
+            if [ "$ARCH" = "ppc64le" ] || [ "$ARCH" = "ppc64" ]; then
+                APT_PKGS="$APT_PKGS qemu-system-ppc qemu-utils"
+            elif [ "$ARCH" = "aarch64" ]; then
+                APT_PKGS="$APT_PKGS qemu-system-arm qemu-utils"
+            else
+                APT_PKGS="$APT_PKGS qemu-system-x86 qemu-utils"
+            fi
         fi
-        apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils $QEMU_PKG socat s3fs nfs-common fuse3
+
+        if [[ "$INSTALL_LXC" =~ ^[Yy] ]]; then
+            APT_PKGS="$APT_PKGS lxc lxc-templates"
+        fi
+
+        apt install -y $APT_PKGS
     fi
 elif [ "$PKG_MANAGER" = "dnf" ]; then
-    dnf install -y git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat s3fs-fuse nfs-utils fuse3
+    DNF_PKGS="git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel dnsmasq bridge-utils socat s3fs-fuse nfs-utils fuse3"
+    [[ "$INSTALL_KVM" =~ ^[Yy] ]] && DNF_PKGS="$DNF_PKGS qemu-kvm qemu-img"
+    [[ "$INSTALL_LXC" =~ ^[Yy] ]] && DNF_PKGS="$DNF_PKGS lxc lxc-templates lxc-extra"
+    dnf install -y $DNF_PKGS
 elif [ "$PKG_MANAGER" = "yum" ]; then
-    yum install -y git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat s3fs-fuse nfs-utils fuse
+    YUM_PKGS="git curl gcc gcc-c++ make openssl-devel pkgconfig dnsmasq bridge-utils socat s3fs-fuse nfs-utils fuse"
+    [[ "$INSTALL_KVM" =~ ^[Yy] ]] && YUM_PKGS="$YUM_PKGS qemu-kvm qemu-img"
+    [[ "$INSTALL_LXC" =~ ^[Yy] ]] && YUM_PKGS="$YUM_PKGS lxc lxc-templates lxc-extra"
+    yum install -y $YUM_PKGS
 elif [ "$PKG_MANAGER" = "zypper" ]; then
-    zypper install -y git curl gcc gcc-c++ make libopenssl-devel pkg-config lxc dnsmasq bridge-utils qemu-kvm qemu-tools socat s3fs nfs-client fuse3
+    ZYPPER_PKGS="git curl gcc gcc-c++ make libopenssl-devel pkg-config dnsmasq bridge-utils socat s3fs nfs-client fuse3"
+    [[ "$INSTALL_KVM" =~ ^[Yy] ]] && ZYPPER_PKGS="$ZYPPER_PKGS qemu-kvm qemu-tools"
+    [[ "$INSTALL_LXC" =~ ^[Yy] ]] && ZYPPER_PKGS="$ZYPPER_PKGS lxc"
+    zypper install -y $ZYPPER_PKGS
 fi
 
 echo "✓ System dependencies installed"
@@ -211,18 +278,22 @@ mkdir -p /etc/wolfstack/s3 /etc/wolfstack/pbs /mnt/wolfstack /var/cache/wolfstac
 echo "✓ Storage directories configured"
 
 # ─── Install Docker if missing ──────────────────────────────────────────────
-if ! command -v docker &> /dev/null; then
-    echo ""
-    echo "Installing Docker..."
-    if curl -fsSL https://get.docker.com | sh; then
-        systemctl enable docker 2>/dev/null || true
-        systemctl start docker 2>/dev/null || true
-        echo "✓ Docker installed"
+if [[ "$INSTALL_DOCKER" =~ ^[Yy] ]]; then
+    if ! command -v docker &> /dev/null; then
+        echo ""
+        echo "Installing Docker..."
+        if curl -fsSL https://get.docker.com | sh; then
+            systemctl enable docker 2>/dev/null || true
+            systemctl start docker 2>/dev/null || true
+            echo "✓ Docker installed"
+        else
+            echo "⚠ Failed to install Docker automatically. Please install manually."
+        fi
     else
-        echo "⚠ Failed to install Docker automatically. Please install manually."
+        echo "✓ Docker already installed"
     fi
 else
-    echo "✓ Docker already installed"
+    echo "⊘ Docker skipped (not selected)"
 fi
 
 # ─── Install WolfNet (cluster network layer) ────────────────────────────────
@@ -743,7 +814,7 @@ elif command -v firewall-cmd &> /dev/null; then
 fi
 
 # ─── Set up lxcbr0 bridge for LXC containers ────────────────────────────────
-if command -v lxc-ls &> /dev/null; then
+if [[ "$INSTALL_LXC" =~ ^[Yy] ]] && command -v lxc-ls &> /dev/null; then
     # Only configure lxc-net on fresh installs — restarting lxc-net on upgrades
     # destroys lxcbr0 and all container kernel routes, breaking WolfNet routing.
     # WolfStack's reapply_wolfnet_routes() handles route restoration on startup.
