@@ -1525,10 +1525,12 @@ pub async fn node_proxy(
     //    accessible only via WolfNet (encrypted tunnel) so still secure
     // 3. HTTP on the main port — last resort (dev/local only)
     let internal_port = node.port + 1;
+    let qs = req.query_string();
+    let query_suffix = if qs.is_empty() { String::new() } else { format!("?{}", qs) };
     let urls = vec![
-        format!("https://{}:{}/api/{}", node.address, node.port, api_path),
-        format!("http://{}:{}/api/{}", node.address, internal_port, api_path),
-        format!("http://{}:{}/api/{}", node.address, node.port, api_path),
+        format!("https://{}:{}/api/{}{}", node.address, node.port, api_path, query_suffix),
+        format!("http://{}:{}/api/{}{}", node.address, internal_port, api_path, query_suffix),
+        format!("http://{}:{}/api/{}{}", node.address, node.port, api_path, query_suffix),
     ];
 
     let timeout_secs = if method == actix_web::http::Method::POST || method == actix_web::http::Method::PUT { 300 } else { 120 };
