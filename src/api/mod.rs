@@ -1406,6 +1406,9 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
     let docker_count = containers::docker_list_all().len() as u32;
     let lxc_count = containers::lxc_list_all().len() as u32;
     let vm_count = state.vms.lock().unwrap().list_vms().len() as u32;
+    let has_docker = containers::docker_status().installed;
+    let has_lxc = containers::lxc_status().installed;
+    let has_kvm = containers::kvm_installed();
     let public_ip = state.cluster.get_node(&state.cluster.self_id).and_then(|n| n.public_ip);
     let msg = AgentMessage::StatusReport {
         node_id: state.cluster.self_id.clone(),
@@ -1419,8 +1422,96 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
         known_nodes: state.cluster.get_all_nodes(),
         deleted_ids: state.cluster.get_deleted_ids(),
         wolfnet_ips: containers::wolfnet_used_ips(),
+        has_docker,
+        has_lxc,
+        has_kvm,
     };
     HttpResponse::Ok().json(msg)
+}
+
+/// POST /api/install/{tech} — install Docker, LXC, or KVM on this node
+pub async fn install_runtime(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let tech = path.into_inner().to_lowercase();
+
+    // Detect distro for package manager
+    let distro = installer::detect_distro();
+    let (pm, install_flag) = installer::pkg_install_cmd(distro);
+
+    let packages = match tech.as_str() {
+        "docker" => {
+            // Use Docker's install script for best compatibility
+            let result = std::process::Command::new("bash")
+                .args(["-c", "curl -fsSL https://get.docker.com | sh"])
+                .output();
+            match result {
+                Ok(o) if o.status.success() => {
+                    // Enable and start Docker
+                    let _ = std::process::Command::new("systemctl").args(["enable", "--now", "docker"]).output();
+                    return HttpResponse::Ok().json(serde_json::json!({
+                        "message": "Docker installed and started successfully"
+                    }));
+                }
+                Ok(o) => {
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Docker install failed: {}", String::from_utf8_lossy(&o.stderr))
+                    }));
+                }
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to run Docker installer: {}", e)
+                    }));
+                }
+            }
+        }
+        "lxc" => match distro {
+            installer::DistroFamily::Debian => "lxc lxc-templates",
+            installer::DistroFamily::RedHat => "lxc lxc-templates lxc-extra",
+            installer::DistroFamily::Suse => "lxc",
+            _ => "lxc",
+        },
+        "kvm" => match distro {
+            installer::DistroFamily::Debian => "qemu-system-x86 qemu-utils libvirt-daemon-system virtinst ovmf",
+            installer::DistroFamily::RedHat => "qemu-kvm libvirt virt-install",
+            installer::DistroFamily::Suse => "qemu-kvm libvirt virt-install",
+            _ => "qemu-system-x86",
+        },
+        _ => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Unknown technology: {}. Use docker, lxc, or kvm.", tech)
+            }));
+        }
+    };
+
+    // Run package install
+    let cmd = format!("{} {} {}", pm, install_flag, packages);
+    let result = std::process::Command::new("bash")
+        .args(["-c", &cmd])
+        .output();
+
+    match result {
+        Ok(o) if o.status.success() => {
+            // Post-install actions
+            if tech == "lxc" {
+                containers::ensure_lxc_bridge();
+            } else if tech == "kvm" {
+                let _ = std::process::Command::new("systemctl").args(["enable", "--now", "libvirtd"]).output();
+            }
+            HttpResponse::Ok().json(serde_json::json!({
+                "message": format!("{} installed successfully", tech)
+            }))
+        }
+        Ok(o) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Install failed: {}", String::from_utf8_lossy(&o.stderr))
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to run installer: {}", e)
+        })),
+    }
 }
 
 /// GET /api/geolocate?ip={address} — server-side geolocation proxy
@@ -4839,6 +4930,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/components/{name}/detail", web::get().to(get_component_detail))
         .route("/api/components/{name}/config", web::put().to(save_component_config))
         .route("/api/components/{name}/install", web::post().to(install_component))
+        .route("/api/install/{tech}", web::post().to(install_runtime))
         // Services
         .route("/api/services/{name}/action", web::post().to(service_action))
         // Cron Jobs

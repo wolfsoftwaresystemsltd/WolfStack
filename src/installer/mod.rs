@@ -131,7 +131,7 @@ pub fn detect_distro() -> DistroFamily {
 }
 
 /// Get the package manager command for the current distro
-fn pkg_install_cmd(distro: DistroFamily) -> (&'static str, &'static str) {
+pub fn pkg_install_cmd(distro: DistroFamily) -> (&'static str, &'static str) {
     match distro {
         DistroFamily::Debian => ("apt-get", "install -y"),
         DistroFamily::RedHat => ("dnf", "install -y"),

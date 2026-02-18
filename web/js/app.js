@@ -190,8 +190,20 @@ function selectServerView(nodeId, view) {
         if (node?.is_self) fetchMetricsHistory();
     }
     if (view === 'components' || view === 'services') loadComponents().finally(() => hidePageLoadingOverlay(el));
-    if (view === 'containers') loadDockerContainers().finally(() => hidePageLoadingOverlay(el));
-    if (view === 'lxc') loadLxcContainers().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'containers') {
+        if (!node?.has_docker && node?.node_type !== 'proxmox') {
+            showInstallPrompt(el, 'Docker', 'docker', '🐳', 'Run application containers with Docker.');
+            return;
+        }
+        loadDockerContainers().finally(() => hidePageLoadingOverlay(el));
+    }
+    if (view === 'lxc') {
+        if (!node?.has_lxc && node?.node_type !== 'proxmox') {
+            showInstallPrompt(el, 'LXC', 'lxc', '📦', 'Run lightweight system containers with LXC.');
+            return;
+        }
+        loadLxcContainers().finally(() => hidePageLoadingOverlay(el));
+    }
 
     if (view === 'terminal') {
         // Open terminal inline in the content area
@@ -203,7 +215,13 @@ function selectServerView(nodeId, view) {
             openInlineTerminal('host', hostname);
         }
     }
-    if (view === 'vms') loadVms().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'vms') {
+        if (!node?.has_kvm && node?.node_type !== 'proxmox') {
+            showInstallPrompt(el, 'KVM', 'kvm', '🖥️', 'Create and manage virtual machines with KVM/QEMU.');
+            return;
+        }
+        loadVms().finally(() => hidePageLoadingOverlay(el));
+    }
     if (view === 'storage') loadStorageMounts().finally(() => hidePageLoadingOverlay(el));
     if (view === 'networking') loadNetworking().finally(() => hidePageLoadingOverlay(el));
     if (view === 'backups') loadBackups().finally(() => hidePageLoadingOverlay(el));
@@ -212,6 +230,68 @@ function selectServerView(nodeId, view) {
     if (view === 'cron') loadCronJobs().finally(() => hidePageLoadingOverlay(el));
     if (view === 'pve-resources') { renderPveResourcesView(nodeId); hidePageLoadingOverlay(el); }
     if (view === 'mysql-editor') { loadMySQLEditor(); hidePageLoadingOverlay(el); }
+}
+
+// ─── Install Prompt for missing runtimes ───
+function showInstallPrompt(container, techName, techId, icon, description) {
+    hidePageLoadingOverlay(container);
+    const content = container.querySelector('.content-body') || container;
+    content.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:center;min-height:320px;">
+            <div style="text-align:center;max-width:420px;padding:40px;background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:16px;">
+                <div style="font-size:56px;margin-bottom:16px;">${icon}</div>
+                <h2 style="margin:0 0 8px;font-size:20px;color:var(--text-primary);">${techName} is not installed</h2>
+                <p style="margin:0 0 24px;color:var(--text-muted);font-size:14px;line-height:1.5;">${description}</p>
+                <button id="install-${techId}-btn" class="btn btn-primary" style="padding:10px 32px;font-size:15px;border-radius:8px;cursor:pointer;" onclick="installRuntime('${techId}', '${techName}')">
+                    Install ${techName}
+                </button>
+                <div id="install-${techId}-status" style="margin-top:16px;font-size:13px;color:var(--text-muted);display:none;"></div>
+            </div>
+        </div>
+    `;
+}
+
+async function installRuntime(techId, techName) {
+    const btn = document.getElementById(`install-${techId}-btn`);
+    const status = document.getElementById(`install-${techId}-status`);
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = `Installing ${techName}...`;
+        btn.style.opacity = '0.6';
+    }
+    if (status) {
+        status.style.display = '';
+        status.textContent = 'This may take a few minutes. Please wait...';
+    }
+
+    try {
+        const url = apiUrl(`/api/install/${techId}`);
+        const resp = await fetch(url, { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`${techName} installed successfully!`, 'success');
+            // Refresh node data to get updated capability flags
+            try {
+                const nodesResp = await fetch('/api/nodes');
+                const nodesData = await nodesResp.json();
+                if (nodesData.nodes) {
+                    buildServerTree(nodesData.nodes);
+                    allNodes = nodesData.nodes;
+                }
+            } catch (e) { /* silent */ }
+            // Reload the current view now that the tech is installed
+            const viewMap = { docker: 'containers', lxc: 'lxc', kvm: 'vms' };
+            selectServerView(currentNodeId, viewMap[techId] || 'dashboard');
+        } else {
+            showToast(data.error || `Failed to install ${techName}`, 'error');
+            if (btn) { btn.disabled = false; btn.textContent = `Install ${techName}`; btn.style.opacity = '1'; }
+            if (status) status.textContent = data.error || 'Installation failed.';
+        }
+    } catch (e) {
+        showToast(`Error installing ${techName}: ${e.message}`, 'error');
+        if (btn) { btn.disabled = false; btn.textContent = `Install ${techName}`; btn.style.opacity = '1'; }
+        if (status) status.textContent = e.message;
+    }
 }
 
 // ─── Server Tree ───

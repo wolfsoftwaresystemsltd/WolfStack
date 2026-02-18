@@ -1005,6 +1005,21 @@ pub struct RuntimeStatus {
 
 // ─── Detection ───
 
+/// Check if KVM/QEMU is installed
+pub fn kvm_installed() -> bool {
+    // Check for qemu-system-x86_64 or virsh
+    Command::new("which")
+        .arg("qemu-system-x86_64")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    || Command::new("which")
+        .arg("virsh")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Check if Docker is installed and running
 pub fn docker_status() -> RuntimeStatus {
     let installed = Command::new("which")

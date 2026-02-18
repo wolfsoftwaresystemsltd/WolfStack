@@ -78,6 +78,12 @@ pub struct Node {
     pub cluster_name: Option<String>,     // Generic cluster name for WolfStack nodes
     #[serde(default)]
     pub join_verified: bool,              // Whether this node was added with a valid join token
+    #[serde(default)]
+    pub has_docker: bool,                 // Whether Docker is installed on this node
+    #[serde(default)]
+    pub has_lxc: bool,                    // Whether LXC is installed on this node
+    #[serde(default)]
+    pub has_kvm: bool,                    // Whether KVM/QEMU is installed on this node
 }
 
 fn default_node_type() -> String { "wolfstack".to_string() }
@@ -201,7 +207,7 @@ impl ClusterState {
     }
 
     /// Update this node's own status
-    pub fn update_self(&self, metrics: SystemMetrics, components: Vec<ComponentStatus>, docker_count: u32, lxc_count: u32, vm_count: u32, public_ip: Option<String>) {
+    pub fn update_self(&self, metrics: SystemMetrics, components: Vec<ComponentStatus>, docker_count: u32, lxc_count: u32, vm_count: u32, public_ip: Option<String>, has_docker: bool, has_lxc: bool, has_kvm: bool) {
         let mut nodes = self.nodes.write().unwrap();
         // Fetch existing cluster_name: in-memory first, then persisted file, then default
         let cluster_name = nodes.get(&self.self_id)
@@ -232,6 +238,9 @@ impl ClusterState {
             pve_cluster_name: None,
             cluster_name,
             join_verified: true, // self is always verified
+            has_docker,
+            has_lxc,
+            has_kvm,
         });
     }
 
@@ -332,6 +341,9 @@ impl ClusterState {
             pve_cluster_name,
             cluster_name,
             join_verified: false, // will be set true by add_node after token validation
+            has_docker: false,
+            has_lxc: false,
+            has_kvm: false,
         });
         drop(nodes);
         self.save_nodes();
@@ -503,6 +515,12 @@ pub enum AgentMessage {
         /// WolfNet IPs in use on this node (host IP first, then container/VM IPs)
         #[serde(default)]
         wolfnet_ips: Vec<String>,
+        #[serde(default)]
+        has_docker: bool,
+        #[serde(default)]
+        has_lxc: bool,
+        #[serde(default)]
+        has_kvm: bool,
     },
     /// "Give me your status"
     StatusRequest,
@@ -604,6 +622,9 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         pve_cluster_name: final_cluster_name.clone(),
                         cluster_name: final_cluster_name,
                         join_verified: node.join_verified,
+                        has_docker: true,  // Proxmox always has container/VM support
+                        has_lxc: true,
+                        has_kvm: true,
                     });
 
                     // Reset fail count on success
@@ -658,7 +679,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
             {
                 Ok(resp) => {
                     if let Ok(msg) = resp.json::<AgentMessage>().await {
-                        if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes, deleted_ids, wolfnet_ips } = msg {
+                        if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes, deleted_ids, wolfnet_ips, has_docker, has_lxc, has_kvm } = msg {
                             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                             cluster.update_remote(Node {
                                 id: node.id.clone(),
@@ -681,6 +702,9 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                 pve_cluster_name: None,
                                 cluster_name: node.cluster_name.clone(),
                                 join_verified: node.join_verified,
+                                has_docker,
+                                has_lxc,
+                                has_kvm,
                             });
 
                             // Reset fail count on success

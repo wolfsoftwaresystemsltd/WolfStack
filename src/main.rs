@@ -188,7 +188,10 @@ async fn main() -> std::io::Result<()> {
         let docker_count = containers::docker_list_all().len() as u32;
         let lxc_count = containers::lxc_list_all().len() as u32;
         let vm_count = vms_manager.list_vms().len() as u32;
-        cluster.update_self(metrics, components, docker_count, lxc_count, vm_count, public_ip.clone());
+        let has_docker = containers::docker_status().installed;
+        let has_lxc = containers::lxc_status().installed;
+        let has_kvm = containers::kvm_installed();
+        cluster.update_self(metrics, components, docker_count, lxc_count, vm_count, public_ip.clone(), has_docker, has_lxc, has_kvm);
 
         // Initialize AI agent
         let ai_agent = Arc::new(ai::AiAgent::new());
@@ -232,6 +235,9 @@ async fn main() -> std::io::Result<()> {
                 let docker_count = containers::docker_list_all().len() as u32;
                 let lxc_count = containers::lxc_list_all().len() as u32;
                 let vm_count = state_clone.vms.lock().unwrap().list_vms().len() as u32;
+                let has_docker = containers::docker_status().installed;
+                let has_lxc = containers::lxc_status().installed;
+                let has_kvm = containers::kvm_installed();
 
                 // Cache the agent status report for instant polling responses
                 let self_id = cluster_clone.self_id.clone();
@@ -250,6 +256,9 @@ async fn main() -> std::io::Result<()> {
                     known_nodes,
                     deleted_ids,
                     wolfnet_ips: containers::wolfnet_used_ips(),
+                    has_docker,
+                    has_lxc,
+                    has_kvm,
                 };
                 if let Ok(json) = serde_json::to_value(&msg) {
                     if let Ok(mut cache) = cached_status_bg.write() {
@@ -257,7 +266,7 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
 
-                cluster_clone.update_self(metrics, components, docker_count, lxc_count, vm_count, public_ip.clone());
+                cluster_clone.update_self(metrics, components, docker_count, lxc_count, vm_count, public_ip.clone(), has_docker, has_lxc, has_kvm);
             }
         });
 
