@@ -206,7 +206,7 @@ function selectServerView(nodeId, view) {
     }
     if (view === 'vms') loadVms().finally(() => hidePageLoadingOverlay(el));
     if (view === 'storage') Promise.all([loadStorageMounts(), loadZfsStatus()]).finally(() => hidePageLoadingOverlay(el));
-    if (view === 'files') loadFiles().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'files') { containerFileMode = null; currentFilePath = '/'; loadFiles().finally(() => hidePageLoadingOverlay(el)); }
     if (view === 'networking') loadNetworking().finally(() => hidePageLoadingOverlay(el));
     if (view === 'backups') loadBackups().finally(() => hidePageLoadingOverlay(el));
     if (view === 'wolfnet') loadWolfNet().finally(() => hidePageLoadingOverlay(el));
@@ -2349,6 +2349,27 @@ async function importRcloneConfig() {
 // ─── File Manager ───
 
 let currentFilePath = '/';
+let containerFileMode = null;  // null = host, {type:'docker', name:'xxx'} or {type:'lxc', name:'xxx', rootfs:'/path'}
+
+function browseContainerFiles(type, name, storagePath) {
+    containerFileMode = type === 'docker'
+        ? { type: 'docker', name }
+        : { type: 'lxc', name, rootfs: storagePath || `/var/lib/lxc/${name}/rootfs` };
+
+    // For LXC, browse the host filesystem at the rootfs path
+    if (type === 'lxc') {
+        containerFileMode = null; // use host mode
+        currentFilePath = storagePath || `/var/lib/lxc/${name}/rootfs`;
+    } else {
+        currentFilePath = '/';
+    }
+
+    // Switch to files view
+    if (typeof selectServerView === 'function') {
+        selectServerView('files');
+    }
+    loadFiles(currentFilePath);
+}
 
 async function loadFiles(path) {
     if (path !== undefined) currentFilePath = path;
@@ -2356,8 +2377,23 @@ async function loadFiles(path) {
     const empty = document.getElementById('file-empty');
     if (!table) return;
 
+    // Update header to show container context
+    const header = document.querySelector('#page-files .card-header h3');
+    if (header) {
+        if (containerFileMode && containerFileMode.type === 'docker') {
+            header.textContent = `📂 Files — 🐳 ${containerFileMode.name}`;
+        } else {
+            header.textContent = '📂 File Manager';
+        }
+    }
+
     try {
-        const resp = await fetch(apiUrl(`/api/files/browse?path=${encodeURIComponent(currentFilePath)}`));
+        let resp;
+        if (containerFileMode && containerFileMode.type === 'docker') {
+            resp = await fetch(apiUrl(`/api/files/docker/browse?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(currentFilePath)}`));
+        } else {
+            resp = await fetch(apiUrl(`/api/files/browse?path=${encodeURIComponent(currentFilePath)}`));
+        }
         const data = await resp.json();
         if (!resp.ok) {
             showToast(data.error || 'Failed to browse', 'error');
@@ -2471,17 +2507,30 @@ function navigateToDir(path) {
 }
 
 function downloadFile(path) {
-    window.open(apiUrl(`/api/files/download?path=${encodeURIComponent(path)}`), '_blank');
+    if (containerFileMode && containerFileMode.type === 'docker') {
+        window.open(apiUrl(`/api/files/docker/download?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(path)}`), '_blank');
+    } else {
+        window.open(apiUrl(`/api/files/download?path=${encodeURIComponent(path)}`), '_blank');
+    }
 }
 
 async function deleteFile(path, name) {
     if (!confirm(`Delete '${name}'?\n\nThis cannot be undone.`)) return;
     try {
-        const resp = await fetch(apiUrl('/api/files/delete'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path }),
-        });
+        let resp;
+        if (containerFileMode && containerFileMode.type === 'docker') {
+            resp = await fetch(apiUrl('/api/files/docker/delete'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ container: containerFileMode.name, path }),
+            });
+        } else {
+            resp = await fetch(apiUrl('/api/files/delete'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path }),
+            });
+        }
         const data = await resp.json();
         if (resp.ok) {
             showToast(data.message || 'Deleted', 'success');
@@ -2498,11 +2547,20 @@ async function renameFile(path, oldName) {
     const parentDir = path.substring(0, path.lastIndexOf('/'));
     const newPath = parentDir + '/' + newName;
     try {
-        const resp = await fetch(apiUrl('/api/files/rename'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ from: path, to: newPath }),
-        });
+        let resp;
+        if (containerFileMode && containerFileMode.type === 'docker') {
+            resp = await fetch(apiUrl('/api/files/docker/rename'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ container: containerFileMode.name, from: path, to: newPath }),
+            });
+        } else {
+            resp = await fetch(apiUrl('/api/files/rename'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ from: path, to: newPath }),
+            });
+        }
         const data = await resp.json();
         if (resp.ok) {
             showToast(data.message || 'Renamed', 'success');
@@ -2522,11 +2580,20 @@ function showNewFolderModal() {
 async function createNewFolder(name) {
     const path = currentFilePath.endsWith('/') ? currentFilePath + name : currentFilePath + '/' + name;
     try {
-        const resp = await fetch(apiUrl('/api/files/mkdir'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path }),
-        });
+        let resp;
+        if (containerFileMode && containerFileMode.type === 'docker') {
+            resp = await fetch(apiUrl('/api/files/docker/mkdir'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ container: containerFileMode.name, path }),
+            });
+        } else {
+            resp = await fetch(apiUrl('/api/files/mkdir'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path }),
+            });
+        }
         const data = await resp.json();
         if (resp.ok) {
             showToast(data.message || 'Folder created', 'success');
@@ -5736,6 +5803,7 @@ function renderDockerContainers(containers) {
                 `}
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs">📜</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewDockerVolumes('${c.name}')" title="Volumes">📁</button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="browseContainerFiles('docker', '${c.name}')" title="Browse Files">📂</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openDockerSettings('${c.name}')" title="Settings">⚙️</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>
@@ -6257,6 +6325,7 @@ function renderLxcContainers(containers, stats) {
                 <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}', '${c.hostname || c.name}')"` : ''} title="Console">💻</button>
                 <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'destroy')"` : ''} title="Destroy">🗑️</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs">📜</button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="browseContainerFiles('lxc', '${c.name}', '${(c.storage_path || '').replace(/'/g, "\\'")}')" title="Browse Files">📂</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcSettings('${c.name}')" title="Settings">⚙️</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="cloneLxcContainer('${c.name}')" title="Clone">📋</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="migrateLxcContainer('${c.name}')" title="Migrate">🚀</button>

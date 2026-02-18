@@ -4610,6 +4610,210 @@ pub async fn files_download(
         })),
     }
 }
+/// GET /api/files/docker/browse?container=ID&path=/ — browse files inside a Docker container
+pub async fn files_docker_browse(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = query.get("container").cloned().unwrap_or_default();
+    let path = query.get("path").cloned().unwrap_or_else(|| "/".into());
+
+    if container.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container'" }));
+    }
+
+    // Use docker exec to list directory contents with stat-like output
+    let output = std::process::Command::new("docker")
+        .args(["exec", &container, "find", &path, "-maxdepth", "1", "-mindepth", "1",
+               "-printf", "%y\\t%s\\t%T@\\t%m\\t%f\\n"])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let mut entries: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|line| {
+                    let parts: Vec<&str> = line.splitn(5, '\t').collect();
+                    let file_type = parts.get(0).unwrap_or(&"f");
+                    let size: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let modified: f64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let permissions = parts.get(3).unwrap_or(&"");
+                    let name = parts.get(4).unwrap_or(&"");
+                    let is_dir = *file_type == "d";
+                    let entry_path = if path.ends_with('/') {
+                        format!("{}{}", path, name)
+                    } else {
+                        format!("{}/{}", path, name)
+                    };
+
+                    serde_json::json!({
+                        "name": name,
+                        "path": entry_path,
+                        "is_dir": is_dir,
+                        "size": if is_dir { 0 } else { size },
+                        "modified": modified as u64,
+                        "permissions": permissions,
+                    })
+                })
+                .collect();
+
+            // Sort: directories first, then alphabetically
+            entries.sort_by(|a, b| {
+                let a_dir = a["is_dir"].as_bool().unwrap_or(false);
+                let b_dir = b["is_dir"].as_bool().unwrap_or(false);
+                match (a_dir, b_dir) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a["name"].as_str().unwrap_or("")
+                        .to_lowercase()
+                        .cmp(&b["name"].as_str().unwrap_or("").to_lowercase()),
+                }
+            });
+
+            HttpResponse::Ok().json(serde_json::json!({
+                "path": path,
+                "container": container,
+                "entries": entries,
+            }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to list directory: {}", err.trim())
+            }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to exec into container: {}", e)
+        })),
+    }
+}
+
+/// POST /api/files/docker/mkdir — create directory inside Docker container
+pub async fn files_docker_mkdir(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if container.is_empty() || path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container' or 'path'" }));
+    }
+
+    let output = std::process::Command::new("docker")
+        .args(["exec", container, "mkdir", "-p", path])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => HttpResponse::Ok().json(serde_json::json!({ "message": format!("Directory created: {}", path) })),
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/files/docker/delete — delete file/dir inside Docker container
+pub async fn files_docker_delete(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if container.is_empty() || path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container' or 'path'" }));
+    }
+
+    let critical = ["/", "/etc", "/usr", "/bin", "/sbin", "/lib", "/boot", "/proc", "/sys", "/dev", "/var"];
+    if critical.contains(&path) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Cannot delete system directory" }));
+    }
+
+    let output = std::process::Command::new("docker")
+        .args(["exec", container, "rm", "-rf", path])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => HttpResponse::Ok().json(serde_json::json!({ "message": format!("Deleted: {}", path) })),
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/files/docker/rename — rename file/dir inside Docker container
+pub async fn files_docker_rename(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
+    let from = body.get("from").and_then(|v| v.as_str()).unwrap_or("");
+    let to = body.get("to").and_then(|v| v.as_str()).unwrap_or("");
+    if container.is_empty() || from.is_empty() || to.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing fields" }));
+    }
+
+    let output = std::process::Command::new("docker")
+        .args(["exec", container, "mv", from, to])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => HttpResponse::Ok().json(serde_json::json!({ "message": format!("Renamed to {}", to) })),
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/files/docker/download?container=ID&path=/file — download file from Docker container
+pub async fn files_docker_download(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = query.get("container").cloned().unwrap_or_default();
+    let path = query.get("path").cloned().unwrap_or_default();
+    if container.is_empty() || path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container' or 'path'" }));
+    }
+
+    // Use docker cp to a temp file
+    let tmp = format!("/tmp/wolfstack-docker-dl-{}", std::process::id());
+    let src = format!("{}:{}", container, path);
+    let output = std::process::Command::new("docker").args(["cp", &src, &tmp]).output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let filename = std::path::Path::new(&path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "download".into());
+
+            match std::fs::read(&tmp) {
+                Ok(data) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    HttpResponse::Ok()
+                        .insert_header(("Content-Disposition", format!("attachment; filename=\"{}\"", filename)))
+                        .insert_header(("Content-Type", "application/octet-stream"))
+                        .body(data)
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Read error: {}", e) }))
+                }
+            }
+        }
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": String::from_utf8_lossy(&out.stderr).trim().to_string()
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
 
 /// POST /api/agent/storage/apply — receive and apply a mount config from another node (cluster-auth)
 pub async fn agent_storage_apply(
@@ -5436,6 +5640,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/files/rename", web::post().to(files_rename))
         .route("/api/files/upload", web::post().to(files_upload))
         .route("/api/files/download", web::get().to(files_download))
+        // Docker File Manager
+        .route("/api/files/docker/browse", web::get().to(files_docker_browse))
+        .route("/api/files/docker/mkdir", web::post().to(files_docker_mkdir))
+        .route("/api/files/docker/delete", web::post().to(files_docker_delete))
+        .route("/api/files/docker/rename", web::post().to(files_docker_rename))
+        .route("/api/files/docker/download", web::get().to(files_docker_download))
         // Networking
         .route("/api/networking/interfaces", web::get().to(net_list_interfaces))
         .route("/api/networking/dns", web::get().to(net_get_dns))
