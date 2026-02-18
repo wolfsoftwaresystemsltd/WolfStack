@@ -246,6 +246,16 @@ if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev
         git fetch origin 2>&1 || true
         git reset --hard origin/main 2>&1 || true
 
+        # Verify wolfnet subdirectory exists after reset — if not, re-clone
+        if [ ! -d "$WOLFNET_SRC_DIR/wolfnet" ]; then
+            echo "  ⚠ wolfnet subdirectory missing — re-cloning WolfScale repo..."
+            cd /tmp
+            rm -rf "$WOLFNET_SRC_DIR"
+            git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+            cd "$WOLFNET_SRC_DIR"
+        fi
+
         # Rebuild
         export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
         if command -v cargo &> /dev/null; then
@@ -284,6 +294,16 @@ elif command -v wolfnet &> /dev/null; then
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
         git fetch origin 2>&1 || true
         git reset --hard origin/main 2>&1 || true
+
+        # Verify wolfnet subdirectory exists after reset — if not, re-clone
+        if [ ! -d "$WOLFNET_SRC_DIR/wolfnet" ]; then
+            echo "  ⚠ wolfnet subdirectory missing — re-cloning WolfScale repo..."
+            cd /tmp
+            rm -rf "$WOLFNET_SRC_DIR"
+            git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+            cd "$WOLFNET_SRC_DIR"
+        fi
 
         export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
         if command -v cargo &> /dev/null; then
