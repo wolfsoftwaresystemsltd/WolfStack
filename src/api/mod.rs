@@ -6064,21 +6064,27 @@ pub async fn scan_issues(
         });
     }
 
-    // ── Disk checks ──
+    // ── Disk checks (free space, not just %) ──
     for disk in &metrics.disks {
-        if disk.usage_percent > 95.0 {
+        let total_gb = disk.total_bytes as f64 / 1_073_741_824.0;
+        let used_gb = disk.used_bytes as f64 / 1_073_741_824.0;
+        let free_gb = disk.available_bytes as f64 / 1_073_741_824.0;
+        let size_detail = format!("{} — {:.1} GB used / {:.1} GB total ({:.1} GB free, {:.1}%)",
+            disk.mount_point, used_gb, total_gb, free_gb, disk.usage_percent);
+
+        if free_gb < 2.0 {
             issues.push(Issue {
                 severity: "critical".into(),
                 category: "disk".into(),
-                title: format!("Disk {} almost full", disk.mount_point),
-                detail: format!("{} at {:.1}% usage", disk.mount_point, disk.usage_percent),
+                title: format!("Disk {} almost full ({:.1} GB free)", disk.mount_point, free_gb),
+                detail: size_detail,
             });
-        } else if disk.usage_percent > 85.0 {
+        } else if free_gb < 10.0 {
             issues.push(Issue {
                 severity: "warning".into(),
                 category: "disk".into(),
-                title: format!("Disk {} usage high", disk.mount_point),
-                detail: format!("{} at {:.1}% usage", disk.mount_point, disk.usage_percent),
+                title: format!("Disk {} low on space ({:.1} GB free)", disk.mount_point, free_gb),
+                detail: size_detail,
             });
         }
     }
