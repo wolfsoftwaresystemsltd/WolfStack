@@ -301,16 +301,21 @@ echo ""
 echo "Checking WolfNet (cluster networking)..."
 
 if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev/null; then
-    # Already installed and running — check for upgrades
+    # Already installed and running — upgrade
     echo "✓ WolfNet already installed and running"
     WOLFNET_IP=$(ip -4 addr show wolfnet0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]}' || echo "")
     if [ -n "$WOLFNET_IP" ]; then
         echo "  WolfNet IP: $WOLFNET_IP"
     fi
 
-    # Always update WolfNet when WolfStack updates
+    # Step 1: Stop WolfNet
+    echo "  Stopping WolfNet for upgrade..."
+    systemctl stop wolfnet 2>/dev/null || true
+    sleep 1
+
+    # Step 2: Pull latest source
     WOLFNET_SRC_DIR="/opt/wolfnet-src"
-    echo "  Updating WolfNet..."
+    echo "  Pulling latest WolfNet..."
     if [ -d "$WOLFNET_SRC_DIR" ]; then
         cd "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
@@ -322,9 +327,10 @@ if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev
         cd "$WOLFNET_SRC_DIR"
     fi
 
-    # Rebuild
+    # Step 3: Build
     export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
     if command -v cargo &> /dev/null; then
+        echo "  Building WolfNet..."
         cd "$WOLFNET_SRC_DIR"
         if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
             chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
@@ -333,18 +339,25 @@ if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev
             cargo build --release
         fi
 
-        # Install updated binaries
-        systemctl stop wolfnet 2>/dev/null || true
+        # Step 4: Install new binary
         cp "$WOLFNET_SRC_DIR/target/release/wolfnet" /usr/local/bin/wolfnet
         chmod +x /usr/local/bin/wolfnet
         if [ -f "$WOLFNET_SRC_DIR/target/release/wolfnetctl" ]; then
             cp "$WOLFNET_SRC_DIR/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
             chmod +x /usr/local/bin/wolfnetctl
         fi
-        systemctl start wolfnet 2>/dev/null || true
-        echo "  ✓ WolfNet updated and restarted"
     else
         echo "  ⚠ Cargo not found — skipping WolfNet rebuild"
+    fi
+
+    # Step 5: Start WolfNet
+    echo "  Starting WolfNet..."
+    systemctl start wolfnet 2>/dev/null || true
+    sleep 2
+    if systemctl is-active --quiet wolfnet; then
+        echo "  ✓ WolfNet upgraded and running"
+    else
+        echo "  ⚠ WolfNet failed to start. Check: journalctl -u wolfnet -n 20"
     fi
 
 elif command -v wolfnet &> /dev/null; then
@@ -670,6 +683,16 @@ rm -rf target/release/wolfstack target/release/.fingerprint/wolfstack-*
 echo ""
 echo "Building WolfStack (this may take a few minutes)..."
 
+# ─── Stop WolfStack if running (for upgrades) ───────────────────────────────
+if systemctl is-active --quiet wolfstack 2>/dev/null; then
+    echo "Stopping WolfStack for upgrade..."
+    systemctl stop wolfstack 2>/dev/null || true
+    sleep 1
+    RESTART_SERVICE=true
+else
+    RESTART_SERVICE=false
+fi
+
 if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
     chown -R "$REAL_USER:$REAL_USER" "$INSTALL_DIR"
     su - "$REAL_USER" -c "cd $INSTALL_DIR && $REAL_HOME/.cargo/bin/cargo build --release"
@@ -678,15 +701,6 @@ else
 fi
 
 echo "✓ Build complete"
-
-# ─── Flag restart if service is running (for upgrades) ───────────────────────
-if systemctl is-active --quiet wolfstack 2>/dev/null; then
-    echo ""
-    echo "WolfStack service is running — will restart after upgrade."
-    RESTART_SERVICE=true
-else
-    RESTART_SERVICE=false
-fi
 
 # ─── Install binary ─────────────────────────────────────────────────────────
 echo ""
