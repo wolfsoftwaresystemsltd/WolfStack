@@ -320,20 +320,20 @@ if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev
         # Rebuild
         export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
         if command -v cargo &> /dev/null; then
-            cd "$WOLFNET_SRC_DIR/wolfnet"
+            cd "$WOLFNET_SRC_DIR"
             if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
                 chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
-                su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
+                su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR && $REAL_HOME/.cargo/bin/cargo build --release"
             else
                 cargo build --release
             fi
 
             # Install updated binaries
             systemctl stop wolfnet 2>/dev/null || true
-            cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
+            cp "$WOLFNET_SRC_DIR/target/release/wolfnet" /usr/local/bin/wolfnet
             chmod +x /usr/local/bin/wolfnet
-            if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
-                cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+            if [ -f "$WOLFNET_SRC_DIR/target/release/wolfnetctl" ]; then
+                cp "$WOLFNET_SRC_DIR/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
                 chmod +x /usr/local/bin/wolfnetctl
             fi
             systemctl start wolfnet 2>/dev/null || true
@@ -358,17 +358,17 @@ elif command -v wolfnet &> /dev/null; then
 
         export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
         if command -v cargo &> /dev/null; then
-            cd "$WOLFNET_SRC_DIR/wolfnet"
+            cd "$WOLFNET_SRC_DIR"
             if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
                 chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
-                su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
+                su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR && $REAL_HOME/.cargo/bin/cargo build --release"
             else
                 cargo build --release
             fi
-            cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
+            cp "$WOLFNET_SRC_DIR/target/release/wolfnet" /usr/local/bin/wolfnet
             chmod +x /usr/local/bin/wolfnet
-            if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
-                cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+            if [ -f "$WOLFNET_SRC_DIR/target/release/wolfnetctl" ]; then
+                cp "$WOLFNET_SRC_DIR/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
                 chmod +x /usr/local/bin/wolfnetctl
             fi
             echo "  ✓ WolfNet updated"
@@ -432,7 +432,7 @@ else
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
         cd "$WOLFNET_SRC_DIR" && git fetch origin && git reset --hard origin/main
     else
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+        git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
         cd "$WOLFNET_SRC_DIR"
     fi
@@ -452,19 +452,19 @@ else
 
     # Build WolfNet
     echo "  Building WolfNet..."
-    cd "$WOLFNET_SRC_DIR/wolfnet"
+    cd "$WOLFNET_SRC_DIR"
     if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
         chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
-        su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
+        su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR && $REAL_HOME/.cargo/bin/cargo build --release"
     else
         cargo build --release
     fi
 
     # Install binaries
-    cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
+    cp "$WOLFNET_SRC_DIR/target/release/wolfnet" /usr/local/bin/wolfnet
     chmod +x /usr/local/bin/wolfnet
-    if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
-        cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+    if [ -f "$WOLFNET_SRC_DIR/target/release/wolfnetctl" ]; then
+        cp "$WOLFNET_SRC_DIR/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
         chmod +x /usr/local/bin/wolfnetctl
     fi
     echo "  ✓ WolfNet binary installed"
