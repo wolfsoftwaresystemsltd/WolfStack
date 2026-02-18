@@ -2774,6 +2774,11 @@ function renderZfsPools(pools) {
 
     table.innerHTML = pools.map(p => {
         const healthColor = p.health === 'ONLINE' ? '#10b981' : p.health === 'DEGRADED' ? '#f59e0b' : '#ef4444';
+        const isScrubbing = (p.scan || '').toLowerCase().includes('scrub in progress');
+        const scanInfo = p.scan || 'none requested';
+        const errorsInfo = p.errors || 'No known data errors';
+        const errorsColor = errorsInfo.toLowerCase().includes('no known') ? '#10b981' : '#ef4444';
+
         return `<tr>
             <td><strong>${escapeHtml(p.name)}</strong></td>
             <td>${escapeHtml(p.size)}</td>
@@ -2782,9 +2787,24 @@ function renderZfsPools(pools) {
             <td><span style="color:${healthColor};font-weight:600;">● ${escapeHtml(p.health)}</span></td>
             <td>${escapeHtml(p.fragmentation)}</td>
             <td>${escapeHtml(p.capacity)}</td>
-            <td>
-                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="expandZfsPool('${escapeHtml(p.name)}')">📂 Datasets</button>
-                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsSnapshots('${escapeHtml(p.name)}')">📸 Snapshots</button>
+            <td style="white-space:nowrap;">
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="expandZfsPool('${escapeHtml(p.name)}')" title="Datasets">📂 Datasets</button>
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsSnapshots('${escapeHtml(p.name)}')" title="Snapshots">📸 Snapshots</button>
+                ${isScrubbing
+                ? `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);" onclick="zfsPoolScrub('${escapeHtml(p.name)}', true)" title="Stop Scrub">⏹️ Stop Scrub</button>`
+                : `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:rgba(16,185,129,0.1);color:#10b981;border:1px solid rgba(16,185,129,0.3);" onclick="zfsPoolScrub('${escapeHtml(p.name)}', false)" title="Start Scrub">🔍 Scrub</button>`
+            }
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsPoolStatus('${escapeHtml(p.name)}')" title="Detailed Status">📋 Status</button>
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsPoolIostat('${escapeHtml(p.name)}')" title="IO Statistics">📊 IO Stats</button>
+            </td>
+        </tr>
+        <tr class="storage-sub-row" style="background:var(--bg-secondary);">
+            <td colspan="8" style="padding:4px 16px 6px 24px;border-top:none;">
+                <div style="display:flex;align-items:center;gap:16px;font-size:11px;flex-wrap:wrap;">
+                    <span>🔄 <strong>Scan:</strong> ${escapeHtml(scanInfo.length > 80 ? scanInfo.substring(0, 80) + '…' : scanInfo)}</span>
+                    <span style="color:${errorsColor};">⚠️ <strong>Errors:</strong> ${escapeHtml(errorsInfo)}</span>
+                    <span>🔢 <strong>Dedup:</strong> ${escapeHtml(p.dedup || '1.00x')}</span>
+                </div>
             </td>
         </tr>`;
     }).join('');
@@ -2926,6 +2946,85 @@ async function deleteZfsSnapshot(snapshot) {
         }
     } catch (e) {
         showToast(`Failed: ${e.message}`, 'error');
+    }
+}
+
+async function zfsPoolScrub(pool, stop) {
+    const action = stop ? 'Stop scrub on' : 'Start scrub on';
+    if (!confirm(`${action} pool '${pool}'?`)) return;
+    try {
+        const resp = await fetch(apiUrl('/api/storage/zfs/pool/scrub'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pool, stop }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'OK', 'success');
+            setTimeout(loadZfsStatus, 1000); // refresh to show updated scan status
+        } else {
+            showToast(data.error || 'Failed', 'error');
+        }
+    } catch (e) { showToast(`Failed: ${e.message}`, 'error'); }
+}
+
+async function showZfsPoolStatus(pool) {
+    const detailSection = document.getElementById('zfs-detail-section');
+    if (!detailSection) return;
+
+    detailSection.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading pool status...</div>';
+
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/zfs/pool/status?pool=${encodeURIComponent(pool)}`));
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            detailSection.innerHTML = `<div style="text-align:center;padding:20px;color:#ef4444;">${data.error || 'Failed'}</div>`;
+            return;
+        }
+
+        detailSection.innerHTML = `
+            <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <h4 style="margin:0;font-size:14px;">📋 Pool Status — ${escapeHtml(pool)}</h4>
+                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                </div>
+                <pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;
+                    font-family:'JetBrains Mono',monospace;font-size:12px;max-height:400px;overflow-y:auto;
+                    color:var(--text-primary);white-space:pre-wrap;word-break:break-all;">${escapeHtml(data.status_text)}</pre>
+            </div>`;
+    } catch (e) {
+        detailSection.innerHTML = `<div style="text-align:center;padding:20px;color:#ef4444;">Failed: ${e.message}</div>`;
+    }
+}
+
+async function showZfsPoolIostat(pool) {
+    const detailSection = document.getElementById('zfs-detail-section');
+    if (!detailSection) return;
+
+    detailSection.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading IO stats...</div>';
+
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/zfs/pool/iostat?pool=${encodeURIComponent(pool)}`));
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            detailSection.innerHTML = `<div style="text-align:center;padding:20px;color:#ef4444;">${data.error || 'Failed'}</div>`;
+            return;
+        }
+
+        detailSection.innerHTML = `
+            <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <h4 style="margin:0;font-size:14px;">📊 IO Statistics — ${escapeHtml(pool)}</h4>
+                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                </div>
+                <pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;
+                    font-family:'JetBrains Mono',monospace;font-size:12px;max-height:400px;overflow-y:auto;
+                    color:var(--text-primary);white-space:pre-wrap;word-break:break-all;">${escapeHtml(data.iostat_text)}</pre>
+            </div>`;
+    } catch (e) {
+        detailSection.innerHTML = `<div style="text-align:center;padding:20px;color:#ef4444;">Failed: ${e.message}</div>`;
     }
 }
 

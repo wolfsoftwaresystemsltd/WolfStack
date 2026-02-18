@@ -4287,12 +4287,12 @@ pub async fn zfs_delete_snapshot(req: HttpRequest, state: web::Data<AppState>, b
 /// Helper: parse zpool list output into JSON
 fn zfs_get_pools() -> Vec<serde_json::Value> {
     let output = std::process::Command::new("zpool")
-        .args(["list", "-H", "-o", "name,size,alloc,free,health,fragmentation,capacity"])
+        .args(["list", "-H", "-o", "name,size,alloc,free,health,fragmentation,capacity,dedup,altroot"])
         .output();
 
     match output {
         Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).lines()
+            let mut pools: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout).lines()
                 .filter(|l| !l.is_empty())
                 .map(|line| {
                     let parts: Vec<&str> = line.split('\t').collect();
@@ -4304,11 +4304,131 @@ fn zfs_get_pools() -> Vec<serde_json::Value> {
                         "health": parts.get(4).unwrap_or(&""),
                         "fragmentation": parts.get(5).unwrap_or(&""),
                         "capacity": parts.get(6).unwrap_or(&""),
+                        "dedup": parts.get(7).unwrap_or(&"1.00x"),
+                        "altroot": parts.get(8).unwrap_or(&"-"),
                     })
                 })
-                .collect()
+                .collect();
+
+            // Enrich each pool with scan/scrub status from `zpool status`
+            for pool in &mut pools {
+                let pool_name = pool["name"].as_str().unwrap_or("").to_string();
+                if let Ok(status_out) = std::process::Command::new("zpool")
+                    .args(["status", &pool_name])
+                    .output()
+                {
+                    if status_out.status.success() {
+                        let status_text = String::from_utf8_lossy(&status_out.stdout).to_string();
+                        // Extract scan line
+                        let scan_line = status_text.lines()
+                            .find(|l| l.trim_start().starts_with("scan:"))
+                            .map(|l| l.trim_start().trim_start_matches("scan:").trim().to_string())
+                            .unwrap_or_else(|| "none requested".to_string());
+                        // Extract errors line
+                        let errors_line = status_text.lines()
+                            .find(|l| l.trim_start().starts_with("errors:"))
+                            .map(|l| l.trim_start().trim_start_matches("errors:").trim().to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+
+                        pool["scan"] = serde_json::json!(scan_line);
+                        pool["errors"] = serde_json::json!(errors_line);
+                    }
+                }
+            }
+
+            pools
         }
         _ => vec![],
+    }
+}
+
+/// POST /api/storage/zfs/pool/scrub — start or stop a scrub
+pub async fn zfs_pool_scrub(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let pool = body.get("pool").and_then(|v| v.as_str()).unwrap_or("");
+    let stop = body.get("stop").and_then(|v| v.as_bool()).unwrap_or(false);
+    if pool.is_empty() || !pool.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid pool name" }));
+    }
+
+    let mut args = vec!["scrub"];
+    if stop { args.push("-s"); }
+    args.push(pool);
+
+    let output = std::process::Command::new("zpool").args(&args).output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let msg = if stop { format!("Scrub stopped on pool '{}'", pool) }
+                      else { format!("Scrub started on pool '{}'", pool) };
+            HttpResponse::Ok().json(serde_json::json!({ "message": msg }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err.trim() }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/storage/zfs/pool/status?pool=POOL — detailed pool status (vdevs, errors, scan)
+pub async fn zfs_pool_status(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let pool = query.get("pool").cloned().unwrap_or_default();
+    if pool.is_empty() || !pool.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid pool name" }));
+    }
+
+    let output = std::process::Command::new("zpool").args(["status", "-v", &pool]).output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            HttpResponse::Ok().json(serde_json::json!({
+                "pool": pool,
+                "status_text": text,
+            }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err.trim() }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/storage/zfs/pool/iostat?pool=POOL — pool IO statistics
+pub async fn zfs_pool_iostat(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let pool = query.get("pool").cloned().unwrap_or_default();
+    if pool.is_empty() || !pool.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid pool name" }));
+    }
+
+    let output = std::process::Command::new("zpool").args(["iostat", "-v", &pool]).output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            HttpResponse::Ok().json(serde_json::json!({
+                "pool": pool,
+                "iostat_text": text,
+            }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err.trim() }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
     }
 }
 
@@ -5767,6 +5887,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/storage/zfs/snapshots", web::get().to(zfs_snapshots))
         .route("/api/storage/zfs/snapshot", web::post().to(zfs_create_snapshot))
         .route("/api/storage/zfs/snapshot", web::delete().to(zfs_delete_snapshot))
+        .route("/api/storage/zfs/pool/scrub", web::post().to(zfs_pool_scrub))
+        .route("/api/storage/zfs/pool/status", web::get().to(zfs_pool_status))
+        .route("/api/storage/zfs/pool/iostat", web::get().to(zfs_pool_iostat))
         // File Manager
         .route("/api/files/browse", web::get().to(files_browse))
         .route("/api/files/mkdir", web::post().to(files_mkdir))
