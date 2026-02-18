@@ -2354,7 +2354,7 @@ let containerFileMode = null;  // null = host, {type:'docker', name:'xxx'} or {t
 function browseContainerFiles(type, name, storagePath) {
     // For LXC, browse the host filesystem at the rootfs path
     if (type === 'lxc') {
-        containerFileMode = null;
+        containerFileMode = { type: 'lxc', name };
         currentFilePath = storagePath || `/var/lib/lxc/${name}/rootfs`;
     } else {
         containerFileMode = { type: 'docker', name };
@@ -2379,6 +2379,8 @@ async function loadFiles(path) {
     if (header) {
         if (containerFileMode && containerFileMode.type === 'docker') {
             header.textContent = `📂 Files — 🐳 ${containerFileMode.name}`;
+        } else if (containerFileMode && containerFileMode.type === 'lxc') {
+            header.textContent = `📂 Files — 📦 ${containerFileMode.name}`;
         } else {
             header.textContent = '📂 File Manager';
         }
@@ -2901,7 +2903,7 @@ async function showZfsSnapshots(pool) {
 }
 
 async function createZfsSnapshot(dataset) {
-    const name = prompt(`Create snapshot for ${dataset}\n\nEnter snapshot name:`, `snap-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`);
+    const name = await wolfPrompt(`Enter snapshot name for ${dataset}:`, `snap-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`, 'Create Snapshot', { okText: 'Create' });
     if (!name) return;
 
     try {
@@ -2925,7 +2927,8 @@ async function createZfsSnapshot(dataset) {
 }
 
 async function deleteZfsSnapshot(snapshot) {
-    if (!confirm(`Delete ZFS snapshot '${snapshot}'?\n\nThis cannot be undone.`)) return;
+    const confirmed = await wolfConfirm(`Delete ZFS snapshot '${snapshot}'?\n\nThis cannot be undone.`, 'Delete Snapshot', { okText: 'Delete', danger: true });
+    if (!confirmed) return;
 
     try {
         const resp = await fetch(apiUrl('/api/storage/zfs/snapshot'), {
@@ -2949,7 +2952,8 @@ async function deleteZfsSnapshot(snapshot) {
 
 async function zfsPoolScrub(pool, stop) {
     const action = stop ? 'Stop scrub on' : 'Start scrub on';
-    if (!confirm(`${action} pool '${pool}'?`)) return;
+    const confirmed = await wolfConfirm(`${action} pool '${pool}'?`, stop ? 'Stop Scrub' : 'Start Scrub', { okText: stop ? 'Stop' : 'Start', danger: stop });
+    if (!confirmed) return;
     try {
         const resp = await fetch(apiUrl('/api/storage/zfs/pool/scrub'), {
             method: 'POST',
@@ -4595,6 +4599,67 @@ async function saveNodeSettings() {
     modal.remove();
     fetchNodes();
 }
+
+// ─── Modal Confirm / Prompt Dialogs ───
+let _wolfDialogResolve = null;
+let _wolfDialogMode = 'confirm'; // 'confirm' or 'prompt'
+
+function wolfConfirm(message, title = 'Confirm', { okText = 'Confirm', cancelText = 'Cancel', danger = false } = {}) {
+    return new Promise(resolve => {
+        _wolfDialogResolve = resolve;
+        _wolfDialogMode = 'confirm';
+        document.getElementById('wolf-dialog-title').textContent = title;
+        document.getElementById('wolf-dialog-message').textContent = message;
+        document.getElementById('wolf-dialog-input-wrap').style.display = 'none';
+        const okBtn = document.getElementById('wolf-dialog-ok-btn');
+        okBtn.textContent = okText;
+        okBtn.className = danger ? 'btn btn-danger' : 'btn btn-primary';
+        document.getElementById('wolf-dialog-cancel-btn').textContent = cancelText;
+        document.getElementById('wolf-dialog-modal').classList.add('active');
+    });
+}
+
+function wolfPrompt(message, defaultValue = '', title = 'Input', { okText = 'OK', cancelText = 'Cancel', placeholder = '' } = {}) {
+    return new Promise(resolve => {
+        _wolfDialogResolve = resolve;
+        _wolfDialogMode = 'prompt';
+        document.getElementById('wolf-dialog-title').textContent = title;
+        document.getElementById('wolf-dialog-message').textContent = message;
+        const inputWrap = document.getElementById('wolf-dialog-input-wrap');
+        const input = document.getElementById('wolf-dialog-input');
+        inputWrap.style.display = 'block';
+        input.value = defaultValue;
+        input.placeholder = placeholder || '';
+        document.getElementById('wolf-dialog-ok-btn').textContent = okText;
+        document.getElementById('wolf-dialog-ok-btn').className = 'btn btn-primary';
+        document.getElementById('wolf-dialog-cancel-btn').textContent = cancelText;
+        document.getElementById('wolf-dialog-modal').classList.add('active');
+        setTimeout(() => input.focus(), 100);
+    });
+}
+
+function wolfDialogOk() {
+    document.getElementById('wolf-dialog-modal').classList.remove('active');
+    if (_wolfDialogResolve) {
+        _wolfDialogResolve(_wolfDialogMode === 'prompt' ? document.getElementById('wolf-dialog-input').value : true);
+        _wolfDialogResolve = null;
+    }
+}
+
+function wolfDialogCancel() {
+    document.getElementById('wolf-dialog-modal').classList.remove('active');
+    if (_wolfDialogResolve) {
+        _wolfDialogResolve(_wolfDialogMode === 'prompt' ? null : false);
+        _wolfDialogResolve = null;
+    }
+}
+
+// Handle Enter/Escape keys for dialog
+document.addEventListener('keydown', (e) => {
+    if (!_wolfDialogResolve) return;
+    if (e.key === 'Enter') { e.preventDefault(); wolfDialogOk(); }
+    if (e.key === 'Escape') { e.preventDefault(); wolfDialogCancel(); }
+});
 
 // ─── Toast Notifications ───
 function showToast(message, type = 'info') {

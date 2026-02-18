@@ -3331,6 +3331,27 @@ region = us-east-1"></textarea>
             </div>
         </div>
 
+        <!-- Generic Confirm/Prompt Modal -->
+        <div class="modal-overlay" id="wolf-dialog-modal">
+            <div class="modal" style="max-width:460px;width:90%;">
+                <div class="modal-header">
+                    <h3 id="wolf-dialog-title">Confirm</h3>
+                    <button class="modal-close" onclick="wolfDialogCancel()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p id="wolf-dialog-message"
+                        style="font-size:14px;line-height:1.6;margin:0;color:var(--text-secondary);"></p>
+                    <div id="wolf-dialog-input-wrap" style="display:none;margin-top:16px;">
+                        <input type="text" id="wolf-dialog-input" class="form-control" autocomplete="off">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" id="wolf-dialog-cancel-btn" onclick="wolfDialogCancel()">Cancel</button>
+                    <button class="btn btn-primary" id="wolf-dialog-ok-btn" onclick="wolfDialogOk()">Confirm</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Toast Container -->
         <div class="toast-container" id="toast-container"></div>
 
