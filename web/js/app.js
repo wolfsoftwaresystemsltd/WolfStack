@@ -2374,6 +2374,13 @@ async function loadFiles(path) {
     const empty = document.getElementById('file-empty');
     if (!table) return;
 
+    // Show loading spinner
+    table.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:40px 0;">
+        <div class="page-loading-spinner" style="margin:0 auto 12px;"></div>
+        <div style="color:var(--text-muted);font-size:13px;">Loading files…</div>
+    </td></tr>`;
+    if (empty) empty.style.display = 'none';
+
     // Update header to show container context
     const header = document.querySelector('#page-files .card-header h3');
     if (header) {
@@ -2398,6 +2405,7 @@ async function loadFiles(path) {
         const data = await resp.json();
         if (!resp.ok) {
             showToast(data.error || 'Failed to browse', 'error');
+            table.innerHTML = '';
             return;
         }
 
@@ -2415,6 +2423,7 @@ async function loadFiles(path) {
     } catch (e) {
         console.error('File browse failed:', e);
         showToast('Failed to load files', 'error');
+        table.innerHTML = '';
     }
 }
 
