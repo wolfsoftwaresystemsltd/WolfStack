@@ -11852,9 +11852,10 @@ function escapeHtml(str) {
 }
 
 // ═══════════════════════════════════════════════
-// ═══════════════════════════════════════════════
 // ─── Issues Scanner ───
 // ═══════════════════════════════════════════════
+
+var issuesScanResults = []; // cached for upgrade-all
 
 async function checkIssuesAiBadge() {
     try {
@@ -11870,22 +11871,29 @@ async function checkIssuesAiBadge() {
 async function scanForIssues() {
     var btn = document.getElementById('issues-scan-btn');
     var listEl = document.getElementById('issues-list');
+    var upgradeAllBtn = document.getElementById('issues-upgrade-all-btn');
     if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Scanning...'; }
+    if (upgradeAllBtn) upgradeAllBtn.style.display = 'none';
     if (listEl) listEl.innerHTML = '<div class="card"><div class="card-body" style="padding:48px; text-align:center; color:var(--text-muted);"><div style="font-size:48px; margin-bottom:12px;">⏳</div><p style="font-size:14px; margin:0;">Scanning nodes for issues...</p></div></div>';
 
     // Hide AI section while scanning
     var aiSection = document.getElementById('issues-ai-section');
     if (aiSection) aiSection.style.display = 'none';
 
-    var results = []; // Array of { hostname, issues, ai_analysis }
+    var results = []; // Array of { node_id, hostname, version, issues, ai_analysis, is_self }
+
+    // Find local node info
+    var localNode = (typeof allNodes !== 'undefined') ? allNodes.find(function (n) { return n.is_self; }) : null;
 
     // Scan local node
     try {
         var resp = await fetch('/api/issues/scan');
         var data = await resp.json();
+        data.node_id = localNode ? localNode.id : 'local';
+        data.is_self = true;
         results.push(data);
     } catch (e) {
-        results.push({ hostname: 'local', issues: [{ severity: 'warning', category: 'scan', title: 'Scan failed', detail: e.message }], ai_analysis: null });
+        results.push({ node_id: 'local', hostname: 'local', version: '?', issues: [{ severity: 'warning', category: 'scan', title: 'Scan failed', detail: e.message }], ai_analysis: null, is_self: true });
     }
 
     // Scan remote WolfStack nodes
@@ -11894,13 +11902,16 @@ async function scanForIssues() {
         var promises = remoteNodes.map(function (node) {
             return fetch('/api/nodes/' + encodeURIComponent(node.id) + '/proxy/issues/scan')
                 .then(function (r) { return r.json(); })
+                .then(function (data) { data.node_id = node.id; data.is_self = false; return data; })
                 .catch(function (e) {
-                    return { hostname: node.hostname || node.id, issues: [{ severity: 'info', category: 'scan', title: 'Could not scan', detail: e.message }], ai_analysis: null };
+                    return { node_id: node.id, hostname: node.hostname || node.id, version: '?', issues: [{ severity: 'info', category: 'scan', title: 'Could not scan', detail: e.message }], ai_analysis: null, is_self: false };
                 });
         });
         var remoteResults = await Promise.all(promises);
         results = results.concat(remoteResults);
     }
+
+    issuesScanResults = results;
 
     // Aggregate counts
     var counts = { critical: 0, warning: 0, info: 0 };
@@ -11919,8 +11930,11 @@ async function scanForIssues() {
     if (infoEl) infoEl.textContent = counts.info;
     if (nodesEl) nodesEl.textContent = results.length;
 
-    // Render results
+    // Render table
     renderIssueResults(results);
+
+    // Show Upgrade All button
+    if (upgradeAllBtn && results.length > 0) upgradeAllBtn.style.display = 'inline-block';
 
     // Show AI analysis if any node returned one
     var aiTexts = results.map(function (r) {
@@ -11943,18 +11957,14 @@ function renderIssueResults(results) {
     var listEl = document.getElementById('issues-list');
     if (!listEl) return;
 
-    var totalIssues = 0;
-    results.forEach(function (r) { totalIssues += (r.issues || []).length; });
-
-    if (totalIssues === 0) {
-        listEl.innerHTML = '<div class="card"><div class="card-body" style="padding:48px; text-align:center; color:var(--text-muted);"><div style="font-size:48px; margin-bottom:12px;">✅</div><p style="font-size:16px; font-weight:600; margin:0 0 4px;">All Clear</p><p style="font-size:13px; margin:0;">No issues detected across ' + results.length + ' node(s).</p></div></div>';
-        return;
-    }
-
-    var severityColors = {
-        critical: { bg: 'rgba(239,68,68,0.1)', border: 'rgba(239,68,68,0.3)', text: '#ef4444', icon: '🔴' },
-        warning: { bg: 'rgba(234,179,8,0.1)', border: 'rgba(234,179,8,0.3)', text: '#eab308', icon: '🟡' },
-        info: { bg: 'rgba(59,130,246,0.1)', border: 'rgba(59,130,246,0.3)', text: '#3b82f6', icon: '🔵' }
+    var severityBadge = function (sev) {
+        var colors = {
+            critical: { bg: 'rgba(239,68,68,0.15)', text: '#ef4444', icon: '🔴' },
+            warning: { bg: 'rgba(234,179,8,0.15)', text: '#eab308', icon: '🟡' },
+            info: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', icon: '🔵' }
+        };
+        var c = colors[sev] || colors.info;
+        return '<span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:' + c.bg + '; color:' + c.text + ';">' + c.icon + ' ' + sev.toUpperCase() + '</span>';
     };
 
     var categoryIcons = {
@@ -11962,39 +11972,114 @@ function renderIssueResults(results) {
         service: '⚙️', container: '📦', scan: '🔍'
     };
 
-    var html = '';
-    results.forEach(function (r) {
-        if (!r.issues || r.issues.length === 0) return;
+    var html = '<div class="card"><div class="card-body" style="padding:0; overflow-x:auto;">';
+    html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
+    html += '<thead><tr style="background:var(--bg-secondary); border-bottom:1px solid var(--border);">';
+    html += '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Node</th>';
+    html += '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Version</th>';
+    html += '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Issues</th>';
+    html += '<th style="padding:12px 16px; text-align:right; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Action</th>';
+    html += '</tr></thead><tbody>';
 
-        html += '<div class="card" style="margin-bottom:16px;">';
-        html += '<div class="card-header"><h3>🖥️ ' + escapeHtml(r.hostname || 'Unknown') + '</h3>';
-        html += '<span style="font-size:12px; color:var(--text-muted);">' + r.issues.length + ' issue(s)</span></div>';
-        html += '<div class="card-body" style="display:grid; gap:10px;">';
+    results.forEach(function (r, idx) {
+        var issues = r.issues || [];
+        var rowBg = idx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
 
-        // Sort: critical first, then warning, then info
-        var order = { critical: 0, warning: 1, info: 2 };
-        var sorted = r.issues.slice().sort(function (a, b) { return (order[a.severity] || 9) - (order[b.severity] || 9); });
+        html += '<tr style="border-bottom:1px solid var(--border); background:' + rowBg + ';">';
 
-        sorted.forEach(function (issue) {
-            var c = severityColors[issue.severity] || severityColors.info;
-            var catIcon = categoryIcons[issue.category] || '❓';
+        // Node
+        html += '<td style="padding:12px 16px; white-space:nowrap;">';
+        html += '<div style="display:flex; align-items:center; gap:8px;">';
+        html += '<span style="font-size:16px;">🖥️</span>';
+        html += '<div>';
+        html += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(r.hostname || 'Unknown') + '</div>';
+        if (r.is_self) html += '<div style="font-size:11px; color:var(--text-muted);">local</div>';
+        html += '</div></div></td>';
 
-            html += '<div style="display:flex; align-items:flex-start; gap:12px; padding:12px 16px; border-radius:10px; background:' + c.bg + '; border:1px solid ' + c.border + ';">';
-            html += '<span style="font-size:18px; flex-shrink:0; margin-top:1px;">' + catIcon + '</span>';
-            html += '<div style="flex:1; min-width:0;">';
-            html += '<div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">';
-            html += '<span style="font-size:10px;">' + c.icon + '</span>';
-            html += '<span style="font-weight:600; font-size:13px; color:' + c.text + '; text-transform:uppercase; letter-spacing:0.5px;">' + escapeHtml(issue.severity) + '</span>';
-            html += '</div>';
-            html += '<div style="font-weight:600; font-size:14px; color:var(--text-primary); margin-bottom:4px;">' + escapeHtml(issue.title) + '</div>';
-            html += '<div style="font-size:12px; color:var(--text-secondary); line-height:1.5;">' + escapeHtml(issue.detail) + '</div>';
-            html += '</div></div>';
-        });
+        // Version
+        html += '<td style="padding:12px 16px; white-space:nowrap;">';
+        html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(99,102,241,0.12); color:rgba(129,140,248,1);">v' + escapeHtml(r.version || '?') + '</span>';
+        html += '</td>';
 
-        html += '</div></div>';
+        // Issues
+        html += '<td style="padding:12px 16px;">';
+        if (issues.length === 0) {
+            html += '<span style="color:#10b981; font-weight:500;">✅ All clear</span>';
+        } else {
+            // Sort: critical first
+            var order = { critical: 0, warning: 1, info: 2 };
+            var sorted = issues.slice().sort(function (a, b) { return (order[a.severity] || 9) - (order[b.severity] || 9); });
+            sorted.forEach(function (issue) {
+                var catIcon = categoryIcons[issue.category] || '❓';
+                html += '<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">';
+                html += severityBadge(issue.severity);
+                html += '<span style="font-size:14px;">' + catIcon + '</span>';
+                html += '<span style="color:var(--text-primary); font-weight:500;">' + escapeHtml(issue.title) + '</span>';
+                html += '<span style="color:var(--text-muted); font-size:12px;"> — ' + escapeHtml(issue.detail) + '</span>';
+                html += '</div>';
+            });
+        }
+        html += '</td>';
+
+        // Action
+        html += '<td style="padding:12px 16px; text-align:right; white-space:nowrap;">';
+        html += '<button class="btn" onclick="issuesUpgradeNode(\'' + escapeHtml(r.node_id) + '\')" id="issues-upgrade-' + idx + '" ';
+        html += 'style="padding:6px 14px; font-size:12px; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3); border-radius:6px; cursor:pointer;">';
+        html += '⚡ Upgrade</button>';
+        html += '</td>';
+
+        html += '</tr>';
     });
 
+    html += '</tbody></table></div></div>';
     listEl.innerHTML = html;
+}
+
+function issuesUpgradeNode(nodeId) {
+    var node = allNodes.find(function (n) { return n.id === nodeId; });
+    var name = node ? node.hostname : nodeId;
+    if (!confirm('⚡ Upgrade ' + name + '?\n\nThis will run the WolfStack upgrade script on this node in the background.')) return;
+
+    var url;
+    if (node && !node.is_self) {
+        url = '/api/nodes/' + encodeURIComponent(nodeId) + '/proxy/upgrade';
+    } else {
+        url = '/api/upgrade';
+    }
+
+    fetch(url, { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            showToast('⚡ Upgrade started on ' + name + ' — it will restart automatically when complete.', 'success');
+        })
+        .catch(function (e) {
+            showToast('Failed to start upgrade on ' + name + ': ' + e.message, 'error');
+        });
+}
+
+function issuesUpgradeAll() {
+    if (!issuesScanResults || issuesScanResults.length === 0) {
+        showToast('Run a scan first.', 'warning');
+        return;
+    }
+    if (!confirm('⚡ Upgrade ALL ' + issuesScanResults.length + ' node(s)?\n\nThis will trigger a background upgrade on every scanned node.\nNodes will restart automatically when complete.')) return;
+
+    var count = 0;
+    issuesScanResults.forEach(function (r) {
+        var node = allNodes.find(function (n) { return n.id === r.node_id; });
+        var url;
+        if (node && !node.is_self) {
+            url = '/api/nodes/' + encodeURIComponent(r.node_id) + '/proxy/upgrade';
+        } else {
+            url = '/api/upgrade';
+        }
+
+        fetch(url, { method: 'POST' })
+            .then(function () { count++; })
+            .catch(function () { });
+    });
+
+    showToast('⚡ Upgrade triggered on ' + issuesScanResults.length + ' node(s) — they will restart automatically.', 'success');
 }
 
 // ═══════════════════════════════════════════════

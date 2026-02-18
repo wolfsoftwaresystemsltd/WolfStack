@@ -6171,6 +6171,7 @@ pub async fn scan_issues(
 
     HttpResponse::Ok().json(serde_json::json!({
         "hostname": metrics.hostname,
+        "version": env!("CARGO_PKG_VERSION"),
         "issues": issues,
         "ai_analysis": ai_analysis,
     }))
