@@ -5990,6 +5990,27 @@ pub async fn appstore_uninstall(
 
 // ─── Issues Scanner ───
 
+/// Parse human-readable size strings (e.g. "1.2G", "450M", "32K") to MB
+fn parse_size_to_mb(s: &str) -> f64 {
+    let s = s.trim();
+    if s.is_empty() { return 0.0; }
+    let (num_str, suffix) = if s.ends_with(|c: char| c.is_alphabetic()) {
+        let idx = s.len() - 1;
+        (&s[..idx], &s[idx..])
+    } else {
+        (s, "")
+    };
+    let num: f64 = num_str.parse().unwrap_or(0.0);
+    match suffix.to_uppercase().as_str() {
+        "T" => num * 1024.0 * 1024.0,
+        "G" => num * 1024.0,
+        "M" => num,
+        "K" => num / 1024.0,
+        "B" => num / (1024.0 * 1024.0),
+        _ => num, // assume MB
+    }
+}
+
 #[derive(Serialize)]
 struct Issue {
     severity: String,   // "critical", "warning", "info"
@@ -6131,20 +6152,117 @@ pub async fn scan_issues(
         }
     }
 
-    // ── Stopped LXC containers ──
-    if let Ok(output) = std::process::Command::new("lxc-ls")
-        .args(["--stopped"])
+    // ── Clearable disk space ──
+
+    // Journal logs
+    if let Ok(output) = std::process::Command::new("journalctl")
+        .args(["--disk-usage"])
         .output()
     {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let stopped: Vec<&str> = stdout.split_whitespace().filter(|l| !l.is_empty()).collect();
-        if !stopped.is_empty() {
-            issues.push(Issue {
-                severity: "info".into(),
-                category: "container".into(),
-                title: format!("{} stopped LXC container(s)", stopped.len()),
-                detail: format!("Stopped: {}", stopped.join(", ")),
-            });
+        // Parse "Archived and active journals take up 1.2G in the file system."
+        if let Some(size_str) = stdout.split("take up ").nth(1).and_then(|s| s.split(' ').next()) {
+            let size_mb = parse_size_to_mb(size_str);
+            if size_mb > 500.0 {
+                issues.push(Issue {
+                    severity: "info".into(),
+                    category: "disk".into(),
+                    title: format!("Journal logs using {}", size_str),
+                    detail: format!("Run 'journalctl --vacuum-size=200M' to reclaim space"),
+                });
+            }
+        }
+    }
+
+    // Package cache (apt)
+    if let Ok(output) = std::process::Command::new("du")
+        .args(["-sh", "/var/cache/apt/archives"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(size_str) = stdout.split_whitespace().next() {
+                let size_mb = parse_size_to_mb(size_str);
+                if size_mb > 200.0 {
+                    issues.push(Issue {
+                        severity: "info".into(),
+                        category: "disk".into(),
+                        title: format!("APT cache using {}", size_str),
+                        detail: "Run 'apt clean' to reclaim space".into(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Package cache (dnf/yum)
+    if let Ok(output) = std::process::Command::new("du")
+        .args(["-sh", "/var/cache/dnf"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(size_str) = stdout.split_whitespace().next() {
+                let size_mb = parse_size_to_mb(size_str);
+                if size_mb > 200.0 {
+                    issues.push(Issue {
+                        severity: "info".into(),
+                        category: "disk".into(),
+                        title: format!("DNF cache using {}", size_str),
+                        detail: "Run 'dnf clean all' to reclaim space".into(),
+                    });
+                }
+            }
+        }
+    }
+
+    // /tmp usage
+    if let Ok(output) = std::process::Command::new("du")
+        .args(["-sh", "/tmp"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(size_str) = stdout.split_whitespace().next() {
+                let size_mb = parse_size_to_mb(size_str);
+                if size_mb > 500.0 {
+                    issues.push(Issue {
+                        severity: "info".into(),
+                        category: "disk".into(),
+                        title: format!("/tmp using {}", size_str),
+                        detail: "Temporary files may be safe to clean up".into(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Docker unused images
+    if let Ok(output) = std::process::Command::new("docker")
+        .args(["system", "df", "--format", "{{.Reclaimable}}"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Sum up any reclaimable amounts
+            let mut total_mb = 0.0f64;
+            let mut total_str = String::new();
+            for line in stdout.lines() {
+                let clean = line.trim().split('(').next().unwrap_or("").trim();
+                if !clean.is_empty() && clean != "0B" {
+                    let mb = parse_size_to_mb(clean);
+                    total_mb += mb;
+                    if total_str.is_empty() { total_str = clean.to_string(); }
+                }
+            }
+            if total_mb > 500.0 {
+                issues.push(Issue {
+                    severity: "info".into(),
+                    category: "container".into(),
+                    title: format!("Docker reclaimable space: {:.0} MB", total_mb),
+                    detail: "Run 'docker system prune' to reclaim unused images/containers".into(),
+                });
+            }
         }
     }
 

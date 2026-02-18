@@ -11929,12 +11929,27 @@ async function scanForIssues() {
     if (warnEl) warnEl.textContent = counts.warning;
     if (infoEl) infoEl.textContent = counts.info;
     if (nodesEl) nodesEl.textContent = results.length;
+    // Find the latest version across all results
+    var latestVersion = '0.0.0';
+    results.forEach(function (r) {
+        if (r.version && r.version !== '?' && compareVersions(r.version, latestVersion) > 0) {
+            latestVersion = r.version;
+        }
+    });
 
     // Render table
-    renderIssueResults(results);
+    renderIssueResults(results, latestVersion);
 
-    // Show Upgrade All button
-    if (upgradeAllBtn && results.length > 0) upgradeAllBtn.style.display = 'inline-block';
+    // Show Upgrade All button only if at least one node needs upgrading
+    var needsUpgrade = results.filter(function (r) { return r.version && r.version !== '?' && compareVersions(r.version, latestVersion) < 0; });
+    if (upgradeAllBtn) {
+        if (needsUpgrade.length > 0) {
+            upgradeAllBtn.style.display = 'inline-block';
+            upgradeAllBtn.innerHTML = '⚡ Upgrade All (' + needsUpgrade.length + ')';
+        } else {
+            upgradeAllBtn.style.display = 'none';
+        }
+    }
 
     // Show AI analysis if any node returned one
     var aiTexts = results.map(function (r) {
@@ -11953,7 +11968,19 @@ async function scanForIssues() {
     if (btn) { btn.disabled = false; btn.innerHTML = '🔄 Scan Now'; }
 }
 
-function renderIssueResults(results) {
+function compareVersions(a, b) {
+    var pa = a.split('.').map(Number);
+    var pb = b.split('.').map(Number);
+    for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+        var na = pa[i] || 0;
+        var nb = pb[i] || 0;
+        if (na > nb) return 1;
+        if (na < nb) return -1;
+    }
+    return 0;
+}
+
+function renderIssueResults(results, latestVersion) {
     var listEl = document.getElementById('issues-list');
     if (!listEl) return;
 
@@ -11976,7 +12003,7 @@ function renderIssueResults(results) {
     html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
     html += '<thead><tr style="background:var(--bg-secondary); border-bottom:1px solid var(--border);">';
     html += '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Node</th>';
-    html += '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Version</th>';
+    html += '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">WolfStack</th>';
     html += '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Issues</th>';
     html += '<th style="padding:12px 16px; text-align:right; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Action</th>';
     html += '</tr></thead><tbody>';
@@ -11984,6 +12011,8 @@ function renderIssueResults(results) {
     results.forEach(function (r, idx) {
         var issues = r.issues || [];
         var rowBg = idx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
+        var nodeVersion = r.version || '?';
+        var isBehind = nodeVersion !== '?' && latestVersion !== '0.0.0' && compareVersions(nodeVersion, latestVersion) < 0;
 
         html += '<tr style="border-bottom:1px solid var(--border); background:' + rowBg + ';">';
 
@@ -11998,7 +12027,12 @@ function renderIssueResults(results) {
 
         // Version
         html += '<td style="padding:12px 16px; white-space:nowrap;">';
-        html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(99,102,241,0.12); color:rgba(129,140,248,1);">v' + escapeHtml(r.version || '?') + '</span>';
+        if (isBehind) {
+            html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(234,179,8,0.15); color:#eab308; border:1px solid rgba(234,179,8,0.3);">v' + escapeHtml(nodeVersion) + ' ↑</span>';
+            html += '<div style="font-size:10px; color:var(--text-muted); margin-top:2px;">latest: v' + escapeHtml(latestVersion) + '</div>';
+        } else {
+            html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3);">v' + escapeHtml(nodeVersion) + ' ✓</span>';
+        }
         html += '</td>';
 
         // Issues
@@ -12006,7 +12040,6 @@ function renderIssueResults(results) {
         if (issues.length === 0) {
             html += '<span style="color:#10b981; font-weight:500;">✅ All clear</span>';
         } else {
-            // Sort: critical first
             var order = { critical: 0, warning: 1, info: 2 };
             var sorted = issues.slice().sort(function (a, b) { return (order[a.severity] || 9) - (order[b.severity] || 9); });
             sorted.forEach(function (issue) {
@@ -12021,11 +12054,15 @@ function renderIssueResults(results) {
         }
         html += '</td>';
 
-        // Action
+        // Action — only show upgrade if version is behind
         html += '<td style="padding:12px 16px; text-align:right; white-space:nowrap;">';
-        html += '<button class="btn" onclick="issuesUpgradeNode(\'' + escapeHtml(r.node_id) + '\')" id="issues-upgrade-' + idx + '" ';
-        html += 'style="padding:6px 14px; font-size:12px; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3); border-radius:6px; cursor:pointer;">';
-        html += '⚡ Upgrade</button>';
+        if (isBehind) {
+            html += '<button class="btn" onclick="issuesUpgradeNode(\'' + escapeHtml(r.node_id) + '\')" id="issues-upgrade-' + idx + '" ';
+            html += 'style="padding:6px 14px; font-size:12px; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3); border-radius:6px; cursor:pointer;">';
+            html += '⚡ Upgrade WolfStack</button>';
+        } else {
+            html += '<span style="color:var(--text-muted); font-size:12px;">Up to date</span>';
+        }
         html += '</td>';
 
         html += '</tr>';
@@ -12038,7 +12075,7 @@ function renderIssueResults(results) {
 function issuesUpgradeNode(nodeId) {
     var node = allNodes.find(function (n) { return n.id === nodeId; });
     var name = node ? node.hostname : nodeId;
-    if (!confirm('⚡ Upgrade ' + name + '?\n\nThis will run the WolfStack upgrade script on this node in the background.')) return;
+    if (!confirm('⚡ Upgrade WolfStack on ' + name + '?\n\nThis will run the upgrade script in the background.')) return;
 
     var url;
     if (node && !node.is_self) {
@@ -12050,7 +12087,7 @@ function issuesUpgradeNode(nodeId) {
     fetch(url, { method: 'POST' })
         .then(function (r) { return r.json(); })
         .then(function (data) {
-            showToast('⚡ Upgrade started on ' + name + ' — it will restart automatically when complete.', 'success');
+            showToast('⚡ WolfStack upgrade started on ' + name + ' — it will restart automatically.', 'success');
         })
         .catch(function (e) {
             showToast('Failed to start upgrade on ' + name + ': ' + e.message, 'error');
@@ -12062,10 +12099,25 @@ function issuesUpgradeAll() {
         showToast('Run a scan first.', 'warning');
         return;
     }
-    if (!confirm('⚡ Upgrade ALL ' + issuesScanResults.length + ' node(s)?\n\nThis will trigger a background upgrade on every scanned node.\nNodes will restart automatically when complete.')) return;
 
-    var count = 0;
+    // Find latest version and only upgrade nodes that are behind
+    var latestVersion = '0.0.0';
     issuesScanResults.forEach(function (r) {
+        if (r.version && r.version !== '?' && compareVersions(r.version, latestVersion) > 0) latestVersion = r.version;
+    });
+
+    var outdated = issuesScanResults.filter(function (r) {
+        return r.version && r.version !== '?' && compareVersions(r.version, latestVersion) < 0;
+    });
+
+    if (outdated.length === 0) {
+        showToast('All nodes are already up to date.', 'info');
+        return;
+    }
+
+    if (!confirm('⚡ Upgrade WolfStack on ' + outdated.length + ' node(s)?\n\nThis will trigger a background upgrade on all outdated nodes.\nNodes will restart automatically when complete.')) return;
+
+    outdated.forEach(function (r) {
         var node = allNodes.find(function (n) { return n.id === r.node_id; });
         var url;
         if (node && !node.is_self) {
@@ -12073,13 +12125,10 @@ function issuesUpgradeAll() {
         } else {
             url = '/api/upgrade';
         }
-
-        fetch(url, { method: 'POST' })
-            .then(function () { count++; })
-            .catch(function () { });
+        fetch(url, { method: 'POST' }).catch(function () { });
     });
 
-    showToast('⚡ Upgrade triggered on ' + issuesScanResults.length + ' node(s) — they will restart automatically.', 'success');
+    showToast('⚡ WolfStack upgrade triggered on ' + outdated.length + ' node(s) — they will restart automatically.', 'success');
 }
 
 // ═══════════════════════════════════════════════
