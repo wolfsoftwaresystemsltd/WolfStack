@@ -11890,7 +11890,7 @@ async function scanForIssues() {
 
     // Scan remote WolfStack nodes
     if (typeof allNodes !== 'undefined' && allNodes.length) {
-        var remoteNodes = allNodes.filter(function (n) { return n.type === 'wolfstack' && !n.is_local; });
+        var remoteNodes = allNodes.filter(function (n) { return !n.is_self && n.node_type !== 'proxmox'; });
         var promises = remoteNodes.map(function (node) {
             return fetch('/api/nodes/' + encodeURIComponent(node.id) + '/proxy/issues/scan')
                 .then(function (r) { return r.json(); })
