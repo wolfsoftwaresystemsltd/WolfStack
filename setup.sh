@@ -311,11 +311,21 @@ if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev
     # Step 1: Pull latest source (service still running)
     WOLFNET_SRC_DIR="/opt/wolfnet-src"
     echo "  Pulling latest WolfNet..."
+    # Ensure the source dir points to the correct WolfNet repo (not WolfScale)
     if [ -d "$WOLFNET_SRC_DIR" ]; then
-        cd "$WOLFNET_SRC_DIR"
-        git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-        git fetch origin 2>&1 || true
-        git reset --hard origin/main 2>&1 || true
+        CURRENT_REMOTE=$(git -C "$WOLFNET_SRC_DIR" remote get-url origin 2>/dev/null || echo "")
+        if echo "$CURRENT_REMOTE" | grep -qi "WolfNet"; then
+            cd "$WOLFNET_SRC_DIR"
+            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+            git fetch origin 2>&1 || true
+            git reset --hard origin/main 2>&1 || true
+        else
+            echo "  Old WolfScale clone detected — replacing with WolfNet..."
+            rm -rf "$WOLFNET_SRC_DIR"
+            git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
+            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+            cd "$WOLFNET_SRC_DIR"
+        fi
     else
         git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
@@ -362,10 +372,19 @@ elif command -v wolfnet &> /dev/null; then
     WOLFNET_SRC_DIR="/opt/wolfnet-src"
     echo "  Updating WolfNet..."
     if [ -d "$WOLFNET_SRC_DIR" ]; then
-        cd "$WOLFNET_SRC_DIR"
-        git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-        git fetch origin 2>&1 || true
-        git reset --hard origin/main 2>&1 || true
+        CURRENT_REMOTE=$(git -C "$WOLFNET_SRC_DIR" remote get-url origin 2>/dev/null || echo "")
+        if echo "$CURRENT_REMOTE" | grep -qi "WolfNet"; then
+            cd "$WOLFNET_SRC_DIR"
+            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+            git fetch origin 2>&1 || true
+            git reset --hard origin/main 2>&1 || true
+        else
+            echo "  Old WolfScale clone detected — replacing with WolfNet..."
+            rm -rf "$WOLFNET_SRC_DIR"
+            git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
+            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+            cd "$WOLFNET_SRC_DIR"
+        fi
     else
         git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
@@ -444,8 +463,17 @@ else
     echo "  Downloading WolfNet..."
     WOLFNET_SRC_DIR="/opt/wolfnet-src"
     if [ -d "$WOLFNET_SRC_DIR" ]; then
-        git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-        cd "$WOLFNET_SRC_DIR" && git fetch origin && git reset --hard origin/main
+        CURRENT_REMOTE=$(git -C "$WOLFNET_SRC_DIR" remote get-url origin 2>/dev/null || echo "")
+        if echo "$CURRENT_REMOTE" | grep -qi "WolfNet"; then
+            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+            cd "$WOLFNET_SRC_DIR" && git fetch origin && git reset --hard origin/main
+        else
+            echo "  Old WolfScale clone detected — replacing with WolfNet..."
+            rm -rf "$WOLFNET_SRC_DIR"
+            git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
+            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+            cd "$WOLFNET_SRC_DIR"
+        fi
     else
         git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
