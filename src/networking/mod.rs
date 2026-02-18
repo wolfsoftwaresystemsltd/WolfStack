@@ -1350,18 +1350,14 @@ pub fn add_ip_mapping(
                 }
             }
 
-            // Live scan: also reject ports currently in use on this server
+            // Live scan: warn (but don't block) if ports are in use on this server
+            // DNAT rules are IP-specific so they won't necessarily conflict
             let listening = get_listening_ports();
             for &port in &port_list {
                 if let Some(entry) = listening.iter().find(|e| e["port"].as_u64() == Some(port as u64)) {
                     let proc_name = entry["process"].as_str().unwrap_or("unknown");
-                    // Skip if it's already covered by blocked ports above
                     if BLOCKED_PORTS.iter().any(|&(bp, _)| bp == port) { continue; }
-                    return Err(format!(
-                        "Port {} is currently in use by '{}'. \
-                         Mapping this port would intercept traffic meant for that service.",
-                        port, proc_name
-                    ));
+                    warn!("Source port {} is in use by '{}' — mapping will use DNAT on public IP only", port, proc_name);
                 }
             }
         }
@@ -1504,6 +1500,77 @@ pub fn remove_ip_mapping(id: &str) -> Result<String, String> {
 
     info!("Removed IP mapping: {} → {}", mapping.public_ip, mapping.wolfnet_ip);
     Ok(format!("Removed mapping {} → {}", mapping.public_ip, mapping.wolfnet_ip))
+}
+
+/// Update an existing IP mapping by ID
+pub fn update_ip_mapping(
+    id: &str,
+    public_ip: &str,
+    wolfnet_ip: &str,
+    ports: Option<&str>,
+    dest_ports: Option<&str>,
+    protocol: &str,
+    label: &str,
+) -> Result<IpMapping, String> {
+    let mut config = load_ip_mapping_config();
+    let idx = config.mappings.iter().position(|m| m.id == id)
+        .ok_or_else(|| format!("Mapping '{}' not found", id))?;
+
+    // Remove old iptables rules
+    remove_mapping_rules(&config.mappings[idx]);
+
+    // Validate protocol
+    let protocol = if protocol.is_empty() { "all" } else { protocol };
+    if !["all", "tcp", "udp"].contains(&protocol) {
+        return Err(format!("Invalid protocol '{}'. Must be 'all', 'tcp', or 'udp'.", protocol));
+    }
+
+    // Validate ports
+    if let Some(port_str) = ports {
+        if !port_str.trim().is_empty() {
+            if protocol == "all" {
+                return Err("When specifying ports, you must select TCP or UDP (not 'All').".to_string());
+            }
+            parse_port_list(port_str)?;
+        }
+    }
+
+    // Validate dest_ports
+    let dest_ports_clean: Option<&str> = match dest_ports {
+        Some(s) if !s.trim().is_empty() => Some(s),
+        _ => None,
+    };
+    if let Some(dp_str) = dest_ports_clean {
+        if ports.map(|s| s.trim().is_empty()).unwrap_or(true) {
+            return Err("Destination ports require source ports to be specified too.".to_string());
+        }
+        let dp_list = parse_port_list(dp_str)?;
+        let sp_list = parse_port_list(ports.unwrap())?;
+        if dp_list.len() != sp_list.len() {
+            return Err(format!(
+                "Source ports ({}) and destination ports ({}) must have the same count.",
+                sp_list.len(), dp_list.len()
+            ));
+        }
+    }
+
+    // Update the mapping in-place
+    let mapping = &mut config.mappings[idx];
+    mapping.public_ip = public_ip.to_string();
+    mapping.wolfnet_ip = wolfnet_ip.to_string();
+    mapping.ports = ports.map(|s| s.to_string());
+    mapping.dest_ports = dest_ports_clean.map(|s| s.to_string());
+    mapping.protocol = protocol.to_string();
+    mapping.label = label.to_string();
+
+    // Apply new rules
+    apply_mapping_rules(mapping)?;
+
+    let result = mapping.clone();
+    save_ip_mapping_config(&config)?;
+
+    info!("Updated IP mapping {}: {} → {}", id, public_ip, wolfnet_ip);
+    Ok(result)
 }
 
 /// Apply iptables rules for a single mapping

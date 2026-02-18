@@ -4614,11 +4614,7 @@ function renderIpMappings(mappings) {
     }
     if (empty) empty.style.display = 'none';
 
-    grid.innerHTML = mappings.map(m => {
-        const statusBadge = m.enabled
-            ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e; font-size:10px;">Active</span>'
-            : '<span class="badge" style="background:rgba(107,114,128,0.2); color:#6b7280; font-size:10px;">Disabled</span>';
-
+    const rows = mappings.map(m => {
         const portsLabel = (() => {
             const src = m.ports || '';
             const dst = m.dest_ports || '';
@@ -4627,24 +4623,92 @@ function renderIpMappings(mappings) {
             return src;
         })();
         const protoLabel = m.protocol === 'all' ? 'TCP+UDP' : m.protocol.toUpperCase();
-        const label = m.label || '';
+        const statusDot = m.enabled
+            ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;" title="Active"></span>'
+            : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#6b7280;" title="Disabled"></span>';
+        const label = m.label ? `<span style="color:var(--text-secondary);">${m.label}</span>` : '';
+        const escapedM = encodeURIComponent(JSON.stringify(m));
 
-        return `<div class="card" style="padding:12px; position:relative;">
-            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                <div style="font-size:11px; font-weight:600; color:var(--text-muted);">${label || 'IP Mapping'}</div>
-                <div style="display:flex; align-items:center; gap:6px;">
-                    ${statusBadge}
-                    <button class="btn btn-sm btn-danger" style="font-size:10px; padding:1px 6px;" onclick="removeIpMapping('${m.id}', '${m.public_ip}', '${m.wolfnet_ip}')" title="Remove">🗑️</button>
-                </div>
-            </div>
-            <div style="font-family:var(--font-mono); font-size:13px; font-weight:600; margin-bottom:6px;">
-                ${m.public_ip} <span style="color:var(--accent);">→</span> ${m.wolfnet_ip}
-            </div>
-            <div style="font-size:11px; color:var(--text-muted);">
-                Ports: <span style="font-family:var(--font-mono);">${portsLabel}</span> · ${protoLabel}
-            </div>
-        </div>`;
+        return `<tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:8px 10px;">${statusDot}</td>
+            <td style="padding:8px 10px; font-family:var(--font-mono); font-size:12px; white-space:nowrap;">${m.public_ip} <span style="color:var(--accent);">→</span> ${m.wolfnet_ip}</td>
+            <td style="padding:8px 10px; font-family:var(--font-mono); font-size:12px;">${portsLabel}</td>
+            <td style="padding:8px 10px; font-size:11px;">${protoLabel}</td>
+            <td style="padding:8px 10px; font-size:12px;">${label}</td>
+            <td style="padding:8px 10px; white-space:nowrap; text-align:right;">
+                <button class="btn btn-sm" style="font-size:10px; padding:2px 6px; margin-right:4px;" onclick="editIpMapping(decodeURIComponent('${escapedM}'))" title="Edit">✏️</button>
+                <button class="btn btn-sm btn-danger" style="font-size:10px; padding:2px 6px;" onclick="removeIpMapping('${m.id}', '${m.public_ip}', '${m.wolfnet_ip}')" title="Remove">🗑️</button>
+            </td>
+        </tr>`;
     }).join('');
+
+    grid.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:13px;">
+        <thead><tr style="border-bottom:2px solid var(--border); text-align:left;">
+            <th style="padding:6px 10px; width:30px;"></th>
+            <th style="padding:6px 10px; font-size:11px; font-weight:600; color:var(--text-muted);">Mapping</th>
+            <th style="padding:6px 10px; font-size:11px; font-weight:600; color:var(--text-muted);">Ports</th>
+            <th style="padding:6px 10px; font-size:11px; font-weight:600; color:var(--text-muted);">Protocol</th>
+            <th style="padding:6px 10px; font-size:11px; font-weight:600; color:var(--text-muted);">Label</th>
+            <th style="padding:6px 10px; width:80px;"></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+    </table>`;
+}
+
+let _editingMappingId = null;
+
+function editIpMapping(jsonStr) {
+    const m = JSON.parse(jsonStr);
+    _editingMappingId = m.id;
+    // Populate the create modal with existing values
+    document.getElementById('mapping-public-ip').value = m.public_ip || '';
+    document.getElementById('mapping-wolfnet-ip').value = m.wolfnet_ip || '';
+    document.getElementById('mapping-ports').value = m.ports || '';
+    document.getElementById('mapping-dest-ports').value = m.dest_ports || '';
+    document.getElementById('mapping-protocol').value = m.protocol || 'all';
+    document.getElementById('mapping-label').value = m.label || '';
+
+    // Change modal title and button to indicate editing
+    const modalHeader = document.querySelector('#create-mapping-modal .modal-header h3');
+    if (modalHeader) modalHeader.textContent = '✏️ Edit IP Mapping';
+    const createBtn = document.querySelector('#create-mapping-modal .modal-footer .btn-primary');
+    if (createBtn) {
+        createBtn.textContent = 'Save Changes';
+        createBtn.setAttribute('onclick', 'saveIpMappingEdit()');
+    }
+
+    document.getElementById('create-mapping-modal').classList.add('active');
+}
+
+async function saveIpMappingEdit() {
+    if (!_editingMappingId) return;
+
+    const public_ip = document.getElementById('mapping-public-ip').value.trim();
+    const wolfnet_ip = document.getElementById('mapping-wolfnet-ip').value.trim();
+    const ports = document.getElementById('mapping-ports').value.trim() || null;
+    const dest_ports = document.getElementById('mapping-dest-ports').value.trim() || null;
+    const protocol = document.getElementById('mapping-protocol').value;
+    const label = document.getElementById('mapping-label').value.trim() || null;
+
+    if (!public_ip || !wolfnet_ip) {
+        showModal('Public IP and WolfNet IP are required.');
+        return;
+    }
+
+    try {
+        const resp = await fetch(apiUrl(`/api/networking/ip-mappings/${_editingMappingId}`), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ public_ip, wolfnet_ip, ports, dest_ports, protocol, label }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to update mapping');
+        showToast('Mapping updated successfully', 'success');
+        closeCreateMappingModal();
+        loadNetworking();
+    } catch (e) {
+        showModal('Error: ' + e.message);
+    }
 }
 
 let _mappingPortData = null; // cached listening + blocked ports
@@ -4699,6 +4763,15 @@ async function showCreateMappingModal() {
 
 function closeCreateMappingModal() {
     document.getElementById('create-mapping-modal').classList.remove('active');
+    // Reset modal back to create mode (in case it was in edit mode)
+    _editingMappingId = null;
+    const modalHeader = document.querySelector('#create-mapping-modal .modal-header h3');
+    if (modalHeader) modalHeader.textContent = '🌍 Create IP Mapping';
+    const createBtn = document.querySelector('#create-mapping-modal .modal-footer .btn-primary');
+    if (createBtn) {
+        createBtn.textContent = 'Create Mapping';
+        createBtn.setAttribute('onclick', 'createIpMapping()');
+    }
 }
 
 function onMappingPublicIpSelect() {
@@ -4770,7 +4843,7 @@ function onMappingPortsInput() {
             if (MAPPING_BLOCKED_PORTS[p]) continue; // already warned
             const match = listening.find(l => l.port === p);
             if (match) {
-                warnings.push(`⚠️ Port <strong>${p}</strong> is in use by <strong>${match.process || 'unknown'}</strong> — traffic will be intercepted`);
+                warnings.push(`ℹ️ Port <strong>${p}</strong> is in use by <strong>${match.process || 'unknown'}</strong> on this server (DNAT is IP-specific, this is usually fine)`);
             }
         }
     }
@@ -4796,8 +4869,9 @@ async function createIpMapping() {
     if (!wolfnet_ip) { showModal('Please enter a WolfNet IP address'); return; }
 
     // Client-side port validation
+    let parsed = null;
     if (ports) {
-        const parsed = parseMappingPorts(ports);
+        parsed = parseMappingPorts(ports);
         if (!parsed) {
             showModal('Invalid port format. Use: 80, 80,443, or 8000:8100');
             return;
@@ -4806,7 +4880,7 @@ async function createIpMapping() {
             showModal('When specifying ports, you must select TCP or UDP (not "All"). iptables requires a specific protocol for port-based rules.');
             return;
         }
-        // Check for blocked ports
+        // Check for blocked ports (source ports only)
         for (const p of parsed) {
             if (MAPPING_BLOCKED_PORTS[p]) {
                 showModal(`Port ${p} is used by ${MAPPING_BLOCKED_PORTS[p]} and cannot be mapped. This would break critical system access.`);
@@ -4815,7 +4889,7 @@ async function createIpMapping() {
         }
     }
 
-    // Validate dest_ports if provided
+    // Validate dest_ports if provided (no blocked-port check — dest is on the container)
     if (dest_ports) {
         if (!ports) {
             showModal('Destination ports require source ports to be specified too.');

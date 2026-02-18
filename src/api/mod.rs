@@ -3580,6 +3580,30 @@ pub async fn net_remove_ip_mapping(
     }
 }
 
+/// PUT /api/networking/ip-mappings/{id} — update an existing mapping
+pub async fn net_update_ip_mapping(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<CreateIpMappingRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = path.into_inner();
+    let protocol = body.protocol.as_deref().unwrap_or("all");
+    let label = body.label.as_deref().unwrap_or("");
+    match networking::update_ip_mapping(
+        &id,
+        &body.public_ip,
+        &body.wolfnet_ip,
+        body.ports.as_deref(),
+        body.dest_ports.as_deref(),
+        protocol,
+        label,
+    ) {
+        Ok(mapping) => HttpResponse::Ok().json(mapping),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// GET /api/networking/available-ips — detect public + wolfnet IPs for the UI
 pub async fn net_available_ips(
     req: HttpRequest, state: web::Data<AppState>,
@@ -5037,6 +5061,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/networking/ip-mappings", web::get().to(net_list_ip_mappings))
         .route("/api/networking/ip-mappings", web::post().to(net_add_ip_mapping))
         .route("/api/networking/ip-mappings/{id}", web::delete().to(net_remove_ip_mapping))
+        .route("/api/networking/ip-mappings/{id}", web::put().to(net_update_ip_mapping))
         .route("/api/networking/available-ips", web::get().to(net_available_ips))
         .route("/api/networking/listening-ports", web::get().to(net_listening_ports))
         // Backups
