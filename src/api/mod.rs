@@ -4231,6 +4231,139 @@ pub async fn storage_sync_s3(
     }
 }
 
+// ─── Disk Partition Info ───
+
+/// GET /api/storage/disk-info — list all block devices, partitions, filesystems & free space
+pub async fn storage_disk_info(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+
+    // Run lsblk in JSON mode with useful columns
+    let lsblk_out = std::process::Command::new("lsblk")
+        .args([
+            "-J",
+            "-o", "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS,TYPE,HOTPLUG,ROTA,MODEL",
+            "--bytes",
+        ])
+        .output();
+
+    let block_devices: serde_json::Value = match lsblk_out {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "blockdevices": [] }))
+        }
+        _ => serde_json::json!({ "blockdevices": [] }),
+    };
+
+    // Run df to get free-space per mount point
+    let df_out = std::process::Command::new("df")
+        .args(["-B1", "--output=target,avail,size,pcent"])
+        .output();
+
+    let mut df_map: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    if let Ok(o) = df_out {
+        let text = String::from_utf8_lossy(&o.stdout);
+        for line in text.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                let mountpoint = parts[0].to_string();
+                let avail_bytes: u64 = parts[1].parse().unwrap_or(0);
+                let total_bytes: u64 = parts[2].parse().unwrap_or(0);
+                let use_pct = parts[3].trim_end_matches('%');
+                let use_pct: f64 = use_pct.parse().unwrap_or(0.0);
+                let free_pct = (100.0 - use_pct).max(0.0);
+                df_map.insert(mountpoint, serde_json::json!({
+                    "avail_bytes": avail_bytes,
+                    "total_bytes": total_bytes,
+                    "use_pct": use_pct,
+                    "free_pct": free_pct,
+                }));
+            }
+        }
+    }
+
+    // Walk lsblk tree and flatten into a list of partitions/disks with free-space data
+    fn fmt_bytes(b: u64) -> String {
+        const TB: u64 = 1_099_511_627_776;
+        const GB: u64 = 1_073_741_824;
+        const MB: u64 = 1_048_576;
+        if b >= TB      { format!("{:.1} TB", b as f64 / TB as f64) }
+        else if b >= GB { format!("{:.1} GB", b as f64 / GB as f64) }
+        else if b >= MB { format!("{:.1} MB", b as f64 / MB as f64) }
+        else            { format!("{} B", b) }
+    }
+
+    fn walk_devices(
+        devices: &[serde_json::Value],
+        df_map: &std::collections::HashMap<String, serde_json::Value>,
+        parent_disk: &str,
+        parent_model: &str,
+        out: &mut Vec<serde_json::Value>,
+    ) {
+        for dev in devices {
+            let name = dev.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let dev_path = format!("/dev/{}", name);
+            let size_bytes: u64 = dev.get("size")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok())
+                .or_else(|| dev.get("size").and_then(|v| v.as_u64()))
+                .unwrap_or(0);
+            let size_str = fmt_bytes(size_bytes);
+            let fstype = dev.get("fstype").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let label  = dev.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let kind   = dev.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let model  = dev.get("model").and_then(|v| v.as_str()).unwrap_or(parent_model).to_string();
+            let hotplug = dev.get("hotplug").and_then(|v| v.as_bool()).unwrap_or(false);
+            let rotational = dev.get("rota").and_then(|v| v.as_bool()).unwrap_or(true);
+
+            // Collect mountpoints
+            let mounts: Vec<String> = dev.get("mountpoints")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter()
+                    .filter_map(|m| m.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect())
+                .unwrap_or_default();
+
+            // Get df data for the first mount point
+            let df = mounts.first()
+                .and_then(|mp| df_map.get(mp.as_str()))
+                .cloned()
+                .unwrap_or(serde_json::json!(null));
+
+            let disk_name = if kind == "disk" { name } else { parent_disk };
+            let disk_model = if kind == "disk" { &model } else { parent_model };
+
+            out.push(serde_json::json!({
+                "device": dev_path,
+                "disk": format!("/dev/{}", disk_name),
+                "model": disk_model,
+                "type": kind,
+                "size": size_str,
+                "size_bytes": size_bytes,
+                "fstype": if fstype.is_empty() { serde_json::json!(null) } else { serde_json::json!(fstype) },
+                "label": if label.is_empty() { serde_json::json!(null) } else { serde_json::json!(label) },
+                "mountpoints": mounts,
+                "hotplug": hotplug,
+                "rotational": rotational,
+                "df": df,
+            }));
+
+            // Recurse into children (partitions)
+            if let Some(children) = dev.get("children").and_then(|v| v.as_array()) {
+                walk_devices(children, df_map, disk_name, disk_model, out);
+            }
+        }
+    }
+
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    if let Some(devs) = block_devices.get("blockdevices").and_then(|v| v.as_array()) {
+        walk_devices(devs, &df_map, "", "", &mut entries);
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({ "devices": entries }))
+}
+
 // ─── ZFS Storage ───
 
 /// GET /api/storage/zfs/status — check if ZFS is available and return overview
@@ -7080,6 +7213,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/storage/mounts/{id}/unmount", web::post().to(storage_do_unmount))
         .route("/api/storage/mounts/{id}/sync", web::post().to(storage_sync_mount))
         .route("/api/storage/mounts/{id}/sync-s3", web::post().to(storage_sync_s3))
+        // Disk partition info
+        .route("/api/storage/disk-info", web::get().to(storage_disk_info))
         // ZFS
         .route("/api/storage/zfs/status", web::get().to(zfs_status))
         .route("/api/storage/zfs/pools", web::get().to(zfs_pools))

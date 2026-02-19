@@ -213,7 +213,7 @@ function selectServerView(nodeId, view) {
         }
     }
     if (view === 'vms') loadVms().finally(() => hidePageLoadingOverlay(el));
-    if (view === 'storage') Promise.all([loadStorageMounts(), loadZfsStatus()]).finally(() => hidePageLoadingOverlay(el));
+    if (view === 'storage') Promise.all([loadStorageMounts(), loadZfsStatus(), loadDiskInfo()]).finally(() => hidePageLoadingOverlay(el));
     if (view === 'files') { if (!window._skipFileReset) { containerFileMode = null; currentFilePath = '/'; } window._skipFileReset = false; loadFiles().finally(() => hidePageLoadingOverlay(el)); }
     if (view === 'networking') loadNetworking().finally(() => hidePageLoadingOverlay(el));
     if (view === 'backups') loadBackups().finally(() => hidePageLoadingOverlay(el));
@@ -3074,7 +3074,87 @@ async function showZfsPoolIostat(pool) {
     }
 }
 
+// ─── Disk Partition Info ───
+
+async function loadDiskInfo() {
+    const tbody = document.getElementById('disk-info-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted); padding:20px;">Loading…</td></tr>';
+    try {
+        const resp = await fetch(apiUrl('/api/storage/disk-info'));
+        if (!resp.ok) throw new Error(await resp.text());
+        const data = await resp.json();
+        renderDiskInfo(data.devices || []);
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:#ef4444; padding:20px;">Failed to load disk info: ${escapeHtml(e.message)}</td></tr>`;
+    }
+}
+
+function renderDiskInfo(devices) {
+    const tbody = document.getElementById('disk-info-tbody');
+    if (!tbody) return;
+
+    if (!devices || devices.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted); padding:20px;">No block devices found</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = devices.map(d => {
+        const typeIcon = d.type === 'disk' ? '🖴' : d.type === 'part' ? '📌' : d.type === 'lvm' ? '🗂️' : '📦';
+        const typeLabel = d.type === 'disk' ? 'Disk' : d.type === 'part' ? 'Partition'
+            : d.type === 'lvm' ? 'LVM' : d.type === 'loop' ? 'Loop' : d.type || '—';
+
+        const indent = d.type !== 'disk' ? 'padding-left:20px;' : 'font-weight:600;';
+        const fstype = d.fstype || '<span style="color:var(--text-muted)">—</span>';
+
+        const mounts = (d.mountpoints || []).length > 0
+            ? d.mountpoints.map(m => `<code style="font-size:11px; background:var(--bg-secondary); padding:1px 5px; border-radius:3px;">${escapeHtml(m)}</code>`).join(' ')
+            : '<span style="color:var(--text-muted)">—</span>';
+
+        let freeCell = '<span style="color:var(--text-muted)">—</span>';
+        if (d.df && d.df.total_bytes > 0) {
+            const freePct = d.df.free_pct;
+            const usePct = d.df.use_pct;
+            const freeBytes = d.df.avail_bytes;
+            const freeStr = formatStorageBytes(freeBytes);
+            const barColor = freePct < 10 ? '#ef4444' : freePct < 25 ? '#f59e0b' : '#10b981';
+            freeCell = `
+                <div style="display:flex; align-items:center; gap:8px; min-width:120px;">
+                    <div style="flex:1; background:var(--bg-secondary); border-radius:3px; height:6px; overflow:hidden;">
+                        <div style="width:${usePct}%; background:${barColor}; height:100%; border-radius:3px; transition:width 0.3s;"></div>
+                    </div>
+                    <span style="font-size:12px; white-space:nowrap; color:${barColor};">${escapeHtml(freeStr)} free</span>
+                </div>`;
+        }
+
+        const modelInfo = d.type === 'disk'
+            ? (d.model ? escapeHtml(d.model) : '<span style="color:var(--text-muted)">—</span>')
+            : `<span style="color:var(--text-muted);font-size:11px;">${escapeHtml(d.disk)}</span>`;
+
+        const rotate = d.rotational ? '🔄 HDD' : '⚡ SSD';
+        const deviceLabel = `<code style="font-size:12px;">${escapeHtml(d.device)}</code>`;
+
+        return `<tr>
+            <td style="${indent}${d.type !== 'disk' ? 'color:var(--text-secondary);' : ''}">${deviceLabel}</td>
+            <td>${typeIcon} <span style="font-size:12px;">${typeLabel}${d.type === 'disk' ? ' · ' + rotate : ''}</span></td>
+            <td style="font-size:12px;">${modelInfo}</td>
+            <td style="font-family:var(--font-mono); font-size:12px;">${fstype}</td>
+            <td style="font-size:13px; white-space:nowrap;">${escapeHtml(d.size)}</td>
+            <td>${mounts}</td>
+            <td>${freeCell}</td>
+        </tr>`;
+    }).join('');
+}
+
+function formatStorageBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+}
+
 // ─── VM Storage Management ───
+
 let vmStorageLocations = [];
 let vmExtraDiskCounter = 0;
 

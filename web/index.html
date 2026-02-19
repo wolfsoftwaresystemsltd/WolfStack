@@ -1946,7 +1946,6 @@
                     </p>
                 </div>
             </div>
-
             <!-- ZFS Pools (shown if ZFS available) -->
             <div id="zfs-section" class="card" style="margin-top:20px; display:none;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
@@ -1973,6 +1972,37 @@
                     </table>
                     <!-- Expandable dataset/snapshot section -->
                     <div id="zfs-detail-section" style="margin-top:16px;"></div>
+                </div>
+            </div>
+
+            <!-- Disk Partitions (always shown) -->
+            <div id="disk-info-section" class="card" style="margin-top:20px;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>💿 Node Disk Layout</h3>
+                    <button class="btn btn-sm" onclick="loadDiskInfo()"
+                        style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;">↻
+                        Refresh</button>
+                </div>
+                <div class="card-body">
+                    <table class="data-table" id="disk-info-table">
+                        <thead>
+                            <tr>
+                                <th>Device</th>
+                                <th>Type</th>
+                                <th>Model / Disk</th>
+                                <th>Filesystem</th>
+                                <th>Size</th>
+                                <th>Mount Point(s)</th>
+                                <th>Free Space</th>
+                            </tr>
+                        </thead>
+                        <tbody id="disk-info-tbody">
+                            <tr>
+                                <td colspan="7" style="text-align:center; color:var(--text-muted); padding:20px;">
+                                    Loading disk layout…</td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
