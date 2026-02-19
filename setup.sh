@@ -79,55 +79,6 @@ if command -v pveversion &> /dev/null || [ -f /etc/pve/.version ] || dpkg -l pro
     echo "  Skipping packages already provided by Proxmox (QEMU, LXC)"
 fi
 
-# ─── Virtualization options ──────────────────────────────────────────────────
-# On upgrades (wolfstack service already exists), auto-detect what's installed
-# and skip the prompts entirely.
-if systemctl list-unit-files wolfstack.service &>/dev/null 2>&1 && [ -f "/etc/systemd/system/wolfstack.service" ]; then
-    # Upgrade mode — detect current state
-    if command -v qemu-system-x86_64 &>/dev/null || command -v qemu-system-ppc64 &>/dev/null || command -v qemu-system-aarch64 &>/dev/null || [ "$IS_PROXMOX" = true ]; then
-        INSTALL_KVM="Y"
-    else
-        INSTALL_KVM="n"
-    fi
-    if command -v docker &>/dev/null; then
-        INSTALL_DOCKER="Y"
-    else
-        INSTALL_DOCKER="n"
-    fi
-    if command -v lxc-ls &>/dev/null || [ "$IS_PROXMOX" = true ]; then
-        INSTALL_LXC="Y"
-    else
-        INSTALL_LXC="n"
-    fi
-else
-    echo ""
-    echo "  ──────────────────────────────────────────────────"
-    echo "  Virtualization Setup"
-    echo "  ──────────────────────────────────────────────────"
-    echo ""
-    echo "  WolfStack can manage KVM virtual machines, Docker"
-    echo "  containers, and LXC system containers."
-    echo ""
-    echo "  If you just want to monitor a small server you can"
-    echo "  say no to these and save resources — you can always"
-    echo "  install them later."
-    echo ""
-
-    echo -n "  Install KVM (virtual machines)? [Y/n]: "
-    read INSTALL_KVM < /dev/tty
-    INSTALL_KVM=${INSTALL_KVM:-Y}
-
-    echo -n "  Install Docker (containers)? [Y/n]: "
-    read INSTALL_DOCKER < /dev/tty
-    INSTALL_DOCKER=${INSTALL_DOCKER:-Y}
-
-    echo -n "  Install LXC (system containers)? [Y/n]: "
-    read INSTALL_LXC < /dev/tty
-    INSTALL_LXC=${INSTALL_LXC:-Y}
-
-    echo ""
-fi
-
 # ─── Install system dependencies ────────────────────────────────────────────
 echo ""
 echo "Installing system dependencies..."
@@ -157,41 +108,23 @@ if [ "$PKG_MANAGER" = "apt" ]; then
             fi
         done
     else
-        # Build the package list based on user choices
-        APT_PKGS="git curl build-essential pkg-config libssl-dev libcrypt-dev dnsmasq-base bridge-utils socat s3fs nfs-common fuse3"
-
-        if [[ "$INSTALL_KVM" =~ ^[Yy] ]]; then
-            ARCH=$(uname -m)
-            if [ "$ARCH" = "ppc64le" ] || [ "$ARCH" = "ppc64" ]; then
-                APT_PKGS="$APT_PKGS qemu-system-ppc qemu-utils"
-            elif [ "$ARCH" = "aarch64" ]; then
-                APT_PKGS="$APT_PKGS qemu-system-arm qemu-utils"
-            else
-                APT_PKGS="$APT_PKGS qemu-system-x86 qemu-utils"
-            fi
+        # Select architecture-appropriate QEMU package
+        ARCH=$(uname -m)
+        if [ "$ARCH" = "ppc64le" ] || [ "$ARCH" = "ppc64" ]; then
+            QEMU_PKG="qemu-system-ppc qemu-utils"
+        elif [ "$ARCH" = "aarch64" ]; then
+            QEMU_PKG="qemu-system-arm qemu-utils"
+        else
+            QEMU_PKG="qemu-system-x86 qemu-utils"
         fi
-
-        if [[ "$INSTALL_LXC" =~ ^[Yy] ]]; then
-            APT_PKGS="$APT_PKGS lxc lxc-templates"
-        fi
-
-        apt install -y $APT_PKGS
+        apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils $QEMU_PKG socat s3fs nfs-common fuse3
     fi
 elif [ "$PKG_MANAGER" = "dnf" ]; then
-    DNF_PKGS="git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel dnsmasq bridge-utils socat s3fs-fuse nfs-utils fuse3"
-    [[ "$INSTALL_KVM" =~ ^[Yy] ]] && DNF_PKGS="$DNF_PKGS qemu-kvm qemu-img"
-    [[ "$INSTALL_LXC" =~ ^[Yy] ]] && DNF_PKGS="$DNF_PKGS lxc lxc-templates lxc-extra"
-    dnf install -y $DNF_PKGS
+    dnf install -y git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat s3fs-fuse nfs-utils fuse3
 elif [ "$PKG_MANAGER" = "yum" ]; then
-    YUM_PKGS="git curl gcc gcc-c++ make openssl-devel pkgconfig dnsmasq bridge-utils socat s3fs-fuse nfs-utils fuse"
-    [[ "$INSTALL_KVM" =~ ^[Yy] ]] && YUM_PKGS="$YUM_PKGS qemu-kvm qemu-img"
-    [[ "$INSTALL_LXC" =~ ^[Yy] ]] && YUM_PKGS="$YUM_PKGS lxc lxc-templates lxc-extra"
-    yum install -y $YUM_PKGS
+    yum install -y git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat s3fs-fuse nfs-utils fuse
 elif [ "$PKG_MANAGER" = "zypper" ]; then
-    ZYPPER_PKGS="git curl gcc gcc-c++ make libopenssl-devel pkg-config dnsmasq bridge-utils socat s3fs nfs-client fuse3"
-    [[ "$INSTALL_KVM" =~ ^[Yy] ]] && ZYPPER_PKGS="$ZYPPER_PKGS qemu-kvm qemu-tools"
-    [[ "$INSTALL_LXC" =~ ^[Yy] ]] && ZYPPER_PKGS="$ZYPPER_PKGS lxc"
-    zypper install -y $ZYPPER_PKGS
+    zypper install -y git curl gcc gcc-c++ make libopenssl-devel pkg-config lxc dnsmasq bridge-utils qemu-kvm qemu-tools socat s3fs nfs-client fuse3
 fi
 
 echo "✓ System dependencies installed"
@@ -278,22 +211,18 @@ mkdir -p /etc/wolfstack/s3 /etc/wolfstack/pbs /mnt/wolfstack /var/cache/wolfstac
 echo "✓ Storage directories configured"
 
 # ─── Install Docker if missing ──────────────────────────────────────────────
-if [[ "$INSTALL_DOCKER" =~ ^[Yy] ]]; then
-    if ! command -v docker &> /dev/null; then
-        echo ""
-        echo "Installing Docker..."
-        if curl -fsSL https://get.docker.com | sh; then
-            systemctl enable docker 2>/dev/null || true
-            systemctl start docker 2>/dev/null || true
-            echo "✓ Docker installed"
-        else
-            echo "⚠ Failed to install Docker automatically. Please install manually."
-        fi
+if ! command -v docker &> /dev/null; then
+    echo ""
+    echo "Installing Docker..."
+    if curl -fsSL https://get.docker.com | sh; then
+        systemctl enable docker 2>/dev/null || true
+        systemctl start docker 2>/dev/null || true
+        echo "✓ Docker installed"
     else
-        echo "✓ Docker already installed"
+        echo "⚠ Failed to install Docker automatically. Please install manually."
     fi
 else
-    echo "⊘ Docker skipped (not selected)"
+    echo "✓ Docker already installed"
 fi
 
 # ─── Install WolfNet (cluster network layer) ────────────────────────────────
@@ -301,67 +230,56 @@ echo ""
 echo "Checking WolfNet (cluster networking)..."
 
 if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev/null; then
-    # Already installed and running — upgrade with minimal downtime
+    # Already installed and running — check for upgrades
     echo "✓ WolfNet already installed and running"
     WOLFNET_IP=$(ip -4 addr show wolfnet0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]}' || echo "")
     if [ -n "$WOLFNET_IP" ]; then
         echo "  WolfNet IP: $WOLFNET_IP"
     fi
 
-    # Step 1: Pull latest source (service still running)
+    # Always update WolfNet when WolfStack updates
     WOLFNET_SRC_DIR="/opt/wolfnet-src"
-    echo "  Pulling latest WolfNet..."
-    # Ensure the source dir points to the correct WolfNet repo (not WolfScale)
     if [ -d "$WOLFNET_SRC_DIR" ]; then
-        CURRENT_REMOTE=$(git -C "$WOLFNET_SRC_DIR" remote get-url origin 2>/dev/null || echo "")
-        if echo "$CURRENT_REMOTE" | grep -qi "WolfNet"; then
-            cd "$WOLFNET_SRC_DIR"
-            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-            git fetch origin 2>&1 || true
-            git reset --hard origin/main 2>&1 || true
-        else
-            echo "  Old WolfScale clone detected — replacing with WolfNet..."
-            rm -rf "$WOLFNET_SRC_DIR"
-            git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
-            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-            cd "$WOLFNET_SRC_DIR"
-        fi
-    else
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
+        echo "  Updating WolfNet..."
+        cd "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-        cd "$WOLFNET_SRC_DIR"
-    fi
+        git fetch origin 2>&1 || true
+        git reset --hard origin/main 2>&1 || true
 
-    # Step 2: Build new binary (service still running)
-    export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
-    if command -v cargo &> /dev/null; then
-        echo "  Building WolfNet..."
-        cd "$WOLFNET_SRC_DIR"
-        if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
-            chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
-            su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR && $REAL_HOME/.cargo/bin/cargo build --release"
-        else
-            cargo build --release
+        # Verify wolfnet subdirectory exists after reset — if not, re-clone
+        if [ ! -d "$WOLFNET_SRC_DIR/wolfnet" ]; then
+            echo "  ⚠ wolfnet subdirectory missing — re-cloning WolfScale repo..."
+            cd /tmp
+            rm -rf "$WOLFNET_SRC_DIR"
+            git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+            cd "$WOLFNET_SRC_DIR"
         fi
 
-        # Step 3: Stop → swap binary → start (minimal downtime)
-        echo "  Upgrading WolfNet binary..."
-        systemctl stop wolfnet 2>/dev/null || true
-        cp "$WOLFNET_SRC_DIR/target/release/wolfnet" /usr/local/bin/wolfnet
-        chmod +x /usr/local/bin/wolfnet
-        if [ -f "$WOLFNET_SRC_DIR/target/release/wolfnetctl" ]; then
-            cp "$WOLFNET_SRC_DIR/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
-            chmod +x /usr/local/bin/wolfnetctl
-        fi
-        systemctl start wolfnet 2>/dev/null || true
-        sleep 2
-        if systemctl is-active --quiet wolfnet; then
-            echo "  ✓ WolfNet upgraded and running"
+        # Rebuild
+        export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
+        if command -v cargo &> /dev/null; then
+            cd "$WOLFNET_SRC_DIR/wolfnet"
+            if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
+                chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
+                su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
+            else
+                cargo build --release
+            fi
+
+            # Install updated binaries
+            systemctl stop wolfnet 2>/dev/null || true
+            cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
+            chmod +x /usr/local/bin/wolfnet
+            if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
+                cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+                chmod +x /usr/local/bin/wolfnetctl
+            fi
+            systemctl start wolfnet 2>/dev/null || true
+            echo "  ✓ WolfNet updated and restarted"
         else
-            echo "  ⚠ WolfNet failed to start. Check: journalctl -u wolfnet -n 20"
+            echo "  ⚠ Cargo not found — skipping WolfNet rebuild"
         fi
-    else
-        echo "  ⚠ Cargo not found — skipping WolfNet rebuild"
     fi
 
 elif command -v wolfnet &> /dev/null; then
@@ -370,45 +288,42 @@ elif command -v wolfnet &> /dev/null; then
 
     # Always update WolfNet when WolfStack updates
     WOLFNET_SRC_DIR="/opt/wolfnet-src"
-    echo "  Updating WolfNet..."
     if [ -d "$WOLFNET_SRC_DIR" ]; then
-        CURRENT_REMOTE=$(git -C "$WOLFNET_SRC_DIR" remote get-url origin 2>/dev/null || echo "")
-        if echo "$CURRENT_REMOTE" | grep -qi "WolfNet"; then
-            cd "$WOLFNET_SRC_DIR"
-            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-            git fetch origin 2>&1 || true
-            git reset --hard origin/main 2>&1 || true
-        else
-            echo "  Old WolfScale clone detected — replacing with WolfNet..."
-            rm -rf "$WOLFNET_SRC_DIR"
-            git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
-            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-            cd "$WOLFNET_SRC_DIR"
-        fi
-    else
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
+        echo "  Updating WolfNet..."
+        cd "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-        cd "$WOLFNET_SRC_DIR"
-    fi
+        git fetch origin 2>&1 || true
+        git reset --hard origin/main 2>&1 || true
 
-    export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
-    if command -v cargo &> /dev/null; then
-        cd "$WOLFNET_SRC_DIR"
-        if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
-            chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
-            su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR && $REAL_HOME/.cargo/bin/cargo build --release"
+        # Verify wolfnet subdirectory exists after reset — if not, re-clone
+        if [ ! -d "$WOLFNET_SRC_DIR/wolfnet" ]; then
+            echo "  ⚠ wolfnet subdirectory missing — re-cloning WolfScale repo..."
+            cd /tmp
+            rm -rf "$WOLFNET_SRC_DIR"
+            git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+            cd "$WOLFNET_SRC_DIR"
+        fi
+
+        export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
+        if command -v cargo &> /dev/null; then
+            cd "$WOLFNET_SRC_DIR/wolfnet"
+            if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
+                chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
+                su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
+            else
+                cargo build --release
+            fi
+            cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
+            chmod +x /usr/local/bin/wolfnet
+            if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
+                cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+                chmod +x /usr/local/bin/wolfnetctl
+            fi
+            echo "  ✓ WolfNet updated"
         else
-            cargo build --release
+            echo "  ⚠ Cargo not found — skipping WolfNet rebuild"
         fi
-        cp "$WOLFNET_SRC_DIR/target/release/wolfnet" /usr/local/bin/wolfnet
-        chmod +x /usr/local/bin/wolfnet
-        if [ -f "$WOLFNET_SRC_DIR/target/release/wolfnetctl" ]; then
-            cp "$WOLFNET_SRC_DIR/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
-            chmod +x /usr/local/bin/wolfnetctl
-        fi
-        echo "  ✓ WolfNet updated"
-    else
-        echo "  ⚠ Cargo not found — skipping WolfNet rebuild"
     fi
 
     echo "  Starting WolfNet..."
@@ -463,19 +378,10 @@ else
     echo "  Downloading WolfNet..."
     WOLFNET_SRC_DIR="/opt/wolfnet-src"
     if [ -d "$WOLFNET_SRC_DIR" ]; then
-        CURRENT_REMOTE=$(git -C "$WOLFNET_SRC_DIR" remote get-url origin 2>/dev/null || echo "")
-        if echo "$CURRENT_REMOTE" | grep -qi "WolfNet"; then
-            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-            cd "$WOLFNET_SRC_DIR" && git fetch origin && git reset --hard origin/main
-        else
-            echo "  Old WolfScale clone detected — replacing with WolfNet..."
-            rm -rf "$WOLFNET_SRC_DIR"
-            git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
-            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-            cd "$WOLFNET_SRC_DIR"
-        fi
+        git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+        cd "$WOLFNET_SRC_DIR" && git fetch origin && git reset --hard origin/main
     else
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
+        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
         cd "$WOLFNET_SRC_DIR"
     fi
@@ -495,19 +401,19 @@ else
 
     # Build WolfNet
     echo "  Building WolfNet..."
-    cd "$WOLFNET_SRC_DIR"
+    cd "$WOLFNET_SRC_DIR/wolfnet"
     if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
         chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
-        su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR && $REAL_HOME/.cargo/bin/cargo build --release"
+        su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
     else
         cargo build --release
     fi
 
     # Install binaries
-    cp "$WOLFNET_SRC_DIR/target/release/wolfnet" /usr/local/bin/wolfnet
+    cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
     chmod +x /usr/local/bin/wolfnet
-    if [ -f "$WOLFNET_SRC_DIR/target/release/wolfnetctl" ]; then
-        cp "$WOLFNET_SRC_DIR/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+    if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
+        cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
         chmod +x /usr/local/bin/wolfnetctl
     fi
     echo "  ✓ WolfNet binary installed"
@@ -714,20 +620,19 @@ fi
 
 echo "✓ Build complete"
 
-# ─── Stop WolfStack if running, swap binary, restart (minimal downtime) ──────
+# ─── Flag restart if service is running (for upgrades) ───────────────────────
 if systemctl is-active --quiet wolfstack 2>/dev/null; then
+    echo ""
+    echo "WolfStack service is running — will restart after upgrade."
     RESTART_SERVICE=true
 else
     RESTART_SERVICE=false
 fi
 
+# ─── Install binary ─────────────────────────────────────────────────────────
 echo ""
 if [ -f "/usr/local/bin/wolfstack" ]; then
     echo "Upgrading WolfStack..."
-    if [ "$RESTART_SERVICE" = "true" ]; then
-        echo "Stopping WolfStack..."
-        systemctl stop wolfstack 2>/dev/null || true
-    fi
     rm -f /usr/local/bin/wolfstack
 else
     echo "Installing WolfStack..."
@@ -858,7 +763,7 @@ elif command -v firewall-cmd &> /dev/null; then
 fi
 
 # ─── Set up lxcbr0 bridge for LXC containers ────────────────────────────────
-if [[ "$INSTALL_LXC" =~ ^[Yy] ]] && command -v lxc-ls &> /dev/null; then
+if command -v lxc-ls &> /dev/null; then
     # Only configure lxc-net on fresh installs — restarting lxc-net on upgrades
     # destroys lxcbr0 and all container kernel routes, breaking WolfNet routing.
     # WolfStack's reapply_wolfnet_routes() handles route restoration on startup.

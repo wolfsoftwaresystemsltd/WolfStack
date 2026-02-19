@@ -53,7 +53,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v8.4.1</span>
+                <span class="version">v9.8.6</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -64,6 +64,10 @@
                 <a class="nav-item" data-page="appstore" onclick="selectView('appstore')">
                     <span class="icon">🛍️</span> App Store
                 </a>
+                <a class="nav-item" data-page="issues" onclick="selectView('issues')">
+                    <span class="icon">⚠️</span> Issues
+                </a>
+
             </div>
             <div class="nav-section">
                 <div class="nav-section-title">Servers</div>
@@ -294,7 +298,7 @@
                             </div>
                         </div>
                         <div style="display: flex; gap: 12px;">
-                            <button class="btn btn-primary" onclick="openTerminalForCurrentNode()">
+                            <button class="btn btn-primary" onclick="selectView('terminal')">
                                 <span class="icon">💻</span> Terminal
                             </button>
                             <button class="btn" onclick="location.reload()">
@@ -496,7 +500,13 @@
 
         </div>
 
-        <!-- ═══ App Store Page ═══ -->
+        <!-- ═══ Security Page (per-node) ═══ -->
+        <div id="page-security" class="page-view" style="display:none;">
+            <div id="security-node-content">
+                <div style="padding:40px; text-align:center; color:var(--text-muted);">Loading security status...</div>
+            </div>
+        </div>
+
         <div id="page-appstore" class="page-view" style="display:none;">
             <!-- Header -->
             <div class="card"
@@ -586,6 +596,109 @@
                         <button class="btn" onclick="closeAppStoreInstallModal()">Cancel</button>
                         <button class="btn btn-primary" id="appstore-install-btn" onclick="executeAppStoreInstall()">🚀
                             Install</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Issues Page ═══ -->
+        <div id="page-issues" class="page-view" style="display:none; padding-top:0;">
+            <!-- Header -->
+            <div class="card"
+                style="margin-bottom:20px; background:linear-gradient(135deg, rgba(234,179,8,0.12), rgba(220,38,38,0.08)); border-color:rgba(234,179,8,0.25);">
+                <div class="card-body"
+                    style="display:flex; align-items:center; justify-content:space-between; padding:28px 32px; flex-wrap:wrap; gap:16px;">
+                    <div style="display:flex; align-items:center; gap:20px;">
+                        <div
+                            style="width:64px; height:64px; background:linear-gradient(135deg,#eab308,#f59e0b); border-radius:16px; display:flex; align-items:center; justify-content:center; font-size:32px; box-shadow:0 4px 20px rgba(234,179,8,0.3);">
+                            ⚠️</div>
+                        <div>
+                            <h2 style="font-size:24px; margin-bottom:4px; color:var(--text-primary); font-weight:700;">
+                                Issues Scanner</h2>
+                            <p style="color:var(--text-secondary); font-size:13px; margin:0;">Scan all nodes for
+                                potential problems — CPU, memory, disk, services, and containers.</p>
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                        <span id="issues-ai-badge"
+                            style="display:none; padding:4px 10px; border-radius:6px; font-size:11px; font-weight:600;
+                            background:rgba(99,102,241,0.15); color:rgba(129,140,248,1); border:1px solid rgba(99,102,241,0.3);">
+                            🤖 AI Enhanced</span>
+                        <div
+                            style="display:flex; align-items:center; gap:6px; background:var(--bg-input); border:1px solid var(--border); border-radius:8px; padding:4px 10px;">
+                            <span style="font-size:11px; color:var(--text-muted); white-space:nowrap;">🔔 Auto
+                                Scan:</span>
+                            <select id="issues-schedule-select" onchange="saveIssueSchedule(this.value)"
+                                style="background:transparent; border:none; color:var(--text-primary); font-size:12px; font-weight:500; cursor:pointer; outline:none; font-family:inherit;">
+                                <option value="off" style="background:var(--bg-card);">Off</option>
+                                <option value="hourly" style="background:var(--bg-card);">Every Hour</option>
+                                <option value="6h" style="background:var(--bg-card);">Every 6 Hours</option>
+                                <option value="12h" style="background:var(--bg-card);">Every 12 Hours</option>
+                                <option value="daily" style="background:var(--bg-card);">Daily</option>
+                            </select>
+                        </div>
+                        <button class="btn" onclick="issuesUpgradeAll()" id="issues-upgrade-all-btn"
+                            style="display:none; background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.3);">
+                            ⚡ Upgrade All
+                        </button>
+                        <button class="btn btn-primary" onclick="scanForIssues()" id="issues-scan-btn">
+                            🔄 Scan Now
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Summary Counters -->
+            <div class="stats-grid" style="margin-bottom:20px;">
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Critical</span>
+                        <div class="stat-icon" style="background:rgba(239,68,68,0.15); color:#ef4444;">🔴</div>
+                    </div>
+                    <div class="stat-value" id="issues-count-critical" style="color:#ef4444;">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Warnings</span>
+                        <div class="stat-icon" style="background:rgba(234,179,8,0.15); color:#eab308;">🟡</div>
+                    </div>
+                    <div class="stat-value" id="issues-count-warning" style="color:#eab308;">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Info</span>
+                        <div class="stat-icon" style="background:rgba(59,130,246,0.15); color:#3b82f6;">🔵</div>
+                    </div>
+                    <div class="stat-value" id="issues-count-info" style="color:#3b82f6;">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Nodes Scanned</span>
+                        <div class="stat-icon" style="background:rgba(16,185,129,0.15); color:#10b981;">🖥️</div>
+                    </div>
+                    <div class="stat-value" id="issues-count-nodes">0</div>
+                </div>
+            </div>
+
+            <!-- Scan Results -->
+            <div id="issues-list">
+                <div class="card">
+                    <div class="card-body" style="padding:48px; text-align:center; color:var(--text-muted);">
+                        <div style="font-size:48px; margin-bottom:12px;">🔍</div>
+                        <p style="font-size:14px; margin:0;">Click <strong>Scan Now</strong> to check all nodes for
+                            issues.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AI Analysis (populated after scan) -->
+            <div id="issues-ai-section" style="display:none; margin-top:20px;">
+                <div class="card" style="border-color:rgba(99,102,241,0.3);">
+                    <div class="card-header">
+                        <h3>🤖 AI Analysis</h3>
+                    </div>
+                    <div class="card-body">
+                        <div id="issues-ai-content" style="font-size:13px; line-height:1.7; color:var(--text);"></div>
                     </div>
                 </div>
             </div>
@@ -1421,6 +1534,7 @@
                         <thead>
                             <tr>
                                 <th>Name</th>
+                                <th>Version</th>
                                 <th>State</th>
                                 <th>IP Address</th>
                                 <th>CPU</th>
@@ -1699,6 +1813,93 @@
                     </p>
                 </div>
             </div>
+
+            <!-- ZFS Pools (shown if ZFS available) -->
+            <div id="zfs-section" class="card" style="margin-top:20px; display:none;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>🗄️ ZFS Pools</h3>
+                    <button class="btn btn-sm" onclick="loadZfsStatus()"
+                        style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;">↻
+                        Refresh</button>
+                </div>
+                <div class="card-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Pool</th>
+                                <th>Size</th>
+                                <th>Used</th>
+                                <th>Free</th>
+                                <th>Health</th>
+                                <th>Frag</th>
+                                <th>Capacity</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="zfs-pools-table"></tbody>
+                    </table>
+                    <!-- Expandable dataset/snapshot section -->
+                    <div id="zfs-detail-section" style="margin-top:16px;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ File Manager ═══ -->
+        <div id="page-files" class="page-view" style="display:none;">
+            <div class="card">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>📂 File Manager</h3>
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn btn-sm btn-primary" onclick="showNewFolderModal()"
+                            style="font-size:12px; padding:4px 12px;">+ New Folder</button>
+                        <button class="btn btn-sm" onclick="triggerFileUpload()"
+                            style="font-size:12px; padding:4px 12px; background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);">📤
+                            Upload</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <!-- Breadcrumb navigation -->
+                    <div id="file-breadcrumb"
+                        style="display:flex; align-items:center; gap:4px; padding:8px 0; font-size:14px; flex-wrap:wrap; margin-bottom:8px;">
+                    </div>
+                    <!-- Search -->
+                    <div style="margin-bottom:12px;">
+                        <input type="text" id="file-search-input" placeholder="🔍 Search files and folders..."
+                            oninput="filterFileList(this.value)"
+                            style="width:100%; max-width:400px; padding:6px 12px; font-size:14px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary); color:var(--text-primary); outline:none;">
+                    </div>
+                    <!-- Multi-select toolbar -->
+                    <div id="file-selection-bar"
+                        style="display:none; align-items:center; gap:12px; padding:8px 12px; margin-bottom:8px; background:var(--bg-tertiary); border-radius:6px; border:1px solid var(--accent);">
+                        <span class="sel-count" style="font-size:13px; font-weight:600; color:var(--accent);"></span>
+                        <button class="btn btn-sm"
+                            style="font-size:12px;padding:4px 10px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);"
+                            onclick="bulkChmod()">🔒 Set Permissions</button>
+                        <button class="btn btn-sm"
+                            style="font-size:12px;padding:4px 10px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);"
+                            onclick="bulkDeleteFiles()">🗑️ Delete Selected</button>
+                    </div>
+                    <!-- File listing table -->
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th style="width:30px;"><input type="checkbox" onchange="toggleSelectAll(this)"
+                                        title="Select all"></th>
+                                <th style="width:38%;">Name</th>
+                                <th>Size</th>
+                                <th>Modified</th>
+                                <th>Permissions</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="file-list-table"></tbody>
+                    </table>
+                    <p id="file-empty" style="display:none; text-align:center; padding:20px; color:var(--text-muted);">
+                        This directory is empty.
+                    </p>
+                </div>
+            </div>
+            <input type="file" id="file-upload-input" multiple style="display:none;" onchange="uploadFiles(this.files)">
         </div>
 
         <!-- ═══ PVE Resources (Proxmox VMs & Containers) ═══ -->
@@ -2600,11 +2801,11 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
 
                         <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px;">
                             <div class="form-group">
-                                <label>Source Port(s) <small style="color:var(--text-muted);">(optional)</small></label>
-                                <input type="text" id="mapping-ports" class="form-control" placeholder="e.g. 8080,443"
+                                <label>Ports <small style="color:var(--text-muted);">(optional)</small></label>
+                                <input type="text" id="mapping-ports" class="form-control" placeholder="e.g. 80,443"
                                     oninput="onMappingPortsInput()"
                                     style="font-family:var(--font-mono); font-size:13px;">
-                                <small style="color:var(--text-muted);">Incoming port(s). Blank = all</small>
+                                <small style="color:var(--text-muted);">Blank = all</small>
                             </div>
                             <div class="form-group">
                                 <label>Protocol</label>
@@ -2614,15 +2815,6 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                                     <option value="udp">UDP only</option>
                                 </select>
                             </div>
-                        </div>
-
-                        <div class="form-group" style="margin-bottom:12px;">
-                            <label>Destination Port(s) <small
-                                    style="color:var(--text-muted);">(optional)</small></label>
-                            <input type="text" id="mapping-dest-ports" class="form-control" placeholder="e.g. 80,443"
-                                style="font-family:var(--font-mono); font-size:13px;">
-                            <small style="color:var(--text-muted);">Port on the container/VM. Blank = same as
-                                source</small>
                         </div>
 
                         <div class="form-group">
@@ -3248,6 +3440,27 @@ region = us-east-1"></textarea>
                 </div>
                 <div style="flex:1;padding:4px;background:#0a0a0a;overflow:hidden;">
                     <div id="terminal-container" style="width:100%;height:100%;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Generic Confirm/Prompt Modal -->
+        <div class="modal-overlay" id="wolf-dialog-modal">
+            <div class="modal" style="max-width:460px;width:90%;">
+                <div class="modal-header">
+                    <h3 id="wolf-dialog-title">Confirm</h3>
+                    <button class="modal-close" onclick="wolfDialogCancel()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p id="wolf-dialog-message"
+                        style="font-size:14px;line-height:1.6;margin:0;color:var(--text-secondary);"></p>
+                    <div id="wolf-dialog-input-wrap" style="display:none;margin-top:16px;">
+                        <input type="text" id="wolf-dialog-input" class="form-control" autocomplete="off">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" id="wolf-dialog-cancel-btn" onclick="wolfDialogCancel()">Cancel</button>
+                    <button class="btn btn-primary" id="wolf-dialog-ok-btn" onclick="wolfDialogOk()">Confirm</button>
                 </div>
             </div>
         </div>

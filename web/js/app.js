@@ -84,13 +84,6 @@ function apiUrl(path) {
     return `/api/nodes/${currentNodeId}/proxy/${cleanPath}`;
 }
 
-// ─── Open Terminal for the current server (called from Dashboard button) ───
-function openTerminalForCurrentNode() {
-    if (currentNodeId) {
-        selectServerView(currentNodeId, 'terminal');
-    }
-}
-
 // ─── Page Navigation ───
 function selectView(page) {
     currentPage = page;
@@ -104,7 +97,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', 'ai-settings': 'AI Agent', docs: 'Help & Documentation', appstore: 'App Store' };
+    const titles = { datacenter: 'Datacenter', 'ai-settings': 'AI Agent', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -115,6 +108,9 @@ function selectView(page) {
         loadAiAlerts();
     } else if (page === 'appstore') {
         loadAppStoreApps();
+    } else if (page === 'issues') {
+        checkIssuesAiBadge();
+        loadIssueSchedule();
     }
 }
 
@@ -141,6 +137,7 @@ function selectServerView(nodeId, view) {
         containers: 'Docker',
         lxc: 'LXC',
         storage: 'Storage',
+        files: 'File Manager',
         networking: 'Networking',
         wolfnet: 'WolfNet',
         certificates: 'Certificates',
@@ -148,6 +145,7 @@ function selectServerView(nodeId, view) {
         'pve-resources': 'VMs & Containers',
         'mysql-editor': 'MariaDB/MySQL',
         'terminal': 'Terminal',
+        'security': 'Security',
     };
     document.getElementById('page-title').textContent = `${hostname} — ${viewTitles[view] || view}`;
     document.getElementById('hostname-display').textContent = `${hostname} (${node?.address}:${node?.port})`;
@@ -168,7 +166,7 @@ function selectServerView(nodeId, view) {
 
     // Load data for the view
     // Show a modern loading overlay for views that fetch data asynchronously
-    const asyncViews = ['components', 'services', 'containers', 'lxc', 'vms', 'storage', 'networking', 'backups', 'wolfnet', 'certificates', 'cron', 'pve-resources', 'mysql-editor'];
+    const asyncViews = ['components', 'services', 'containers', 'lxc', 'vms', 'storage', 'networking', 'backups', 'wolfnet', 'certificates', 'cron', 'pve-resources', 'mysql-editor', 'security'];
     if (asyncViews.includes(view) && el) {
         // Clear table bodies to prevent stale data showing
         el.querySelectorAll('tbody').forEach(tb => { tb.innerHTML = ''; });
@@ -197,20 +195,8 @@ function selectServerView(nodeId, view) {
         if (node?.is_self) fetchMetricsHistory();
     }
     if (view === 'components' || view === 'services') loadComponents().finally(() => hidePageLoadingOverlay(el));
-    if (view === 'containers') {
-        if (!node?.has_docker && node?.node_type !== 'proxmox') {
-            showInstallPrompt(el, 'Docker', 'docker', '🐳', 'Run application containers with Docker.');
-            return;
-        }
-        loadDockerContainers().finally(() => hidePageLoadingOverlay(el));
-    }
-    if (view === 'lxc') {
-        if (!node?.has_lxc && node?.node_type !== 'proxmox') {
-            showInstallPrompt(el, 'LXC', 'lxc', '📦', 'Run lightweight system containers with LXC.');
-            return;
-        }
-        loadLxcContainers().finally(() => hidePageLoadingOverlay(el));
-    }
+    if (view === 'containers') loadDockerContainers().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'lxc') loadLxcContainers().finally(() => hidePageLoadingOverlay(el));
 
     if (view === 'terminal') {
         // Open terminal inline in the content area
@@ -222,14 +208,9 @@ function selectServerView(nodeId, view) {
             openInlineTerminal('host', hostname);
         }
     }
-    if (view === 'vms') {
-        if (!node?.has_kvm && node?.node_type !== 'proxmox') {
-            showInstallPrompt(el, 'KVM', 'kvm', '🖥️', 'Create and manage virtual machines with KVM/QEMU.');
-            return;
-        }
-        loadVms().finally(() => hidePageLoadingOverlay(el));
-    }
-    if (view === 'storage') loadStorageMounts().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'vms') loadVms().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'storage') Promise.all([loadStorageMounts(), loadZfsStatus()]).finally(() => hidePageLoadingOverlay(el));
+    if (view === 'files') { if (!window._skipFileReset) { containerFileMode = null; currentFilePath = '/'; } window._skipFileReset = false; loadFiles().finally(() => hidePageLoadingOverlay(el)); }
     if (view === 'networking') loadNetworking().finally(() => hidePageLoadingOverlay(el));
     if (view === 'backups') loadBackups().finally(() => hidePageLoadingOverlay(el));
     if (view === 'wolfnet') loadWolfNet().finally(() => hidePageLoadingOverlay(el));
@@ -237,68 +218,7 @@ function selectServerView(nodeId, view) {
     if (view === 'cron') loadCronJobs().finally(() => hidePageLoadingOverlay(el));
     if (view === 'pve-resources') { renderPveResourcesView(nodeId); hidePageLoadingOverlay(el); }
     if (view === 'mysql-editor') { loadMySQLEditor(); hidePageLoadingOverlay(el); }
-}
-
-// ─── Install Prompt for missing runtimes ───
-function showInstallPrompt(container, techName, techId, icon, description) {
-    hidePageLoadingOverlay(container);
-    const content = container.querySelector('.content-body') || container;
-    content.innerHTML = `
-        <div style="display:flex;align-items:center;justify-content:center;min-height:320px;">
-            <div style="text-align:center;max-width:420px;padding:40px;background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:16px;">
-                <div style="font-size:56px;margin-bottom:16px;">${icon}</div>
-                <h2 style="margin:0 0 8px;font-size:20px;color:var(--text-primary);">${techName} is not installed</h2>
-                <p style="margin:0 0 24px;color:var(--text-muted);font-size:14px;line-height:1.5;">${description}</p>
-                <button id="install-${techId}-btn" class="btn btn-primary" style="padding:10px 32px;font-size:15px;border-radius:8px;cursor:pointer;" onclick="installRuntime('${techId}', '${techName}')">
-                    Install ${techName}
-                </button>
-                <div id="install-${techId}-status" style="margin-top:16px;font-size:13px;color:var(--text-muted);display:none;"></div>
-            </div>
-        </div>
-    `;
-}
-
-async function installRuntime(techId, techName) {
-    const btn = document.getElementById(`install-${techId}-btn`);
-    const status = document.getElementById(`install-${techId}-status`);
-    if (btn) {
-        btn.disabled = true;
-        btn.textContent = `Installing ${techName}...`;
-        btn.style.opacity = '0.6';
-    }
-    if (status) {
-        status.style.display = '';
-        status.textContent = 'This may take a few minutes. Please wait...';
-    }
-
-    try {
-        const url = apiUrl(`/api/install/${techId}`);
-        const resp = await fetch(url, { method: 'POST' });
-        const data = await resp.json();
-        if (resp.ok) {
-            showToast(`${techName} installed successfully!`, 'success');
-            // Refresh node data to get updated capability flags
-            try {
-                const nodesResp = await fetch('/api/nodes');
-                const nodesData = await nodesResp.json();
-                if (nodesData.nodes) {
-                    buildServerTree(nodesData.nodes);
-                    allNodes = nodesData.nodes;
-                }
-            } catch (e) { /* silent */ }
-            // Reload the current view now that the tech is installed
-            const viewMap = { docker: 'containers', lxc: 'lxc', kvm: 'vms' };
-            selectServerView(currentNodeId, viewMap[techId] || 'dashboard');
-        } else {
-            showToast(data.error || `Failed to install ${techName}`, 'error');
-            if (btn) { btn.disabled = false; btn.textContent = `Install ${techName}`; btn.style.opacity = '1'; }
-            if (status) status.textContent = data.error || 'Installation failed.';
-        }
-    } catch (e) {
-        showToast(`Error installing ${techName}: ${e.message}`, 'error');
-        if (btn) { btn.disabled = false; btn.textContent = `Install ${techName}`; btn.style.opacity = '1'; }
-        if (status) status.textContent = e.message;
-    }
+    if (view === 'security') loadNodeSecurity().finally(() => hidePageLoadingOverlay(el));
 }
 
 // ─── Server Tree ───
@@ -414,6 +334,9 @@ function buildServerTree(nodes) {
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="storage" onclick="selectServerView('${node.id}', 'storage')">
                             <span class="icon">💾</span> Storage
                         </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="files" onclick="selectServerView('${node.id}', 'files')">
+                            <span class="icon">📂</span> Files
+                        </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="networking" onclick="selectServerView('${node.id}', 'networking')">
                             <span class="icon">🌐</span> Networking
                         </a>
@@ -428,6 +351,9 @@ function buildServerTree(nodes) {
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="cron" onclick="selectServerView('${node.id}', 'cron')">
                             <span class="icon">🕐</span> Cron Jobs
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="security" onclick="selectServerView('${node.id}', 'security')">
+                            <span class="icon">🛡️</span> Security
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
                             <span class="icon">💻</span> Terminal
@@ -2428,6 +2354,722 @@ async function importRcloneConfig() {
     }
 }
 
+// ─── File Manager ───
+
+let currentFilePath = '/';
+let containerFileMode = null;  // null = host, {type:'docker', name:'xxx'} or {type:'lxc', name:'xxx', rootfs:'/path'}
+
+function browseContainerFiles(type, name, storagePath) {
+    // Always browse inside the container's filesystem starting at /
+    if (type === 'lxc') {
+        containerFileMode = { type: 'lxc', name };
+        currentFilePath = '/';
+    } else {
+        containerFileMode = { type: 'docker', name };
+        currentFilePath = '/';
+    }
+
+    // Set flag so selectServerView doesn't reset our state
+    window._skipFileReset = true;
+
+    // Switch to files view (this triggers loadFiles via selectServerView)
+    selectServerView(currentNodeId, 'files');
+}
+
+async function loadFiles(path) {
+    if (path !== undefined) currentFilePath = path;
+    const table = document.getElementById('file-list-table');
+    const empty = document.getElementById('file-empty');
+    if (!table) return;
+
+    // Show loading spinner
+    table.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:40px 0;">
+        <div class="page-loading-spinner" style="margin:0 auto 12px;"></div>
+        <div style="color:var(--text-muted);font-size:13px;">Loading files…</div>
+    </td></tr>`;
+    if (empty) empty.style.display = 'none';
+
+    // Update header to show container context
+    const header = document.querySelector('#page-files .card-header h3');
+    if (header) {
+        if (containerFileMode && containerFileMode.type === 'docker') {
+            header.textContent = `📂 Files — 🐳 ${containerFileMode.name}`;
+        } else if (containerFileMode && containerFileMode.type === 'lxc') {
+            header.textContent = `📂 Files — 📦 ${containerFileMode.name}`;
+        } else {
+            header.textContent = '📂 File Manager';
+        }
+    }
+
+    try {
+        let resp;
+        if (containerFileMode && containerFileMode.type === 'docker') {
+            resp = await fetch(apiUrl(`/api/files/docker/browse?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(currentFilePath)}`));
+        } else if (containerFileMode && containerFileMode.type === 'lxc') {
+            resp = await fetch(apiUrl(`/api/files/lxc/browse?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(currentFilePath)}`));
+        } else {
+            resp = await fetch(apiUrl(`/api/files/browse?path=${encodeURIComponent(currentFilePath)}`));
+        }
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast(data.error || 'Failed to browse', 'error');
+            table.innerHTML = '';
+            return;
+        }
+
+        currentFilePath = data.path || currentFilePath;
+        renderFileBreadcrumb(currentFilePath);
+
+        const entries = data.entries || [];
+        if (entries.length === 0) {
+            table.innerHTML = '';
+            if (empty) empty.style.display = '';
+            return;
+        }
+        if (empty) empty.style.display = 'none';
+        renderFileList(entries);
+    } catch (e) {
+        console.error('File browse failed:', e);
+        showToast('Failed to load files', 'error');
+        table.innerHTML = '';
+    }
+}
+
+function renderFileBreadcrumb(path) {
+    const bc = document.getElementById('file-breadcrumb');
+    if (!bc) return;
+
+    const parts = path.split('/').filter(Boolean);
+    let html = `<a href="#" onclick="navigateToDir('/');return false;" style="color:var(--accent);text-decoration:none;font-weight:600;">🏠 /</a>`;
+    let accumulated = '';
+    for (const part of parts) {
+        accumulated += '/' + part;
+        const p = accumulated;
+        html += `<span style="color:var(--text-muted);">/</span>`;
+        html += `<a href="#" onclick="navigateToDir('${p.replace(/'/g, "\\'")}');return false;" style="color:var(--accent);text-decoration:none;">${escapeHtml(part)}</a>`;
+    }
+    bc.innerHTML = html;
+}
+
+let cachedFileEntries = [];
+let fileSearchTimer = null;
+
+function renderFileList(entries) {
+    const table = document.getElementById('file-list-table');
+    if (!table) return;
+
+    cachedFileEntries = entries;
+    renderFilteredFileList(entries, false);
+}
+
+function renderFilteredFileList(entries, isSearch) {
+    const table = document.getElementById('file-list-table');
+    if (!table) return;
+
+    table.innerHTML = entries.map(e => {
+        const icon = e.is_dir ? '📁' : getFileIcon(e.name);
+        const sizeStr = e.is_dir ? '—' : formatFileSize(e.size);
+        const modStr = e.modified ? new Date(e.modified * 1000).toLocaleString() : '—';
+        const nameClick = e.is_dir
+            ? `onclick="navigateToDir('${e.path.replace(/'/g, "\\'")}')" style="cursor:pointer;color:#f5b731;font-weight:600;"`
+            : '';
+        const displayName = isSearch ? e.path : e.name;
+
+        return `<tr>
+            <td style="font-size:14px;"><input type="checkbox" class="file-checkbox" data-path="${escapeHtml(e.path)}" onchange="updateFileSelection()"></td>
+            <td style="font-size:14px;"><span ${nameClick}>${icon} ${escapeHtml(displayName)}</span></td>
+            <td style="font-size:13px;color:var(--text-muted);">${sizeStr}</td>
+            <td style="font-size:13px;color:var(--text-muted);">${modStr}</td>
+            <td style="font-family:var(--font-mono);font-size:13px;cursor:pointer;color:var(--accent);" onclick="changePermissions('${e.path.replace(/'/g, "\\'")}')" title="Click to change permissions">${escapeHtml(e.permissions)}</td>
+            <td style="white-space:nowrap;">
+                ${!e.is_dir ? `<button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="downloadFile('${e.path.replace(/'/g, "\\'")}')">⬇️</button>` : ''}
+                <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="renameFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">✏️</button>
+                <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);" onclick="deleteFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">🗑️</button>
+            </td>
+        </tr>`;
+    }).join('');
+
+    updateFileSelection();
+}
+
+function toggleSelectAll(cb) {
+    document.querySelectorAll('.file-checkbox').forEach(c => c.checked = cb.checked);
+    updateFileSelection();
+}
+
+function getSelectedFiles() {
+    return Array.from(document.querySelectorAll('.file-checkbox:checked')).map(c => c.dataset.path);
+}
+
+function updateFileSelection() {
+    const selected = getSelectedFiles();
+    const bar = document.getElementById('file-selection-bar');
+    if (bar) {
+        if (selected.length > 0) {
+            bar.style.display = 'flex';
+            bar.querySelector('.sel-count').textContent = `${selected.length} selected`;
+        } else {
+            bar.style.display = 'none';
+        }
+    }
+}
+
+async function bulkDeleteFiles() {
+    const paths = getSelectedFiles();
+    if (paths.length === 0) return;
+    if (!confirm(`Delete ${paths.length} item(s)?\n\nThis cannot be undone.`)) return;
+    for (const p of paths) {
+        try {
+            const endpoint = containerFileMode && containerFileMode.type === 'docker'
+                ? '/api/files/docker/delete' : containerFileMode && containerFileMode.type === 'lxc'
+                    ? '/api/files/lxc/delete' : '/api/files/delete';
+            const body = (containerFileMode && (containerFileMode.type === 'docker' || containerFileMode.type === 'lxc'))
+                ? { container: containerFileMode.name, path: p } : { path: p };
+            await fetch(apiUrl(endpoint), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+        } catch (e) { /* continue */ }
+    }
+    showToast(`Deleted ${paths.length} item(s)`, 'success');
+    loadFiles();
+}
+
+async function bulkChmod() {
+    const paths = getSelectedFiles();
+    if (paths.length === 0) return;
+    const mode = prompt(`Set permissions for ${paths.length} item(s):\n\nExamples: 755, 644, u+x, go-w`, '644');
+    if (!mode) return;
+    try {
+        const resp = await fetch(apiUrl('/api/files/chmod'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode, paths }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            const errs = (data.results || []).filter(r => r.error);
+            if (errs.length > 0) {
+                showToast(`${paths.length - errs.length} OK, ${errs.length} failed`, 'warning');
+            } else {
+                showToast(`Permissions set to ${mode}`, 'success');
+            }
+            loadFiles();
+        } else {
+            showToast(data.error || 'Failed', 'error');
+        }
+    } catch (e) { showToast(`Failed: ${e.message}`, 'error'); }
+}
+
+async function changePermissions(path) {
+    const mode = prompt(`Set permissions for this item:\n\nExamples: 755, 644, u+x, go-w`, '644');
+    if (!mode) return;
+    try {
+        const resp = await fetch(apiUrl('/api/files/chmod'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode, paths: [path] }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`Permissions set to ${mode}`, 'success');
+            loadFiles();
+        } else {
+            showToast(data.error || 'Failed', 'error');
+        }
+    } catch (e) { showToast(`Failed: ${e.message}`, 'error'); }
+}
+
+function filterFileList(query) {
+    clearTimeout(fileSearchTimer);
+    if (!query || query.trim() === '') {
+        renderFilteredFileList(cachedFileEntries, false);
+        return;
+    }
+    // Debounce 400ms then call server-side recursive search
+    fileSearchTimer = setTimeout(async () => {
+        try {
+            let resp;
+            if (containerFileMode && (containerFileMode.type === 'docker' || containerFileMode.type === 'lxc')) {
+                // For containers, do client-side filter (find may not be available)
+                const q = query.toLowerCase();
+                const filtered = cachedFileEntries.filter(e => e.name.toLowerCase().includes(q));
+                renderFilteredFileList(filtered, false);
+                return;
+            }
+            resp = await fetch(apiUrl(`/api/files/search?path=${encodeURIComponent(currentFilePath)}&query=${encodeURIComponent(query)}`));
+            const data = await resp.json();
+            if (resp.ok) {
+                renderFilteredFileList(data.entries || [], true);
+            }
+        } catch (e) {
+            console.error('Search failed:', e);
+        }
+    }, 400);
+}
+
+function getFileIcon(name) {
+    const ext = name.split('.').pop().toLowerCase();
+    const icons = {
+        'js': '📜', 'ts': '📜', 'rs': '🦀', 'py': '🐍', 'go': '🔵',
+        'html': '🌐', 'css': '🎨', 'json': '📋', 'xml': '📋', 'yaml': '📋', 'yml': '📋', 'toml': '📋',
+        'md': '📝', 'txt': '📄', 'log': '📄', 'conf': '⚙️', 'cfg': '⚙️', 'ini': '⚙️',
+        'sh': '⚡', 'bash': '⚡', 'zsh': '⚡',
+        'png': '🖼️', 'jpg': '🖼️', 'jpeg': '🖼️', 'gif': '🖼️', 'svg': '🖼️', 'webp': '🖼️',
+        'zip': '📦', 'tar': '📦', 'gz': '📦', 'bz2': '📦', 'xz': '📦', 'rar': '📦',
+        'db': '🗃️', 'sql': '🗃️', 'sqlite': '🗃️',
+    };
+    return icons[ext] || '📄';
+}
+
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+}
+
+function navigateToDir(path) {
+    const searchInput = document.getElementById('file-search-input');
+    if (searchInput) searchInput.value = '';
+    loadFiles(path);
+}
+
+function downloadFile(path) {
+    if (containerFileMode && containerFileMode.type === 'docker') {
+        window.open(apiUrl(`/api/files/docker/download?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(path)}`), '_blank');
+    } else if (containerFileMode && containerFileMode.type === 'lxc') {
+        window.open(apiUrl(`/api/files/lxc/download?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(path)}`), '_blank');
+    } else {
+        window.open(apiUrl(`/api/files/download?path=${encodeURIComponent(path)}`), '_blank');
+    }
+}
+
+async function deleteFile(path, name) {
+    if (!confirm(`Delete '${name}'?\n\nThis cannot be undone.`)) return;
+    try {
+        let resp;
+        if (containerFileMode && containerFileMode.type === 'docker') {
+            resp = await fetch(apiUrl('/api/files/docker/delete'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ container: containerFileMode.name, path }),
+            });
+        } else if (containerFileMode && containerFileMode.type === 'lxc') {
+            resp = await fetch(apiUrl('/api/files/lxc/delete'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ container: containerFileMode.name, path }),
+            });
+        } else {
+            resp = await fetch(apiUrl('/api/files/delete'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path }),
+            });
+        }
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Deleted', 'success');
+            loadFiles();
+        } else {
+            showToast(data.error || 'Failed to delete', 'error');
+        }
+    } catch (e) { showToast(`Failed: ${e.message}`, 'error'); }
+}
+
+async function renameFile(path, oldName) {
+    const newName = prompt(`Rename '${oldName}' to:`, oldName);
+    if (!newName || newName === oldName) return;
+    const parentDir = path.substring(0, path.lastIndexOf('/'));
+    const newPath = parentDir + '/' + newName;
+    try {
+        let resp;
+        if (containerFileMode && containerFileMode.type === 'docker') {
+            resp = await fetch(apiUrl('/api/files/docker/rename'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ container: containerFileMode.name, from: path, to: newPath }),
+            });
+        } else if (containerFileMode && containerFileMode.type === 'lxc') {
+            resp = await fetch(apiUrl('/api/files/lxc/rename'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ container: containerFileMode.name, from: path, to: newPath }),
+            });
+        } else {
+            resp = await fetch(apiUrl('/api/files/rename'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ from: path, to: newPath }),
+            });
+        }
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Renamed', 'success');
+            loadFiles();
+        } else {
+            showToast(data.error || 'Failed to rename', 'error');
+        }
+    } catch (e) { showToast(`Failed: ${e.message}`, 'error'); }
+}
+
+function showNewFolderModal() {
+    const name = prompt('Enter folder name:');
+    if (!name) return;
+    createNewFolder(name);
+}
+
+async function createNewFolder(name) {
+    const path = currentFilePath.endsWith('/') ? currentFilePath + name : currentFilePath + '/' + name;
+    try {
+        let resp;
+        if (containerFileMode && containerFileMode.type === 'docker') {
+            resp = await fetch(apiUrl('/api/files/docker/mkdir'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ container: containerFileMode.name, path }),
+            });
+        } else if (containerFileMode && containerFileMode.type === 'lxc') {
+            resp = await fetch(apiUrl('/api/files/lxc/mkdir'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ container: containerFileMode.name, path }),
+            });
+        } else {
+            resp = await fetch(apiUrl('/api/files/mkdir'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path }),
+            });
+        }
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Folder created', 'success');
+            loadFiles();
+        } else {
+            showToast(data.error || 'Failed to create folder', 'error');
+        }
+    } catch (e) { showToast(`Failed: ${e.message}`, 'error'); }
+}
+
+function triggerFileUpload() {
+    document.getElementById('file-upload-input').click();
+}
+
+async function uploadFiles(files) {
+    if (!files || files.length === 0) return;
+    const formData = new FormData();
+    for (const file of files) {
+        formData.append('file', file, file.name);
+    }
+    try {
+        const resp = await fetch(apiUrl(`/api/files/upload?path=${encodeURIComponent(currentFilePath)}`), {
+            method: 'POST',
+            body: formData,
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Uploaded', 'success');
+            loadFiles();
+        } else {
+            showToast(data.error || 'Upload failed', 'error');
+        }
+    } catch (e) { showToast(`Upload failed: ${e.message}`, 'error'); }
+    // Reset the input
+    document.getElementById('file-upload-input').value = '';
+}
+
+// ─── ZFS Storage ───
+
+async function loadZfsStatus() {
+    try {
+        const resp = await fetch(apiUrl('/api/storage/zfs/status'));
+        const data = await resp.json();
+        const section = document.getElementById('zfs-section');
+        if (!section) return;
+
+        if (!data.available) {
+            section.style.display = 'none';
+            return;
+        }
+        section.style.display = '';
+        renderZfsPools(data.pools || []);
+    } catch (e) {
+        console.error('Failed to load ZFS status:', e);
+        const section = document.getElementById('zfs-section');
+        if (section) section.style.display = 'none';
+    }
+}
+
+function renderZfsPools(pools) {
+    const table = document.getElementById('zfs-pools-table');
+    if (!table) return;
+
+    if (pools.length === 0) {
+        table.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);">No ZFS pools found</td></tr>';
+        return;
+    }
+
+    table.innerHTML = pools.map(p => {
+        const healthColor = p.health === 'ONLINE' ? '#10b981' : p.health === 'DEGRADED' ? '#f59e0b' : '#ef4444';
+        const isScrubbing = (p.scan || '').toLowerCase().includes('scrub in progress');
+        const scanInfo = p.scan || 'none requested';
+        const errorsInfo = p.errors || 'No known data errors';
+        const errorsColor = errorsInfo.toLowerCase().includes('no known') ? '#10b981' : '#ef4444';
+
+        return `<tr>
+            <td><strong>${escapeHtml(p.name)}</strong></td>
+            <td>${escapeHtml(p.size)}</td>
+            <td>${escapeHtml(p.alloc)}</td>
+            <td>${escapeHtml(p.free)}</td>
+            <td><span style="color:${healthColor};font-weight:600;">● ${escapeHtml(p.health)}</span></td>
+            <td>${escapeHtml(p.fragmentation)}</td>
+            <td>${escapeHtml(p.capacity)}</td>
+            <td style="white-space:nowrap;">
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="expandZfsPool('${escapeHtml(p.name)}')" title="Datasets">📂 Datasets</button>
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsSnapshots('${escapeHtml(p.name)}')" title="Snapshots">📸 Snapshots</button>
+                ${isScrubbing
+                ? `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);" onclick="zfsPoolScrub('${escapeHtml(p.name)}', true)" title="Stop Scrub">⏹️ Stop Scrub</button>`
+                : `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:rgba(16,185,129,0.1);color:#10b981;border:1px solid rgba(16,185,129,0.3);" onclick="zfsPoolScrub('${escapeHtml(p.name)}', false)" title="Start Scrub">🔍 Scrub</button>`
+            }
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsPoolStatus('${escapeHtml(p.name)}')" title="Detailed Status">📋 Status</button>
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsPoolIostat('${escapeHtml(p.name)}')" title="IO Statistics">📊 IO Stats</button>
+            </td>
+        </tr>
+        <tr class="storage-sub-row" style="background:var(--bg-secondary);">
+            <td colspan="8" style="padding:4px 16px 6px 24px;border-top:none;">
+                <div style="display:flex;align-items:center;gap:16px;font-size:11px;flex-wrap:wrap;">
+                    <span>🔄 <strong>Scan:</strong> ${escapeHtml(scanInfo.length > 80 ? scanInfo.substring(0, 80) + '…' : scanInfo)}</span>
+                    <span style="color:${errorsColor};">⚠️ <strong>Errors:</strong> ${escapeHtml(errorsInfo)}</span>
+                    <span>🔢 <strong>Dedup:</strong> ${escapeHtml(p.dedup || '1.00x')}</span>
+                </div>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+async function expandZfsPool(pool) {
+    const detailSection = document.getElementById('zfs-detail-section');
+    if (!detailSection) return;
+
+    detailSection.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading datasets...</div>';
+
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/zfs/datasets?pool=${encodeURIComponent(pool)}`));
+        const datasets = await resp.json();
+
+        if (!Array.isArray(datasets) || datasets.length === 0) {
+            detailSection.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">No datasets found</div>';
+            return;
+        }
+
+        detailSection.innerHTML = `
+            <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <h4 style="margin:0;font-size:14px;">📁 Datasets — ${escapeHtml(pool)}</h4>
+                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                </div>
+                <table class="data-table">
+                    <thead><tr><th>Name</th><th>Used</th><th>Available</th><th>Refer</th><th>Mountpoint</th><th>Compression</th><th>Ratio</th><th>Actions</th></tr></thead>
+                    <tbody>
+                    ${datasets.map(d => `<tr>
+                        <td style="font-family:var(--font-mono);font-size:12px;">${escapeHtml(d.name)}</td>
+                        <td>${escapeHtml(d.used)}</td>
+                        <td>${escapeHtml(d.available)}</td>
+                        <td>${escapeHtml(d.refer)}</td>
+                        <td style="font-family:var(--font-mono);font-size:12px;">${escapeHtml(d.mountpoint)}</td>
+                        <td>${escapeHtml(d.compression)}</td>
+                        <td>${escapeHtml(d.compressratio)}</td>
+                        <td>
+                            <button class="btn btn-sm btn-primary" style="font-size:11px;padding:2px 8px;" onclick="createZfsSnapshot('${escapeHtml(d.name)}')">📸 Snapshot</button>
+                        </td>
+                    </tr>`).join('')}
+                    </tbody>
+                </table>
+            </div>`;
+    } catch (e) {
+        detailSection.innerHTML = `<div style="text-align:center;padding:20px;color:#ef4444;">Failed to load datasets: ${e.message}</div>`;
+    }
+}
+
+async function showZfsSnapshots(pool) {
+    const detailSection = document.getElementById('zfs-detail-section');
+    if (!detailSection) return;
+
+    detailSection.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading snapshots...</div>';
+
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/zfs/snapshots?dataset=${encodeURIComponent(pool)}`));
+        const snapshots = await resp.json();
+
+        if (!Array.isArray(snapshots) || snapshots.length === 0) {
+            detailSection.innerHTML = `
+                <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                        <h4 style="margin:0;font-size:14px;">📸 Snapshots — ${escapeHtml(pool)}</h4>
+                        <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                    </div>
+                    <div style="text-align:center;padding:20px;color:var(--text-muted);">No snapshots found for this pool</div>
+                </div>`;
+            return;
+        }
+
+        detailSection.innerHTML = `
+            <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <h4 style="margin:0;font-size:14px;">📸 Snapshots — ${escapeHtml(pool)} (${snapshots.length})</h4>
+                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                </div>
+                <table class="data-table">
+                    <thead><tr><th>Snapshot</th><th>Created</th><th>Used</th><th>Refer</th><th>Actions</th></tr></thead>
+                    <tbody>
+                    ${snapshots.map(s => `<tr>
+                        <td style="font-family:var(--font-mono);font-size:12px;">${escapeHtml(s.name)}</td>
+                        <td style="font-size:12px;">${escapeHtml(s.creation)}</td>
+                        <td>${escapeHtml(s.used)}</td>
+                        <td>${escapeHtml(s.refer)}</td>
+                        <td>
+                            <button class="btn btn-sm btn-danger" style="font-size:11px;padding:2px 8px;" onclick="deleteZfsSnapshot('${escapeHtml(s.name)}')">🗑️ Delete</button>
+                        </td>
+                    </tr>`).join('')}
+                    </tbody>
+                </table>
+            </div>`;
+    } catch (e) {
+        detailSection.innerHTML = `<div style="text-align:center;padding:20px;color:#ef4444;">Failed to load snapshots: ${e.message}</div>`;
+    }
+}
+
+async function createZfsSnapshot(dataset) {
+    const name = await wolfPrompt(`Enter snapshot name for ${dataset}:`, `snap-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`, 'Create Snapshot', { okText: 'Create' });
+    if (!name) return;
+
+    try {
+        const resp = await fetch(apiUrl('/api/storage/zfs/snapshot'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dataset, name }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Snapshot created', 'success');
+            // Refresh the pool's snapshot list
+            const pool = dataset.split('/')[0];
+            showZfsSnapshots(pool);
+        } else {
+            showToast(data.error || 'Failed to create snapshot', 'error');
+        }
+    } catch (e) {
+        showToast(`Failed: ${e.message}`, 'error');
+    }
+}
+
+async function deleteZfsSnapshot(snapshot) {
+    const confirmed = await wolfConfirm(`Delete ZFS snapshot '${snapshot}'?\n\nThis cannot be undone.`, 'Delete Snapshot', { okText: 'Delete', danger: true });
+    if (!confirmed) return;
+
+    try {
+        const resp = await fetch(apiUrl('/api/storage/zfs/snapshot'), {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ snapshot }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Snapshot deleted', 'success');
+            // Refresh
+            const pool = snapshot.split('@')[0].split('/')[0];
+            showZfsSnapshots(pool);
+        } else {
+            showToast(data.error || 'Failed to delete snapshot', 'error');
+        }
+    } catch (e) {
+        showToast(`Failed: ${e.message}`, 'error');
+    }
+}
+
+async function zfsPoolScrub(pool, stop) {
+    const action = stop ? 'Stop scrub on' : 'Start scrub on';
+    const confirmed = await wolfConfirm(`${action} pool '${pool}'?`, stop ? 'Stop Scrub' : 'Start Scrub', { okText: stop ? 'Stop' : 'Start', danger: stop });
+    if (!confirmed) return;
+    try {
+        const resp = await fetch(apiUrl('/api/storage/zfs/pool/scrub'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pool, stop }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'OK', 'success');
+            setTimeout(loadZfsStatus, 1000); // refresh to show updated scan status
+        } else {
+            showToast(data.error || 'Failed', 'error');
+        }
+    } catch (e) { showToast(`Failed: ${e.message}`, 'error'); }
+}
+
+async function showZfsPoolStatus(pool) {
+    const detailSection = document.getElementById('zfs-detail-section');
+    if (!detailSection) return;
+
+    detailSection.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading pool status...</div>';
+
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/zfs/pool/status?pool=${encodeURIComponent(pool)}`));
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            detailSection.innerHTML = `<div style="text-align:center;padding:20px;color:#ef4444;">${data.error || 'Failed'}</div>`;
+            return;
+        }
+
+        detailSection.innerHTML = `
+            <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <h4 style="margin:0;font-size:14px;">📋 Pool Status — ${escapeHtml(pool)}</h4>
+                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                </div>
+                <pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;
+                    font-family:'JetBrains Mono',monospace;font-size:12px;max-height:400px;overflow-y:auto;
+                    color:var(--text-primary);white-space:pre-wrap;word-break:break-all;">${escapeHtml(data.status_text)}</pre>
+            </div>`;
+    } catch (e) {
+        detailSection.innerHTML = `<div style="text-align:center;padding:20px;color:#ef4444;">Failed: ${e.message}</div>`;
+    }
+}
+
+async function showZfsPoolIostat(pool) {
+    const detailSection = document.getElementById('zfs-detail-section');
+    if (!detailSection) return;
+
+    detailSection.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading IO stats...</div>';
+
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/zfs/pool/iostat?pool=${encodeURIComponent(pool)}`));
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            detailSection.innerHTML = `<div style="text-align:center;padding:20px;color:#ef4444;">${data.error || 'Failed'}</div>`;
+            return;
+        }
+
+        detailSection.innerHTML = `
+            <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <h4 style="margin:0;font-size:14px;">📊 IO Statistics — ${escapeHtml(pool)}</h4>
+                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                </div>
+                <pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;
+                    font-family:'JetBrains Mono',monospace;font-size:12px;max-height:400px;overflow-y:auto;
+                    color:var(--text-primary);white-space:pre-wrap;word-break:break-all;">${escapeHtml(data.iostat_text)}</pre>
+            </div>`;
+    } catch (e) {
+        detailSection.innerHTML = `<div style="text-align:center;padding:20px;color:#ef4444;">Failed: ${e.message}</div>`;
+    }
+}
+
 // ─── VM Storage Management ───
 let vmStorageLocations = [];
 let vmExtraDiskCounter = 0;
@@ -2892,7 +3534,7 @@ async function toggleCronJob(index, currentlyEnabled, schedule, command, comment
 }
 
 var PREMADE_CRON_JOBS = {
-    'wolfstack-update': { schedule: '0 3 * * *', command: 'cd /opt/wolfstack && bash setup.sh --auto', comment: 'Auto-update WolfStack' },
+    'wolfstack-update': { schedule: '0 3 * * *', command: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | bash', comment: 'Auto-update WolfStack (daily 3AM)' },
     'docker-prune': { schedule: '0 4 * * 0', command: 'docker image prune -af 2>/dev/null; docker system prune -f 2>/dev/null', comment: 'Clean Docker images (weekly)' },
     'apt-update': { schedule: '0 2 * * 1', command: 'apt-get update -qq && apt-get upgrade -y -qq', comment: 'System updates (weekly Mon 2AM)' },
     'certbot-renew': { schedule: '0 5 * * *', command: 'certbot renew --quiet', comment: 'Renew SSL certificates' },
@@ -3927,7 +4569,7 @@ function upgradeNode(nodeId) {
     // Open console popup with type=upgrade
     let url = '/console.html?type=upgrade&name=wolfstack';
     if (!node.is_self) {
-        url += '&node_id=' + encodeURIComponent(node.id);
+        url += '&host=' + encodeURIComponent(node.address) + '&port=' + encodeURIComponent(node.port);
     }
     window.open(url, 'upgrade_console_' + nodeId, 'width=960,height=600,menubar=no,toolbar=no');
 
@@ -3997,6 +4639,67 @@ async function saveNodeSettings() {
     modal.remove();
     fetchNodes();
 }
+
+// ─── Modal Confirm / Prompt Dialogs ───
+let _wolfDialogResolve = null;
+let _wolfDialogMode = 'confirm'; // 'confirm' or 'prompt'
+
+function wolfConfirm(message, title = 'Confirm', { okText = 'Confirm', cancelText = 'Cancel', danger = false } = {}) {
+    return new Promise(resolve => {
+        _wolfDialogResolve = resolve;
+        _wolfDialogMode = 'confirm';
+        document.getElementById('wolf-dialog-title').textContent = title;
+        document.getElementById('wolf-dialog-message').textContent = message;
+        document.getElementById('wolf-dialog-input-wrap').style.display = 'none';
+        const okBtn = document.getElementById('wolf-dialog-ok-btn');
+        okBtn.textContent = okText;
+        okBtn.className = danger ? 'btn btn-danger' : 'btn btn-primary';
+        document.getElementById('wolf-dialog-cancel-btn').textContent = cancelText;
+        document.getElementById('wolf-dialog-modal').classList.add('active');
+    });
+}
+
+function wolfPrompt(message, defaultValue = '', title = 'Input', { okText = 'OK', cancelText = 'Cancel', placeholder = '' } = {}) {
+    return new Promise(resolve => {
+        _wolfDialogResolve = resolve;
+        _wolfDialogMode = 'prompt';
+        document.getElementById('wolf-dialog-title').textContent = title;
+        document.getElementById('wolf-dialog-message').textContent = message;
+        const inputWrap = document.getElementById('wolf-dialog-input-wrap');
+        const input = document.getElementById('wolf-dialog-input');
+        inputWrap.style.display = 'block';
+        input.value = defaultValue;
+        input.placeholder = placeholder || '';
+        document.getElementById('wolf-dialog-ok-btn').textContent = okText;
+        document.getElementById('wolf-dialog-ok-btn').className = 'btn btn-primary';
+        document.getElementById('wolf-dialog-cancel-btn').textContent = cancelText;
+        document.getElementById('wolf-dialog-modal').classList.add('active');
+        setTimeout(() => input.focus(), 100);
+    });
+}
+
+function wolfDialogOk() {
+    document.getElementById('wolf-dialog-modal').classList.remove('active');
+    if (_wolfDialogResolve) {
+        _wolfDialogResolve(_wolfDialogMode === 'prompt' ? document.getElementById('wolf-dialog-input').value : true);
+        _wolfDialogResolve = null;
+    }
+}
+
+function wolfDialogCancel() {
+    document.getElementById('wolf-dialog-modal').classList.remove('active');
+    if (_wolfDialogResolve) {
+        _wolfDialogResolve(_wolfDialogMode === 'prompt' ? null : false);
+        _wolfDialogResolve = null;
+    }
+}
+
+// Handle Enter/Escape keys for dialog
+document.addEventListener('keydown', (e) => {
+    if (!_wolfDialogResolve) return;
+    if (e.key === 'Enter') { e.preventDefault(); wolfDialogOk(); }
+    if (e.key === 'Escape') { e.preventDefault(); wolfDialogCancel(); }
+});
 
 // ─── Toast Notifications ───
 function showToast(message, type = 'info') {
@@ -4621,101 +5324,31 @@ function renderIpMappings(mappings) {
     }
     if (empty) empty.style.display = 'none';
 
-    const rows = mappings.map(m => {
-        const portsLabel = (() => {
-            const src = m.ports || '';
-            const dst = m.dest_ports || '';
-            if (!src) return '<span style="color:var(--text-muted);">all</span>';
-            if (dst && dst !== src) return `${src} → ${dst}`;
-            return src;
-        })();
+    grid.innerHTML = mappings.map(m => {
+        const statusBadge = m.enabled
+            ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e; font-size:10px;">Active</span>'
+            : '<span class="badge" style="background:rgba(107,114,128,0.2); color:#6b7280; font-size:10px;">Disabled</span>';
+
+        const portsLabel = m.ports || '<span style="color:var(--text-muted);">all</span>';
         const protoLabel = m.protocol === 'all' ? 'TCP+UDP' : m.protocol.toUpperCase();
-        const statusDot = m.enabled
-            ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;" title="Active"></span>'
-            : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#6b7280;" title="Disabled"></span>';
-        const label = m.label ? `<span style="color:var(--text-secondary);">${m.label}</span>` : '';
-        const escapedM = encodeURIComponent(JSON.stringify(m));
+        const label = m.label || '';
 
-        return `<tr style="border-bottom:1px solid var(--border);">
-            <td style="padding:8px 10px;">${statusDot}</td>
-            <td style="padding:8px 10px; font-family:var(--font-mono); font-size:12px; white-space:nowrap;">${m.public_ip} <span style="color:var(--accent);">→</span> ${m.wolfnet_ip}</td>
-            <td style="padding:8px 10px; font-family:var(--font-mono); font-size:12px;">${portsLabel}</td>
-            <td style="padding:8px 10px; font-size:11px;">${protoLabel}</td>
-            <td style="padding:8px 10px; font-size:12px;">${label}</td>
-            <td style="padding:8px 10px; white-space:nowrap; text-align:right;">
-                <button class="btn btn-sm" style="font-size:10px; padding:2px 6px; margin-right:4px;" onclick="editIpMapping(decodeURIComponent('${escapedM}'))" title="Edit">✏️</button>
-                <button class="btn btn-sm btn-danger" style="font-size:10px; padding:2px 6px;" onclick="removeIpMapping('${m.id}', '${m.public_ip}', '${m.wolfnet_ip}')" title="Remove">🗑️</button>
-            </td>
-        </tr>`;
+        return `<div class="card" style="padding:12px; position:relative;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <div style="font-size:11px; font-weight:600; color:var(--text-muted);">${label || 'IP Mapping'}</div>
+                <div style="display:flex; align-items:center; gap:6px;">
+                    ${statusBadge}
+                    <button class="btn btn-sm btn-danger" style="font-size:10px; padding:1px 6px;" onclick="removeIpMapping('${m.id}', '${m.public_ip}', '${m.wolfnet_ip}')" title="Remove">🗑️</button>
+                </div>
+            </div>
+            <div style="font-family:var(--font-mono); font-size:13px; font-weight:600; margin-bottom:6px;">
+                ${m.public_ip} <span style="color:var(--accent);">→</span> ${m.wolfnet_ip}
+            </div>
+            <div style="font-size:11px; color:var(--text-muted);">
+                Ports: <span style="font-family:var(--font-mono);">${portsLabel}</span> · ${protoLabel}
+            </div>
+        </div>`;
     }).join('');
-
-    grid.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:13px;">
-        <thead><tr style="border-bottom:2px solid var(--border); text-align:left;">
-            <th style="padding:6px 10px; width:30px;"></th>
-            <th style="padding:6px 10px; font-size:11px; font-weight:600; color:var(--text-muted);">Mapping</th>
-            <th style="padding:6px 10px; font-size:11px; font-weight:600; color:var(--text-muted);">Ports</th>
-            <th style="padding:6px 10px; font-size:11px; font-weight:600; color:var(--text-muted);">Protocol</th>
-            <th style="padding:6px 10px; font-size:11px; font-weight:600; color:var(--text-muted);">Label</th>
-            <th style="padding:6px 10px; width:80px;"></th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-    </table>`;
-}
-
-let _editingMappingId = null;
-
-function editIpMapping(jsonStr) {
-    const m = JSON.parse(jsonStr);
-    _editingMappingId = m.id;
-    // Populate the create modal with existing values
-    document.getElementById('mapping-public-ip').value = m.public_ip || '';
-    document.getElementById('mapping-wolfnet-ip').value = m.wolfnet_ip || '';
-    document.getElementById('mapping-ports').value = m.ports || '';
-    document.getElementById('mapping-dest-ports').value = m.dest_ports || '';
-    document.getElementById('mapping-protocol').value = m.protocol || 'all';
-    document.getElementById('mapping-label').value = m.label || '';
-
-    // Change modal title and button to indicate editing
-    const modalHeader = document.querySelector('#create-mapping-modal .modal-header h3');
-    if (modalHeader) modalHeader.textContent = '✏️ Edit IP Mapping';
-    const createBtn = document.querySelector('#create-mapping-modal .modal-footer .btn-primary');
-    if (createBtn) {
-        createBtn.textContent = 'Save Changes';
-        createBtn.setAttribute('onclick', 'saveIpMappingEdit()');
-    }
-
-    document.getElementById('create-mapping-modal').classList.add('active');
-}
-
-async function saveIpMappingEdit() {
-    if (!_editingMappingId) return;
-
-    const public_ip = document.getElementById('mapping-public-ip').value.trim();
-    const wolfnet_ip = document.getElementById('mapping-wolfnet-ip').value.trim();
-    const ports = document.getElementById('mapping-ports').value.trim() || null;
-    const dest_ports = document.getElementById('mapping-dest-ports').value.trim() || null;
-    const protocol = document.getElementById('mapping-protocol').value;
-    const label = document.getElementById('mapping-label').value.trim() || null;
-
-    if (!public_ip || !wolfnet_ip) {
-        showModal('Public IP and WolfNet IP are required.');
-        return;
-    }
-
-    try {
-        const resp = await fetch(apiUrl(`/api/networking/ip-mappings/${_editingMappingId}`), {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ public_ip, wolfnet_ip, ports, dest_ports, protocol, label }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || 'Failed to update mapping');
-        showToast('Mapping updated successfully', 'success');
-        closeCreateMappingModal();
-        loadNetworking();
-    } catch (e) {
-        showModal('Error: ' + e.message);
-    }
 }
 
 let _mappingPortData = null; // cached listening + blocked ports
@@ -4725,7 +5358,6 @@ async function showCreateMappingModal() {
     document.getElementById('mapping-public-ip').value = '';
     document.getElementById('mapping-wolfnet-ip').value = '';
     document.getElementById('mapping-ports').value = '';
-    document.getElementById('mapping-dest-ports').value = '';
     document.getElementById('mapping-protocol').value = 'all';
     document.getElementById('mapping-label').value = '';
 
@@ -4770,15 +5402,6 @@ async function showCreateMappingModal() {
 
 function closeCreateMappingModal() {
     document.getElementById('create-mapping-modal').classList.remove('active');
-    // Reset modal back to create mode (in case it was in edit mode)
-    _editingMappingId = null;
-    const modalHeader = document.querySelector('#create-mapping-modal .modal-header h3');
-    if (modalHeader) modalHeader.textContent = '🌍 Create IP Mapping';
-    const createBtn = document.querySelector('#create-mapping-modal .modal-footer .btn-primary');
-    if (createBtn) {
-        createBtn.textContent = 'Create Mapping';
-        createBtn.setAttribute('onclick', 'createIpMapping()');
-    }
 }
 
 function onMappingPublicIpSelect() {
@@ -4850,7 +5473,7 @@ function onMappingPortsInput() {
             if (MAPPING_BLOCKED_PORTS[p]) continue; // already warned
             const match = listening.find(l => l.port === p);
             if (match) {
-                warnings.push(`ℹ️ Port <strong>${p}</strong> is in use by <strong>${match.process || 'unknown'}</strong> on this server (DNAT is IP-specific, this is usually fine)`);
+                warnings.push(`⚠️ Port <strong>${p}</strong> is in use by <strong>${match.process || 'unknown'}</strong> — traffic will be intercepted`);
             }
         }
     }
@@ -4868,7 +5491,6 @@ async function createIpMapping() {
     const public_ip = document.getElementById('mapping-public-ip').value.trim();
     const wolfnet_ip = document.getElementById('mapping-wolfnet-ip').value.trim();
     const ports = document.getElementById('mapping-ports').value.trim() || null;
-    const dest_ports = document.getElementById('mapping-dest-ports').value.trim() || null;
     const protocol = document.getElementById('mapping-protocol').value;
     const label = document.getElementById('mapping-label').value.trim() || null;
 
@@ -4876,9 +5498,8 @@ async function createIpMapping() {
     if (!wolfnet_ip) { showModal('Please enter a WolfNet IP address'); return; }
 
     // Client-side port validation
-    let parsed = null;
     if (ports) {
-        parsed = parseMappingPorts(ports);
+        const parsed = parseMappingPorts(ports);
         if (!parsed) {
             showModal('Invalid port format. Use: 80, 80,443, or 8000:8100');
             return;
@@ -4887,7 +5508,7 @@ async function createIpMapping() {
             showModal('When specifying ports, you must select TCP or UDP (not "All"). iptables requires a specific protocol for port-based rules.');
             return;
         }
-        // Check for blocked ports (source ports only)
+        // Check for blocked ports
         for (const p of parsed) {
             if (MAPPING_BLOCKED_PORTS[p]) {
                 showModal(`Port ${p} is used by ${MAPPING_BLOCKED_PORTS[p]} and cannot be mapped. This would break critical system access.`);
@@ -4896,28 +5517,11 @@ async function createIpMapping() {
         }
     }
 
-    // Validate dest_ports if provided (no blocked-port check — dest is on the container)
-    if (dest_ports) {
-        if (!ports) {
-            showModal('Destination ports require source ports to be specified too.');
-            return;
-        }
-        const parsedDest = parseMappingPorts(dest_ports);
-        if (!parsedDest) {
-            showModal('Invalid destination port format. Use: 80, 80,443, or 8000:8100');
-            return;
-        }
-        if (parsedDest.length !== parsed.length) {
-            showModal(`Source ports (${parsed.length}) and destination ports (${parsedDest.length}) must have the same count.`);
-            return;
-        }
-    }
-
     try {
         const resp = await fetch(apiUrl('/api/networking/ip-mappings'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ public_ip, wolfnet_ip, ports, dest_ports, protocol, label }),
+            body: JSON.stringify({ public_ip, wolfnet_ip, ports, protocol, label }),
         });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Failed to create mapping');
@@ -5511,6 +6115,7 @@ function renderDockerContainers(containers) {
                 `}
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs">📜</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewDockerVolumes('${c.name}')" title="Volumes">📁</button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="browseContainerFiles('docker', '${c.name}')" title="Browse Files">📂</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openDockerSettings('${c.name}')" title="Settings">⚙️</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>
@@ -6005,7 +6610,7 @@ function renderLxcContainers(containers, stats) {
         const barColor = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#10b981';
         const fsLabel = c.fs_type ? `<span style="color:var(--text-muted);font-size:10px;margin-left:8px;">${c.fs_type}</span>` : '';
         const pathLabel = c.storage_path ? `<span style="color:var(--text-muted);font-size:10px;" title="${c.storage_path}">${c.storage_path.length > 30 ? '...' + c.storage_path.slice(-27) : c.storage_path}</span>` : '';
-        const storageSubRow = hasStorage ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="7" style="padding:4px 16px 6px 24px;border-top:none;">
+        const storageSubRow = hasStorage ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="8" style="padding:4px 16px 6px 24px;border-top:none;">
             <div style="display:flex;align-items:center;gap:8px;font-size:11px;">
                 <span>💾</span>
                 <div style="flex:1;max-width:220px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">
@@ -6018,6 +6623,7 @@ function renderLxcContainers(containers, stats) {
 
         return `<tr>
             <td><strong>${c.hostname || c.name}</strong>${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
+            <td style="font-size:12px;color:var(--text-secondary);">${c.version || '<span style="color:var(--text-muted)">—</span>'}</td>
             <td><span style="color:${stateColor}">●</span> ${c.state}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
             <td>${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
@@ -6031,6 +6637,7 @@ function renderLxcContainers(containers, stats) {
                 <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}', '${c.hostname || c.name}')"` : ''} title="Console">💻</button>
                 <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'destroy')"` : ''} title="Destroy">🗑️</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs">📜</button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="browseContainerFiles('lxc', '${c.name}', '${(c.storage_path || '').replace(/'/g, "\\'")}')" title="Browse Files">📂</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcSettings('${c.name}')" title="Settings">⚙️</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="cloneLxcContainer('${c.name}')" title="Clone">📋</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="migrateLxcContainer('${c.name}')" title="Migrate">🚀</button>
@@ -11251,6 +11858,314 @@ function escapeHtml(str) {
 }
 
 // ═══════════════════════════════════════════════
+// ─── Issues Scanner ───
+// ═══════════════════════════════════════════════
+
+var issuesScanResults = []; // cached for upgrade-all
+
+async function checkIssuesAiBadge() {
+    try {
+        var resp = await fetch('/api/ai/status');
+        var status = await resp.json();
+        var badge = document.getElementById('issues-ai-badge');
+        if (badge) badge.style.display = status.configured ? 'inline-block' : 'none';
+    } catch (e) {
+        // silently ignore
+    }
+}
+
+async function loadIssueSchedule() {
+    try {
+        var resp = await fetch('/api/ai/config');
+        var cfg = await resp.json();
+        var sel = document.getElementById('issues-schedule-select');
+        if (sel && cfg.scan_schedule) sel.value = cfg.scan_schedule;
+    } catch (e) { /* ignore */ }
+}
+
+async function saveIssueSchedule(value) {
+    try {
+        // Read current config, update scan_schedule, save back
+        var resp = await fetch('/api/ai/config');
+        var cfg = await resp.json();
+        cfg.scan_schedule = value;
+        await fetch('/api/ai/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cfg)
+        });
+    } catch (e) {
+        console.error('Failed to save scan schedule:', e);
+    }
+}
+
+async function scanForIssues() {
+    var btn = document.getElementById('issues-scan-btn');
+    var listEl = document.getElementById('issues-list');
+    var upgradeAllBtn = document.getElementById('issues-upgrade-all-btn');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Scanning...'; }
+    if (upgradeAllBtn) upgradeAllBtn.style.display = 'none';
+    if (listEl) listEl.innerHTML = '<div class="card"><div class="card-body" style="padding:48px; text-align:center; color:var(--text-muted);"><div class="page-loading-spinner" style="margin:0 auto 16px;"></div><p style="font-size:14px; margin:0;">Scanning nodes for issues...</p></div></div>';
+
+    // Hide AI section while scanning
+    var aiSection = document.getElementById('issues-ai-section');
+    if (aiSection) aiSection.style.display = 'none';
+
+    var results = []; // Array of { node_id, hostname, version, issues, ai_analysis, is_self }
+
+    // Find local node info
+    var localNode = (typeof allNodes !== 'undefined') ? allNodes.find(function (n) { return n.is_self; }) : null;
+
+    // Scan local node
+    try {
+        var resp = await fetch('/api/issues/scan');
+        var data = await resp.json();
+        data.node_id = localNode ? localNode.id : 'local';
+        data.is_self = true;
+        results.push(data);
+    } catch (e) {
+        results.push({ node_id: 'local', hostname: 'local', version: '?', issues: [{ severity: 'warning', category: 'scan', title: 'Scan failed', detail: e.message }], ai_analysis: null, is_self: true });
+    }
+
+    // Scan remote WolfStack nodes
+    if (typeof allNodes !== 'undefined' && allNodes.length) {
+        var remoteNodes = allNodes.filter(function (n) { return !n.is_self && n.node_type !== 'proxmox'; });
+        var promises = remoteNodes.map(function (node) {
+            return fetch('/api/nodes/' + encodeURIComponent(node.id) + '/proxy/issues/scan')
+                .then(function (r) {
+                    if (!r.ok) throw new Error('HTTP ' + r.status + (r.status === 404 ? ' — node may need WolfStack update' : ''));
+                    return r.json();
+                })
+                .then(function (data) { data.node_id = node.id; data.is_self = false; return data; })
+                .catch(function (e) {
+                    return { node_id: node.id, hostname: node.hostname || node.id, version: '?', issues: [{ severity: 'info', category: 'scan', title: 'Could not scan', detail: e.message }], ai_analysis: null, is_self: false };
+                });
+        });
+        var remoteResults = await Promise.all(promises);
+        results = results.concat(remoteResults);
+    }
+
+    issuesScanResults = results;
+
+    // Aggregate counts
+    var counts = { critical: 0, warning: 0, info: 0 };
+    results.forEach(function (r) {
+        (r.issues || []).forEach(function (issue) {
+            if (counts[issue.severity] !== undefined) counts[issue.severity]++;
+        });
+    });
+
+    var critEl = document.getElementById('issues-count-critical');
+    var warnEl = document.getElementById('issues-count-warning');
+    var infoEl = document.getElementById('issues-count-info');
+    var nodesEl = document.getElementById('issues-count-nodes');
+    if (critEl) critEl.textContent = counts.critical;
+    if (warnEl) warnEl.textContent = counts.warning;
+    if (infoEl) infoEl.textContent = counts.info;
+    if (nodesEl) nodesEl.textContent = results.length;
+    // Find the latest version across all results
+    var latestVersion = '0.0.0';
+    results.forEach(function (r) {
+        if (r.version && r.version !== '?' && compareVersions(r.version, latestVersion) > 0) {
+            latestVersion = r.version;
+        }
+    });
+
+    // Render table
+    renderIssueResults(results, latestVersion);
+
+    // Show Upgrade All button only if at least one node needs upgrading
+    var needsUpgrade = results.filter(function (r) { return r.version && r.version !== '?' && compareVersions(r.version, latestVersion) < 0; });
+    if (upgradeAllBtn) {
+        if (needsUpgrade.length > 0) {
+            upgradeAllBtn.style.display = 'inline-block';
+            upgradeAllBtn.innerHTML = '⚡ Upgrade All (' + needsUpgrade.length + ')';
+        } else {
+            upgradeAllBtn.style.display = 'none';
+        }
+    }
+
+    // Show AI analysis if any node returned one
+    var aiTexts = results.map(function (r) {
+        if (r.ai_analysis) return '**' + escapeHtml(r.hostname) + ':** ' + r.ai_analysis;
+        return null;
+    }).filter(Boolean);
+
+    if (aiTexts.length > 0) {
+        if (aiSection) {
+            aiSection.style.display = 'block';
+            var aiContent = document.getElementById('issues-ai-content');
+            if (aiContent) aiContent.innerHTML = aiTexts.map(function (t) { return formatAiResponse(t); }).join('<hr style="border-color:var(--border); margin:16px 0;">');
+        }
+    }
+
+    if (btn) { btn.disabled = false; btn.innerHTML = '🔄 Scan Now'; }
+}
+
+function compareVersions(a, b) {
+    var pa = a.split('.').map(Number);
+    var pb = b.split('.').map(Number);
+    for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+        var na = pa[i] || 0;
+        var nb = pb[i] || 0;
+        if (na > nb) return 1;
+        if (na < nb) return -1;
+    }
+    return 0;
+}
+
+function renderIssueResults(results, latestVersion) {
+    var listEl = document.getElementById('issues-list');
+    if (!listEl) return;
+
+    var severityBadge = function (sev) {
+        var colors = {
+            critical: { bg: 'rgba(239,68,68,0.15)', text: '#ef4444', icon: '🔴' },
+            warning: { bg: 'rgba(234,179,8,0.15)', text: '#eab308', icon: '🟡' },
+            info: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', icon: '🔵' }
+        };
+        var c = colors[sev] || colors.info;
+        return '<span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:' + c.bg + '; color:' + c.text + ';">' + c.icon + ' ' + sev.toUpperCase() + '</span>';
+    };
+
+    var categoryIcons = {
+        cpu: '⚡', memory: '🧠', disk: '💾', swap: '🔄', load: '📈',
+        service: '⚙️', container: '📦', scan: '🔍'
+    };
+
+    var html = '<div class="card"><div class="card-body" style="padding:0; overflow-x:auto;">';
+    html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
+    html += '<thead><tr style="background:var(--bg-secondary); border-bottom:1px solid var(--border);">';
+    html += '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Node</th>';
+    html += '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">WolfStack</th>';
+    html += '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Issues</th>';
+    html += '<th style="padding:12px 16px; text-align:right; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Action</th>';
+    html += '</tr></thead><tbody>';
+
+    results.forEach(function (r, idx) {
+        var issues = r.issues || [];
+        var rowBg = idx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
+        var nodeVersion = r.version || '?';
+        var isBehind = nodeVersion !== '?' && latestVersion !== '0.0.0' && compareVersions(nodeVersion, latestVersion) < 0;
+
+        html += '<tr style="border-bottom:1px solid var(--border); background:' + rowBg + ';">';
+
+        // Node
+        html += '<td style="padding:12px 16px; white-space:nowrap;">';
+        html += '<div style="display:flex; align-items:center; gap:8px;">';
+        html += '<span style="font-size:16px;">🖥️</span>';
+        html += '<div>';
+        html += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(r.hostname || 'Unknown') + '</div>';
+        if (r.is_self) html += '<div style="font-size:11px; color:var(--text-muted);">local</div>';
+        html += '</div></div></td>';
+
+        // Version
+        html += '<td style="padding:12px 16px; white-space:nowrap;">';
+        if (isBehind) {
+            html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(234,179,8,0.15); color:#eab308; border:1px solid rgba(234,179,8,0.3);">v' + escapeHtml(nodeVersion) + ' ↑</span>';
+            html += '<div style="font-size:10px; color:var(--text-muted); margin-top:2px;">latest: v' + escapeHtml(latestVersion) + '</div>';
+        } else {
+            html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3);">v' + escapeHtml(nodeVersion) + ' ✓</span>';
+        }
+        html += '</td>';
+
+        // Issues
+        html += '<td style="padding:12px 16px;">';
+        if (issues.length === 0) {
+            html += '<span style="color:#10b981; font-weight:500;">✅ All clear</span>';
+        } else {
+            var order = { critical: 0, warning: 1, info: 2 };
+            var sorted = issues.slice().sort(function (a, b) { return (order[a.severity] || 9) - (order[b.severity] || 9); });
+            sorted.forEach(function (issue) {
+                var catIcon = categoryIcons[issue.category] || '❓';
+                html += '<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">';
+                html += severityBadge(issue.severity);
+                html += '<span style="font-size:14px;">' + catIcon + '</span>';
+                html += '<span style="color:var(--text-primary); font-weight:500;">' + escapeHtml(issue.title) + '</span>';
+                html += '<span style="color:var(--text-muted); font-size:12px;"> — ' + escapeHtml(issue.detail) + '</span>';
+                html += '</div>';
+            });
+        }
+        html += '</td>';
+
+        // Action — only show upgrade if version is behind
+        html += '<td style="padding:12px 16px; text-align:right; white-space:nowrap;">';
+        if (isBehind) {
+            html += '<button class="btn" onclick="issuesUpgradeNode(\'' + escapeHtml(r.node_id) + '\')" id="issues-upgrade-' + idx + '" ';
+            html += 'style="padding:6px 14px; font-size:12px; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3); border-radius:6px; cursor:pointer;">';
+            html += '⚡ Upgrade WolfStack</button>';
+        } else {
+            html += '<span style="color:var(--text-muted); font-size:12px;">Up to date</span>';
+        }
+        html += '</td>';
+
+        html += '</tr>';
+    });
+
+    html += '</tbody></table></div></div>';
+    listEl.innerHTML = html;
+}
+
+function issuesUpgradeNode(nodeId) {
+    var node = allNodes.find(function (n) { return n.id === nodeId; });
+    var name = node ? node.hostname : nodeId;
+    if (!confirm('⚡ Upgrade WolfStack on ' + name + '?\n\nThis will run the upgrade script in the background.')) return;
+
+    var url;
+    if (node && !node.is_self) {
+        url = '/api/nodes/' + encodeURIComponent(nodeId) + '/proxy/upgrade';
+    } else {
+        url = '/api/upgrade';
+    }
+
+    fetch(url, { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            showToast('⚡ WolfStack upgrade started on ' + name + ' — it will restart automatically.', 'success');
+        })
+        .catch(function (e) {
+            showToast('Failed to start upgrade on ' + name + ': ' + e.message, 'error');
+        });
+}
+
+function issuesUpgradeAll() {
+    if (!issuesScanResults || issuesScanResults.length === 0) {
+        showToast('Run a scan first.', 'warning');
+        return;
+    }
+
+    // Find latest version and only upgrade nodes that are behind
+    var latestVersion = '0.0.0';
+    issuesScanResults.forEach(function (r) {
+        if (r.version && r.version !== '?' && compareVersions(r.version, latestVersion) > 0) latestVersion = r.version;
+    });
+
+    var outdated = issuesScanResults.filter(function (r) {
+        return r.version && r.version !== '?' && compareVersions(r.version, latestVersion) < 0;
+    });
+
+    if (outdated.length === 0) {
+        showToast('All nodes are already up to date.', 'info');
+        return;
+    }
+
+    if (!confirm('⚡ Upgrade WolfStack on ' + outdated.length + ' node(s)?\n\nThis will trigger a background upgrade on all outdated nodes.\nNodes will restart automatically when complete.')) return;
+
+    outdated.forEach(function (r) {
+        var node = allNodes.find(function (n) { return n.id === r.node_id; });
+        var url;
+        if (node && !node.is_self) {
+            url = '/api/nodes/' + encodeURIComponent(r.node_id) + '/proxy/upgrade';
+        } else {
+            url = '/api/upgrade';
+        }
+        fetch(url, { method: 'POST' }).catch(function () { });
+    });
+
+    showToast('⚡ WolfStack upgrade triggered on ' + outdated.length + ' node(s) — they will restart automatically.', 'success');
+}
+
+// ═══════════════════════════════════════════════
 // ─── App Store ───
 // ═══════════════════════════════════════════════
 let appStoreApps = [];
@@ -11293,6 +12208,8 @@ function renderAppStoreGrid() {
         grid.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted); grid-column:1/-1;">No apps match your search.</div>';
         return;
     }
+
+    filtered.sort((a, b) => a.name.localeCompare(b.name));
 
     grid.innerHTML = filtered.map(app => {
         const icon = APP_ICONS[app.id] || '📦';
@@ -11359,9 +12276,10 @@ function openAppStoreInstallModal(appId) {
     document.getElementById('appstore-install-title').textContent = `Install ${app.name}`;
     document.getElementById('appstore-install-name').value = app.id.replace(/_/g, '-');
 
-    // Populate host selector from allNodes (show all, mark offline)
+    // Populate host selector from allNodes (show all, mark offline) — sorted alphabetically
     const hostSelect = document.getElementById('appstore-install-host');
-    hostSelect.innerHTML = allNodes.map(n => {
+    const sortedNodes = [...allNodes].sort((a, b) => a.hostname.localeCompare(b.hostname));
+    hostSelect.innerHTML = sortedNodes.map(n => {
         const status = n.online ? '' : ' [offline]';
         const self = n.is_self ? ' — this server' : '';
         const label = `${n.hostname} (${n.address})${self}${status}`;
@@ -11555,5 +12473,299 @@ async function uninstallApp(installId, name) {
         }
     } catch (e) {
         showToast('Uninstall failed: ' + e.message, 'error');
+    }
+}
+
+// ═══════════════════════════════════════════════
+// ─── Security Page (per-node) ───
+// ═══════════════════════════════════════════════
+
+async function loadNodeSecurity() {
+    const container = document.getElementById('security-node-content');
+    if (!container) return;
+
+    const node = allNodes.find(n => n.id === currentNodeId);
+    if (!node) {
+        container.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);">No node selected.</div>';
+        return;
+    }
+
+    const url = node.is_self
+        ? '/api/security/status'
+        : `/api/nodes/${node.id}/proxy/security/status`;
+
+    try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        container.innerHTML = renderNodeSecurity(node, data);
+    } catch (e) {
+        container.innerHTML = `<div class="card" style="border-color:rgba(239,68,68,0.3);"><div class="card-body" style="padding:24px;"><div style="color:#ef4444; font-size:14px;">⚠️ Failed to retrieve security status: ${escapeHtml(e.message)}</div></div></div>`;
+    }
+}
+
+function renderNodeSecurity(node, data) {
+    const nodePrefix = node.is_self ? '' : `nodes/${node.id}/proxy/`;
+
+    // ── Fail2ban ──
+    let f2bHtml;
+    if (data.fail2ban.installed) {
+        const jails = data.fail2ban.jails || 'none';
+        const banned = (data.fail2ban.banned || '').trim();
+        const bannedLines = banned ? banned.split('\n').filter(l => l.trim()).map(l => `<div style="font-size:12px; color:#ef4444; padding:2px 0;">${escapeHtml(l.trim())}</div>`).join('') : '<span style="color:#22c55e; font-size:12px;">No banned IPs</span>';
+        const jailExists = data.fail2ban.jail_local_exists;
+
+        const settingRow = (label, value, hint) => `
+            <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border);">
+                <div>
+                    <span style="font-weight:600; font-size:13px; color:var(--text-primary);">${label}</span>
+                    <div style="font-size:11px; color:var(--text-muted);">${hint}</div>
+                </div>
+                <span style="font-size:13px; color:var(--text-secondary); font-family:monospace; background:var(--bg-primary); padding:4px 10px; border-radius:6px; border:1px solid var(--border);">${escapeHtml(value || '\u2014')}</span>
+            </div>`;
+
+        const settingsHtml = jailExists ? `
+            <div style="margin-top:12px;">
+                ${settingRow('Ban Time', data.fail2ban.bantime, 'How long an IP stays banned')}
+                ${settingRow('Find Time', data.fail2ban.findtime, 'Window to count failures')}
+                ${settingRow('Max Retry', data.fail2ban.maxretry, 'Failed attempts before ban')}
+                ${settingRow('Ignore IPs', data.fail2ban.ignoreip, 'IPs that are never banned')}
+            </div>
+            <div style="display:flex; gap:8px; margin-top:12px;">
+                <button onclick="editJailLocal('${nodePrefix}')" class="btn btn-sm" style="font-size:12px;">📝 Edit jail.local</button>
+            </div>` : `
+            <div style="margin-top:12px; padding:12px; background:var(--bg-primary); border-radius:8px; border:1px solid var(--border);">
+                <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <div>
+                        <div style="font-weight:600; font-size:13px; color:#f59e0b;">\u26a0\ufe0f No jail.local found</div>
+                        <div style="font-size:12px; color:var(--text-muted);">Using defaults from jail.conf. Create jail.local for custom settings.</div>
+                    </div>
+                    <button onclick="securityAction('${nodePrefix}security/fail2ban/install', 'POST', {}, this)" class="btn btn-sm btn-primary" style="font-size:12px;">Create jail.local</button>
+                </div>
+            </div>`;
+
+        f2bHtml = `
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:20px;">\ud83d\udee1\ufe0f</span>
+                    <h3 style="margin:0;">Fail2ban</h3>
+                    <span style="background:#22c55e20; color:#22c55e; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Installed</span>
+                </div>
+                <button onclick="securityAction('${nodePrefix}security/fail2ban/install', 'POST', {}, this)" class="btn btn-sm" style="font-size:12px;">\ud83d\udd04 Update</button>
+            </div>
+            <div class="card-body">
+                <div style="font-size:13px; color:var(--text-secondary); margin-bottom:8px;"><strong>Active Jails:</strong> ${escapeHtml(jails)}</div>
+                <div style="margin-bottom:4px;">${bannedLines}</div>
+                ${settingsHtml}
+            </div>
+        </div>`;
+    } else {
+        f2bHtml = `
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:20px;">\ud83d\udee1\ufe0f</span>
+                    <h3 style="margin:0;">Fail2ban</h3>
+                    <span style="background:#ef444420; color:#ef4444; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Not Installed</span>
+                </div>
+                <button onclick="securityAction('${nodePrefix}security/fail2ban/install', 'POST', {}, this)" class="btn btn-sm btn-primary" style="font-size:12px;">Install Fail2ban</button>
+            </div>
+            <div class="card-body">
+                <p style="color:var(--text-secondary); font-size:13px; margin:0;">Fail2ban protects against brute-force attacks by banning IPs with too many failed login attempts. Installing will also create a default jail.local with sensible settings.</p>
+            </div>
+        </div>`;
+    }
+
+    // ── UFW ──
+    let ufwHtml;
+    if (data.ufw.installed) {
+        const ufwStatus = (data.ufw.status || '').trim();
+        const isActive = ufwStatus.toLowerCase().includes('active');
+        const statusBadge = isActive
+            ? '<span style="background:#22c55e20; color:#22c55e; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Active</span>'
+            : '<span style="background:#f59e0b20; color:#f59e0b; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Inactive</span>';
+
+        ufwHtml = `
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:20px;">🔥</span>
+                    <h3 style="margin:0;">UFW Firewall</h3>
+                    ${statusBadge}
+                </div>
+                <button onclick="securityAction('${nodePrefix}security/ufw/toggle', 'POST', {enable: ${!isActive}}, this)" class="btn btn-sm" style="font-size:12px;">${isActive ? '⏸️ Disable' : '▶️ Enable'}</button>
+            </div>
+            <div class="card-body">
+                <pre style="font-size:11px; color:var(--text-secondary); background:var(--bg-primary); padding:10px; border-radius:6px; max-height:180px; overflow-y:auto; white-space:pre-wrap; margin:0 0 12px; border:1px solid var(--border);">${escapeHtml(ufwStatus)}</pre>
+                <div style="display:flex; gap:8px;">
+                    <input type="text" id="ufw-rule-input" placeholder="e.g. allow 443/tcp" style="flex:1; padding:8px 12px; font-size:13px; border-radius:8px; background:var(--bg-secondary); border:1px solid var(--border); color:var(--text-primary); outline:none; font-family:inherit;">
+                    <button onclick="addUfwRule('${nodePrefix}')" class="btn btn-sm btn-primary" style="font-size:12px;">Add Rule</button>
+                </div>
+            </div>
+        </div>`;
+    } else {
+        ufwHtml = `
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:20px;">🔥</span>
+                    <h3 style="margin:0;">UFW Firewall</h3>
+                    <span style="background:#ef444420; color:#ef4444; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Not Installed</span>
+                </div>
+                <button onclick="securityAction('${nodePrefix}security/ufw/install', 'POST', {}, this)" class="btn btn-sm btn-primary" style="font-size:12px;">Install UFW</button>
+            </div>
+            <div class="card-body">
+                <p style="color:var(--text-secondary); font-size:13px; margin:0;">UFW (Uncomplicated Firewall) provides an easy-to-use interface for managing iptables firewall rules.</p>
+            </div>
+        </div>`;
+    }
+
+    // ── iptables ──
+    const iptRules = (data.iptables.rules || '').trim();
+    const iptHtml = `
+    <div class="card">
+        <div class="card-header" style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:20px;">📋</span>
+            <h3 style="margin:0;">iptables Rules</h3>
+            <span style="background:#3b82f620; color:#3b82f6; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">System</span>
+        </div>
+        <div class="card-body">
+            <pre style="font-size:11px; color:var(--text-secondary); background:var(--bg-primary); padding:10px; border-radius:6px; max-height:300px; overflow-y:auto; white-space:pre-wrap; margin:0; border:1px solid var(--border);">${escapeHtml(iptRules)}</pre>
+        </div>
+    </div>`;
+
+    // ── System Updates ──
+    const updates = data.updates || {};
+    const updCount = updates.count || 0;
+    const updList = (updates.list || '').trim();
+    const pkgMgr = updates.package_manager || 'unknown';
+    const updBadge = updCount > 0
+        ? `<span style="background:#f59e0b20; color:#f59e0b; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">${updCount} update${updCount !== 1 ? 's' : ''} available</span>`
+        : '<span style="background:#22c55e20; color:#22c55e; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Up to date</span>';
+
+    const updHtml = `
+    <div class="card" style="margin-bottom:16px;">
+        <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:20px;">📦</span>
+                <h3 style="margin:0;">System Updates</h3>
+                ${updBadge}
+                <span style="color:var(--text-muted); font-size:11px;">(${pkgMgr})</span>
+            </div>
+            <div style="display:flex; gap:6px;">
+                <button onclick="securityAction('${nodePrefix}security/updates/check', 'POST', {}, this)" class="btn btn-sm" style="font-size:12px;">🔍 Check</button>
+                ${updCount > 0 ? `<button onclick="securityAction('${nodePrefix}security/updates/apply', 'POST', {}, this)" class="btn btn-sm btn-primary" style="font-size:12px;">⬆️ Update All</button>` : ''}
+            </div>
+        </div>
+        ${updList ? `<div class="card-body"><pre style="font-size:11px; color:var(--text-secondary); background:var(--bg-primary); padding:10px; border-radius:6px; max-height:200px; overflow-y:auto; white-space:pre-wrap; margin:0; border:1px solid var(--border);">${escapeHtml(updList)}</pre></div>` : ''}
+    </div>`;
+
+    return updHtml + f2bHtml + ufwHtml + iptHtml;
+}
+
+async function securityAction(path, method, body, btn) {
+    const orig = btn.textContent;
+    btn.textContent = '⏳ Working...';
+    btn.disabled = true;
+    try {
+        const opts = { method, headers: { 'Content-Type': 'application/json' } };
+        if (method !== 'GET') opts.body = JSON.stringify(body);
+        const res = await fetch(`/api/${path}`, opts);
+        const data = await res.json();
+        if (res.ok) {
+            showToast(data.output ? 'Action completed' : 'Done', 'success');
+            loadNodeSecurity();
+        } else {
+            showToast(data.error || 'Action failed', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    } finally {
+        btn.textContent = orig;
+        btn.disabled = false;
+    }
+}
+
+async function addUfwRule(nodePrefix) {
+    const input = document.getElementById('ufw-rule-input');
+    const rule = (input?.value || '').trim();
+    if (!rule) { showToast('Please enter a UFW rule', 'error'); return; }
+    try {
+        const res = await fetch(`/api/${nodePrefix}security/ufw/rule`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rule }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+            showToast('Rule added', 'success');
+            input.value = '';
+            loadNodeSecurity();
+        } else {
+            showToast(data.error || 'Failed to add rule', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function editJailLocal(nodePrefix) {
+    try {
+        const res = await fetch(`/api/${nodePrefix}security/fail2ban/config`);
+        const data = await res.json();
+        const content = data.content || `[DEFAULT]\nbantime  = 1h\nfindtime = 10m\nmaxretry = 5\nignoreip = 127.0.0.1/8 ::1\nbanaction = iptables-multiport\n\n[sshd]\nenabled = true\nport    = ssh\nfilter  = sshd\nlogpath = /var/log/auth.log\nmaxretry = 3\n`;
+        const modal = document.createElement('div');
+        modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); backdrop-filter:blur(4px); z-index:10000; display:flex; align-items:center; justify-content:center;';
+        modal.innerHTML = `
+            <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; width:640px; max-width:90vw; max-height:85vh; display:flex; flex-direction:column; box-shadow:0 20px 60px rgba(0,0,0,0.4);">
+                <div style="padding:20px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between;">
+                    <div style="display:flex; align-items:center; gap:10px;">
+                        <span style="font-size:20px;">📝</span>
+                        <h3 style="margin:0; font-size:16px;">Edit jail.local</h3>
+                    </div>
+                    <button onclick="this.closest('div[style*=fixed]').remove()" style="background:none; border:none; color:var(--text-muted); font-size:20px; cursor:pointer; padding:4px;">✕</button>
+                </div>
+                <div style="padding:16px 24px; flex:1; overflow:auto;">
+                    <textarea id="jail-local-editor" spellcheck="false" style="width:100%; height:400px; font-family:'JetBrains Mono','Fira Code',monospace; font-size:13px; line-height:1.6; background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border); border-radius:8px; padding:12px; resize:vertical; outline:none; tab-size:4;">${escapeHtml(content)}</textarea>
+                </div>
+                <div style="padding:16px 24px; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:8px;">
+                    <button onclick="this.closest('div[style*=fixed]').remove()" class="btn btn-sm" style="font-size:13px;">Cancel</button>
+                    <button onclick="saveFail2banConfig('${nodePrefix}', this)" class="btn btn-sm btn-primary" style="font-size:13px;">💾 Save & Restart</button>
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
+        modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+    } catch (e) {
+        showToast('Error loading config: ' + e.message, 'error');
+    }
+}
+
+async function saveFail2banConfig(nodePrefix, btn) {
+    const editor = document.getElementById('jail-local-editor');
+    const content = editor?.value || '';
+    if (!content.trim()) { showToast('Config cannot be empty', 'error'); return; }
+    const orig = btn.textContent;
+    btn.textContent = '⏳ Saving...';
+    btn.disabled = true;
+    try {
+        const res = await fetch(`/api/${nodePrefix}security/fail2ban/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+            showToast(data.warning || 'Saved & restarted fail2ban', 'success');
+            btn.closest('div[style*=fixed]').remove();
+            loadNodeSecurity();
+        } else {
+            showToast(data.error || 'Save failed', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    } finally {
+        btn.textContent = orig;
+        btn.disabled = false;
     }
 }

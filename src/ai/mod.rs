@@ -38,7 +38,11 @@ pub struct AiConfig {
     #[serde(default)]
     pub smtp_tls: String,         // "none", "starttls", or "tls"
     pub check_interval_minutes: u32,
+    #[serde(default = "default_scan_schedule")]
+    pub scan_schedule: String,    // "off", "hourly", "6h", "12h", "daily"
 }
+
+fn default_scan_schedule() -> String { "off".to_string() }
 
 impl Default for AiConfig {
     fn default() -> Self {
@@ -55,6 +59,7 @@ impl Default for AiConfig {
             smtp_pass: String::new(),
             smtp_tls: "starttls".to_string(),
             check_interval_minutes: 60,
+            scan_schedule: "off".to_string(),
         }
     }
 }
@@ -88,6 +93,7 @@ impl AiConfig {
             "smtp_user": self.smtp_user,
             "smtp_pass": mask_key(&self.smtp_pass),
             "check_interval_minutes": self.check_interval_minutes,
+            "scan_schedule": self.scan_schedule,
             "has_claude_key": !self.claude_api_key.is_empty(),
             "has_gemini_key": !self.gemini_api_key.is_empty(),
             "has_smtp_pass": !self.smtp_pass.is_empty(),

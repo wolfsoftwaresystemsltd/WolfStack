@@ -1616,10 +1616,12 @@ pub async fn node_proxy(
     //    accessible only via WolfNet (encrypted tunnel) so still secure
     // 3. HTTP on the main port — last resort (dev/local only)
     let internal_port = node.port + 1;
+    let qs = req.query_string();
+    let query_suffix = if qs.is_empty() { String::new() } else { format!("?{}", qs) };
     let urls = vec![
-        format!("https://{}:{}/api/{}", node.address, node.port, api_path),
-        format!("http://{}:{}/api/{}", node.address, internal_port, api_path),
-        format!("http://{}:{}/api/{}", node.address, node.port, api_path),
+        format!("https://{}:{}/api/{}{}", node.address, node.port, api_path, query_suffix),
+        format!("http://{}:{}/api/{}{}", node.address, internal_port, api_path, query_suffix),
+        format!("http://{}:{}/api/{}{}", node.address, node.port, api_path, query_suffix),
     ];
 
     let timeout_secs = if method == actix_web::http::Method::POST || method == actix_web::http::Method::PUT { 300 } else { 120 };
@@ -3006,6 +3008,9 @@ pub async fn ai_save_config(
         if let Some(v) = body.get("check_interval_minutes").and_then(|v| v.as_u64()) {
             config.check_interval_minutes = v as u32;
         }
+        if let Some(v) = body.get("scan_schedule").and_then(|v| v.as_str()) {
+            config.scan_schedule = v.to_string();
+        }
 
         if let Err(e) = config.save() {
             return HttpResponse::InternalServerError().json(serde_json::json!({"error": e}));
@@ -4226,6 +4231,1183 @@ pub async fn storage_sync_s3(
     }
 }
 
+// ─── ZFS Storage ───
+
+/// GET /api/storage/zfs/status — check if ZFS is available and return overview
+pub async fn zfs_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+
+    let available = std::process::Command::new("which").arg("zfs").output()
+        .map(|o| o.status.success()).unwrap_or(false);
+
+    if !available {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "available": false,
+            "pools": []
+        }));
+    }
+
+    // Get pool summary
+    let pools = zfs_get_pools();
+    HttpResponse::Ok().json(serde_json::json!({
+        "available": true,
+        "pools": pools
+    }))
+}
+
+/// GET /api/storage/zfs/pools — list all ZFS pools with usage stats
+pub async fn zfs_pools(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(zfs_get_pools())
+}
+
+/// GET /api/storage/zfs/datasets?pool=POOL — list datasets for a pool
+pub async fn zfs_datasets(req: HttpRequest, state: web::Data<AppState>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let pool = query.get("pool").cloned().unwrap_or_default();
+    if pool.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'pool' parameter" }));
+    }
+    // Validate pool name (alphanumeric, dash, underscore, dot only)
+    if !pool.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid pool name" }));
+    }
+
+    let output = std::process::Command::new("zfs")
+        .args(["list", "-H", "-r", "-o", "name,used,avail,refer,mountpoint,compression,compressratio", &pool])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let datasets: Vec<serde_json::Value> = text.lines()
+                .filter(|l| !l.is_empty())
+                .map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    serde_json::json!({
+                        "name": parts.get(0).unwrap_or(&""),
+                        "used": parts.get(1).unwrap_or(&""),
+                        "available": parts.get(2).unwrap_or(&""),
+                        "refer": parts.get(3).unwrap_or(&""),
+                        "mountpoint": parts.get(4).unwrap_or(&""),
+                        "compression": parts.get(5).unwrap_or(&""),
+                        "compressratio": parts.get(6).unwrap_or(&""),
+                    })
+                })
+                .collect();
+            HttpResponse::Ok().json(datasets)
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/storage/zfs/snapshots?dataset=DATASET — list snapshots
+pub async fn zfs_snapshots(req: HttpRequest, state: web::Data<AppState>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let dataset = query.get("dataset").cloned().unwrap_or_default();
+
+    let mut args = vec!["list", "-t", "snapshot", "-H", "-o", "name,creation,used,refer"];
+    if !dataset.is_empty() {
+        if !dataset.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/' || c == '@') {
+            return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid dataset name" }));
+        }
+        args.push("-r");
+        args.push(&dataset);
+    }
+
+    let output = std::process::Command::new("zfs").args(&args).output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let snapshots: Vec<serde_json::Value> = text.lines()
+                .filter(|l| !l.is_empty())
+                .map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    serde_json::json!({
+                        "name": parts.get(0).unwrap_or(&""),
+                        "creation": parts.get(1).unwrap_or(&""),
+                        "used": parts.get(2).unwrap_or(&""),
+                        "refer": parts.get(3).unwrap_or(&""),
+                    })
+                })
+                .collect();
+            HttpResponse::Ok().json(snapshots)
+        }
+        Ok(out) => {
+            let _err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::Ok().json(Vec::<serde_json::Value>::new()) // empty list if no snapshots
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/storage/zfs/snapshot — create a snapshot
+pub async fn zfs_create_snapshot(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let dataset = body.get("dataset").and_then(|v| v.as_str()).unwrap_or("");
+    let snap_name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
+
+    if dataset.is_empty() || snap_name.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'dataset' or 'name'" }));
+    }
+    // Validate names
+    let valid_chars = |s: &str| s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/');
+    if !valid_chars(dataset) || !valid_chars(snap_name) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid characters in dataset or snapshot name" }));
+    }
+
+    let snapshot_full = format!("{}@{}", dataset, snap_name);
+    let output = std::process::Command::new("zfs")
+        .args(["snapshot", &snapshot_full])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            HttpResponse::Ok().json(serde_json::json!({ "message": format!("Snapshot '{}' created", snapshot_full) }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// DELETE /api/storage/zfs/snapshot — delete a snapshot
+pub async fn zfs_delete_snapshot(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let snapshot = body.get("snapshot").and_then(|v| v.as_str()).unwrap_or("");
+
+    if snapshot.is_empty() || !snapshot.contains('@') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid snapshot name (must contain @)" }));
+    }
+    if !snapshot.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/' || c == '@') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid characters in snapshot name" }));
+    }
+
+    let output = std::process::Command::new("zfs")
+        .args(["destroy", snapshot])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            HttpResponse::Ok().json(serde_json::json!({ "message": format!("Snapshot '{}' deleted", snapshot) }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// Helper: parse zpool list output into JSON
+fn zfs_get_pools() -> Vec<serde_json::Value> {
+    let output = std::process::Command::new("zpool")
+        .args(["list", "-H", "-o", "name,size,alloc,free,health,fragmentation,capacity,dedup,altroot"])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let mut pools: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout).lines()
+                .filter(|l| !l.is_empty())
+                .map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    serde_json::json!({
+                        "name": parts.get(0).unwrap_or(&""),
+                        "size": parts.get(1).unwrap_or(&""),
+                        "alloc": parts.get(2).unwrap_or(&""),
+                        "free": parts.get(3).unwrap_or(&""),
+                        "health": parts.get(4).unwrap_or(&""),
+                        "fragmentation": parts.get(5).unwrap_or(&""),
+                        "capacity": parts.get(6).unwrap_or(&""),
+                        "dedup": parts.get(7).unwrap_or(&"1.00x"),
+                        "altroot": parts.get(8).unwrap_or(&"-"),
+                    })
+                })
+                .collect();
+
+            // Enrich each pool with scan/scrub status from `zpool status`
+            for pool in &mut pools {
+                let pool_name = pool["name"].as_str().unwrap_or("").to_string();
+                if let Ok(status_out) = std::process::Command::new("zpool")
+                    .args(["status", &pool_name])
+                    .output()
+                {
+                    if status_out.status.success() {
+                        let status_text = String::from_utf8_lossy(&status_out.stdout).to_string();
+                        // Extract scan line
+                        let scan_line = status_text.lines()
+                            .find(|l| l.trim_start().starts_with("scan:"))
+                            .map(|l| l.trim_start().trim_start_matches("scan:").trim().to_string())
+                            .unwrap_or_else(|| "none requested".to_string());
+                        // Extract errors line
+                        let errors_line = status_text.lines()
+                            .find(|l| l.trim_start().starts_with("errors:"))
+                            .map(|l| l.trim_start().trim_start_matches("errors:").trim().to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+
+                        pool["scan"] = serde_json::json!(scan_line);
+                        pool["errors"] = serde_json::json!(errors_line);
+                    }
+                }
+            }
+
+            pools
+        }
+        _ => vec![],
+    }
+}
+
+/// POST /api/storage/zfs/pool/scrub — start or stop a scrub
+pub async fn zfs_pool_scrub(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let pool = body.get("pool").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let stop = body.get("stop").and_then(|v| v.as_bool()).unwrap_or(false);
+    if pool.is_empty() || pool.contains("..") {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid pool name" }));
+    }
+
+    let mut args = vec!["scrub"];
+    if stop { args.push("-s"); }
+    args.push(pool);
+
+    let output = std::process::Command::new("zpool").args(&args).output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let msg = if stop { format!("Scrub stopped on pool '{}'", pool) }
+                      else { format!("Scrub started on pool '{}'", pool) };
+            HttpResponse::Ok().json(serde_json::json!({ "message": msg }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err.trim() }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/storage/zfs/pool/status?pool=POOL — detailed pool status (vdevs, errors, scan)
+pub async fn zfs_pool_status(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let pool = query.get("pool").cloned().unwrap_or_default();
+    let pool = pool.trim().to_string();
+    if pool.is_empty() || pool.contains("..") {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid pool name" }));
+    }
+
+    let output = std::process::Command::new("zpool").args(["status", "-v", &pool]).output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            HttpResponse::Ok().json(serde_json::json!({
+                "pool": pool,
+                "status_text": text,
+            }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err.trim() }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/storage/zfs/pool/iostat?pool=POOL — pool IO statistics
+pub async fn zfs_pool_iostat(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let pool = query.get("pool").cloned().unwrap_or_default();
+    let pool = pool.trim().to_string();
+    if pool.is_empty() || pool.contains("..") {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid pool name" }));
+    }
+
+    let output = std::process::Command::new("zpool").args(["iostat", "-v", &pool]).output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            HttpResponse::Ok().json(serde_json::json!({
+                "pool": pool,
+                "iostat_text": text,
+            }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err.trim() }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+// ─── File Manager ───
+
+/// Validate and normalize a file path — prevent traversal attacks
+fn sanitize_file_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let p = std::path::Path::new(path);
+    // Must be absolute
+    if !p.is_absolute() {
+        return Err("Path must be absolute".into());
+    }
+    // Canonicalize to resolve .. and symlinks
+    match p.canonicalize() {
+        Ok(canonical) => Ok(canonical),
+        Err(_) => {
+            // For paths that don't exist yet (e.g., mkdir), check the parent
+            if let Some(parent) = p.parent() {
+                if let Ok(canonical_parent) = parent.canonicalize() {
+                    let file_name = p.file_name().ok_or("Invalid path")?;
+                    Ok(canonical_parent.join(file_name))
+                } else {
+                    Err("Parent directory does not exist".into())
+                }
+            } else {
+                Err("Invalid path".into())
+            }
+        }
+    }
+}
+
+/// GET /api/files/browse?path=/some/path — list directory contents
+pub async fn files_browse(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let path = query.get("path").cloned().unwrap_or_else(|| "/".into());
+
+    let canonical = match sanitize_file_path(&path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+
+    if !canonical.is_dir() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Not a directory" }));
+    }
+
+    let mut entries = Vec::new();
+    match std::fs::read_dir(&canonical) {
+        Ok(dir) => {
+            for entry in dir.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let meta = entry.metadata().ok();
+                let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let modified = meta.as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                // Unix permissions
+                #[cfg(unix)]
+                let permissions = {
+                    use std::os::unix::fs::PermissionsExt;
+                    meta.as_ref()
+                        .map(|m| format!("{:o}", m.permissions().mode() & 0o7777))
+                        .unwrap_or_default()
+                };
+                #[cfg(not(unix))]
+                let permissions = String::new();
+
+                let entry_path = canonical.join(&name);
+                entries.push(serde_json::json!({
+                    "name": name,
+                    "path": entry_path.to_string_lossy(),
+                    "is_dir": is_dir,
+                    "size": if is_dir { 0 } else { size },
+                    "modified": modified,
+                    "permissions": permissions,
+                }));
+            }
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Cannot read directory: {}", e)
+            }));
+        }
+    }
+
+    // Sort: directories first, then alphabetically
+    entries.sort_by(|a, b| {
+        let a_dir = a["is_dir"].as_bool().unwrap_or(false);
+        let b_dir = b["is_dir"].as_bool().unwrap_or(false);
+        match (a_dir, b_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a["name"].as_str().unwrap_or("")
+                .to_lowercase()
+                .cmp(&b["name"].as_str().unwrap_or("").to_lowercase()),
+        }
+    });
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "path": canonical.to_string_lossy(),
+        "entries": entries,
+    }))
+}
+
+/// POST /api/files/mkdir — create directory
+pub async fn files_mkdir(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" }));
+    }
+
+    let canonical = match sanitize_file_path(path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+
+    match std::fs::create_dir_all(&canonical) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Directory created: {}", canonical.display())
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to create directory: {}", e)
+        })),
+    }
+}
+
+/// POST /api/files/delete — delete file or directory
+pub async fn files_delete(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" }));
+    }
+
+    let canonical = match sanitize_file_path(path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+
+    // Prevent deleting critical system paths
+    let critical = ["/", "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/proc", "/sys", "/dev", "/var", "/root"];
+    if critical.contains(&canonical.to_string_lossy().as_ref()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Cannot delete system directory" }));
+    }
+
+    let result = if canonical.is_dir() {
+        std::fs::remove_dir_all(&canonical)
+    } else {
+        std::fs::remove_file(&canonical)
+    };
+
+    match result {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Deleted: {}", canonical.display())
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to delete: {}", e)
+        })),
+    }
+}
+
+/// POST /api/files/rename — rename / move a file or directory
+pub async fn files_rename(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let from = body.get("from").and_then(|v| v.as_str()).unwrap_or("");
+    let to = body.get("to").and_then(|v| v.as_str()).unwrap_or("");
+    if from.is_empty() || to.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'from' or 'to'" }));
+    }
+
+    let from_path = match sanitize_file_path(from) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+    let to_path = match sanitize_file_path(to) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+
+    match std::fs::rename(&from_path, &to_path) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Renamed to {}", to_path.display())
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to rename: {}", e)
+        })),
+    }
+}
+
+/// POST /api/files/upload?path=/some/dir — upload file(s) via multipart
+pub async fn files_upload(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+    mut payload: actix_multipart::Multipart,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let dir = query.get("path").cloned().unwrap_or_else(|| "/tmp".into());
+
+    let canonical_dir = match sanitize_file_path(&dir) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+
+    if !canonical_dir.is_dir() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Target is not a directory" }));
+    }
+
+    use futures::StreamExt;
+    let mut uploaded = Vec::new();
+
+    while let Some(Ok(mut field)) = payload.next().await {
+        let filename = field.content_disposition()
+            .and_then(|cd| cd.get_filename().map(|s| s.to_string()))
+            .unwrap_or_else(|| "upload".to_string());
+
+        // Sanitize filename
+        let safe_name = filename.replace("..", "").replace("/", "").replace("\\", "");
+        if safe_name.is_empty() { continue; }
+
+        let file_path = canonical_dir.join(&safe_name);
+        let mut file = match std::fs::File::create(&file_path) {
+            Ok(f) => f,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Cannot create file {}: {}", safe_name, e)
+                }));
+            }
+        };
+
+        use std::io::Write;
+        while let Some(Ok(chunk)) = field.next().await {
+            if file.write_all(&chunk).is_err() {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to write file {}", safe_name)
+                }));
+            }
+        }
+        uploaded.push(safe_name);
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": format!("Uploaded {} file(s)", uploaded.len()),
+        "files": uploaded,
+    }))
+}
+
+/// GET /api/files/download?path=/some/file — download a file
+pub async fn files_download(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let path = query.get("path").cloned().unwrap_or_default();
+    if path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" }));
+    }
+
+    let canonical = match sanitize_file_path(&path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+
+    if !canonical.is_file() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Not a file" }));
+    }
+
+    let filename = canonical.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".into());
+
+    match std::fs::read(&canonical) {
+        Ok(data) => HttpResponse::Ok()
+            .insert_header(("Content-Disposition", format!("attachment; filename=\"{}\"", filename)))
+            .insert_header(("Content-Type", "application/octet-stream"))
+            .body(data),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Cannot read file: {}", e)
+        })),
+    }
+}
+
+/// GET /api/files/search?path=/start&query=pattern — recursive search using find
+pub async fn files_search(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let search_path = query.get("path").cloned().unwrap_or_else(|| "/".into());
+    let search_query = query.get("query").cloned().unwrap_or_default();
+
+    if search_query.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'query'" }));
+    }
+
+    let canonical = match sanitize_file_path(&search_path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+
+    // Use find with -iname for case-insensitive matching, limit results
+    let output = std::process::Command::new("find")
+        .args([canonical.to_str().unwrap_or("/"), "-maxdepth", "8",
+               "-iname", &format!("*{}*", search_query),
+               "-printf", "%y\t%s\t%T@\t%m\t%p\n"])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let mut entries: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .take(100) // cap results
+                .map(|line| {
+                    let parts: Vec<&str> = line.splitn(5, '\t').collect();
+                    let file_type = parts.get(0).unwrap_or(&"f");
+                    let size: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let modified: f64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let permissions = parts.get(3).unwrap_or(&"").to_string();
+                    let full_path = parts.get(4).unwrap_or(&"").to_string();
+                    let name = std::path::Path::new(&full_path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| full_path.clone());
+                    let is_dir = *file_type == "d";
+
+                    serde_json::json!({
+                        "name": name,
+                        "path": full_path,
+                        "is_dir": is_dir,
+                        "size": if is_dir { 0 } else { size },
+                        "modified": modified as u64,
+                        "permissions": permissions,
+                    })
+                })
+                .collect();
+
+            entries.sort_by(|a, b| {
+                let ad = a["is_dir"].as_bool().unwrap_or(false);
+                let bd = b["is_dir"].as_bool().unwrap_or(false);
+                match (ad, bd) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a["name"].as_str().unwrap_or("").to_lowercase()
+                        .cmp(&b["name"].as_str().unwrap_or("").to_lowercase()),
+                }
+            });
+
+            HttpResponse::Ok().json(serde_json::json!({
+                "path": search_path,
+                "query": search_query,
+                "entries": entries,
+            }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::Ok().json(serde_json::json!({
+                "path": search_path,
+                "query": search_query,
+                "entries": [],
+                "warning": err.trim(),
+            }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/files/chmod — change permissions on a file or files
+pub async fn files_chmod(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+    let paths: Vec<String> = body.get("paths")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    if mode.is_empty() || paths.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'mode' or 'paths'" }));
+    }
+
+    // Validate mode (must be octal like 755 or symbolic like u+x)
+    if mode.len() > 10 || mode.contains("..") {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid mode" }));
+    }
+
+    let mut results = Vec::new();
+    for path in &paths {
+        let canonical = match sanitize_file_path(path) {
+            Ok(p) => p,
+            Err(e) => { results.push(serde_json::json!({"path": path, "error": e})); continue; }
+        };
+        let output = std::process::Command::new("chmod")
+            .args([mode, canonical.to_str().unwrap_or("")])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                results.push(serde_json::json!({"path": path, "ok": true}));
+            }
+            Ok(out) => {
+                results.push(serde_json::json!({"path": path, "error": String::from_utf8_lossy(&out.stderr).trim().to_string()}));
+            }
+            Err(e) => {
+                results.push(serde_json::json!({"path": path, "error": format!("{}", e)}));
+            }
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({ "results": results }))
+}
+
+/// GET /api/files/docker/browse?container=ID&path=/ — browse files inside a Docker container
+pub async fn files_docker_browse(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = query.get("container").cloned().unwrap_or_default();
+    let path = query.get("path").cloned().unwrap_or_else(|| "/".into());
+
+    if container.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container'" }));
+    }
+
+    // Use docker exec to list directory contents with stat-like output
+    let output = std::process::Command::new("docker")
+        .args(["exec", &container, "find", &path, "-maxdepth", "1", "-mindepth", "1",
+               "-printf", "%y\\t%s\\t%T@\\t%m\\t%f\\n"])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let mut entries: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|line| {
+                    let parts: Vec<&str> = line.splitn(5, '\t').collect();
+                    let file_type = parts.get(0).unwrap_or(&"f");
+                    let size: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let modified: f64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let permissions = parts.get(3).unwrap_or(&"");
+                    let name = parts.get(4).unwrap_or(&"");
+                    let is_dir = *file_type == "d";
+                    let entry_path = if path.ends_with('/') {
+                        format!("{}{}", path, name)
+                    } else {
+                        format!("{}/{}", path, name)
+                    };
+
+                    serde_json::json!({
+                        "name": name,
+                        "path": entry_path,
+                        "is_dir": is_dir,
+                        "size": if is_dir { 0 } else { size },
+                        "modified": modified as u64,
+                        "permissions": permissions,
+                    })
+                })
+                .collect();
+
+            // Sort: directories first, then alphabetically
+            entries.sort_by(|a, b| {
+                let a_dir = a["is_dir"].as_bool().unwrap_or(false);
+                let b_dir = b["is_dir"].as_bool().unwrap_or(false);
+                match (a_dir, b_dir) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a["name"].as_str().unwrap_or("")
+                        .to_lowercase()
+                        .cmp(&b["name"].as_str().unwrap_or("").to_lowercase()),
+                }
+            });
+
+            HttpResponse::Ok().json(serde_json::json!({
+                "path": path,
+                "container": container,
+                "entries": entries,
+            }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to list directory: {}", err.trim())
+            }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to exec into container: {}", e)
+        })),
+    }
+}
+
+/// POST /api/files/docker/mkdir — create directory inside Docker container
+pub async fn files_docker_mkdir(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if container.is_empty() || path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container' or 'path'" }));
+    }
+
+    let output = std::process::Command::new("docker")
+        .args(["exec", container, "mkdir", "-p", path])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => HttpResponse::Ok().json(serde_json::json!({ "message": format!("Directory created: {}", path) })),
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/files/docker/delete — delete file/dir inside Docker container
+pub async fn files_docker_delete(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if container.is_empty() || path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container' or 'path'" }));
+    }
+
+    let critical = ["/", "/etc", "/usr", "/bin", "/sbin", "/lib", "/boot", "/proc", "/sys", "/dev", "/var"];
+    if critical.contains(&path) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Cannot delete system directory" }));
+    }
+
+    let output = std::process::Command::new("docker")
+        .args(["exec", container, "rm", "-rf", path])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => HttpResponse::Ok().json(serde_json::json!({ "message": format!("Deleted: {}", path) })),
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/files/docker/rename — rename file/dir inside Docker container
+pub async fn files_docker_rename(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
+    let from = body.get("from").and_then(|v| v.as_str()).unwrap_or("");
+    let to = body.get("to").and_then(|v| v.as_str()).unwrap_or("");
+    if container.is_empty() || from.is_empty() || to.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing fields" }));
+    }
+
+    let output = std::process::Command::new("docker")
+        .args(["exec", container, "mv", from, to])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => HttpResponse::Ok().json(serde_json::json!({ "message": format!("Renamed to {}", to) })),
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/files/docker/download?container=ID&path=/file — download file from Docker container
+pub async fn files_docker_download(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = query.get("container").cloned().unwrap_or_default();
+    let path = query.get("path").cloned().unwrap_or_default();
+    if container.is_empty() || path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container' or 'path'" }));
+    }
+
+    // Use docker cp to a temp file
+    let tmp = format!("/tmp/wolfstack-docker-dl-{}", std::process::id());
+    let src = format!("{}:{}", container, path);
+    let output = std::process::Command::new("docker").args(["cp", &src, &tmp]).output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let filename = std::path::Path::new(&path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "download".into());
+
+            match std::fs::read(&tmp) {
+                Ok(data) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    HttpResponse::Ok()
+                        .insert_header(("Content-Disposition", format!("attachment; filename=\"{}\"", filename)))
+                        .insert_header(("Content-Type", "application/octet-stream"))
+                        .body(data)
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Read error: {}", e) }))
+                }
+            }
+        }
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": String::from_utf8_lossy(&out.stderr).trim().to_string()
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+// ─── LXC File Manager ───
+
+/// Detect if Proxmox `pct` is available, and use `pct exec` if so; else `lxc-attach`.
+fn lxc_exec_cmd(container: &str, cmd_args: &[&str]) -> std::process::Command {
+    let is_proxmox = std::process::Command::new("which").arg("pct").output()
+        .map(|o| o.status.success()).unwrap_or(false);
+    let mut cmd;
+    if is_proxmox {
+        cmd = std::process::Command::new("pct");
+        cmd.arg("exec").arg(container).arg("--");
+    } else {
+        cmd = std::process::Command::new("lxc-attach");
+        cmd.arg("-n").arg(container).arg("--");
+    }
+    for a in cmd_args { cmd.arg(a); }
+    cmd
+}
+
+/// GET /api/files/lxc/browse?container=NAME&path=/ — browse files inside an LXC container
+pub async fn files_lxc_browse(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = query.get("container").cloned().unwrap_or_default();
+    let path = query.get("path").cloned().unwrap_or_else(|| "/".into());
+
+    if container.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container'" }));
+    }
+
+    // Use a POSIX shell one-liner that works everywhere (BusyBox, Alpine, Debian, etc.)
+    // Output format per line: TYPE<tab>SIZE<tab>NAME
+    // TYPE: d = directory, f = file, l = link
+    let script = format!(
+        "cd '{}' 2>/dev/null && for f in .* *; do [ \"$f\" = '.' ] || [ \"$f\" = '..' ] || [ \"$f\" = '.*' ] || [ \"$f\" = '*' ] && continue; if [ -L \"$f\" ]; then printf 'l\\t0\\t%s\\n' \"$f\"; elif [ -d \"$f\" ]; then printf 'd\\t0\\t%s\\n' \"$f\"; else s=$(stat -c%s \"$f\" 2>/dev/null || echo 0); printf 'f\\t'\"$s\"'\\t%s\\n' \"$f\"; fi; done",
+        path.replace('\'', "'\\''")
+    );
+
+    let output = lxc_exec_cmd(&container, &["sh", "-c", &script]).output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let mut entries: Vec<serde_json::Value> = stdout
+                .lines()
+                .filter(|l| !l.is_empty())
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.splitn(3, '\t').collect();
+                    if parts.len() < 3 { return None; }
+
+                    let file_type = parts[0];
+                    let size: u64 = parts[1].parse().unwrap_or(0);
+                    let name = parts[2].to_string();
+
+                    if name.is_empty() { return None; }
+
+                    let is_dir = file_type == "d" || file_type == "l";
+                    let entry_path = if path.ends_with('/') {
+                        format!("{}{}", path, name)
+                    } else {
+                        format!("{}/{}", path, name)
+                    };
+
+                    Some(serde_json::json!({
+                        "name": name,
+                        "path": entry_path,
+                        "is_dir": is_dir,
+                        "size": if is_dir { 0 } else { size },
+                        "modified": 0,
+                        "permissions": "",
+                    }))
+                })
+                .collect();
+
+            entries.sort_by(|a, b| {
+                let a_dir = a["is_dir"].as_bool().unwrap_or(false);
+                let b_dir = b["is_dir"].as_bool().unwrap_or(false);
+                match (a_dir, b_dir) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a["name"].as_str().unwrap_or("")
+                        .to_lowercase()
+                        .cmp(&b["name"].as_str().unwrap_or("").to_lowercase()),
+                }
+            });
+
+            HttpResponse::Ok().json(serde_json::json!({
+                "path": path,
+                "container": container,
+                "entries": entries,
+            }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            info!("LXC browse failed for container={} path={}: stderr={} stdout={}", container, path, err.trim(), stdout.trim());
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to list directory: {}", err.trim())
+            }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to exec into container: {}", e)
+        })),
+    }
+}
+
+/// POST /api/files/lxc/mkdir — create directory inside LXC container
+pub async fn files_lxc_mkdir(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if container.is_empty() || path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container' or 'path'" }));
+    }
+
+    let output = lxc_exec_cmd(container, &["mkdir", "-p", path]).output();
+
+    match output {
+        Ok(out) if out.status.success() => HttpResponse::Ok().json(serde_json::json!({ "message": format!("Directory created: {}", path) })),
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/files/lxc/delete — delete file/dir inside LXC container
+pub async fn files_lxc_delete(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if container.is_empty() || path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container' or 'path'" }));
+    }
+
+    let critical = ["/", "/etc", "/usr", "/bin", "/sbin", "/lib", "/boot", "/proc", "/sys", "/dev", "/var"];
+    if critical.contains(&path) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Cannot delete system directory" }));
+    }
+
+    let output = lxc_exec_cmd(container, &["rm", "-rf", path]).output();
+
+    match output {
+        Ok(out) if out.status.success() => HttpResponse::Ok().json(serde_json::json!({ "message": format!("Deleted: {}", path) })),
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/files/lxc/rename — rename file/dir inside LXC container
+pub async fn files_lxc_rename(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
+    let from = body.get("from").and_then(|v| v.as_str()).unwrap_or("");
+    let to = body.get("to").and_then(|v| v.as_str()).unwrap_or("");
+    if container.is_empty() || from.is_empty() || to.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing fields" }));
+    }
+
+    let output = lxc_exec_cmd(container, &["mv", from, to]).output();
+
+    match output {
+        Ok(out) if out.status.success() => HttpResponse::Ok().json(serde_json::json!({ "message": format!("Renamed to {}", to) })),
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/files/lxc/download?container=NAME&path=/file — download file from LXC container
+pub async fn files_lxc_download(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = query.get("container").cloned().unwrap_or_default();
+    let path = query.get("path").cloned().unwrap_or_default();
+    if container.is_empty() || path.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container' or 'path'" }));
+    }
+
+    // Use lxc-attach cat to stream the file content
+    let output = lxc_exec_cmd(&container, &["cat", &path]).output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let filename = std::path::Path::new(&path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "download".into());
+
+            HttpResponse::Ok()
+                .insert_header(("Content-Disposition", format!("attachment; filename=\"{}\"", filename)))
+                .insert_header(("Content-Type", "application/octet-stream"))
+                .body(out.stdout)
+        }
+        Ok(out) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to read file: {}", String::from_utf8_lossy(&out.stderr).trim())
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
 /// POST /api/agent/storage/apply — receive and apply a mount config from another node (cluster-auth)
 pub async fn agent_storage_apply(
     req: HttpRequest,
@@ -4926,6 +6108,679 @@ pub async fn appstore_uninstall(
     }
 }
 
+// ─── Security (Fail2ban, iptables, UFW) ───
+
+/// Helper: check if a command exists on the system
+fn command_exists(cmd: &str) -> bool {
+    std::process::Command::new("which").arg(cmd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Helper: run a shell command, return stdout
+fn run_shell(cmd: &str) -> Result<String, String> {
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .map_err(|e| format!("Failed to execute: {}", e))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(if stderr.is_empty() { "Command failed".into() } else { stderr })
+    }
+}
+
+/// GET /api/security/status — get fail2ban, iptables, and ufw status
+pub async fn security_status(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+
+    // Fail2ban
+    let f2b_installed = command_exists("fail2ban-client");
+    let f2b_status = if f2b_installed {
+        match run_shell("fail2ban-client status 2>/dev/null") {
+            Ok(out) => Some(out),
+            Err(_) => Some("installed but not running".to_string()),
+        }
+    } else { None };
+    let f2b_banned = if f2b_installed {
+        run_shell("fail2ban-client status sshd 2>/dev/null | grep 'Banned IP' || fail2ban-client status sshd 2>/dev/null | grep -i 'ban' || echo ''")
+            .unwrap_or_default()
+    } else { String::new() };
+    let f2b_jails = if f2b_installed {
+        run_shell("fail2ban-client status 2>/dev/null | grep 'Jail list' | sed 's/.*Jail list:\\s*//' | tr -d '\\t'")
+            .unwrap_or_default().trim().to_string()
+    } else { String::new() };
+    // jail.local config
+    let jail_local_exists = std::path::Path::new("/etc/fail2ban/jail.local").exists();
+    let jail_local_content = if jail_local_exists {
+        std::fs::read_to_string("/etc/fail2ban/jail.local").unwrap_or_default()
+    } else { String::new() };
+    // Parse key settings from jail.local
+    let parse_val = |content: &str, key: &str| -> String {
+        content.lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .find(|l| l.trim().starts_with(key))
+            .and_then(|l| l.split('=').nth(1))
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    };
+    let bantime = parse_val(&jail_local_content, "bantime");
+    let findtime = parse_val(&jail_local_content, "findtime");
+    let maxretry = parse_val(&jail_local_content, "maxretry");
+    let ignoreip = parse_val(&jail_local_content, "ignoreip");
+
+    // iptables — always available
+    let iptables_rules = run_shell("iptables -L -n --line-numbers 2>/dev/null || echo 'iptables not available'")
+        .unwrap_or_else(|e| e);
+
+    // UFW
+    let ufw_installed = command_exists("ufw");
+    let ufw_status = if ufw_installed {
+        run_shell("ufw status verbose 2>/dev/null").unwrap_or_else(|e| e)
+    } else { String::new() };
+
+    // System updates — detect package manager and count pending updates
+    let (pkg_manager, updates_count, updates_list) = if command_exists("apt") {
+        let list = run_shell("apt list --upgradable 2>/dev/null | grep -v '^Listing'")
+            .unwrap_or_default();
+        let count = list.lines().filter(|l| !l.trim().is_empty()).count();
+        ("apt", count, list.trim().to_string())
+    } else if command_exists("dnf") {
+        let list = run_shell("dnf check-update --quiet 2>/dev/null")
+            .unwrap_or_default();
+        let count = list.lines().filter(|l| !l.trim().is_empty()).count();
+        ("dnf", count, list.trim().to_string())
+    } else if command_exists("yum") {
+        let list = run_shell("yum check-update --quiet 2>/dev/null")
+            .unwrap_or_default();
+        let count = list.lines().filter(|l| !l.trim().is_empty()).count();
+        ("yum", count, list.trim().to_string())
+    } else if command_exists("pacman") {
+        let list = run_shell("pacman -Qu 2>/dev/null")
+            .unwrap_or_default();
+        let count = list.lines().filter(|l| !l.trim().is_empty()).count();
+        ("pacman", count, list.trim().to_string())
+    } else {
+        ("unknown", 0, String::new())
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "fail2ban": {
+            "installed": f2b_installed,
+            "status": f2b_status,
+            "banned": f2b_banned,
+            "jails": f2b_jails,
+            "jail_local_exists": jail_local_exists,
+            "bantime": bantime,
+            "findtime": findtime,
+            "maxretry": maxretry,
+            "ignoreip": ignoreip,
+        },
+        "iptables": {
+            "rules": iptables_rules,
+        },
+        "ufw": {
+            "installed": ufw_installed,
+            "status": ufw_status,
+        },
+        "updates": {
+            "package_manager": pkg_manager,
+            "count": updates_count,
+            "list": updates_list,
+        }
+    }))
+}
+
+/// POST /api/security/fail2ban/install — install fail2ban + create default jail.local
+pub async fn security_fail2ban_install(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    // Install fail2ban
+    if let Err(e) = run_shell("apt-get update && apt-get install -y fail2ban") {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+    // Create default jail.local if it doesn't exist
+    if !std::path::Path::new("/etc/fail2ban/jail.local").exists() {
+        let default_config = r#"[DEFAULT]
+bantime  = 1h
+findtime = 10m
+maxretry = 5
+ignoreip = 127.0.0.1/8 ::1
+banaction = iptables-multiport
+
+[sshd]
+enabled = true
+port    = ssh
+filter  = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+"#;
+        let _ = std::fs::write("/etc/fail2ban/jail.local", default_config);
+    }
+    match run_shell("systemctl enable --now fail2ban && systemctl restart fail2ban") {
+        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/security/fail2ban/config — read jail.local
+pub async fn security_fail2ban_config_get(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let exists = std::path::Path::new("/etc/fail2ban/jail.local").exists();
+    let content = if exists {
+        std::fs::read_to_string("/etc/fail2ban/jail.local").unwrap_or_default()
+    } else { String::new() };
+    HttpResponse::Ok().json(serde_json::json!({
+        "exists": exists,
+        "content": content,
+    }))
+}
+
+/// POST /api/security/fail2ban/config — save jail.local and restart fail2ban
+pub async fn security_fail2ban_config_save(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    if content.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Content required" }));
+    }
+    if let Err(e) = std::fs::write("/etc/fail2ban/jail.local", content) {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Failed to write: {}", e) }));
+    }
+    match run_shell("systemctl restart fail2ban") {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "warning": format!("Saved but restart failed: {}", e) })),
+    }
+}
+
+/// POST /api/security/fail2ban/unban — unban an IP { "ip": "1.2.3.4", "jail": "sshd" }
+pub async fn security_fail2ban_unban(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let ip = body.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+    let jail = body.get("jail").and_then(|v| v.as_str()).unwrap_or("sshd");
+    if ip.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "IP required" }));
+    }
+    // Sanitise IP — allow only digits, dots, colons (IPv6)
+    if !ip.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ':') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid IP" }));
+    }
+    match run_shell(&format!("fail2ban-client set {} unbanip {}", jail, ip)) {
+        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/security/ufw/install — install UFW
+pub async fn security_ufw_install(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    match run_shell("apt-get update && apt-get install -y ufw") {
+        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/security/ufw/rule — add a UFW rule { "rule": "allow 22/tcp" }
+pub async fn security_ufw_add_rule(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let rule = body.get("rule").and_then(|v| v.as_str()).unwrap_or("");
+    if rule.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Rule required" }));
+    }
+    // Basic sanitisation — only allow alphanumeric, spaces, slashes, dots, colons
+    if !rule.chars().all(|c| c.is_alphanumeric() || c == ' ' || c == '/' || c == '.' || c == ':') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid rule characters" }));
+    }
+    match run_shell(&format!("ufw {}", rule)) {
+        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/security/ufw/rule — delete a UFW rule { "rule_number": "3" }
+pub async fn security_ufw_delete_rule(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let num = body.get("rule_number").and_then(|v| v.as_str()).unwrap_or("");
+    if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Valid rule number required" }));
+    }
+    match run_shell(&format!("echo y | ufw delete {}", num)) {
+        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/security/ufw/toggle — enable or disable UFW { "enable": true }
+pub async fn security_ufw_toggle(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let enable = body.get("enable").and_then(|v| v.as_bool()).unwrap_or(false);
+    let cmd = if enable { "echo y | ufw enable" } else { "ufw disable" };
+    match run_shell(cmd) {
+        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/security/iptables/rules — get iptables rules
+pub async fn security_iptables_rules(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let rules = run_shell("iptables -L -n --line-numbers 2>/dev/null")
+        .unwrap_or_else(|e| format!("Error: {}", e));
+    HttpResponse::Ok().json(serde_json::json!({ "rules": rules }))
+}
+
+/// POST /api/security/updates/check — refresh package cache and list pending updates
+pub async fn security_check_updates(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let (pkg_manager, output) = if command_exists("apt") {
+        let _ = run_shell("apt-get update -qq 2>/dev/null");
+        let list = run_shell("apt list --upgradable 2>/dev/null | grep -v '^Listing'")
+            .unwrap_or_default();
+        ("apt", list)
+    } else if command_exists("dnf") {
+        let list = run_shell("dnf check-update --quiet 2>/dev/null").unwrap_or_default();
+        ("dnf", list)
+    } else if command_exists("yum") {
+        let list = run_shell("yum check-update --quiet 2>/dev/null").unwrap_or_default();
+        ("yum", list)
+    } else if command_exists("pacman") {
+        let _ = run_shell("pacman -Sy 2>/dev/null");
+        let list = run_shell("pacman -Qu 2>/dev/null").unwrap_or_default();
+        ("pacman", list)
+    } else {
+        ("unknown", String::new())
+    };
+    let count = output.lines().filter(|l| !l.trim().is_empty()).count();
+    HttpResponse::Ok().json(serde_json::json!({
+        "ok": true,
+        "package_manager": pkg_manager,
+        "count": count,
+        "list": output.trim(),
+    }))
+}
+
+/// POST /api/security/updates/apply — apply all pending updates
+pub async fn security_apply_updates(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let cmd = if command_exists("apt") {
+        "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y 2>&1"
+    } else if command_exists("dnf") {
+        "dnf upgrade -y 2>&1"
+    } else if command_exists("yum") {
+        "yum update -y 2>&1"
+    } else if command_exists("pacman") {
+        "pacman -Syu --noconfirm 2>&1"
+    } else {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "No supported package manager found" }));
+    };
+    match run_shell(cmd) {
+        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+// ─── Issues Scanner ───
+
+/// Parse human-readable size strings (e.g. "1.2G", "450M", "32K") to MB
+fn parse_size_to_mb(s: &str) -> f64 {
+    let s = s.trim();
+    if s.is_empty() { return 0.0; }
+    let (num_str, suffix) = if s.ends_with(|c: char| c.is_alphabetic()) {
+        let idx = s.len() - 1;
+        (&s[..idx], &s[idx..])
+    } else {
+        (s, "")
+    };
+    let num: f64 = num_str.parse().unwrap_or(0.0);
+    match suffix.to_uppercase().as_str() {
+        "T" => num * 1024.0 * 1024.0,
+        "G" => num * 1024.0,
+        "M" => num,
+        "K" => num / 1024.0,
+        "B" => num / (1024.0 * 1024.0),
+        _ => num, // assume MB
+    }
+}
+
+#[derive(Serialize, Clone)]
+pub struct Issue {
+    pub severity: String,   // "critical", "warning", "info"
+    pub category: String,   // "cpu", "memory", "disk", "swap", "load", "service", "container"
+    pub title: String,
+    pub detail: String,
+}
+
+/// Collect system issues (reusable — called by HTTP handler and background scheduler)
+pub fn collect_issues(metrics: &crate::monitoring::SystemMetrics) -> Vec<Issue> {
+    let mut issues: Vec<Issue> = Vec::new();
+    let mem_pct = metrics.memory_percent;
+
+    // ── CPU check ──
+    if metrics.cpu_usage_percent > 90.0 {
+        issues.push(Issue {
+            severity: "critical".into(),
+            category: "cpu".into(),
+            title: "CPU usage critically high".into(),
+            detail: format!("CPU at {:.1}% — system may be unresponsive", metrics.cpu_usage_percent),
+        });
+    } else if metrics.cpu_usage_percent > 75.0 {
+        issues.push(Issue {
+            severity: "warning".into(),
+            category: "cpu".into(),
+            title: "CPU usage elevated".into(),
+            detail: format!("CPU at {:.1}% — monitor for sustained load", metrics.cpu_usage_percent),
+        });
+    }
+
+    // ── Memory check ──
+    if mem_pct > 90.0 {
+        issues.push(Issue {
+            severity: "critical".into(),
+            category: "memory".into(),
+            title: "Memory usage critically high".into(),
+            detail: format!("Memory at {:.1}% — OOM risk", mem_pct),
+        });
+    } else if mem_pct > 80.0 {
+        issues.push(Issue {
+            severity: "warning".into(),
+            category: "memory".into(),
+            title: "Memory usage elevated".into(),
+            detail: format!("Memory at {:.1}%", mem_pct),
+        });
+    }
+
+    // ── Disk checks (free space, not just %) ──
+    for disk in &metrics.disks {
+        let total_gb = disk.total_bytes as f64 / 1_073_741_824.0;
+        let used_gb = disk.used_bytes as f64 / 1_073_741_824.0;
+        let free_gb = disk.available_bytes as f64 / 1_073_741_824.0;
+        let size_detail = format!("{} — {:.1} GB used / {:.1} GB total ({:.1} GB free, {:.1}%)",
+            disk.mount_point, used_gb, total_gb, free_gb, disk.usage_percent);
+
+        if free_gb < 2.0 {
+            issues.push(Issue {
+                severity: "critical".into(),
+                category: "disk".into(),
+                title: format!("Disk {} almost full ({:.1} GB free)", disk.mount_point, free_gb),
+                detail: size_detail,
+            });
+        } else if free_gb < 10.0 {
+            issues.push(Issue {
+                severity: "warning".into(),
+                category: "disk".into(),
+                title: format!("Disk {} low on space ({:.1} GB free)", disk.mount_point, free_gb),
+                detail: size_detail,
+            });
+        }
+    }
+
+    // ── Swap check ──
+    if metrics.swap_total_bytes > 0 {
+        let swap_pct = (metrics.swap_used_bytes as f64 / metrics.swap_total_bytes as f64) * 100.0;
+        if swap_pct > 50.0 {
+            issues.push(Issue {
+                severity: "warning".into(),
+                category: "swap".into(),
+                title: "Significant swap usage".into(),
+                detail: format!("Swap at {:.1}% — system may be low on RAM", swap_pct),
+            });
+        }
+    }
+
+    // ── Load average check ──
+    let cpu_count = metrics.cpu_count.max(1) as f64;
+    if metrics.load_avg.one > cpu_count * 2.0 {
+        issues.push(Issue {
+            severity: "critical".into(),
+            category: "load".into(),
+            title: "Load average extremely high".into(),
+            detail: format!("Load {:.2} ({:.1}× CPU count {})", metrics.load_avg.one, metrics.load_avg.one / cpu_count, metrics.cpu_count),
+        });
+    } else if metrics.load_avg.one > cpu_count {
+        issues.push(Issue {
+            severity: "warning".into(),
+            category: "load".into(),
+            title: "Load average high".into(),
+            detail: format!("Load {:.2} (>{} CPUs)", metrics.load_avg.one, metrics.cpu_count),
+        });
+    }
+
+    // ── Failed systemd services ──
+    if let Ok(output) = std::process::Command::new("systemctl")
+        .args(["--failed", "--no-legend", "--plain"])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(unit) = parts.first() {
+                if !unit.is_empty() {
+                    issues.push(Issue {
+                        severity: "warning".into(),
+                        category: "service".into(),
+                        title: format!("Service {} failed", unit),
+                        detail: format!("systemd unit {} is in failed state", unit),
+                    });
+                }
+            }
+        }
+    }
+
+    // ── Stopped Docker containers ──
+    if let Ok(output) = std::process::Command::new("docker")
+        .args(["ps", "-a", "--filter", "status=exited", "--format", "{{.Names}}"])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stopped: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+        if !stopped.is_empty() {
+            issues.push(Issue {
+                severity: "info".into(),
+                category: "container".into(),
+                title: format!("{} stopped Docker container(s)", stopped.len()),
+                detail: format!("Stopped: {}", stopped.join(", ")),
+            });
+        }
+    }
+
+    // ── Clearable disk space ──
+
+    // Journal logs
+    if let Ok(output) = std::process::Command::new("journalctl")
+        .args(["--disk-usage"])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Parse "Archived and active journals take up 1.2G in the file system."
+        if let Some(size_str) = stdout.split("take up ").nth(1).and_then(|s| s.split(' ').next()) {
+            let size_mb = parse_size_to_mb(size_str);
+            if size_mb > 500.0 {
+                issues.push(Issue {
+                    severity: "info".into(),
+                    category: "disk".into(),
+                    title: format!("Journal logs using {}", size_str),
+                    detail: format!("Run 'journalctl --vacuum-size=200M' to reclaim space"),
+                });
+            }
+        }
+    }
+
+    // Package cache (apt)
+    if let Ok(output) = std::process::Command::new("du")
+        .args(["-sh", "/var/cache/apt/archives"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(size_str) = stdout.split_whitespace().next() {
+                let size_mb = parse_size_to_mb(size_str);
+                if size_mb > 200.0 {
+                    issues.push(Issue {
+                        severity: "info".into(),
+                        category: "disk".into(),
+                        title: format!("APT cache using {}", size_str),
+                        detail: "Run 'apt clean' to reclaim space".into(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Package cache (dnf/yum)
+    if let Ok(output) = std::process::Command::new("du")
+        .args(["-sh", "/var/cache/dnf"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(size_str) = stdout.split_whitespace().next() {
+                let size_mb = parse_size_to_mb(size_str);
+                if size_mb > 200.0 {
+                    issues.push(Issue {
+                        severity: "info".into(),
+                        category: "disk".into(),
+                        title: format!("DNF cache using {}", size_str),
+                        detail: "Run 'dnf clean all' to reclaim space".into(),
+                    });
+                }
+            }
+        }
+    }
+
+    // /tmp usage
+    if let Ok(output) = std::process::Command::new("du")
+        .args(["-sh", "/tmp"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(size_str) = stdout.split_whitespace().next() {
+                let size_mb = parse_size_to_mb(size_str);
+                if size_mb > 500.0 {
+                    issues.push(Issue {
+                        severity: "info".into(),
+                        category: "disk".into(),
+                        title: format!("/tmp using {}", size_str),
+                        detail: "Temporary files may be safe to clean up".into(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Docker unused images
+    if let Ok(output) = std::process::Command::new("docker")
+        .args(["system", "df", "--format", "{{.Reclaimable}}"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Sum up any reclaimable amounts
+            let mut total_mb = 0.0f64;
+            let mut total_str = String::new();
+            for line in stdout.lines() {
+                let clean = line.trim().split('(').next().unwrap_or("").trim();
+                if !clean.is_empty() && clean != "0B" {
+                    let mb = parse_size_to_mb(clean);
+                    total_mb += mb;
+                    if total_str.is_empty() { total_str = clean.to_string(); }
+                }
+            }
+            if total_mb > 500.0 {
+                issues.push(Issue {
+                    severity: "info".into(),
+                    category: "container".into(),
+                    title: format!("Docker reclaimable space: {:.0} MB", total_mb),
+                    detail: "Run 'docker system prune' to reclaim unused images/containers".into(),
+                });
+            }
+        }
+    }
+
+    issues
+}
+
+/// GET /api/issues/scan — scan system for issues
+pub async fn scan_issues(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let metrics = state.monitor.lock().unwrap().collect();
+    let issues = collect_issues(&metrics);
+
+    // ── AI analysis (if configured) ──
+    let ai_analysis = {
+        let config = state.ai_agent.config.lock().unwrap().clone();
+        if config.is_configured() {
+            let mem_pct = metrics.memory_percent;
+            let summary = format!(
+                "Hostname: {}\nCPU: {:.1}% ({} cores, {})\nMemory: {:.1}% ({}/{} MB)\nSwap: {}/{} MB\nLoad: {:.2} {:.2} {:.2}\nDisks: {}\nProcesses: {}",
+                metrics.hostname,
+                metrics.cpu_usage_percent, metrics.cpu_count, metrics.cpu_model,
+                mem_pct, metrics.memory_used_bytes / 1048576, metrics.memory_total_bytes / 1048576,
+                metrics.swap_used_bytes / 1048576, metrics.swap_total_bytes / 1048576,
+                metrics.load_avg.one, metrics.load_avg.five, metrics.load_avg.fifteen,
+                metrics.disks.iter().map(|d| format!("{}: {:.1}%", d.mount_point, d.usage_percent)).collect::<Vec<_>>().join(", "),
+                metrics.processes,
+            );
+            state.ai_agent.health_check(&summary).await
+        } else {
+            None
+        }
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "hostname": metrics.hostname,
+        "version": env!("CARGO_PKG_VERSION"),
+        "issues": issues,
+        "ai_analysis": ai_analysis,
+    }))
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -5038,6 +6893,37 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/storage/mounts/{id}/unmount", web::post().to(storage_do_unmount))
         .route("/api/storage/mounts/{id}/sync", web::post().to(storage_sync_mount))
         .route("/api/storage/mounts/{id}/sync-s3", web::post().to(storage_sync_s3))
+        // ZFS
+        .route("/api/storage/zfs/status", web::get().to(zfs_status))
+        .route("/api/storage/zfs/pools", web::get().to(zfs_pools))
+        .route("/api/storage/zfs/datasets", web::get().to(zfs_datasets))
+        .route("/api/storage/zfs/snapshots", web::get().to(zfs_snapshots))
+        .route("/api/storage/zfs/snapshot", web::post().to(zfs_create_snapshot))
+        .route("/api/storage/zfs/snapshot", web::delete().to(zfs_delete_snapshot))
+        .route("/api/storage/zfs/pool/scrub", web::post().to(zfs_pool_scrub))
+        .route("/api/storage/zfs/pool/status", web::get().to(zfs_pool_status))
+        .route("/api/storage/zfs/pool/iostat", web::get().to(zfs_pool_iostat))
+        // File Manager
+        .route("/api/files/browse", web::get().to(files_browse))
+        .route("/api/files/mkdir", web::post().to(files_mkdir))
+        .route("/api/files/delete", web::post().to(files_delete))
+        .route("/api/files/rename", web::post().to(files_rename))
+        .route("/api/files/upload", web::post().to(files_upload))
+        .route("/api/files/download", web::get().to(files_download))
+        .route("/api/files/search", web::get().to(files_search))
+        .route("/api/files/chmod", web::post().to(files_chmod))
+        // Docker File Manager
+        .route("/api/files/docker/browse", web::get().to(files_docker_browse))
+        .route("/api/files/docker/mkdir", web::post().to(files_docker_mkdir))
+        .route("/api/files/docker/delete", web::post().to(files_docker_delete))
+        .route("/api/files/docker/rename", web::post().to(files_docker_rename))
+        .route("/api/files/docker/download", web::get().to(files_docker_download))
+        // LXC File Manager
+        .route("/api/files/lxc/browse", web::get().to(files_lxc_browse))
+        .route("/api/files/lxc/mkdir", web::post().to(files_lxc_mkdir))
+        .route("/api/files/lxc/delete", web::post().to(files_lxc_delete))
+        .route("/api/files/lxc/rename", web::post().to(files_lxc_rename))
+        .route("/api/files/lxc/download", web::get().to(files_lxc_download))
         // Networking
         .route("/api/networking/interfaces", web::get().to(net_list_interfaces))
         .route("/api/networking/dns", web::get().to(net_get_dns))
@@ -5114,6 +7000,21 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/config/export", web::get().to(config_export))
         .route("/api/config/import", web::post().to(config_import))
         .route("/api/upgrade", web::post().to(system_upgrade))
+        // Issues Scanner
+        .route("/api/issues/scan", web::get().to(scan_issues))
+        // Security (Fail2ban, iptables, UFW)
+        .route("/api/security/status", web::get().to(security_status))
+        .route("/api/security/fail2ban/install", web::post().to(security_fail2ban_install))
+        .route("/api/security/fail2ban/config", web::get().to(security_fail2ban_config_get))
+        .route("/api/security/fail2ban/config", web::post().to(security_fail2ban_config_save))
+        .route("/api/security/fail2ban/unban", web::post().to(security_fail2ban_unban))
+        .route("/api/security/ufw/install", web::post().to(security_ufw_install))
+        .route("/api/security/ufw/rule", web::post().to(security_ufw_add_rule))
+        .route("/api/security/ufw/rule", web::delete().to(security_ufw_delete_rule))
+        .route("/api/security/ufw/toggle", web::post().to(security_ufw_toggle))
+        .route("/api/security/iptables/rules", web::get().to(security_iptables_rules))
+        .route("/api/security/updates/check", web::post().to(security_check_updates))
+        .route("/api/security/updates/apply", web::post().to(security_apply_updates))
         // Node proxy — forward API calls to remote nodes (must be last — wildcard path)
         .route("/api/nodes/{id}/proxy/{path:.*}", web::get().to(node_proxy))
         .route("/api/nodes/{id}/proxy/{path:.*}", web::post().to(node_proxy))

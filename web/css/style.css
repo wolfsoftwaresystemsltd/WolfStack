@@ -307,7 +307,7 @@ body {
 }
 
 .page-content {
-    padding: 28px 32px;
+    padding: 8px 32px 28px;
 }
 
 #page-terminal {
@@ -316,7 +316,7 @@ body {
 
 /* Ensure page-views outside .page-content still get padding */
 .main-content>.page-view {
-    padding: 28px 32px;
+    padding: 8px 32px 28px;
 }
 
 /* ─── Time Range Selector ─── */
