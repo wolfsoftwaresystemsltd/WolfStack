@@ -3534,7 +3534,7 @@ async function toggleCronJob(index, currentlyEnabled, schedule, command, comment
 }
 
 var PREMADE_CRON_JOBS = {
-    'wolfstack-update': { schedule: '0 3 * * *', command: 'cd /opt/wolfstack && bash setup.sh --auto', comment: 'Auto-update WolfStack' },
+    'wolfstack-update': { schedule: '0 3 * * *', command: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | bash', comment: 'Auto-update WolfStack (daily 3AM)' },
     'docker-prune': { schedule: '0 4 * * 0', command: 'docker image prune -af 2>/dev/null; docker system prune -f 2>/dev/null', comment: 'Clean Docker images (weekly)' },
     'apt-update': { schedule: '0 2 * * 1', command: 'apt-get update -qq && apt-get upgrade -y -qq', comment: 'System updates (weekly Mon 2AM)' },
     'certbot-renew': { schedule: '0 5 * * *', command: 'certbot renew --quiet', comment: 'Renew SSL certificates' },
