@@ -12845,6 +12845,7 @@ function renderNodeSecurity(node, data) {
             </div>
             <div style="display:flex; gap:8px; margin-top:12px;">
                 <button onclick="editJailLocal('${nodePrefix}')" class="btn btn-sm" style="font-size:12px;">📝 Edit jail.local</button>
+                <button onclick="securityAction('${nodePrefix}security/fail2ban/rebuild', 'POST', {}, this)" class="btn btn-sm" style="font-size:12px;">🔄 Rebuild jail.local</button>
             </div>` : `
             <div style="margin-top:12px; padding:12px; background:var(--bg-primary); border-radius:8px; border:1px solid var(--border);">
                 <div style="display:flex; align-items:center; justify-content:space-between;">
