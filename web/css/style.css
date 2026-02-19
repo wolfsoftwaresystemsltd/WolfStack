@@ -227,91 +227,145 @@
 
 /* ─── Glass Theme ─── */
 [data-theme="glass"] {
-    --bg-primary: rgba(15, 15, 35, 0.6);
-    --bg-secondary: rgba(255, 255, 255, 0.05);
-    --bg-card: rgba(255, 255, 255, 0.07);
-    --bg-card-hover: rgba(255, 255, 255, 0.12);
-    --bg-input: rgba(255, 255, 255, 0.06);
-    --bg-tertiary: rgba(255, 255, 255, 0.08);
-    --border: rgba(255, 255, 255, 0.12);
-    --border-light: rgba(255, 255, 255, 0.22);
-    --text-primary: #f0f0ff;
-    --text-secondary: #a0a8c8;
-    --text-muted: #6870a0;
-    --accent: #818cf8;
-    --accent-light: #a5b4fc;
-    --accent-glow: rgba(129, 140, 248, 0.18);
+    --bg-primary: rgba(4, 8, 28, 0.75);
+    --bg-secondary: rgba(10, 20, 60, 0.55);
+    --bg-card: rgba(12, 28, 80, 0.45);
+    --bg-card-hover: rgba(18, 40, 100, 0.6);
+    --bg-input: rgba(8, 18, 55, 0.5);
+    --bg-tertiary: rgba(14, 30, 75, 0.45);
+    --border: rgba(80, 140, 255, 0.18);
+    --border-light: rgba(100, 180, 255, 0.32);
+    --text-primary: #dceeff;
+    --text-secondary: #7eaee0;
+    --text-muted: #456090;
+    --accent: #3b9eff;
+    --accent-light: #74c0ff;
+    --accent-glow: rgba(59, 158, 255, 0.22);
     --success: #34d399;
     --success-bg: rgba(52, 211, 153, 0.12);
     --warning: #fbbf24;
     --warning-bg: rgba(251, 191, 36, 0.12);
-    --danger: #f472b6;
-    --danger-bg: rgba(244, 114, 182, 0.12);
-    --info: #67e8f9;
-    --info-bg: rgba(103, 232, 249, 0.12);
-    --gradient-main: linear-gradient(135deg, #818cf8 0%, #a78bfa 50%, #67e8f9 100%);
+    --danger: #f87171;
+    --danger-bg: rgba(248, 113, 113, 0.12);
+    --info: #60c8ff;
+    --info-bg: rgba(96, 200, 255, 0.12);
+    --gradient-main: linear-gradient(135deg, #1a6fff 0%, #3b9eff 50%, #74c0ff 100%);
     --gradient-success: linear-gradient(135deg, #34d399 0%, #6ee7b7 100%);
-    --gradient-danger: linear-gradient(135deg, #f472b6 0%, #fb7185 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
-    --shadow-md: 0 4px 24px rgba(0, 0, 0, 0.4);
-    --shadow-lg: 0 12px 48px rgba(0, 0, 0, 0.5);
-    --shadow-glow: 0 0 40px rgba(129, 140, 248, 0.2);
+    --gradient-danger: linear-gradient(135deg, #f87171 0%, #fca5a5 100%);
+    --shadow-sm: 0 2px 8px rgba(0, 20, 80, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 6px 28px rgba(0, 20, 100, 0.6), 0 2px 8px rgba(0, 0, 0, 0.5);
+    --shadow-lg: 0 16px 56px rgba(0, 15, 80, 0.75), 0 4px 16px rgba(0, 0, 0, 0.6);
+    --shadow-glow: 0 0 40px rgba(30, 100, 255, 0.25), 0 0 80px rgba(30, 80, 200, 0.12);
 }
 
-/* Glass — animated mesh background on <body> */
+/* Glass — shimmer keyframe */
+@keyframes glass-shimmer {
+    0% {
+        background-position: -200% center;
+    }
+
+    100% {
+        background-position: 200% center;
+    }
+}
+
+/* Glass — deep dark blue mesh background */
 [data-theme="glass"] body {
     background:
-        radial-gradient(ellipse at 20% 20%, rgba(99, 102, 241, 0.35) 0%, transparent 55%),
-        radial-gradient(ellipse at 80% 10%, rgba(168, 85, 247, 0.28) 0%, transparent 50%),
-        radial-gradient(ellipse at 60% 80%, rgba(6, 182, 212, 0.25) 0%, transparent 55%),
-        radial-gradient(ellipse at 10% 75%, rgba(244, 114, 182, 0.2) 0%, transparent 50%),
-        #0a0a1e;
+        radial-gradient(ellipse at 15% 20%, rgba(20, 80, 220, 0.55) 0%, transparent 50%),
+        radial-gradient(ellipse at 80% 10%, rgba(10, 50, 180, 0.45) 0%, transparent 45%),
+        radial-gradient(ellipse at 65% 85%, rgba(5, 30, 140, 0.50) 0%, transparent 50%),
+        radial-gradient(ellipse at 5% 80%, rgba(30, 60, 200, 0.35) 0%, transparent 45%),
+        radial-gradient(ellipse at 50% 50%, rgba(10, 25, 90, 0.80) 0%, transparent 70%),
+        #020714;
     background-attachment: fixed;
 }
 
-/* Glass — frosted sidebar */
+/* Glass — frosted sidebar with blue tint */
 [data-theme="glass"] .sidebar {
-    background: rgba(255, 255, 255, 0.05);
-    backdrop-filter: blur(20px) saturate(1.6);
-    -webkit-backdrop-filter: blur(20px) saturate(1.6);
-    border-right: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(6, 16, 55, 0.65);
+    backdrop-filter: blur(24px) saturate(1.8) brightness(0.95);
+    -webkit-backdrop-filter: blur(24px) saturate(1.8) brightness(0.95);
+    border-right: 1px solid rgba(60, 130, 255, 0.2);
+    box-shadow: 4px 0 32px rgba(0, 10, 60, 0.6);
 }
 
 /* Glass — frosted top-bar */
 [data-theme="glass"] .top-bar {
-    background: rgba(10, 10, 30, 0.5);
-    backdrop-filter: blur(20px) saturate(1.6);
-    -webkit-backdrop-filter: blur(20px) saturate(1.6);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(4, 12, 45, 0.7);
+    backdrop-filter: blur(24px) saturate(1.8) brightness(0.9);
+    -webkit-backdrop-filter: blur(24px) saturate(1.8) brightness(0.9);
+    border-bottom: 1px solid rgba(60, 130, 255, 0.18);
+    box-shadow: 0 4px 24px rgba(0, 10, 60, 0.55);
 }
 
-/* Glass — frosted cards */
+/* Glass — frosted cards with shimmer top edge */
 [data-theme="glass"] .card,
 [data-theme="glass"] .stat-card {
-    background: rgba(255, 255, 255, 0.07);
-    backdrop-filter: blur(16px) saturate(1.5);
-    -webkit-backdrop-filter: blur(16px) saturate(1.5);
-    border: 1px solid rgba(255, 255, 255, 0.13);
+    background: rgba(10, 25, 75, 0.45);
+    backdrop-filter: blur(18px) saturate(1.7) brightness(0.95);
+    -webkit-backdrop-filter: blur(18px) saturate(1.7) brightness(0.95);
+    border: 1px solid rgba(70, 140, 255, 0.2);
+    box-shadow:
+        0 8px 32px rgba(0, 15, 80, 0.6),
+        0 2px 8px rgba(0, 0, 0, 0.5),
+        inset 0 1px 0 rgba(120, 200, 255, 0.12);
+    position: relative;
+    overflow: hidden;
+}
+
+/* Shimmer highlight sweeping across the card top */
+[data-theme="glass"] .card::before,
+[data-theme="glass"] .stat-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg,
+            transparent 0%,
+            rgba(120, 200, 255, 0.0) 20%,
+            rgba(160, 220, 255, 0.7) 50%,
+            rgba(120, 200, 255, 0.0) 80%,
+            transparent 100%);
+    background-size: 200% auto;
+    animation: glass-shimmer 4s linear infinite;
+    pointer-events: none;
 }
 
 [data-theme="glass"] .card:hover,
 [data-theme="glass"] .stat-card:hover {
-    background: rgba(255, 255, 255, 0.11);
-    border-color: rgba(255, 255, 255, 0.22);
+    background: rgba(14, 36, 100, 0.58);
+    border-color: rgba(80, 160, 255, 0.35);
+    box-shadow:
+        0 12px 48px rgba(0, 20, 100, 0.7),
+        0 4px 16px rgba(0, 0, 0, 0.6),
+        inset 0 1px 0 rgba(150, 220, 255, 0.2),
+        0 0 20px rgba(30, 100, 255, 0.12);
 }
 
-/* Glass — frosted modals & dropdowns */
+/* Glass — frosted modals with deep shadow */
 [data-theme="glass"] .modal-content,
 [data-theme="glass"] .dropdown-menu {
-    background: rgba(20, 20, 50, 0.7);
-    backdrop-filter: blur(24px) saturate(1.6);
-    -webkit-backdrop-filter: blur(24px) saturate(1.6);
-    border: 1px solid rgba(255, 255, 255, 0.15);
+    background: rgba(6, 18, 60, 0.8);
+    backdrop-filter: blur(28px) saturate(1.9);
+    -webkit-backdrop-filter: blur(28px) saturate(1.9);
+    border: 1px solid rgba(70, 140, 255, 0.22);
+    box-shadow:
+        0 24px 80px rgba(0, 10, 60, 0.8),
+        0 8px 32px rgba(0, 0, 0, 0.6),
+        inset 0 1px 0 rgba(140, 210, 255, 0.15);
 }
 
-/* Glass — data table rows */
+/* Glass — data table row hover */
 [data-theme="glass"] .data-table tbody tr:hover {
-    background: rgba(255, 255, 255, 0.07);
+    background: rgba(20, 60, 160, 0.2);
+}
+
+/* Glass — sticky table header */
+[data-theme="glass"] .data-table thead {
+    background: rgba(8, 20, 65, 0.7);
 }
 
 /* Glass — form inputs */
@@ -319,16 +373,56 @@
 [data-theme="glass"] input,
 [data-theme="glass"] select,
 [data-theme="glass"] textarea {
-    background: rgba(255, 255, 255, 0.06);
-    border-color: rgba(255, 255, 255, 0.15);
+    background: rgba(6, 16, 55, 0.6);
+    border-color: rgba(60, 120, 240, 0.25);
     backdrop-filter: blur(8px);
     color: var(--text-primary);
+    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+[data-theme="glass"] .form-control:focus,
+[data-theme="glass"] input:focus,
+[data-theme="glass"] select:focus,
+[data-theme="glass"] textarea:focus {
+    border-color: rgba(60, 160, 255, 0.5);
+    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(30, 100, 255, 0.15);
+    outline: none;
+}
+
+/* Glass — buttons shimmer */
+[data-theme="glass"] .btn-primary {
+    background: linear-gradient(135deg, rgba(20, 90, 220, 0.9), rgba(50, 130, 255, 0.9));
+    border: 1px solid rgba(80, 160, 255, 0.4);
+    box-shadow: 0 4px 16px rgba(0, 60, 200, 0.4), inset 0 1px 0 rgba(160, 220, 255, 0.2);
+}
+
+[data-theme="glass"] .btn-primary:hover {
+    background: linear-gradient(135deg, rgba(30, 110, 255, 0.95), rgba(70, 155, 255, 0.95));
+    box-shadow: 0 6px 24px rgba(0, 80, 255, 0.5), inset 0 1px 0 rgba(180, 230, 255, 0.25);
+}
+
+/* Glass — stat card shimmer ring on stat-icon */
+[data-theme="glass"] .stat-icon {
+    box-shadow: 0 0 12px rgba(60, 160, 255, 0.3), inset 0 1px 0 rgba(160, 220, 255, 0.2);
 }
 
 /* Glass — log viewer */
 [data-theme="glass"] .log-viewer {
-    background: rgba(0, 0, 0, 0.4);
+    background: rgba(2, 8, 30, 0.7);
     backdrop-filter: blur(12px);
+    box-shadow: inset 0 4px 24px rgba(0, 0, 0, 0.6);
+}
+
+/* Glass — nav active item */
+[data-theme="glass"] .nav-item.active {
+    background: rgba(30, 80, 200, 0.25);
+    box-shadow: inset 3px 0 0 #3b9eff, 0 2px 8px rgba(0, 40, 160, 0.3);
+}
+
+/* Glass — progress bars */
+[data-theme="glass"] .progress-bar {
+    background: rgba(8, 20, 65, 0.6);
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
 /* ─── Settings Page Tabs ─── */
