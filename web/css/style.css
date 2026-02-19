@@ -1069,6 +1069,16 @@ body {
     }
 }
 
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
 .fade-in {
     animation: fadeInUp 0.4s ease;
 }

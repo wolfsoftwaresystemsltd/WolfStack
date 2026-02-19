@@ -11905,73 +11905,110 @@ async function scanForIssues() {
     var upgradeAllBtn = document.getElementById('issues-upgrade-all-btn');
     if (btn) { btn.disabled = true; btn.innerHTML = '<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Scanning...'; }
     if (upgradeAllBtn) upgradeAllBtn.style.display = 'none';
-    if (listEl) listEl.innerHTML = '<div class="card"><div class="card-body" style="padding:48px; text-align:center; color:var(--text-muted);"><div class="page-loading-spinner" style="margin:0 auto 16px;"></div><p style="font-size:14px; margin:0;">Scanning nodes for issues...</p></div></div>';
 
     // Hide AI section while scanning
     var aiSection = document.getElementById('issues-ai-section');
     if (aiSection) aiSection.style.display = 'none';
 
     var results = []; // Array of { node_id, hostname, version, issues, ai_analysis, is_self }
+    var counts = { critical: 0, warning: 0, info: 0 };
 
-    // Find local node info
+    // Find local node info and remote nodes
     var localNode = (typeof allNodes !== 'undefined') ? allNodes.find(function (n) { return n.is_self; }) : null;
+    var remoteNodes = (typeof allNodes !== 'undefined' && allNodes.length) ? allNodes.filter(function (n) { return !n.is_self && n.node_type !== 'proxmox'; }) : [];
+    var totalNodes = 1 + remoteNodes.length;
+    var completedNodes = 0;
 
-    // Scan local node
+    // Set up the table skeleton with progress bar immediately
+    if (listEl) {
+        listEl.innerHTML = '<div class="card"><div class="card-body" style="padding:0; overflow-x:auto;">'
+            + '<div id="issues-progress" style="padding:12px 16px; background:var(--bg-secondary); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px;">'
+            + '<div style="flex:1; height:6px; background:var(--bg-tertiary); border-radius:3px; overflow:hidden;">'
+            + '<div id="issues-progress-bar" style="width:0%; height:100%; background:var(--accent-primary); border-radius:3px; transition:width 0.3s ease;"></div></div>'
+            + '<span id="issues-progress-text" style="font-size:12px; color:var(--text-muted); white-space:nowrap;">Scanning 0/' + totalNodes + ' nodes...</span></div>'
+            + '<table style="width:100%; border-collapse:collapse; font-size:13px;">'
+            + '<thead><tr style="background:var(--bg-secondary); border-bottom:1px solid var(--border);">'
+            + '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Node</th>'
+            + '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">WolfStack</th>'
+            + '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Issues</th>'
+            + '<th style="padding:12px 16px; text-align:right; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Action</th>'
+            + '</tr></thead><tbody id="issues-table-body"></tbody></table></div></div>';
+    }
+
+    // Helper: update progress bar
+    function updateProgress() {
+        completedNodes++;
+        var pct = Math.round((completedNodes / totalNodes) * 100);
+        var bar = document.getElementById('issues-progress-bar');
+        var text = document.getElementById('issues-progress-text');
+        if (bar) bar.style.width = pct + '%';
+        if (text) text.textContent = completedNodes < totalNodes ? ('Scanning ' + completedNodes + '/' + totalNodes + ' nodes...') : (totalNodes + ' nodes scanned ✓');
+    }
+
+    // Helper: update the summary counters
+    function updateCounts() {
+        var critEl = document.getElementById('issues-count-critical');
+        var warnEl = document.getElementById('issues-count-warning');
+        var infoEl = document.getElementById('issues-count-info');
+        var nodesEl = document.getElementById('issues-count-nodes');
+        if (critEl) critEl.textContent = counts.critical;
+        if (warnEl) warnEl.textContent = counts.warning;
+        if (infoEl) infoEl.textContent = counts.info;
+        if (nodesEl) nodesEl.textContent = results.length;
+    }
+
+    // Helper: add a result to the counts + table
+    function addResult(data) {
+        results.push(data);
+        (data.issues || []).forEach(function (issue) {
+            if (counts[issue.severity] !== undefined) counts[issue.severity]++;
+        });
+        updateCounts();
+        appendIssueRow(data, results.length - 1);
+        updateProgress();
+    }
+
+    // Scan local node first
     try {
         var resp = await fetch('/api/issues/scan');
         var data = await resp.json();
         data.node_id = localNode ? localNode.id : 'local';
         data.is_self = true;
-        results.push(data);
+        addResult(data);
     } catch (e) {
-        results.push({ node_id: 'local', hostname: 'local', version: '?', issues: [{ severity: 'warning', category: 'scan', title: 'Scan failed', detail: e.message }], ai_analysis: null, is_self: true });
+        addResult({ node_id: 'local', hostname: 'local', version: '?', issues: [{ severity: 'warning', category: 'scan', title: 'Scan failed', detail: e.message }], ai_analysis: null, is_self: true });
     }
 
-    // Scan remote WolfStack nodes
-    if (typeof allNodes !== 'undefined' && allNodes.length) {
-        var remoteNodes = allNodes.filter(function (n) { return !n.is_self && n.node_type !== 'proxmox'; });
-        var promises = remoteNodes.map(function (node) {
+    // Scan remote WolfStack nodes — fire all but render each as it arrives
+    if (remoteNodes.length > 0) {
+        var remotePromises = remoteNodes.map(function (node) {
             return fetch('/api/nodes/' + encodeURIComponent(node.id) + '/proxy/issues/scan')
                 .then(function (r) {
                     if (!r.ok) throw new Error('HTTP ' + r.status + (r.status === 404 ? ' — node may need WolfStack update' : ''));
                     return r.json();
                 })
-                .then(function (data) { data.node_id = node.id; data.is_self = false; return data; })
+                .then(function (data) { data.node_id = node.id; data.is_self = false; addResult(data); })
                 .catch(function (e) {
-                    return { node_id: node.id, hostname: node.hostname || node.id, version: '?', issues: [{ severity: 'info', category: 'scan', title: 'Could not scan', detail: e.message }], ai_analysis: null, is_self: false };
+                    addResult({ node_id: node.id, hostname: node.hostname || node.id, version: '?', issues: [{ severity: 'info', category: 'scan', title: 'Could not scan', detail: e.message }], ai_analysis: null, is_self: false });
                 });
         });
-        var remoteResults = await Promise.all(promises);
-        results = results.concat(remoteResults);
+        await Promise.all(remotePromises);
     }
 
     issuesScanResults = results;
 
-    // Aggregate counts
-    var counts = { critical: 0, warning: 0, info: 0 };
-    results.forEach(function (r) {
-        (r.issues || []).forEach(function (issue) {
-            if (counts[issue.severity] !== undefined) counts[issue.severity]++;
-        });
-    });
+    // Hide progress bar now that we're done
+    var progressEl = document.getElementById('issues-progress');
+    if (progressEl) progressEl.style.display = 'none';
 
-    var critEl = document.getElementById('issues-count-critical');
-    var warnEl = document.getElementById('issues-count-warning');
-    var infoEl = document.getElementById('issues-count-info');
-    var nodesEl = document.getElementById('issues-count-nodes');
-    if (critEl) critEl.textContent = counts.critical;
-    if (warnEl) warnEl.textContent = counts.warning;
-    if (infoEl) infoEl.textContent = counts.info;
-    if (nodesEl) nodesEl.textContent = results.length;
-    // Find the latest version across all results
+    // Now that all results are in, re-render the version column in case we can detect outdated nodes
     var latestVersion = '0.0.0';
     results.forEach(function (r) {
         if (r.version && r.version !== '?' && compareVersions(r.version, latestVersion) > 0) {
             latestVersion = r.version;
         }
     });
-
-    // Render table
+    // Re-render the full table with correct version badges (now we know the latest)
     renderIssueResults(results, latestVersion);
 
     // Show Upgrade All button only if at least one node needs upgrading
@@ -12000,6 +12037,74 @@ async function scanForIssues() {
     }
 
     if (btn) { btn.disabled = false; btn.innerHTML = '🔄 Scan Now'; }
+}
+
+function appendIssueRow(r, idx) {
+    var tbody = document.getElementById('issues-table-body');
+    if (!tbody) return;
+
+    var severityBadge = function (sev) {
+        var colors = {
+            critical: { bg: 'rgba(239,68,68,0.15)', text: '#ef4444', icon: '🔴' },
+            warning: { bg: 'rgba(234,179,8,0.15)', text: '#eab308', icon: '🟡' },
+            info: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', icon: '🔵' }
+        };
+        var c = colors[sev] || colors.info;
+        return '<span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:' + c.bg + '; color:' + c.text + ';">' + c.icon + ' ' + sev.toUpperCase() + '</span>';
+    };
+
+    var categoryIcons = {
+        cpu: '⚡', memory: '🧠', disk: '💾', swap: '🔄', load: '📈',
+        service: '⚙️', container: '📦', scan: '🔍'
+    };
+
+    var issues = r.issues || [];
+    var rowBg = idx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
+    var nodeVersion = r.version || '?';
+
+    var html = '';
+    // Node
+    html += '<td style="padding:12px 16px; white-space:nowrap;">';
+    html += '<div style="display:flex; align-items:center; gap:8px;">';
+    html += '<span style="font-size:16px;">🖥️</span>';
+    html += '<div>';
+    html += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(r.hostname || 'Unknown') + '</div>';
+    if (r.is_self) html += '<div style="font-size:11px; color:var(--text-muted);">local</div>';
+    html += '</div></div></td>';
+
+    // Version — show plain version for now (will be updated with badges in final render)
+    html += '<td style="padding:12px 16px; white-space:nowrap;">';
+    html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(255,255,255,0.06); color:var(--text-secondary); border:1px solid var(--border);">v' + escapeHtml(nodeVersion) + '</span>';
+    html += '</td>';
+
+    // Issues
+    html += '<td style="padding:12px 16px;">';
+    if (issues.length === 0) {
+        html += '<span style="color:#10b981; font-weight:500;">✅ All clear</span>';
+    } else {
+        var order = { critical: 0, warning: 1, info: 2 };
+        var sorted = issues.slice().sort(function (a, b) { return (order[a.severity] || 9) - (order[b.severity] || 9); });
+        sorted.forEach(function (issue) {
+            var catIcon = categoryIcons[issue.category] || '❓';
+            html += '<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">';
+            html += severityBadge(issue.severity);
+            html += '<span style="font-size:14px;">' + catIcon + '</span>';
+            html += '<span style="color:var(--text-primary); font-weight:500;">' + escapeHtml(issue.title) + '</span>';
+            html += '<span style="color:var(--text-muted); font-size:12px;"> — ' + escapeHtml(issue.detail) + '</span>';
+            html += '</div>';
+        });
+    }
+    html += '</td>';
+
+    // Action — skip version comparison for now (final render will add upgrade buttons)
+    html += '<td style="padding:12px 16px; text-align:right; white-space:nowrap;">';
+    html += '<span style="color:var(--text-muted); font-size:12px;">—</span>';
+    html += '</td>';
+
+    var tr = document.createElement('tr');
+    tr.style.cssText = 'border-bottom:1px solid var(--border); background:' + rowBg + '; animation:fadeIn 0.3s ease;';
+    tr.innerHTML = html;
+    tbody.appendChild(tr);
 }
 
 function compareVersions(a, b) {
