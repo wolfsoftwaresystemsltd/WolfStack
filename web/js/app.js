@@ -97,7 +97,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', 'ai-settings': 'AI Agent', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', security: 'Security' };
+    const titles = { datacenter: 'Datacenter', 'ai-settings': 'AI Agent', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -111,8 +111,6 @@ function selectView(page) {
     } else if (page === 'issues') {
         checkIssuesAiBadge();
         loadIssueSchedule();
-    } else if (page === 'security') {
-        loadSecurityStatus();
     }
 }
 
@@ -147,6 +145,7 @@ function selectServerView(nodeId, view) {
         'pve-resources': 'VMs & Containers',
         'mysql-editor': 'MariaDB/MySQL',
         'terminal': 'Terminal',
+        'security': 'Security',
     };
     document.getElementById('page-title').textContent = `${hostname} — ${viewTitles[view] || view}`;
     document.getElementById('hostname-display').textContent = `${hostname} (${node?.address}:${node?.port})`;
@@ -167,7 +166,7 @@ function selectServerView(nodeId, view) {
 
     // Load data for the view
     // Show a modern loading overlay for views that fetch data asynchronously
-    const asyncViews = ['components', 'services', 'containers', 'lxc', 'vms', 'storage', 'networking', 'backups', 'wolfnet', 'certificates', 'cron', 'pve-resources', 'mysql-editor'];
+    const asyncViews = ['components', 'services', 'containers', 'lxc', 'vms', 'storage', 'networking', 'backups', 'wolfnet', 'certificates', 'cron', 'pve-resources', 'mysql-editor', 'security'];
     if (asyncViews.includes(view) && el) {
         // Clear table bodies to prevent stale data showing
         el.querySelectorAll('tbody').forEach(tb => { tb.innerHTML = ''; });
@@ -219,6 +218,7 @@ function selectServerView(nodeId, view) {
     if (view === 'cron') loadCronJobs().finally(() => hidePageLoadingOverlay(el));
     if (view === 'pve-resources') { renderPveResourcesView(nodeId); hidePageLoadingOverlay(el); }
     if (view === 'mysql-editor') { loadMySQLEditor(); hidePageLoadingOverlay(el); }
+    if (view === 'security') loadNodeSecurity().finally(() => hidePageLoadingOverlay(el));
 }
 
 // ─── Server Tree ───
@@ -351,6 +351,9 @@ function buildServerTree(nodes) {
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="cron" onclick="selectServerView('${node.id}', 'cron')">
                             <span class="icon">🕐</span> Cron Jobs
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="security" onclick="selectServerView('${node.id}', 'security')">
+                            <span class="icon">🛡️</span> Security
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
                             <span class="icon">💻</span> Terminal
@@ -12469,173 +12472,134 @@ async function uninstallApp(installId, name) {
 }
 
 // ═══════════════════════════════════════════════
-// ─── Security Page ───
+// ─── Security Page (per-node) ───
 // ═══════════════════════════════════════════════
 
-async function loadSecurityStatus() {
-    const grid = document.getElementById('security-nodes-grid');
-    if (!grid) return;
-    grid.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted); grid-column:1/-1;"><div class="scanning-spinner" style="margin:0 auto 12px;"></div>Loading security status across all nodes...</div>';
+async function loadNodeSecurity() {
+    const container = document.getElementById('security-node-content');
+    if (!container) return;
 
-    // Gather nodes sorted alphabetically
-    const sortedNodes = [...allNodes].sort((a, b) => a.hostname.localeCompare(b.hostname));
-    if (sortedNodes.length === 0) {
-        grid.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted); grid-column:1/-1;">No nodes found.</div>';
+    const node = allNodes.find(n => n.id === currentNodeId);
+    if (!node) {
+        container.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);">No node selected.</div>';
         return;
     }
 
-    // Fetch security status from all nodes in parallel
-    const results = await Promise.allSettled(sortedNodes.map(async node => {
-        const url = node.is_self
-            ? '/api/security/status'
-            : `/api/nodes/${node.id}/proxy/security/status`;
+    const url = node.is_self
+        ? '/api/security/status'
+        : `/api/nodes/${node.id}/proxy/security/status`;
+
+    try {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return { node, data: await res.json() };
-    }));
-
-    grid.innerHTML = '';
-    results.forEach(r => {
-        if (r.status === 'fulfilled') {
-            grid.innerHTML += renderSecurityCard(r.value.node, r.value.data);
-        } else {
-            // Find the node for this failed request
-            const idx = results.indexOf(r);
-            const node = sortedNodes[idx];
-            grid.innerHTML += renderSecurityCardError(node);
-        }
-    });
+        const data = await res.json();
+        container.innerHTML = renderNodeSecurity(node, data);
+    } catch (e) {
+        container.innerHTML = `<div class="card" style="border-color:rgba(239,68,68,0.3);"><div class="card-body" style="padding:24px;"><div style="color:#ef4444; font-size:14px;">⚠️ Failed to retrieve security status: ${escapeHtml(e.message)}</div></div></div>`;
+    }
 }
 
-function refreshSecurityAll() {
-    loadSecurityStatus();
-}
-
-function renderSecurityCard(node, data) {
-    const self = node.is_self ? ' <span style="color:var(--text-muted); font-size:11px;">(this server)</span>' : '';
+function renderNodeSecurity(node, data) {
     const nodePrefix = node.is_self ? '' : `nodes/${node.id}/proxy/`;
 
-    // ── Fail2ban section ──
+    // ── Fail2ban ──
     let f2bHtml;
     if (data.fail2ban.installed) {
         const jails = data.fail2ban.jails || 'none';
         const banned = (data.fail2ban.banned || '').trim();
-        const statusText = (data.fail2ban.status || '').trim();
-        // Extract banned IPs from status output
         const bannedLines = banned ? banned.split('\n').filter(l => l.trim()).map(l => `<div style="font-size:12px; color:#ef4444; padding:2px 0;">${escapeHtml(l.trim())}</div>`).join('') : '<span style="color:#22c55e; font-size:12px;">No banned IPs</span>';
 
         f2bHtml = `
-            <div style="margin-bottom:16px;">
-                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <span style="font-size:18px;">🛡️</span>
-                        <span style="font-weight:600; font-size:14px;">Fail2ban</span>
-                        <span style="background:#22c55e20; color:#22c55e; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600;">Installed</span>
-                    </div>
-                    <button onclick="securityAction('${nodePrefix}security/fail2ban/install', 'POST', {}, this)" style="padding:4px 10px; font-size:11px; border-radius:6px; background:var(--bg-secondary); border:1px solid var(--border); color:var(--text-secondary); cursor:pointer;">🔄 Update</button>
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:20px;">🛡️</span>
+                    <h3 style="margin:0;">Fail2ban</h3>
+                    <span style="background:#22c55e20; color:#22c55e; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Installed</span>
                 </div>
-                <div style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;"><strong>Jails:</strong> ${escapeHtml(jails)}</div>
-                <div style="margin-top:4px;">${bannedLines}</div>
-            </div>`;
+                <button onclick="securityAction('${nodePrefix}security/fail2ban/install', 'POST', {}, this)" class="btn btn-sm" style="font-size:12px;">🔄 Update</button>
+            </div>
+            <div class="card-body">
+                <div style="font-size:13px; color:var(--text-secondary); margin-bottom:8px;"><strong>Jails:</strong> ${escapeHtml(jails)}</div>
+                <div>${bannedLines}</div>
+            </div>
+        </div>`;
     } else {
         f2bHtml = `
-            <div style="margin-bottom:16px;">
-                <div style="display:flex; align-items:center; justify-content:space-between;">
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <span style="font-size:18px;">🛡️</span>
-                        <span style="font-weight:600; font-size:14px;">Fail2ban</span>
-                        <span style="background:#ef444420; color:#ef4444; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600;">Not Installed</span>
-                    </div>
-                    <button onclick="securityAction('${nodePrefix}security/fail2ban/install', 'POST', {}, this)" style="padding:6px 14px; font-size:12px; border-radius:8px; background:linear-gradient(135deg,#dc2626,#ef4444); border:none; color:#fff; cursor:pointer; font-weight:600;">Install</button>
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:20px;">🛡️</span>
+                    <h3 style="margin:0;">Fail2ban</h3>
+                    <span style="background:#ef444420; color:#ef4444; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Not Installed</span>
                 </div>
-            </div>`;
+                <button onclick="securityAction('${nodePrefix}security/fail2ban/install', 'POST', {}, this)" class="btn btn-sm btn-primary" style="font-size:12px;">Install Fail2ban</button>
+            </div>
+            <div class="card-body">
+                <p style="color:var(--text-secondary); font-size:13px; margin:0;">Fail2ban protects against brute-force attacks by banning IPs with too many failed login attempts.</p>
+            </div>
+        </div>`;
     }
 
-    // ── UFW section ──
+    // ── UFW ──
     let ufwHtml;
     if (data.ufw.installed) {
         const ufwStatus = (data.ufw.status || '').trim();
         const isActive = ufwStatus.toLowerCase().includes('active');
         const statusBadge = isActive
-            ? '<span style="background:#22c55e20; color:#22c55e; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600;">Active</span>'
-            : '<span style="background:#f59e0b20; color:#f59e0b; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600;">Inactive</span>';
+            ? '<span style="background:#22c55e20; color:#22c55e; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Active</span>'
+            : '<span style="background:#f59e0b20; color:#f59e0b; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Inactive</span>';
 
         ufwHtml = `
-            <div style="margin-bottom:16px;">
-                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <span style="font-size:18px;">🔥</span>
-                        <span style="font-weight:600; font-size:14px;">UFW Firewall</span>
-                        ${statusBadge}
-                    </div>
-                    <div style="display:flex; gap:6px;">
-                        <button onclick="securityAction('${nodePrefix}security/ufw/toggle', 'POST', {enable: ${!isActive}}, this)" style="padding:4px 10px; font-size:11px; border-radius:6px; background:var(--bg-secondary); border:1px solid var(--border); color:var(--text-secondary); cursor:pointer;">${isActive ? '⏸️ Disable' : '▶️ Enable'}</button>
-                    </div>
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:20px;">🔥</span>
+                    <h3 style="margin:0;">UFW Firewall</h3>
+                    ${statusBadge}
                 </div>
-                <pre style="font-size:11px; color:var(--text-secondary); background:var(--bg-primary); padding:8px; border-radius:6px; max-height:120px; overflow-y:auto; white-space:pre-wrap; margin:0; border:1px solid var(--border);">${escapeHtml(ufwStatus)}</pre>
-                <div style="display:flex; gap:6px; margin-top:8px;">
-                    <input type="text" id="ufw-rule-${node.id}" placeholder="e.g. allow 443/tcp" style="flex:1; padding:6px 10px; font-size:12px; border-radius:6px; background:var(--bg-secondary); border:1px solid var(--border); color:var(--text-primary); outline:none;">
-                    <button onclick="addUfwRule('${nodePrefix}', '${node.id}')" style="padding:6px 12px; font-size:12px; border-radius:6px; background:linear-gradient(135deg,#3b82f6,#60a5fa); border:none; color:#fff; cursor:pointer; font-weight:600;">Add Rule</button>
+                <button onclick="securityAction('${nodePrefix}security/ufw/toggle', 'POST', {enable: ${!isActive}}, this)" class="btn btn-sm" style="font-size:12px;">${isActive ? '⏸️ Disable' : '▶️ Enable'}</button>
+            </div>
+            <div class="card-body">
+                <pre style="font-size:11px; color:var(--text-secondary); background:var(--bg-primary); padding:10px; border-radius:6px; max-height:180px; overflow-y:auto; white-space:pre-wrap; margin:0 0 12px; border:1px solid var(--border);">${escapeHtml(ufwStatus)}</pre>
+                <div style="display:flex; gap:8px;">
+                    <input type="text" id="ufw-rule-input" placeholder="e.g. allow 443/tcp" style="flex:1; padding:8px 12px; font-size:13px; border-radius:8px; background:var(--bg-secondary); border:1px solid var(--border); color:var(--text-primary); outline:none; font-family:inherit;">
+                    <button onclick="addUfwRule('${nodePrefix}')" class="btn btn-sm btn-primary" style="font-size:12px;">Add Rule</button>
                 </div>
-            </div>`;
+            </div>
+        </div>`;
     } else {
         ufwHtml = `
-            <div style="margin-bottom:16px;">
-                <div style="display:flex; align-items:center; justify-content:space-between;">
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <span style="font-size:18px;">🔥</span>
-                        <span style="font-weight:600; font-size:14px;">UFW Firewall</span>
-                        <span style="background:#ef444420; color:#ef4444; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600;">Not Installed</span>
-                    </div>
-                    <button onclick="securityAction('${nodePrefix}security/ufw/install', 'POST', {}, this)" style="padding:6px 14px; font-size:12px; border-radius:8px; background:linear-gradient(135deg,#3b82f6,#60a5fa); border:none; color:#fff; cursor:pointer; font-weight:600;">Install</button>
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:20px;">🔥</span>
+                    <h3 style="margin:0;">UFW Firewall</h3>
+                    <span style="background:#ef444420; color:#ef4444; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Not Installed</span>
                 </div>
-            </div>`;
+                <button onclick="securityAction('${nodePrefix}security/ufw/install', 'POST', {}, this)" class="btn btn-sm btn-primary" style="font-size:12px;">Install UFW</button>
+            </div>
+            <div class="card-body">
+                <p style="color:var(--text-secondary); font-size:13px; margin:0;">UFW (Uncomplicated Firewall) provides an easy-to-use interface for managing iptables firewall rules.</p>
+            </div>
+        </div>`;
     }
 
-    // ── iptables section ──
+    // ── iptables ──
     const iptRules = (data.iptables.rules || '').trim();
     const iptHtml = `
-        <div>
-            <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
-                <span style="font-size:18px;">📋</span>
-                <span style="font-weight:600; font-size:14px;">iptables Rules</span>
-                <span style="background:#3b82f620; color:#3b82f6; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600;">System</span>
-            </div>
-            <pre style="font-size:11px; color:var(--text-secondary); background:var(--bg-primary); padding:8px; border-radius:6px; max-height:200px; overflow-y:auto; white-space:pre-wrap; margin:0; border:1px solid var(--border);">${escapeHtml(iptRules)}</pre>
-        </div>`;
+    <div class="card">
+        <div class="card-header" style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:20px;">📋</span>
+            <h3 style="margin:0;">iptables Rules</h3>
+            <span style="background:#3b82f620; color:#3b82f6; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">System</span>
+        </div>
+        <div class="card-body">
+            <pre style="font-size:11px; color:var(--text-secondary); background:var(--bg-primary); padding:10px; border-radius:6px; max-height:300px; overflow-y:auto; white-space:pre-wrap; margin:0; border:1px solid var(--border);">${escapeHtml(iptRules)}</pre>
+        </div>
+    </div>`;
 
-    return `
-        <div class="card" style="border-color:rgba(220,38,38,0.15);">
-            <div class="card-body" style="padding:20px;">
-                <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid var(--border);">
-                    <div style="width:36px; height:36px; background:linear-gradient(135deg,#dc2626,#ef4444); border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:18px; color:#fff; font-weight:700;">${escapeHtml(node.hostname.charAt(0).toUpperCase())}</div>
-                    <div>
-                        <div style="font-weight:700; font-size:15px;">${escapeHtml(node.hostname)}${self}</div>
-                        <div style="font-size:11px; color:var(--text-muted);">${escapeHtml(node.address)}</div>
-                    </div>
-                </div>
-                ${f2bHtml}
-                <div style="border-top:1px solid var(--border); padding-top:12px; margin-top:12px;">${ufwHtml}</div>
-                <div style="border-top:1px solid var(--border); padding-top:12px; margin-top:12px;">${iptHtml}</div>
-            </div>
-        </div>`;
-}
-
-function renderSecurityCardError(node) {
-    const self = node.is_self ? ' (this server)' : '';
-    return `
-        <div class="card" style="border-color:rgba(239,68,68,0.3);">
-            <div class="card-body" style="padding:20px;">
-                <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
-                    <div style="width:36px; height:36px; background:#ef444430; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:18px;">❌</div>
-                    <div>
-                        <div style="font-weight:700; font-size:15px;">${escapeHtml(node.hostname)}${self}</div>
-                        <div style="font-size:11px; color:var(--text-muted);">${escapeHtml(node.address)}</div>
-                    </div>
-                </div>
-                <div style="color:#ef4444; font-size:13px;">Failed to retrieve security status — node may be offline.</div>
-            </div>
-        </div>`;
+    return f2bHtml + ufwHtml + iptHtml;
 }
 
 async function securityAction(path, method, body, btn) {
@@ -12649,7 +12613,7 @@ async function securityAction(path, method, body, btn) {
         const data = await res.json();
         if (res.ok) {
             showToast(data.output ? 'Action completed' : 'Done', 'success');
-            loadSecurityStatus(); // Refresh
+            loadNodeSecurity();
         } else {
             showToast(data.error || 'Action failed', 'error');
         }
@@ -12661,8 +12625,8 @@ async function securityAction(path, method, body, btn) {
     }
 }
 
-async function addUfwRule(nodePrefix, nodeId) {
-    const input = document.getElementById(`ufw-rule-${nodeId}`);
+async function addUfwRule(nodePrefix) {
+    const input = document.getElementById('ufw-rule-input');
     const rule = (input?.value || '').trim();
     if (!rule) { showToast('Please enter a UFW rule', 'error'); return; }
     try {
@@ -12675,7 +12639,7 @@ async function addUfwRule(nodePrefix, nodeId) {
         if (res.ok) {
             showToast('Rule added', 'success');
             input.value = '';
-            loadSecurityStatus();
+            loadNodeSecurity();
         } else {
             showToast(data.error || 'Failed to add rule', 'error');
         }

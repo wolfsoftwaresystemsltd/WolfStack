@@ -67,9 +67,7 @@
                 <a class="nav-item" data-page="issues" onclick="selectView('issues')">
                     <span class="icon">⚠️</span> Issues
                 </a>
-                <a class="nav-item" data-page="security" onclick="selectView('security')">
-                    <span class="icon">🛡️</span> Security
-                </a>
+
             </div>
             <div class="nav-section">
                 <div class="nav-section-title">Servers</div>
@@ -502,39 +500,10 @@
 
         </div>
 
-        <!-- ═══ App Store Page ═══ -->
-        <!-- ═══════════════════════════════════════════ -->
-        <!-- ─── Security Page ─── -->
-        <!-- ═══════════════════════════════════════════ -->
+        <!-- ═══ Security Page (per-node) ═══ -->
         <div id="page-security" class="page-view" style="display:none;">
-            <!-- Header -->
-            <div class="card"
-                style="margin-bottom:20px; background:linear-gradient(135deg, rgba(220,38,38,0.12), rgba(34,197,94,0.08)); border-color:rgba(220,38,38,0.25);">
-                <div class="card-body"
-                    style="display:flex; align-items:center; justify-content:space-between; padding:28px 32px;">
-                    <div style="display:flex; align-items:center; gap:20px;">
-                        <div
-                            style="width:64px; height:64px; background:linear-gradient(135deg,#dc2626,#22c55e); border-radius:16px; display:flex; align-items:center; justify-content:center; font-size:32px; box-shadow:0 4px 20px rgba(220,38,38,0.3);">
-                            🛡️</div>
-                        <div>
-                            <h2 style="font-size:24px; margin-bottom:4px; color:var(--text-primary); font-weight:700;">
-                                Security</h2>
-                            <p style="color:var(--text-secondary); font-size:13px; margin:0;">Manage Fail2ban intrusion
-                                prevention across your servers. Install, configure, and monitor bans.</p>
-                        </div>
-                    </div>
-                    <button class="btn btn-danger" onclick="refreshSecurityAll()"
-                        style="display:flex; align-items:center; gap:6px; padding:10px 20px; font-weight:600; border-radius:10px; font-size:14px;">
-                        <span style="font-size:16px;">🔄</span> Refresh All
-                    </button>
-                </div>
-            </div>
-
-            <!-- Security nodes grid -->
-            <div id="security-nodes-grid"
-                style="display:grid; grid-template-columns:repeat(auto-fill, minmax(420px, 1fr)); gap:16px;">
-                <div style="padding:40px; text-align:center; color:var(--text-muted); grid-column:1/-1;">Loading
-                    security status...</div>
+            <div id="security-node-content">
+                <div style="padding:40px; text-align:center; color:var(--text-muted);">Loading security status...</div>
             </div>
         </div>
 

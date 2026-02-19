@@ -316,7 +316,8 @@ body {
 }
 
 /* Terminal page — remove top padding so terminal card sits flush below top bar */
-#page-terminal {
+#page-terminal,
+#page-security {
     padding-top: 8px !important;
 }
 
