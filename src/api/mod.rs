@@ -6752,32 +6752,11 @@ pub async fn scan_issues(
     let metrics = state.monitor.lock().unwrap().collect();
     let issues = collect_issues(&metrics);
 
-    // ── AI analysis (if configured) ──
-    let ai_analysis = {
-        let config = state.ai_agent.config.lock().unwrap().clone();
-        if config.is_configured() {
-            let mem_pct = metrics.memory_percent;
-            let summary = format!(
-                "Hostname: {}\nCPU: {:.1}% ({} cores, {})\nMemory: {:.1}% ({}/{} MB)\nSwap: {}/{} MB\nLoad: {:.2} {:.2} {:.2}\nDisks: {}\nProcesses: {}",
-                metrics.hostname,
-                metrics.cpu_usage_percent, metrics.cpu_count, metrics.cpu_model,
-                mem_pct, metrics.memory_used_bytes / 1048576, metrics.memory_total_bytes / 1048576,
-                metrics.swap_used_bytes / 1048576, metrics.swap_total_bytes / 1048576,
-                metrics.load_avg.one, metrics.load_avg.five, metrics.load_avg.fifteen,
-                metrics.disks.iter().map(|d| format!("{}: {:.1}%", d.mount_point, d.usage_percent)).collect::<Vec<_>>().join(", "),
-                metrics.processes,
-            );
-            state.ai_agent.health_check(&summary).await
-        } else {
-            None
-        }
-    };
-
     HttpResponse::Ok().json(serde_json::json!({
         "hostname": metrics.hostname,
         "version": env!("CARGO_PKG_VERSION"),
         "issues": issues,
-        "ai_analysis": ai_analysis,
+        "ai_analysis": null,
     }))
 }
 

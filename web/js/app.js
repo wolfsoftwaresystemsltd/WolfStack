@@ -12331,41 +12331,96 @@ function issuesUpgradeAll() {
 }
 
 async function cleanSystem() {
-    if (!confirm('🧹 Clean system?\n\nThis will safely free disk space by:\n• Vacuuming journal logs to 200 MB\n• Clearing package cache (apt/dnf)\n• Pruning unused Docker resources\n• Removing old kernels\n• Deleting old /tmp files (>7 days)')) return;
-
-    var btn = document.getElementById('issues-clean-btn');
-    if (btn) { btn.disabled = true; btn.innerHTML = '<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(59,130,246,0.2);border-top-color:#3b82f6;border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Cleaning...'; }
-
-    var baseUrl = getNodeApiBase(currentNodeId);
-    try {
-        var resp = await fetch(baseUrl + '/api/issues/clean', { method: 'POST', credentials: 'include' });
-        var data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
-
-        // Show results in a nice modal
-        var freedText = data.freed_mb > 0 ? ('🎉 Freed ~' + (data.freed_mb > 1024 ? (data.freed_mb / 1024).toFixed(1) + ' GB' : data.freed_mb + ' MB')) : '✅ System is clean';
-        var listHtml = (data.cleaned || []).map(function (item) {
-            return '<div style="display:flex; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid var(--border);">'
-                + '<span style="color:#10b981; font-size:14px;">✓</span>'
-                + '<span style="color:var(--text-primary); font-size:13px;">' + escapeHtml(item) + '</span></div>';
-        }).join('');
-
+    // ── Styled modal confirm instead of window.confirm ──
+    var confirmed = await new Promise(function (resolve, reject) {
         var overlay = document.createElement('div');
         overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
         overlay.innerHTML = '<div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:480px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.5);">'
             + '<div style="text-align:center; margin-bottom:20px;">'
             + '<div style="font-size:48px; margin-bottom:8px;">🧹</div>'
-            + '<h3 style="font-size:18px; font-weight:700; color:var(--text-primary); margin:0 0 6px;">' + freedText + '</h3>'
+            + '<h3 style="font-size:18px; font-weight:700; color:var(--text-primary); margin:0 0 10px;">Clean All Servers?</h3>'
+            + '<p style="font-size:13px; color:var(--text-secondary); margin:0; line-height:1.6;">This will safely free disk space on <strong>all nodes</strong> by:</p>'
             + '</div>'
-            + '<div style="max-height:300px; overflow-y:auto;">' + listHtml + '</div>'
-            + '<div style="display:flex; justify-content:center; margin-top:20px;">'
-            + '<button onclick="this.closest(\'div[style*=fixed]\').remove()" style="padding:10px 28px; background:var(--accent-primary); color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:600; font-size:14px;">Done</button>'
+            + '<div style="padding:12px 16px; background:var(--bg-secondary); border-radius:10px; margin-bottom:20px;">'
+            + '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;color:var(--text-primary);font-size:13px;">📋 Vacuuming journal logs to 200 MB</div>'
+            + '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;color:var(--text-primary);font-size:13px;">📦 Clearing package cache (apt/dnf)</div>'
+            + '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;color:var(--text-primary);font-size:13px;">🐳 Pruning unused Docker resources</div>'
+            + '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;color:var(--text-primary);font-size:13px;">🗑️ Removing old kernels</div>'
+            + '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;color:var(--text-primary);font-size:13px;">📁 Deleting old /tmp files (>7 days)</div>'
+            + '</div>'
+            + '<div style="display:flex; gap:10px; justify-content:center;">'
+            + '<button id="clean-cancel-btn" style="padding:10px 24px; background:var(--bg-secondary); color:var(--text-secondary); border:1px solid var(--border); border-radius:8px; cursor:pointer; font-weight:600; font-size:14px;">Cancel</button>'
+            + '<button id="clean-confirm-btn" style="padding:10px 24px; background:var(--accent-primary); color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:600; font-size:14px;">🧹 Clean All Servers</button>'
             + '</div></div>';
         document.body.appendChild(overlay);
-        overlay.onclick = function (e) { if (e.target === overlay) overlay.remove(); };
-    } catch (e) {
-        showToast('Clean failed: ' + e.message, 'error');
-    }
+        overlay.onclick = function (e) { if (e.target === overlay) { overlay.remove(); reject('cancelled'); } };
+        document.getElementById('clean-cancel-btn').onclick = function () { overlay.remove(); reject('cancelled'); };
+        document.getElementById('clean-confirm-btn').onclick = function () { overlay.remove(); resolve(); };
+    }).catch(function () { return 'cancelled'; });
+
+    // If cancelled, stop
+    if (confirmed === 'cancelled') return;
+
+    var btn = document.getElementById('issues-clean-btn');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(59,130,246,0.2);border-top-color:#3b82f6;border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Cleaning...'; }
+
+    // ── Gather all nodes (like the scanner does) ──
+    var wsNodes = (typeof allNodes !== 'undefined' && allNodes.length) ? allNodes.filter(function (n) { return n.node_type !== 'proxmox'; }) : [];
+    if (wsNodes.length === 0) wsNodes = [{ id: 'local', hostname: 'local', is_self: true }];
+
+    var allResults = [];
+
+    // ── Clean all nodes in parallel ──
+    var cleanPromises = wsNodes.map(function (node) {
+        var isLocal = !!node.is_self;
+        var url = isLocal ? '/api/issues/clean' : '/api/nodes/' + encodeURIComponent(node.id) + '/proxy/issues/clean';
+        return fetch(url, { method: 'POST', credentials: 'include' })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function (data) {
+                allResults.push({ hostname: node.hostname || node.id || 'local', ok: true, freed_mb: data.freed_mb || 0, cleaned: data.cleaned || [] });
+            })
+            .catch(function (e) {
+                allResults.push({ hostname: node.hostname || node.id || 'local', ok: false, freed_mb: 0, cleaned: ['Error: ' + e.message] });
+            });
+    });
+    await Promise.all(cleanPromises);
+
+    // ── Show aggregated results modal ──
+    var totalFreed = allResults.reduce(function (sum, r) { return sum + r.freed_mb; }, 0);
+    var freedText = totalFreed > 0 ? ('🎉 Freed ~' + (totalFreed > 1024 ? (totalFreed / 1024).toFixed(1) + ' GB' : totalFreed + ' MB') + ' across ' + allResults.length + ' server' + (allResults.length !== 1 ? 's' : '')) : '✅ All servers are clean';
+
+    var listHtml = '';
+    allResults.forEach(function (r) {
+        var icon = r.ok ? '🖥️' : '⚠️';
+        var freedStr = r.freed_mb > 0 ? ' — freed ' + (r.freed_mb > 1024 ? (r.freed_mb / 1024).toFixed(1) + ' GB' : r.freed_mb + ' MB') : '';
+        listHtml += '<div style="margin-bottom:12px;">';
+        listHtml += '<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">';
+        listHtml += '<span style="font-size:16px;">' + icon + '</span>';
+        listHtml += '<span style="font-weight:600; color:var(--text-primary); font-size:14px;">' + escapeHtml(r.hostname) + freedStr + '</span>';
+        listHtml += '</div>';
+        (r.cleaned || []).forEach(function (item) {
+            listHtml += '<div style="display:flex; align-items:center; gap:8px; padding:4px 0 4px 28px; color:var(--text-secondary); font-size:13px;">';
+            listHtml += '<span style="color:#10b981;">✓</span> ' + escapeHtml(item) + '</div>';
+        });
+        listHtml += '</div>';
+    });
+
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
+    overlay.innerHTML = '<div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:520px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.5);">'
+        + '<div style="text-align:center; margin-bottom:20px;">'
+        + '<div style="font-size:48px; margin-bottom:8px;">🧹</div>'
+        + '<h3 style="font-size:18px; font-weight:700; color:var(--text-primary); margin:0 0 6px;">' + freedText + '</h3>'
+        + '</div>'
+        + '<div style="max-height:350px; overflow-y:auto;">' + listHtml + '</div>'
+        + '<div style="display:flex; justify-content:center; margin-top:20px;">'
+        + '<button onclick="this.closest(\'div[style*=fixed]\').remove()" style="padding:10px 28px; background:var(--accent-primary); color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:600; font-size:14px;">Done</button>'
+        + '</div></div>';
+    document.body.appendChild(overlay);
+    overlay.onclick = function (e) { if (e.target === overlay) overlay.remove(); };
 
     if (btn) { btn.disabled = false; btn.innerHTML = '🧹 Clean'; }
 }
