@@ -307,18 +307,12 @@ body {
 }
 
 .page-content {
-    padding: 28px 32px;
+    padding: 8px 32px 28px;
 }
 
 /* Ensure page-views outside .page-content still get padding */
 .main-content>.page-view {
-    padding: 28px 32px;
-}
-
-/* Terminal page — remove top padding so terminal card sits flush below top bar */
-#page-terminal,
-#page-security {
-    padding-top: 8px !important;
+    padding: 8px 32px 28px;
 }
 
 /* ─── Time Range Selector ─── */
