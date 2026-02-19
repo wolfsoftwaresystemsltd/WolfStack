@@ -67,6 +67,9 @@
                 <a class="nav-item" data-page="issues" onclick="selectView('issues')">
                     <span class="icon">⚠️</span> Issues
                 </a>
+                <a class="nav-item" data-page="security" onclick="selectView('security')">
+                    <span class="icon">🛡️</span> Security
+                </a>
             </div>
             <div class="nav-section">
                 <div class="nav-section-title">Servers</div>
@@ -500,6 +503,41 @@
         </div>
 
         <!-- ═══ App Store Page ═══ -->
+        <!-- ═══════════════════════════════════════════ -->
+        <!-- ─── Security Page ─── -->
+        <!-- ═══════════════════════════════════════════ -->
+        <div id="page-security" class="page-view" style="display:none;">
+            <!-- Header -->
+            <div class="card"
+                style="margin-bottom:20px; background:linear-gradient(135deg, rgba(220,38,38,0.12), rgba(34,197,94,0.08)); border-color:rgba(220,38,38,0.25);">
+                <div class="card-body"
+                    style="display:flex; align-items:center; justify-content:space-between; padding:28px 32px;">
+                    <div style="display:flex; align-items:center; gap:20px;">
+                        <div
+                            style="width:64px; height:64px; background:linear-gradient(135deg,#dc2626,#22c55e); border-radius:16px; display:flex; align-items:center; justify-content:center; font-size:32px; box-shadow:0 4px 20px rgba(220,38,38,0.3);">
+                            🛡️</div>
+                        <div>
+                            <h2 style="font-size:24px; margin-bottom:4px; color:var(--text-primary); font-weight:700;">
+                                Security</h2>
+                            <p style="color:var(--text-secondary); font-size:13px; margin:0;">Manage Fail2ban intrusion
+                                prevention across your servers. Install, configure, and monitor bans.</p>
+                        </div>
+                    </div>
+                    <button class="btn btn-danger" onclick="refreshSecurityAll()"
+                        style="display:flex; align-items:center; gap:6px; padding:10px 20px; font-weight:600; border-radius:10px; font-size:14px;">
+                        <span style="font-size:16px;">🔄</span> Refresh All
+                    </button>
+                </div>
+            </div>
+
+            <!-- Security nodes grid -->
+            <div id="security-nodes-grid"
+                style="display:grid; grid-template-columns:repeat(auto-fill, minmax(420px, 1fr)); gap:16px;">
+                <div style="padding:40px; text-align:center; color:var(--text-muted); grid-column:1/-1;">Loading
+                    security status...</div>
+            </div>
+        </div>
+
         <div id="page-appstore" class="page-view" style="display:none;">
             <!-- Header -->
             <div class="card"
@@ -595,7 +633,7 @@
         </div>
 
         <!-- ═══ Issues Page ═══ -->
-        <div id="page-issues" class="page-view" style="display:none;">
+        <div id="page-issues" class="page-view" style="display:none; padding-top:0;">
             <!-- Header -->
             <div class="card"
                 style="margin-bottom:20px; background:linear-gradient(135deg, rgba(234,179,8,0.12), rgba(220,38,38,0.08)); border-color:rgba(234,179,8,0.25);">
@@ -612,11 +650,24 @@
                                 potential problems — CPU, memory, disk, services, and containers.</p>
                         </div>
                     </div>
-                    <div style="display:flex; gap:10px; align-items:center;">
+                    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
                         <span id="issues-ai-badge"
                             style="display:none; padding:4px 10px; border-radius:6px; font-size:11px; font-weight:600;
                             background:rgba(99,102,241,0.15); color:rgba(129,140,248,1); border:1px solid rgba(99,102,241,0.3);">
                             🤖 AI Enhanced</span>
+                        <div
+                            style="display:flex; align-items:center; gap:6px; background:var(--bg-input); border:1px solid var(--border); border-radius:8px; padding:4px 10px;">
+                            <span style="font-size:11px; color:var(--text-muted); white-space:nowrap;">🔔 Auto
+                                Scan:</span>
+                            <select id="issues-schedule-select" onchange="saveIssueSchedule(this.value)"
+                                style="background:transparent; border:none; color:var(--text-primary); font-size:12px; font-weight:500; cursor:pointer; outline:none; font-family:inherit;">
+                                <option value="off" style="background:var(--bg-card);">Off</option>
+                                <option value="hourly" style="background:var(--bg-card);">Every Hour</option>
+                                <option value="6h" style="background:var(--bg-card);">Every 6 Hours</option>
+                                <option value="12h" style="background:var(--bg-card);">Every 12 Hours</option>
+                                <option value="daily" style="background:var(--bg-card);">Daily</option>
+                            </select>
+                        </div>
                         <button class="btn" onclick="issuesUpgradeAll()" id="issues-upgrade-all-btn"
                             style="display:none; background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.3);">
                             ⚡ Upgrade All

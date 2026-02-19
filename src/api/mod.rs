@@ -2917,6 +2917,9 @@ pub async fn ai_save_config(
         if let Some(v) = body.get("check_interval_minutes").and_then(|v| v.as_u64()) {
             config.check_interval_minutes = v as u32;
         }
+        if let Some(v) = body.get("scan_schedule").and_then(|v| v.as_str()) {
+            config.scan_schedule = v.to_string();
+        }
 
         if let Err(e) = config.save() {
             return HttpResponse::InternalServerError().json(serde_json::json!({"error": e}));
@@ -5988,6 +5991,192 @@ pub async fn appstore_uninstall(
     }
 }
 
+// ─── Security (Fail2ban, iptables, UFW) ───
+
+/// Helper: check if a command exists on the system
+fn command_exists(cmd: &str) -> bool {
+    std::process::Command::new("which").arg(cmd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Helper: run a shell command, return stdout
+fn run_shell(cmd: &str) -> Result<String, String> {
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .map_err(|e| format!("Failed to execute: {}", e))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(if stderr.is_empty() { "Command failed".into() } else { stderr })
+    }
+}
+
+/// GET /api/security/status — get fail2ban, iptables, and ufw status
+pub async fn security_status(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+
+    // Fail2ban
+    let f2b_installed = command_exists("fail2ban-client");
+    let f2b_status = if f2b_installed {
+        match run_shell("fail2ban-client status 2>/dev/null") {
+            Ok(out) => Some(out),
+            Err(_) => Some("installed but not running".to_string()),
+        }
+    } else { None };
+    let f2b_banned = if f2b_installed {
+        run_shell("fail2ban-client status sshd 2>/dev/null | grep 'Banned IP' || fail2ban-client status sshd 2>/dev/null | grep -i 'ban' || echo ''")
+            .unwrap_or_default()
+    } else { String::new() };
+    let f2b_jails = if f2b_installed {
+        run_shell("fail2ban-client status 2>/dev/null | grep 'Jail list' | sed 's/.*Jail list:\\s*//' | tr -d '\\t'")
+            .unwrap_or_default().trim().to_string()
+    } else { String::new() };
+
+    // iptables — always available
+    let iptables_rules = run_shell("iptables -L -n --line-numbers 2>/dev/null || echo 'iptables not available'")
+        .unwrap_or_else(|e| e);
+
+    // UFW
+    let ufw_installed = command_exists("ufw");
+    let ufw_status = if ufw_installed {
+        run_shell("ufw status verbose 2>/dev/null").unwrap_or_else(|e| e)
+    } else { String::new() };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "fail2ban": {
+            "installed": f2b_installed,
+            "status": f2b_status,
+            "banned": f2b_banned,
+            "jails": f2b_jails,
+        },
+        "iptables": {
+            "rules": iptables_rules,
+        },
+        "ufw": {
+            "installed": ufw_installed,
+            "status": ufw_status,
+        }
+    }))
+}
+
+/// POST /api/security/fail2ban/install — install fail2ban
+pub async fn security_fail2ban_install(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    match run_shell("apt-get update && apt-get install -y fail2ban && systemctl enable --now fail2ban") {
+        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/security/fail2ban/unban — unban an IP { "ip": "1.2.3.4", "jail": "sshd" }
+pub async fn security_fail2ban_unban(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let ip = body.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+    let jail = body.get("jail").and_then(|v| v.as_str()).unwrap_or("sshd");
+    if ip.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "IP required" }));
+    }
+    // Sanitise IP — allow only digits, dots, colons (IPv6)
+    if !ip.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ':') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid IP" }));
+    }
+    match run_shell(&format!("fail2ban-client set {} unbanip {}", jail, ip)) {
+        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/security/ufw/install — install UFW
+pub async fn security_ufw_install(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    match run_shell("apt-get update && apt-get install -y ufw") {
+        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/security/ufw/rule — add a UFW rule { "rule": "allow 22/tcp" }
+pub async fn security_ufw_add_rule(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let rule = body.get("rule").and_then(|v| v.as_str()).unwrap_or("");
+    if rule.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Rule required" }));
+    }
+    // Basic sanitisation — only allow alphanumeric, spaces, slashes, dots, colons
+    if !rule.chars().all(|c| c.is_alphanumeric() || c == ' ' || c == '/' || c == '.' || c == ':') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid rule characters" }));
+    }
+    match run_shell(&format!("ufw {}", rule)) {
+        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/security/ufw/rule — delete a UFW rule { "rule_number": "3" }
+pub async fn security_ufw_delete_rule(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let num = body.get("rule_number").and_then(|v| v.as_str()).unwrap_or("");
+    if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Valid rule number required" }));
+    }
+    match run_shell(&format!("echo y | ufw delete {}", num)) {
+        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/security/ufw/toggle — enable or disable UFW { "enable": true }
+pub async fn security_ufw_toggle(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let enable = body.get("enable").and_then(|v| v.as_bool()).unwrap_or(false);
+    let cmd = if enable { "echo y | ufw enable" } else { "ufw disable" };
+    match run_shell(cmd) {
+        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/security/iptables/rules — get iptables rules
+pub async fn security_iptables_rules(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let rules = run_shell("iptables -L -n --line-numbers 2>/dev/null")
+        .unwrap_or_else(|e| format!("Error: {}", e));
+    HttpResponse::Ok().json(serde_json::json!({ "rules": rules }))
+}
+
 // ─── Issues Scanner ───
 
 /// Parse human-readable size strings (e.g. "1.2G", "450M", "32K") to MB
@@ -6527,6 +6716,15 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/upgrade", web::post().to(system_upgrade))
         // Issues Scanner
         .route("/api/issues/scan", web::get().to(scan_issues))
+        // Security (Fail2ban, iptables, UFW)
+        .route("/api/security/status", web::get().to(security_status))
+        .route("/api/security/fail2ban/install", web::post().to(security_fail2ban_install))
+        .route("/api/security/fail2ban/unban", web::post().to(security_fail2ban_unban))
+        .route("/api/security/ufw/install", web::post().to(security_ufw_install))
+        .route("/api/security/ufw/rule", web::post().to(security_ufw_add_rule))
+        .route("/api/security/ufw/rule", web::delete().to(security_ufw_delete_rule))
+        .route("/api/security/ufw/toggle", web::post().to(security_ufw_toggle))
+        .route("/api/security/iptables/rules", web::get().to(security_iptables_rules))
         // Node proxy — forward API calls to remote nodes (must be last — wildcard path)
         .route("/api/nodes/{id}/proxy/{path:.*}", web::get().to(node_proxy))
         .route("/api/nodes/{id}/proxy/{path:.*}", web::post().to(node_proxy))

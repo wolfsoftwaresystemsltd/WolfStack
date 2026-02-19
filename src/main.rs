@@ -291,99 +291,184 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
-        // Background: scheduled issues scan (hourly critical alerts + daily summary)
+        // Background: scheduled issues scan (configurable alerts + daily summary)
         let scan_state = app_state.clone();
         let scan_ai = ai_agent.clone();
+        let scan_cluster = cluster.clone();
+        let scan_secret = cluster_secret.clone();
         tokio::spawn(async move {
-            // Wait 60 seconds after startup before first scan
+            // Wait 60 seconds after startup before first check
             tokio::time::sleep(Duration::from_secs(60)).await;
             let mut last_daily_date = String::new();
+            let mut last_scan_time = std::time::Instant::now();
+            // Run first scan immediately after startup delay
+            let mut should_scan_now = true;
+            let http_client = reqwest::Client::new();
             loop {
-                // Check if email is configured
+                // Re-read config each loop to pick up schedule changes
                 let config = scan_ai.config.lock().unwrap().clone();
-                if config.email_enabled && !config.email_to.is_empty() {
-                    // Collect local metrics
-                    let metrics = scan_state.monitor.lock().unwrap().collect();
-                    let hostname = metrics.hostname.clone();
-                    let issues = api::collect_issues(&metrics);
+                let schedule = config.scan_schedule.as_str();
 
-                    let critical_issues: Vec<&api::Issue> = issues.iter()
-                        .filter(|i| i.severity == "critical")
-                        .collect();
-                    let warning_issues: Vec<&api::Issue> = issues.iter()
-                        .filter(|i| i.severity == "warning")
-                        .collect();
+                // Determine scan interval from schedule
+                let interval_secs: u64 = match schedule {
+                    "hourly" => 3600,
+                    "6h"     => 6 * 3600,
+                    "12h"    => 12 * 3600,
+                    "daily"  => 24 * 3600,
+                    _        => 0, // "off" — no scanning
+                };
 
-                    // Immediate alert if critical issues found
-                    if !critical_issues.is_empty() {
-                        let subject = format!(
-                            "[WolfStack CRITICAL] {} — {} critical issue(s)",
-                            hostname, critical_issues.len()
-                        );
-                        let mut body = format!(
-                            "🚨 Critical Issues Detected on {}\nTime: {}\n\n",
-                            hostname,
-                            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
-                        );
-                        for issue in &critical_issues {
-                            body.push_str(&format!("❌ {}\n   {}\n\n", issue.title, issue.detail));
+                if interval_secs > 0 && config.email_enabled && !config.email_to.is_empty() {
+                    // Check if enough time has passed
+                    if should_scan_now || last_scan_time.elapsed().as_secs() >= interval_secs {
+                        should_scan_now = false;
+                        last_scan_time = std::time::Instant::now();
+
+                        // Collect issues from ALL nodes (local + remote)
+                        // Each entry: (cluster_name, hostname, issue)
+                        let mut all_issues: Vec<(String, String, api::Issue)> = Vec::new();
+
+                        // Local node
+                        let metrics = scan_state.monitor.lock().unwrap().collect();
+                        let local_hostname = metrics.hostname.clone();
+                        let local_cluster = {
+                            let nodes = scan_cluster.get_all_nodes();
+                            nodes.iter().find(|n| n.is_self)
+                                .and_then(|n| n.cluster_name.clone())
+                                .unwrap_or_else(|| "Default".to_string())
+                        };
+                        for issue in api::collect_issues(&metrics) {
+                            all_issues.push((local_cluster.clone(), local_hostname.clone(), issue));
                         }
-                        if !warning_issues.is_empty() {
-                            body.push_str(&format!("\n⚠️ Also {} warning(s):\n", warning_issues.len()));
-                            for issue in &warning_issues {
-                                body.push_str(&format!("  • {}\n", issue.title));
+
+                        // All remote WolfStack nodes
+                        let nodes = scan_cluster.get_all_nodes();
+                        for node in nodes.iter().filter(|n| !n.is_self && n.online && n.node_type != "proxmox") {
+                            let cluster = node.cluster_name.clone().unwrap_or_else(|| "Default".to_string());
+                            let url = format!("http://{}:{}/api/issues/scan", node.address, node.port);
+                            match http_client.get(&url)
+                                .header("X-WolfStack-Secret", scan_secret.as_str())
+                                .timeout(std::time::Duration::from_secs(30))
+                                .send().await
+                            {
+                                Ok(resp) => {
+                                    if let Ok(data) = resp.json::<serde_json::Value>().await {
+                                        let node_host = data["hostname"].as_str().unwrap_or(&node.hostname).to_string();
+                                        if let Some(issues_arr) = data["issues"].as_array() {
+                                            for iv in issues_arr {
+                                                if let (Some(sev), Some(cat), Some(title), Some(detail)) = (
+                                                    iv["severity"].as_str(), iv["category"].as_str(),
+                                                    iv["title"].as_str(), iv["detail"].as_str(),
+                                                ) {
+                                                    all_issues.push((cluster.clone(), node_host.clone(), api::Issue {
+                                                        severity: sev.to_string(), category: cat.to_string(),
+                                                        title: title.to_string(), detail: detail.to_string(),
+                                                    }));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Scheduled scan: failed to reach {}: {}", node.hostname, e);
+                                }
                             }
                         }
-                        body.push_str(&format!("\nWolfStack v{}", env!("CARGO_PKG_VERSION")));
-                        if let Err(e) = ai::send_alert_email(&config, &subject, &body) {
-                            tracing::warn!("Failed to send critical issues email: {}", e);
-                        } else {
-                            tracing::info!("Sent critical issues alert email ({} issues)", critical_issues.len());
-                        }
-                    }
 
-                    // Daily summary — send once per day (first check after midnight UTC)
-                    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                    if today != last_daily_date {
-                        last_daily_date = today.clone();
+                        // Sort by cluster name, then hostname (alphabetical)
+                        all_issues.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
-                        let subject = format!(
-                            "[WolfStack Daily] {} — {} issue(s)",
-                            hostname, issues.len()
-                        );
-                        let mut body = format!(
-                            "📋 Daily Issues Report for {}\nDate: {}\nWolfStack v{}\n\n",
-                            hostname, today, env!("CARGO_PKG_VERSION")
-                        );
-                        if issues.is_empty() {
-                            body.push_str("✅ No issues detected — all systems healthy.\n");
-                        } else {
-                            for issue in &issues {
+                        let critical_count = all_issues.iter().filter(|(_, _, i)| i.severity == "critical").count();
+                        let warning_count = all_issues.iter().filter(|(_, _, i)| i.severity == "warning").count();
+                        let info_count = all_issues.iter().filter(|(_, _, i)| i.severity == "info").count();
+                        let total_nodes = {
+                            let n = scan_cluster.get_all_nodes();
+                            n.iter().filter(|nd| nd.node_type != "proxmox").count()
+                        };
+
+                        // Helper: format issues grouped by cluster → hostname
+                        let format_grouped = |issues: &[(String, String, api::Issue)], filter_sev: Option<&str>| -> String {
+                            let mut out = String::new();
+                            let mut current_cluster = String::new();
+                            let mut current_host = String::new();
+                            for (cluster, host, issue) in issues {
+                                if let Some(sev) = filter_sev {
+                                    if issue.severity != sev { continue; }
+                                }
+                                if *cluster != current_cluster {
+                                    current_cluster = cluster.clone();
+                                    current_host.clear();
+                                    out.push_str(&format!("\n━━━ {} ━━━\n", cluster));
+                                }
+                                if *host != current_host {
+                                    current_host = host.clone();
+                                    out.push_str(&format!("\n  📍 {}\n", host));
+                                }
                                 let icon = match issue.severity.as_str() {
                                     "critical" => "❌",
                                     "warning" => "⚠️",
                                     _ => "ℹ️",
                                 };
-                                body.push_str(&format!("{} [{}] {}\n   {}\n\n",
-                                    icon, issue.severity.to_uppercase(), issue.title, issue.detail));
+                                out.push_str(&format!("    {} {}\n      {}\n", icon, issue.title, issue.detail));
                             }
-                            body.push_str(&format!(
-                                "Summary: {} critical, {} warning, {} info\n",
-                                critical_issues.len(),
-                                warning_issues.len(),
-                                issues.iter().filter(|i| i.severity == "info").count()
-                            ));
+                            out
+                        };
+
+                        // Immediate alert if critical issues found
+                        if critical_count > 0 {
+                            let subject = format!(
+                                "[WolfStack CRITICAL] {} critical issue(s) across {} node(s)",
+                                critical_count, total_nodes
+                            );
+                            let mut body = format!(
+                                "🚨 Critical Issues Detected\nTime: {}\nNodes scanned: {}\n",
+                                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"), total_nodes
+                            );
+                            body.push_str(&format_grouped(&all_issues, Some("critical")));
+                            if warning_count > 0 {
+                                body.push_str(&format!("\n\n⚠️ Also {} warning(s) — see daily report for details.\n", warning_count));
+                            }
+                            body.push_str(&format!("\nWolfStack v{}", env!("CARGO_PKG_VERSION")));
+                            if let Err(e) = ai::send_alert_email(&config, &subject, &body) {
+                                tracing::warn!("Failed to send critical issues email: {}", e);
+                            } else {
+                                tracing::info!("Sent critical issues alert email ({} issues)", critical_count);
+                            }
                         }
-                        if let Err(e) = ai::send_alert_email(&config, &subject, &body) {
-                            tracing::warn!("Failed to send daily issues email: {}", e);
-                        } else {
-                            tracing::info!("Sent daily issues summary email");
+
+                        // Daily summary — send once per day (first check after midnight UTC)
+                        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                        if today != last_daily_date {
+                            last_daily_date = today.clone();
+
+                            let subject = format!(
+                                "[WolfStack Daily] {} issue(s) across {} node(s)",
+                                all_issues.len(), total_nodes
+                            );
+                            let mut body = format!(
+                                "📋 Daily Issues Report\nDate: {}\nWolfStack v{}\nNodes scanned: {}\n",
+                                today, env!("CARGO_PKG_VERSION"), total_nodes
+                            );
+                            if all_issues.is_empty() {
+                                body.push_str("\n✅ No issues detected — all systems healthy.\n");
+                            } else {
+                                body.push_str(&format_grouped(&all_issues, None));
+                                body.push_str(&format!(
+                                    "\n━━━ Summary ━━━\n{} critical, {} warning, {} info\n",
+                                    critical_count, warning_count, info_count
+                                ));
+                            }
+                            if let Err(e) = ai::send_alert_email(&config, &subject, &body) {
+                                tracing::warn!("Failed to send daily issues email: {}", e);
+                            } else {
+                                tracing::info!("Sent daily issues summary email");
+                            }
                         }
                     }
                 }
 
-                // Sleep for 1 hour
-                tokio::time::sleep(Duration::from_secs(3600)).await;
+                // Check every 60 seconds for schedule changes / time elapsed
+                tokio::time::sleep(Duration::from_secs(60)).await;
             }
         });
 

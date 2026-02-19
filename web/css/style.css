@@ -315,6 +315,11 @@ body {
     padding: 28px 32px;
 }
 
+/* Terminal page — remove top padding so terminal card sits flush below top bar */
+#page-terminal {
+    padding-top: 8px !important;
+}
+
 /* ─── Time Range Selector ─── */
 .time-range-btn {
     padding: 4px 12px;
