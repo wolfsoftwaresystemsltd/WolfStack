@@ -6050,6 +6050,31 @@ pub async fn security_status(
         run_shell("ufw status verbose 2>/dev/null").unwrap_or_else(|e| e)
     } else { String::new() };
 
+    // System updates — detect package manager and count pending updates
+    let (pkg_manager, updates_count, updates_list) = if command_exists("apt") {
+        let list = run_shell("apt list --upgradable 2>/dev/null | grep -v '^Listing'")
+            .unwrap_or_default();
+        let count = list.lines().filter(|l| !l.trim().is_empty()).count();
+        ("apt", count, list.trim().to_string())
+    } else if command_exists("dnf") {
+        let list = run_shell("dnf check-update --quiet 2>/dev/null")
+            .unwrap_or_default();
+        let count = list.lines().filter(|l| !l.trim().is_empty()).count();
+        ("dnf", count, list.trim().to_string())
+    } else if command_exists("yum") {
+        let list = run_shell("yum check-update --quiet 2>/dev/null")
+            .unwrap_or_default();
+        let count = list.lines().filter(|l| !l.trim().is_empty()).count();
+        ("yum", count, list.trim().to_string())
+    } else if command_exists("pacman") {
+        let list = run_shell("pacman -Qu 2>/dev/null")
+            .unwrap_or_default();
+        let count = list.lines().filter(|l| !l.trim().is_empty()).count();
+        ("pacman", count, list.trim().to_string())
+    } else {
+        ("unknown", 0, String::new())
+    };
+
     HttpResponse::Ok().json(serde_json::json!({
         "fail2ban": {
             "installed": f2b_installed,
@@ -6063,6 +6088,11 @@ pub async fn security_status(
         "ufw": {
             "installed": ufw_installed,
             "status": ufw_status,
+        },
+        "updates": {
+            "package_manager": pkg_manager,
+            "count": updates_count,
+            "list": updates_list,
         }
     }))
 }
@@ -6175,6 +6205,62 @@ pub async fn security_iptables_rules(
     let rules = run_shell("iptables -L -n --line-numbers 2>/dev/null")
         .unwrap_or_else(|e| format!("Error: {}", e));
     HttpResponse::Ok().json(serde_json::json!({ "rules": rules }))
+}
+
+/// POST /api/security/updates/check — refresh package cache and list pending updates
+pub async fn security_check_updates(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let (pkg_manager, output) = if command_exists("apt") {
+        let _ = run_shell("apt-get update -qq 2>/dev/null");
+        let list = run_shell("apt list --upgradable 2>/dev/null | grep -v '^Listing'")
+            .unwrap_or_default();
+        ("apt", list)
+    } else if command_exists("dnf") {
+        let list = run_shell("dnf check-update --quiet 2>/dev/null").unwrap_or_default();
+        ("dnf", list)
+    } else if command_exists("yum") {
+        let list = run_shell("yum check-update --quiet 2>/dev/null").unwrap_or_default();
+        ("yum", list)
+    } else if command_exists("pacman") {
+        let _ = run_shell("pacman -Sy 2>/dev/null");
+        let list = run_shell("pacman -Qu 2>/dev/null").unwrap_or_default();
+        ("pacman", list)
+    } else {
+        ("unknown", String::new())
+    };
+    let count = output.lines().filter(|l| !l.trim().is_empty()).count();
+    HttpResponse::Ok().json(serde_json::json!({
+        "ok": true,
+        "package_manager": pkg_manager,
+        "count": count,
+        "list": output.trim(),
+    }))
+}
+
+/// POST /api/security/updates/apply — apply all pending updates
+pub async fn security_apply_updates(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let cmd = if command_exists("apt") {
+        "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y 2>&1"
+    } else if command_exists("dnf") {
+        "dnf upgrade -y 2>&1"
+    } else if command_exists("yum") {
+        "yum update -y 2>&1"
+    } else if command_exists("pacman") {
+        "pacman -Syu --noconfirm 2>&1"
+    } else {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "No supported package manager found" }));
+    };
+    match run_shell(cmd) {
+        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
 }
 
 // ─── Issues Scanner ───
@@ -6725,6 +6811,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/security/ufw/rule", web::delete().to(security_ufw_delete_rule))
         .route("/api/security/ufw/toggle", web::post().to(security_ufw_toggle))
         .route("/api/security/iptables/rules", web::get().to(security_iptables_rules))
+        .route("/api/security/updates/check", web::post().to(security_check_updates))
+        .route("/api/security/updates/apply", web::post().to(security_apply_updates))
         // Node proxy — forward API calls to remote nodes (must be last — wildcard path)
         .route("/api/nodes/{id}/proxy/{path:.*}", web::get().to(node_proxy))
         .route("/api/nodes/{id}/proxy/{path:.*}", web::post().to(node_proxy))

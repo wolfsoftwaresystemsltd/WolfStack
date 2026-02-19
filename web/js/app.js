@@ -12601,7 +12601,33 @@ function renderNodeSecurity(node, data) {
         </div>
     </div>`;
 
-    return f2bHtml + ufwHtml + iptHtml;
+    // ── System Updates ──
+    const updates = data.updates || {};
+    const updCount = updates.count || 0;
+    const updList = (updates.list || '').trim();
+    const pkgMgr = updates.package_manager || 'unknown';
+    const updBadge = updCount > 0
+        ? `<span style="background:#f59e0b20; color:#f59e0b; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">${updCount} update${updCount !== 1 ? 's' : ''} available</span>`
+        : '<span style="background:#22c55e20; color:#22c55e; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Up to date</span>';
+
+    const updHtml = `
+    <div class="card" style="margin-bottom:16px;">
+        <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:20px;">📦</span>
+                <h3 style="margin:0;">System Updates</h3>
+                ${updBadge}
+                <span style="color:var(--text-muted); font-size:11px;">(${pkgMgr})</span>
+            </div>
+            <div style="display:flex; gap:6px;">
+                <button onclick="securityAction('${nodePrefix}security/updates/check', 'POST', {}, this)" class="btn btn-sm" style="font-size:12px;">🔍 Check</button>
+                ${updCount > 0 ? `<button onclick="securityAction('${nodePrefix}security/updates/apply', 'POST', {}, this)" class="btn btn-sm btn-primary" style="font-size:12px;">⬆️ Update All</button>` : ''}
+            </div>
+        </div>
+        ${updList ? `<div class="card-body"><pre style="font-size:11px; color:var(--text-secondary); background:var(--bg-primary); padding:10px; border-radius:6px; max-height:200px; overflow-y:auto; white-space:pre-wrap; margin:0; border:1px solid var(--border);">${escapeHtml(updList)}</pre></div>` : ''}
+    </div>`;
+
+    return updHtml + f2bHtml + ufwHtml + iptHtml;
 }
 
 async function securityAction(path, method, body, btn) {
