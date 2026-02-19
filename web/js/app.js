@@ -11876,7 +11876,8 @@ async function checkIssuesAiBadge() {
 
 async function loadIssueSchedule() {
     try {
-        var resp = await fetch('/api/ai/config');
+        var resp = await fetch('/api/ai/config', { credentials: 'include' });
+        if (!resp.ok) return;
         var cfg = await resp.json();
         var sel = document.getElementById('issues-schedule-select');
         if (sel && cfg.scan_schedule) sel.value = cfg.scan_schedule;
@@ -11885,17 +11886,22 @@ async function loadIssueSchedule() {
 
 async function saveIssueSchedule(value) {
     try {
-        // Read current config, update scan_schedule, save back
-        var resp = await fetch('/api/ai/config');
+        var resp = await fetch('/api/ai/config', { credentials: 'include' });
+        if (!resp.ok) throw new Error('Failed to read config: HTTP ' + resp.status);
         var cfg = await resp.json();
         cfg.scan_schedule = value;
-        await fetch('/api/ai/config', {
+        var saveResp = await fetch('/api/ai/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify(cfg)
         });
+        if (!saveResp.ok) throw new Error('HTTP ' + saveResp.status);
+        var labels = { off: 'Off', hourly: 'Every Hour', '6h': 'Every 6 Hours', '12h': 'Every 12 Hours', daily: 'Daily' };
+        showToast('🔔 Auto scan: ' + (labels[value] || value), 'success');
     } catch (e) {
         console.error('Failed to save scan schedule:', e);
+        showToast('Failed to save scan schedule: ' + e.message, 'error');
     }
 }
 
