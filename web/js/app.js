@@ -12510,20 +12510,51 @@ function renderNodeSecurity(node, data) {
         const jails = data.fail2ban.jails || 'none';
         const banned = (data.fail2ban.banned || '').trim();
         const bannedLines = banned ? banned.split('\n').filter(l => l.trim()).map(l => `<div style="font-size:12px; color:#ef4444; padding:2px 0;">${escapeHtml(l.trim())}</div>`).join('') : '<span style="color:#22c55e; font-size:12px;">No banned IPs</span>';
+        const jailExists = data.fail2ban.jail_local_exists;
+
+        const settingRow = (label, value, hint) => `
+            <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border);">
+                <div>
+                    <span style="font-weight:600; font-size:13px; color:var(--text-primary);">${label}</span>
+                    <div style="font-size:11px; color:var(--text-muted);">${hint}</div>
+                </div>
+                <span style="font-size:13px; color:var(--text-secondary); font-family:monospace; background:var(--bg-primary); padding:4px 10px; border-radius:6px; border:1px solid var(--border);">${escapeHtml(value || '\u2014')}</span>
+            </div>`;
+
+        const settingsHtml = jailExists ? `
+            <div style="margin-top:12px;">
+                ${settingRow('Ban Time', data.fail2ban.bantime, 'How long an IP stays banned')}
+                ${settingRow('Find Time', data.fail2ban.findtime, 'Window to count failures')}
+                ${settingRow('Max Retry', data.fail2ban.maxretry, 'Failed attempts before ban')}
+                ${settingRow('Ignore IPs', data.fail2ban.ignoreip, 'IPs that are never banned')}
+            </div>
+            <div style="display:flex; gap:8px; margin-top:12px;">
+                <button onclick="editJailLocal('${nodePrefix}')" class="btn btn-sm" style="font-size:12px;">📝 Edit jail.local</button>
+            </div>` : `
+            <div style="margin-top:12px; padding:12px; background:var(--bg-primary); border-radius:8px; border:1px solid var(--border);">
+                <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <div>
+                        <div style="font-weight:600; font-size:13px; color:#f59e0b;">\u26a0\ufe0f No jail.local found</div>
+                        <div style="font-size:12px; color:var(--text-muted);">Using defaults from jail.conf. Create jail.local for custom settings.</div>
+                    </div>
+                    <button onclick="securityAction('${nodePrefix}security/fail2ban/install', 'POST', {}, this)" class="btn btn-sm btn-primary" style="font-size:12px;">Create jail.local</button>
+                </div>
+            </div>`;
 
         f2bHtml = `
         <div class="card" style="margin-bottom:16px;">
             <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
                 <div style="display:flex; align-items:center; gap:8px;">
-                    <span style="font-size:20px;">🛡️</span>
+                    <span style="font-size:20px;">\ud83d\udee1\ufe0f</span>
                     <h3 style="margin:0;">Fail2ban</h3>
                     <span style="background:#22c55e20; color:#22c55e; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Installed</span>
                 </div>
-                <button onclick="securityAction('${nodePrefix}security/fail2ban/install', 'POST', {}, this)" class="btn btn-sm" style="font-size:12px;">🔄 Update</button>
+                <button onclick="securityAction('${nodePrefix}security/fail2ban/install', 'POST', {}, this)" class="btn btn-sm" style="font-size:12px;">\ud83d\udd04 Update</button>
             </div>
             <div class="card-body">
-                <div style="font-size:13px; color:var(--text-secondary); margin-bottom:8px;"><strong>Jails:</strong> ${escapeHtml(jails)}</div>
-                <div>${bannedLines}</div>
+                <div style="font-size:13px; color:var(--text-secondary); margin-bottom:8px;"><strong>Active Jails:</strong> ${escapeHtml(jails)}</div>
+                <div style="margin-bottom:4px;">${bannedLines}</div>
+                ${settingsHtml}
             </div>
         </div>`;
     } else {
@@ -12531,14 +12562,14 @@ function renderNodeSecurity(node, data) {
         <div class="card" style="margin-bottom:16px;">
             <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
                 <div style="display:flex; align-items:center; gap:8px;">
-                    <span style="font-size:20px;">🛡️</span>
+                    <span style="font-size:20px;">\ud83d\udee1\ufe0f</span>
                     <h3 style="margin:0;">Fail2ban</h3>
                     <span style="background:#ef444420; color:#ef4444; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Not Installed</span>
                 </div>
                 <button onclick="securityAction('${nodePrefix}security/fail2ban/install', 'POST', {}, this)" class="btn btn-sm btn-primary" style="font-size:12px;">Install Fail2ban</button>
             </div>
             <div class="card-body">
-                <p style="color:var(--text-secondary); font-size:13px; margin:0;">Fail2ban protects against brute-force attacks by banning IPs with too many failed login attempts.</p>
+                <p style="color:var(--text-secondary); font-size:13px; margin:0;">Fail2ban protects against brute-force attacks by banning IPs with too many failed login attempts. Installing will also create a default jail.local with sensible settings.</p>
             </div>
         </div>`;
     }
@@ -12673,5 +12704,65 @@ async function addUfwRule(nodePrefix) {
         }
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function editJailLocal(nodePrefix) {
+    try {
+        const res = await fetch(`/api/${nodePrefix}security/fail2ban/config`);
+        const data = await res.json();
+        const content = data.content || `[DEFAULT]\nbantime  = 1h\nfindtime = 10m\nmaxretry = 5\nignoreip = 127.0.0.1/8 ::1\nbanaction = iptables-multiport\n\n[sshd]\nenabled = true\nport    = ssh\nfilter  = sshd\nlogpath = /var/log/auth.log\nmaxretry = 3\n`;
+        const modal = document.createElement('div');
+        modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); backdrop-filter:blur(4px); z-index:10000; display:flex; align-items:center; justify-content:center;';
+        modal.innerHTML = `
+            <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; width:640px; max-width:90vw; max-height:85vh; display:flex; flex-direction:column; box-shadow:0 20px 60px rgba(0,0,0,0.4);">
+                <div style="padding:20px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between;">
+                    <div style="display:flex; align-items:center; gap:10px;">
+                        <span style="font-size:20px;">📝</span>
+                        <h3 style="margin:0; font-size:16px;">Edit jail.local</h3>
+                    </div>
+                    <button onclick="this.closest('div[style*=fixed]').remove()" style="background:none; border:none; color:var(--text-muted); font-size:20px; cursor:pointer; padding:4px;">✕</button>
+                </div>
+                <div style="padding:16px 24px; flex:1; overflow:auto;">
+                    <textarea id="jail-local-editor" spellcheck="false" style="width:100%; height:400px; font-family:'JetBrains Mono','Fira Code',monospace; font-size:13px; line-height:1.6; background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border); border-radius:8px; padding:12px; resize:vertical; outline:none; tab-size:4;">${escapeHtml(content)}</textarea>
+                </div>
+                <div style="padding:16px 24px; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:8px;">
+                    <button onclick="this.closest('div[style*=fixed]').remove()" class="btn btn-sm" style="font-size:13px;">Cancel</button>
+                    <button onclick="saveFail2banConfig('${nodePrefix}', this)" class="btn btn-sm btn-primary" style="font-size:13px;">💾 Save & Restart</button>
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
+        modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+    } catch (e) {
+        showToast('Error loading config: ' + e.message, 'error');
+    }
+}
+
+async function saveFail2banConfig(nodePrefix, btn) {
+    const editor = document.getElementById('jail-local-editor');
+    const content = editor?.value || '';
+    if (!content.trim()) { showToast('Config cannot be empty', 'error'); return; }
+    const orig = btn.textContent;
+    btn.textContent = '⏳ Saving...';
+    btn.disabled = true;
+    try {
+        const res = await fetch(`/api/${nodePrefix}security/fail2ban/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+            showToast(data.warning || 'Saved & restarted fail2ban', 'success');
+            btn.closest('div[style*=fixed]').remove();
+            loadNodeSecurity();
+        } else {
+            showToast(data.error || 'Save failed', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    } finally {
+        btn.textContent = orig;
+        btn.disabled = false;
     }
 }

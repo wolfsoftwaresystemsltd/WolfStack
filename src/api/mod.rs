@@ -6039,6 +6039,24 @@ pub async fn security_status(
         run_shell("fail2ban-client status 2>/dev/null | grep 'Jail list' | sed 's/.*Jail list:\\s*//' | tr -d '\\t'")
             .unwrap_or_default().trim().to_string()
     } else { String::new() };
+    // jail.local config
+    let jail_local_exists = std::path::Path::new("/etc/fail2ban/jail.local").exists();
+    let jail_local_content = if jail_local_exists {
+        std::fs::read_to_string("/etc/fail2ban/jail.local").unwrap_or_default()
+    } else { String::new() };
+    // Parse key settings from jail.local
+    let parse_val = |content: &str, key: &str| -> String {
+        content.lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .find(|l| l.trim().starts_with(key))
+            .and_then(|l| l.split('=').nth(1))
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    };
+    let bantime = parse_val(&jail_local_content, "bantime");
+    let findtime = parse_val(&jail_local_content, "findtime");
+    let maxretry = parse_val(&jail_local_content, "maxretry");
+    let ignoreip = parse_val(&jail_local_content, "ignoreip");
 
     // iptables — always available
     let iptables_rules = run_shell("iptables -L -n --line-numbers 2>/dev/null || echo 'iptables not available'")
@@ -6081,6 +6099,11 @@ pub async fn security_status(
             "status": f2b_status,
             "banned": f2b_banned,
             "jails": f2b_jails,
+            "jail_local_exists": jail_local_exists,
+            "bantime": bantime,
+            "findtime": findtime,
+            "maxretry": maxretry,
+            "ignoreip": ignoreip,
         },
         "iptables": {
             "rules": iptables_rules,
@@ -6097,15 +6120,73 @@ pub async fn security_status(
     }))
 }
 
-/// POST /api/security/fail2ban/install — install fail2ban
+/// POST /api/security/fail2ban/install — install fail2ban + create default jail.local
 pub async fn security_fail2ban_install(
     _req: HttpRequest,
     state: web::Data<AppState>,
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&_req, &state) { return resp; }
-    match run_shell("apt-get update && apt-get install -y fail2ban && systemctl enable --now fail2ban") {
+    // Install fail2ban
+    if let Err(e) = run_shell("apt-get update && apt-get install -y fail2ban") {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+    // Create default jail.local if it doesn't exist
+    if !std::path::Path::new("/etc/fail2ban/jail.local").exists() {
+        let default_config = r#"[DEFAULT]
+bantime  = 1h
+findtime = 10m
+maxretry = 5
+ignoreip = 127.0.0.1/8 ::1
+banaction = iptables-multiport
+
+[sshd]
+enabled = true
+port    = ssh
+filter  = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+"#;
+        let _ = std::fs::write("/etc/fail2ban/jail.local", default_config);
+    }
+    match run_shell("systemctl enable --now fail2ban && systemctl restart fail2ban") {
         Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/security/fail2ban/config — read jail.local
+pub async fn security_fail2ban_config_get(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let exists = std::path::Path::new("/etc/fail2ban/jail.local").exists();
+    let content = if exists {
+        std::fs::read_to_string("/etc/fail2ban/jail.local").unwrap_or_default()
+    } else { String::new() };
+    HttpResponse::Ok().json(serde_json::json!({
+        "exists": exists,
+        "content": content,
+    }))
+}
+
+/// POST /api/security/fail2ban/config — save jail.local and restart fail2ban
+pub async fn security_fail2ban_config_save(
+    _req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&_req, &state) { return resp; }
+    let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    if content.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Content required" }));
+    }
+    if let Err(e) = std::fs::write("/etc/fail2ban/jail.local", content) {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Failed to write: {}", e) }));
+    }
+    match run_shell("systemctl restart fail2ban") {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "warning": format!("Saved but restart failed: {}", e) })),
     }
 }
 
@@ -6805,6 +6886,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // Security (Fail2ban, iptables, UFW)
         .route("/api/security/status", web::get().to(security_status))
         .route("/api/security/fail2ban/install", web::post().to(security_fail2ban_install))
+        .route("/api/security/fail2ban/config", web::get().to(security_fail2ban_config_get))
+        .route("/api/security/fail2ban/config", web::post().to(security_fail2ban_config_save))
         .route("/api/security/fail2ban/unban", web::post().to(security_fail2ban_unban))
         .route("/api/security/ufw/install", web::post().to(security_ufw_install))
         .route("/api/security/ufw/rule", web::post().to(security_ufw_add_rule))
