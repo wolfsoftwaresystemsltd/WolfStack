@@ -12112,6 +12112,17 @@ async function scanForIssues() {
     results.forEach(function (r) {
         if (r.version && r.version !== '?' && compareVersions(r.version, latestVersion) > 0) latestVersion = r.version;
     });
+
+    // Also check GitHub for the actual latest release version
+    try {
+        var ghResp = await fetch('https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/Cargo.toml');
+        var ghText = await ghResp.text();
+        var ghMatch = ghText.match(/^version\s*=\s*"([^"]+)"/m);
+        if (ghMatch && ghMatch[1] && compareVersions(ghMatch[1], latestVersion) > 0) {
+            latestVersion = ghMatch[1];
+        }
+    } catch (e) { /* GitHub unreachable, fall back to cluster comparison */ }
+
     renderIssueResults(results, latestVersion, clusters, clusterKeys);
 
     // Upgrade All button
