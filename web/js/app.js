@@ -11932,7 +11932,10 @@ async function scanForIssues() {
         var remoteNodes = allNodes.filter(function (n) { return !n.is_self && n.node_type !== 'proxmox'; });
         var promises = remoteNodes.map(function (node) {
             return fetch('/api/nodes/' + encodeURIComponent(node.id) + '/proxy/issues/scan')
-                .then(function (r) { return r.json(); })
+                .then(function (r) {
+                    if (!r.ok) throw new Error('HTTP ' + r.status + (r.status === 404 ? ' — node may need WolfStack update' : ''));
+                    return r.json();
+                })
                 .then(function (data) { data.node_id = node.id; data.is_self = false; return data; })
                 .catch(function (e) {
                     return { node_id: node.id, hostname: node.hostname || node.id, version: '?', issues: [{ severity: 'info', category: 'scan', title: 'Could not scan', detail: e.message }], ai_analysis: null, is_self: false };
