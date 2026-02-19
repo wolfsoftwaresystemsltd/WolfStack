@@ -6011,23 +6011,18 @@ fn parse_size_to_mb(s: &str) -> f64 {
     }
 }
 
-#[derive(Serialize)]
-struct Issue {
-    severity: String,   // "critical", "warning", "info"
-    category: String,   // "cpu", "memory", "disk", "swap", "load", "service", "container"
-    title: String,
-    detail: String,
+#[derive(Serialize, Clone)]
+pub struct Issue {
+    pub severity: String,   // "critical", "warning", "info"
+    pub category: String,   // "cpu", "memory", "disk", "swap", "load", "service", "container"
+    pub title: String,
+    pub detail: String,
 }
 
-/// GET /api/issues/scan — scan system for issues
-pub async fn scan_issues(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
-
-    let metrics = state.monitor.lock().unwrap().collect();
+/// Collect system issues (reusable — called by HTTP handler and background scheduler)
+pub fn collect_issues(metrics: &crate::monitoring::SystemMetrics) -> Vec<Issue> {
     let mut issues: Vec<Issue> = Vec::new();
+    let mem_pct = metrics.memory_percent;
 
     // ── CPU check ──
     if metrics.cpu_usage_percent > 90.0 {
@@ -6047,7 +6042,6 @@ pub async fn scan_issues(
     }
 
     // ── Memory check ──
-    let mem_pct = metrics.memory_percent;
     if mem_pct > 90.0 {
         issues.push(Issue {
             severity: "critical".into(),
@@ -6272,11 +6266,24 @@ pub async fn scan_issues(
         }
     }
 
+    issues
+}
+
+/// GET /api/issues/scan — scan system for issues
+pub async fn scan_issues(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let metrics = state.monitor.lock().unwrap().collect();
+    let issues = collect_issues(&metrics);
+
     // ── AI analysis (if configured) ──
     let ai_analysis = {
         let config = state.ai_agent.config.lock().unwrap().clone();
         if config.is_configured() {
-            // Build a metrics summary for the AI
+            let mem_pct = metrics.memory_percent;
             let summary = format!(
                 "Hostname: {}\nCPU: {:.1}% ({} cores, {})\nMemory: {:.1}% ({}/{} MB)\nSwap: {}/{} MB\nLoad: {:.2} {:.2} {:.2}\nDisks: {}\nProcesses: {}",
                 metrics.hostname,

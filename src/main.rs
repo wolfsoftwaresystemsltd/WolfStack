@@ -291,6 +291,102 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
+        // Background: scheduled issues scan (hourly critical alerts + daily summary)
+        let scan_state = app_state.clone();
+        let scan_ai = ai_agent.clone();
+        tokio::spawn(async move {
+            // Wait 60 seconds after startup before first scan
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let mut last_daily_date = String::new();
+            loop {
+                // Check if email is configured
+                let config = scan_ai.config.lock().unwrap().clone();
+                if config.email_enabled && !config.email_to.is_empty() {
+                    // Collect local metrics
+                    let metrics = scan_state.monitor.lock().unwrap().collect();
+                    let hostname = metrics.hostname.clone();
+                    let issues = api::collect_issues(&metrics);
+
+                    let critical_issues: Vec<&api::Issue> = issues.iter()
+                        .filter(|i| i.severity == "critical")
+                        .collect();
+                    let warning_issues: Vec<&api::Issue> = issues.iter()
+                        .filter(|i| i.severity == "warning")
+                        .collect();
+
+                    // Immediate alert if critical issues found
+                    if !critical_issues.is_empty() {
+                        let subject = format!(
+                            "[WolfStack CRITICAL] {} — {} critical issue(s)",
+                            hostname, critical_issues.len()
+                        );
+                        let mut body = format!(
+                            "🚨 Critical Issues Detected on {}\nTime: {}\n\n",
+                            hostname,
+                            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+                        );
+                        for issue in &critical_issues {
+                            body.push_str(&format!("❌ {}\n   {}\n\n", issue.title, issue.detail));
+                        }
+                        if !warning_issues.is_empty() {
+                            body.push_str(&format!("\n⚠️ Also {} warning(s):\n", warning_issues.len()));
+                            for issue in &warning_issues {
+                                body.push_str(&format!("  • {}\n", issue.title));
+                            }
+                        }
+                        body.push_str(&format!("\nWolfStack v{}", env!("CARGO_PKG_VERSION")));
+                        if let Err(e) = ai::send_alert_email(&config, &subject, &body) {
+                            tracing::warn!("Failed to send critical issues email: {}", e);
+                        } else {
+                            tracing::info!("Sent critical issues alert email ({} issues)", critical_issues.len());
+                        }
+                    }
+
+                    // Daily summary — send once per day (first check after midnight UTC)
+                    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                    if today != last_daily_date {
+                        last_daily_date = today.clone();
+
+                        let subject = format!(
+                            "[WolfStack Daily] {} — {} issue(s)",
+                            hostname, issues.len()
+                        );
+                        let mut body = format!(
+                            "📋 Daily Issues Report for {}\nDate: {}\nWolfStack v{}\n\n",
+                            hostname, today, env!("CARGO_PKG_VERSION")
+                        );
+                        if issues.is_empty() {
+                            body.push_str("✅ No issues detected — all systems healthy.\n");
+                        } else {
+                            for issue in &issues {
+                                let icon = match issue.severity.as_str() {
+                                    "critical" => "❌",
+                                    "warning" => "⚠️",
+                                    _ => "ℹ️",
+                                };
+                                body.push_str(&format!("{} [{}] {}\n   {}\n\n",
+                                    icon, issue.severity.to_uppercase(), issue.title, issue.detail));
+                            }
+                            body.push_str(&format!(
+                                "Summary: {} critical, {} warning, {} info\n",
+                                critical_issues.len(),
+                                warning_issues.len(),
+                                issues.iter().filter(|i| i.severity == "info").count()
+                            ));
+                        }
+                        if let Err(e) = ai::send_alert_email(&config, &subject, &body) {
+                            tracing::warn!("Failed to send daily issues email: {}", e);
+                        } else {
+                            tracing::info!("Sent daily issues summary email");
+                        }
+                    }
+                }
+
+                // Sleep for 1 hour
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        });
+
         // Background: AI health check loop
         let ai_state = app_state.clone();
         let ai_agent_bg = ai_agent.clone();
