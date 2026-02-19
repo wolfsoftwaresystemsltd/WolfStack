@@ -12271,35 +12271,111 @@ function renderIssueResults(results, latestVersion, clusters, clusterKeys) {
     listEl.innerHTML = html;
 }
 
-function issuesUpgradeNode(nodeId) {
-    var node = allNodes.find(function (n) { return n.id === nodeId; });
-    var name = node ? node.hostname : nodeId;
-    if (!confirm('⚡ Upgrade WolfStack on ' + name + '?\n\nThis will run the upgrade script in the background.')) return;
-
-    var url;
-    if (node && !node.is_self) {
-        url = '/api/nodes/' + encodeURIComponent(nodeId) + '/proxy/upgrade';
-    } else {
-        url = '/api/upgrade';
-    }
-
-    fetch(url, { method: 'POST' })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-            showToast('⚡ WolfStack upgrade started on ' + name + ' — it will restart automatically.', 'success');
-        })
-        .catch(function (e) {
-            showToast('Failed to start upgrade on ' + name + ': ' + e.message, 'error');
-        });
+// ── Reusable modal confirm for issues page ──
+function showIssuesConfirm(icon, title, description, items, confirmLabel, confirmColor) {
+    return new Promise(function (resolve, reject) {
+        var overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
+        var itemsHtml = items.length ? '<div style="padding:12px 16px; background:var(--bg-secondary); border-radius:10px; margin-bottom:20px;">'
+            + items.map(function (i) { return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;color:var(--text-primary);font-size:13px;">' + i + '</div>'; }).join('')
+            + '</div>' : '';
+        overlay.innerHTML = '<div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:480px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.5);">'
+            + '<div style="text-align:center; margin-bottom:20px;">'
+            + '<div style="font-size:48px; margin-bottom:8px;">' + icon + '</div>'
+            + '<h3 style="font-size:18px; font-weight:700; color:var(--text-primary); margin:0 0 10px;">' + title + '</h3>'
+            + (description ? '<p style="font-size:13px; color:var(--text-secondary); margin:0; line-height:1.6;">' + description + '</p>' : '')
+            + '</div>' + itemsHtml
+            + '<div style="display:flex; gap:10px; justify-content:center;">'
+            + '<button class="ic-cancel" style="padding:10px 24px; background:var(--bg-secondary); color:var(--text-secondary); border:1px solid var(--border); border-radius:8px; cursor:pointer; font-weight:600; font-size:14px;">Cancel</button>'
+            + '<button class="ic-confirm" style="padding:10px 24px; background:' + (confirmColor || 'var(--accent-primary)') + '; color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:600; font-size:14px;">' + confirmLabel + '</button>'
+            + '</div></div>';
+        document.body.appendChild(overlay);
+        overlay.onclick = function (e) { if (e.target === overlay) { overlay.remove(); reject('cancelled'); } };
+        overlay.querySelector('.ic-cancel').onclick = function () { overlay.remove(); reject('cancelled'); };
+        overlay.querySelector('.ic-confirm').onclick = function () { overlay.remove(); resolve(); };
+    });
 }
 
-function issuesUpgradeAll() {
+// ── Live progress modal ──
+function showProgressModal(icon, title) {
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
+    overlay.innerHTML = '<div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:520px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.5);">'
+        + '<div style="text-align:center; margin-bottom:16px;">'
+        + '<div style="font-size:48px; margin-bottom:8px;">' + icon + '</div>'
+        + '<h3 class="pm-title" style="font-size:18px; font-weight:700; color:var(--text-primary); margin:0 0 6px;">' + title + '</h3>'
+        + '</div>'
+        + '<div class="pm-list" style="max-height:350px; overflow-y:auto;"></div>'
+        + '<div class="pm-footer" style="display:none; margin-top:16px;"></div>'
+        + '<div class="pm-actions" style="display:none; margin-top:20px; text-align:center;">'
+        + '<button class="pm-done" style="padding:10px 28px; background:var(--accent-primary); color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:600; font-size:14px;">Done</button>'
+        + '</div></div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('.pm-done').onclick = function () { overlay.remove(); };
+    return {
+        el: overlay,
+        addRow: function (id, hostname) {
+            var row = document.createElement('div');
+            row.id = 'pm-row-' + id;
+            row.style.cssText = 'display:flex; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid var(--border);';
+            row.innerHTML = '<span class="pm-icon" style="display:inline-block;width:18px;height:18px;border:2px solid rgba(99,102,241,0.2);border-top-color:rgba(99,102,241,0.8);border-radius:50%;animation:spin 0.7s linear infinite;flex-shrink:0;"></span>'
+                + '<span style="font-weight:600; color:var(--text-primary); font-size:14px;">\uD83D\uDDA5\uFE0F ' + escapeHtml(hostname) + '</span>'
+                + '<span class="pm-status" style="margin-left:auto; font-size:12px; color:var(--text-muted);">Sending command...</span>';
+            overlay.querySelector('.pm-list').appendChild(row);
+        },
+        updateRow: function (id, success, statusText) {
+            var row = document.getElementById('pm-row-' + id);
+            if (!row) return;
+            var ic = row.querySelector('.pm-icon');
+            if (ic) { ic.style.cssText = 'font-size:18px; flex-shrink:0;'; ic.textContent = success ? '\u2705' : '\u274C'; }
+            var st = row.querySelector('.pm-status');
+            if (st) { st.style.color = success ? '#10b981' : '#ef4444'; st.textContent = statusText; }
+        },
+        setTitle: function (text) { overlay.querySelector('.pm-title').innerHTML = text; },
+        setFooter: function (html) { var f = overlay.querySelector('.pm-footer'); f.innerHTML = html; f.style.display = 'block'; },
+        showDone: function () { overlay.querySelector('.pm-actions').style.display = 'block'; },
+        remove: function () { overlay.remove(); }
+    };
+}
+
+async function issuesUpgradeNode(nodeId) {
+    var node = allNodes.find(function (n) { return n.id === nodeId; });
+    var name = node ? node.hostname : nodeId;
+
+    try {
+        await showIssuesConfirm('\u26A1', 'Upgrade WolfStack on ' + escapeHtml(name) + '?',
+            'This will run the upgrade script in the background. The server will restart automatically when complete.',
+            [], '\u26A1 Upgrade', '#f59e0b');
+    } catch (e) { return; }
+
+    var modal = showProgressModal('\u26A1', 'Upgrading WolfStack');
+    var safeId = (nodeId || 'local').replace(/[^a-z0-9_-]/gi, '-');
+    modal.addRow(safeId, name);
+
+    var url = (node && !node.is_self) ? '/api/nodes/' + encodeURIComponent(nodeId) + '/proxy/upgrade' : '/api/upgrade';
+
+    try {
+        await fetch(url, { method: 'POST' });
+        modal.updateRow(safeId, true, 'Command sent \u2713');
+    } catch (e) {
+        modal.updateRow(safeId, false, 'Failed: ' + e.message);
+    }
+
+    modal.setTitle('Upgrade In Progress');
+    modal.setFooter('<div style="background:rgba(234,179,8,0.1); border:1px solid rgba(234,179,8,0.3); border-radius:10px; padding:16px; text-align:center;">'
+        + '<div style="font-size:24px; margin-bottom:8px;">\u23F3</div>'
+        + '<div style="font-weight:600; color:var(--text-primary); font-size:14px; margin-bottom:4px;">Please wait approximately 5 minutes</div>'
+        + '<div style="color:var(--text-secondary); font-size:12px;">The server is upgrading and will restart automatically.<br>Refresh your browser once complete.</div>'
+        + '</div>');
+    modal.showDone();
+}
+
+async function issuesUpgradeAll() {
     if (!issuesScanResults || issuesScanResults.length === 0) {
         showToast('Run a scan first.', 'warning');
         return;
     }
 
-    // Find latest version and only upgrade nodes that are behind
     var latestVersion = '0.0.0';
     issuesScanResults.forEach(function (r) {
         if (r.version && r.version !== '?' && compareVersions(r.version, latestVersion) > 0) latestVersion = r.version;
@@ -12314,116 +12390,92 @@ function issuesUpgradeAll() {
         return;
     }
 
-    if (!confirm('⚡ Upgrade WolfStack on ' + outdated.length + ' node(s)?\n\nThis will trigger a background upgrade on all outdated nodes.\nNodes will restart automatically when complete.')) return;
+    var nodeList = outdated.map(function (r) { return '\uD83D\uDDA5\uFE0F ' + escapeHtml(r.hostname || r.node_id) + ' (v' + r.version + ' \u2192 v' + latestVersion + ')'; });
+    try {
+        await showIssuesConfirm('\u26A1', 'Upgrade ' + outdated.length + ' Server' + (outdated.length !== 1 ? 's' : '') + '?',
+            'This will trigger a background upgrade on all outdated nodes.', nodeList, '\u26A1 Upgrade All', '#f59e0b');
+    } catch (e) { return; }
+
+    var modal = showProgressModal('\u26A1', 'Upgrading ' + outdated.length + ' Server' + (outdated.length !== 1 ? 's' : ''));
 
     outdated.forEach(function (r) {
-        var node = allNodes.find(function (n) { return n.id === r.node_id; });
-        var url;
-        if (node && !node.is_self) {
-            url = '/api/nodes/' + encodeURIComponent(r.node_id) + '/proxy/upgrade';
-        } else {
-            url = '/api/upgrade';
-        }
-        fetch(url, { method: 'POST' }).catch(function () { });
+        var safeId = (r.node_id || 'local').replace(/[^a-z0-9_-]/gi, '-');
+        modal.addRow(safeId, r.hostname || r.node_id);
     });
 
-    showToast('⚡ WolfStack upgrade triggered on ' + outdated.length + ' node(s) — they will restart automatically.', 'success');
+    for (var i = 0; i < outdated.length; i++) {
+        var r = outdated[i];
+        var node = allNodes.find(function (n) { return n.id === r.node_id; });
+        var safeId = (r.node_id || 'local').replace(/[^a-z0-9_-]/gi, '-');
+        var url = (node && !node.is_self) ? '/api/nodes/' + encodeURIComponent(r.node_id) + '/proxy/upgrade' : '/api/upgrade';
+        try {
+            await fetch(url, { method: 'POST' });
+            modal.updateRow(safeId, true, 'Command sent \u2713');
+        } catch (e) {
+            modal.updateRow(safeId, false, 'Failed: ' + e.message);
+        }
+    }
+
+    modal.setTitle('Upgrades In Progress');
+    modal.setFooter('<div style="background:rgba(234,179,8,0.1); border:1px solid rgba(234,179,8,0.3); border-radius:10px; padding:16px; text-align:center;">'
+        + '<div style="font-size:24px; margin-bottom:8px;">\u23F3</div>'
+        + '<div style="font-weight:600; color:var(--text-primary); font-size:14px; margin-bottom:4px;">Please wait approximately 5 minutes</div>'
+        + '<div style="color:var(--text-secondary); font-size:12px;">All servers are upgrading and will restart automatically.<br>Refresh your browser once complete.</div>'
+        + '</div>');
+    modal.showDone();
 }
 
 async function cleanSystem() {
-    // ── Styled modal confirm instead of window.confirm ──
-    var confirmed = await new Promise(function (resolve, reject) {
-        var overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
-        overlay.innerHTML = '<div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:480px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.5);">'
-            + '<div style="text-align:center; margin-bottom:20px;">'
-            + '<div style="font-size:48px; margin-bottom:8px;">🧹</div>'
-            + '<h3 style="font-size:18px; font-weight:700; color:var(--text-primary); margin:0 0 10px;">Clean All Servers?</h3>'
-            + '<p style="font-size:13px; color:var(--text-secondary); margin:0; line-height:1.6;">This will safely free disk space on <strong>all nodes</strong> by:</p>'
-            + '</div>'
-            + '<div style="padding:12px 16px; background:var(--bg-secondary); border-radius:10px; margin-bottom:20px;">'
-            + '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;color:var(--text-primary);font-size:13px;">📋 Vacuuming journal logs to 200 MB</div>'
-            + '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;color:var(--text-primary);font-size:13px;">📦 Clearing package cache (apt/dnf)</div>'
-            + '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;color:var(--text-primary);font-size:13px;">🐳 Pruning unused Docker resources</div>'
-            + '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;color:var(--text-primary);font-size:13px;">🗑️ Removing old kernels</div>'
-            + '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;color:var(--text-primary);font-size:13px;">📁 Deleting old /tmp files (>7 days)</div>'
-            + '</div>'
-            + '<div style="display:flex; gap:10px; justify-content:center;">'
-            + '<button id="clean-cancel-btn" style="padding:10px 24px; background:var(--bg-secondary); color:var(--text-secondary); border:1px solid var(--border); border-radius:8px; cursor:pointer; font-weight:600; font-size:14px;">Cancel</button>'
-            + '<button id="clean-confirm-btn" style="padding:10px 24px; background:var(--accent-primary); color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:600; font-size:14px;">🧹 Clean All Servers</button>'
-            + '</div></div>';
-        document.body.appendChild(overlay);
-        overlay.onclick = function (e) { if (e.target === overlay) { overlay.remove(); reject('cancelled'); } };
-        document.getElementById('clean-cancel-btn').onclick = function () { overlay.remove(); reject('cancelled'); };
-        document.getElementById('clean-confirm-btn').onclick = function () { overlay.remove(); resolve(); };
-    }).catch(function () { return 'cancelled'; });
-
-    // If cancelled, stop
-    if (confirmed === 'cancelled') return;
+    try {
+        await showIssuesConfirm('\uD83E\uDDF9', 'Clean All Servers?',
+            'This will safely free disk space on <strong>all nodes</strong> by:',
+            ['\uD83D\uDCCB Vacuuming journal logs to 200 MB', '\uD83D\uDCE6 Clearing package cache (apt/dnf)',
+                '\uD83D\uDC33 Pruning unused Docker resources', '\uD83D\uDDD1\uFE0F Removing old kernels', '\uD83D\uDCC1 Deleting old /tmp files (>7 days)'],
+            '\uD83E\uDDF9 Clean All Servers');
+    } catch (e) { return; }
 
     var btn = document.getElementById('issues-clean-btn');
     if (btn) { btn.disabled = true; btn.innerHTML = '<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(59,130,246,0.2);border-top-color:#3b82f6;border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Cleaning...'; }
 
-    // ── Gather all nodes (like the scanner does) ──
     var wsNodes = (typeof allNodes !== 'undefined' && allNodes.length) ? allNodes.filter(function (n) { return n.node_type !== 'proxmox'; }) : [];
     if (wsNodes.length === 0) wsNodes = [{ id: 'local', hostname: 'local', is_self: true }];
 
-    var allResults = [];
+    var modal = showProgressModal('\uD83E\uDDF9', 'Cleaning ' + wsNodes.length + ' Server' + (wsNodes.length !== 1 ? 's' : ''));
+    wsNodes.forEach(function (node) {
+        var safeId = (node.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
+        modal.addRow(safeId, node.hostname || node.id || 'local');
+    });
 
-    // ── Clean all nodes in parallel ──
-    var cleanPromises = wsNodes.map(function (node) {
+    var totalFreed = 0;
+    var successCount = 0;
+    for (var i = 0; i < wsNodes.length; i++) {
+        var node = wsNodes[i];
+        var safeId = (node.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
         var isLocal = !!node.is_self;
         var url = isLocal ? '/api/issues/clean' : '/api/nodes/' + encodeURIComponent(node.id) + '/proxy/issues/clean';
-        return fetch(url, { method: 'POST', credentials: 'include' })
-            .then(function (r) {
-                if (!r.ok) throw new Error('HTTP ' + r.status);
-                return r.json();
-            })
-            .then(function (data) {
-                allResults.push({ hostname: node.hostname || node.id || 'local', ok: true, freed_mb: data.freed_mb || 0, cleaned: data.cleaned || [] });
-            })
-            .catch(function (e) {
-                allResults.push({ hostname: node.hostname || node.id || 'local', ok: false, freed_mb: 0, cleaned: ['Error: ' + e.message] });
-            });
-    });
-    await Promise.all(cleanPromises);
+        try {
+            var resp = await fetch(url, { method: 'POST', credentials: 'include' });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            var data = await resp.json();
+            var freed = data.freed_mb || 0;
+            totalFreed += freed;
+            successCount++;
+            var freedStr = freed > 0 ? 'Freed ' + (freed > 1024 ? (freed / 1024).toFixed(1) + ' GB' : freed + ' MB') : 'Already clean';
+            modal.updateRow(safeId, true, freedStr);
+        } catch (e) {
+            modal.updateRow(safeId, false, 'Error: ' + e.message);
+        }
+    }
 
-    // ── Show aggregated results modal ──
-    var totalFreed = allResults.reduce(function (sum, r) { return sum + r.freed_mb; }, 0);
-    var freedText = totalFreed > 0 ? ('🎉 Freed ~' + (totalFreed > 1024 ? (totalFreed / 1024).toFixed(1) + ' GB' : totalFreed + ' MB') + ' across ' + allResults.length + ' server' + (allResults.length !== 1 ? 's' : '')) : '✅ All servers are clean';
+    var summaryText = totalFreed > 0
+        ? '\uD83C\uDF89 Freed ~' + (totalFreed > 1024 ? (totalFreed / 1024).toFixed(1) + ' GB' : totalFreed + ' MB') + ' across ' + successCount + ' server' + (successCount !== 1 ? 's' : '')
+        : '\u2705 All servers are clean';
+    modal.setTitle(summaryText);
+    modal.showDone();
 
-    var listHtml = '';
-    allResults.forEach(function (r) {
-        var icon = r.ok ? '🖥️' : '⚠️';
-        var freedStr = r.freed_mb > 0 ? ' — freed ' + (r.freed_mb > 1024 ? (r.freed_mb / 1024).toFixed(1) + ' GB' : r.freed_mb + ' MB') : '';
-        listHtml += '<div style="margin-bottom:12px;">';
-        listHtml += '<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">';
-        listHtml += '<span style="font-size:16px;">' + icon + '</span>';
-        listHtml += '<span style="font-weight:600; color:var(--text-primary); font-size:14px;">' + escapeHtml(r.hostname) + freedStr + '</span>';
-        listHtml += '</div>';
-        (r.cleaned || []).forEach(function (item) {
-            listHtml += '<div style="display:flex; align-items:center; gap:8px; padding:4px 0 4px 28px; color:var(--text-secondary); font-size:13px;">';
-            listHtml += '<span style="color:#10b981;">✓</span> ' + escapeHtml(item) + '</div>';
-        });
-        listHtml += '</div>';
-    });
-
-    var overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
-    overlay.innerHTML = '<div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:520px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.5);">'
-        + '<div style="text-align:center; margin-bottom:20px;">'
-        + '<div style="font-size:48px; margin-bottom:8px;">🧹</div>'
-        + '<h3 style="font-size:18px; font-weight:700; color:var(--text-primary); margin:0 0 6px;">' + freedText + '</h3>'
-        + '</div>'
-        + '<div style="max-height:350px; overflow-y:auto;">' + listHtml + '</div>'
-        + '<div style="display:flex; justify-content:center; margin-top:20px;">'
-        + '<button onclick="this.closest(\'div[style*=fixed]\').remove()" style="padding:10px 28px; background:var(--accent-primary); color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:600; font-size:14px;">Done</button>'
-        + '</div></div>';
-    document.body.appendChild(overlay);
-    overlay.onclick = function (e) { if (e.target === overlay) overlay.remove(); };
-
-    if (btn) { btn.disabled = false; btn.innerHTML = '🧹 Clean'; }
+    if (btn) { btn.disabled = false; btn.innerHTML = '\uD83E\uDDF9 Clean'; }
 }
+
 
 // ═══════════════════════════════════════════════
 // ─── App Store ───
