@@ -4573,7 +4573,7 @@ function upgradeNode(nodeId) {
     // Open console popup with type=upgrade
     let url = '/console.html?type=upgrade&name=wolfstack';
     if (!node.is_self) {
-        url += '&host=' + encodeURIComponent(node.address) + '&port=' + encodeURIComponent(node.port);
+        url += '&node_id=' + encodeURIComponent(nodeId);
     }
     window.open(url, 'upgrade_console_' + nodeId, 'width=960,height=600,menubar=no,toolbar=no');
 
@@ -10208,7 +10208,7 @@ function triggerUpgrade() {
     // Open console popup with type=upgrade to stream live output
     var url = '/console.html?type=upgrade&name=wolfstack';
     if (targetNode && !targetNode.is_self) {
-        url += '&host=' + encodeURIComponent(targetNode.address) + '&port=' + encodeURIComponent(targetNode.port);
+        url += '&node_id=' + encodeURIComponent(targetNode.id);
     }
     window.open(url, 'upgrade_console', 'width=960,height=600,menubar=no,toolbar=no');
 
