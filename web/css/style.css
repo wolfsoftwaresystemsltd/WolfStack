@@ -225,6 +225,112 @@
     color: #d0a040;
 }
 
+/* ─── Glass Theme ─── */
+[data-theme="glass"] {
+    --bg-primary: rgba(15, 15, 35, 0.6);
+    --bg-secondary: rgba(255, 255, 255, 0.05);
+    --bg-card: rgba(255, 255, 255, 0.07);
+    --bg-card-hover: rgba(255, 255, 255, 0.12);
+    --bg-input: rgba(255, 255, 255, 0.06);
+    --bg-tertiary: rgba(255, 255, 255, 0.08);
+    --border: rgba(255, 255, 255, 0.12);
+    --border-light: rgba(255, 255, 255, 0.22);
+    --text-primary: #f0f0ff;
+    --text-secondary: #a0a8c8;
+    --text-muted: #6870a0;
+    --accent: #818cf8;
+    --accent-light: #a5b4fc;
+    --accent-glow: rgba(129, 140, 248, 0.18);
+    --success: #34d399;
+    --success-bg: rgba(52, 211, 153, 0.12);
+    --warning: #fbbf24;
+    --warning-bg: rgba(251, 191, 36, 0.12);
+    --danger: #f472b6;
+    --danger-bg: rgba(244, 114, 182, 0.12);
+    --info: #67e8f9;
+    --info-bg: rgba(103, 232, 249, 0.12);
+    --gradient-main: linear-gradient(135deg, #818cf8 0%, #a78bfa 50%, #67e8f9 100%);
+    --gradient-success: linear-gradient(135deg, #34d399 0%, #6ee7b7 100%);
+    --gradient-danger: linear-gradient(135deg, #f472b6 0%, #fb7185 100%);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 24px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 12px 48px rgba(0, 0, 0, 0.5);
+    --shadow-glow: 0 0 40px rgba(129, 140, 248, 0.2);
+}
+
+/* Glass — animated mesh background on <body> */
+[data-theme="glass"] body {
+    background:
+        radial-gradient(ellipse at 20% 20%, rgba(99, 102, 241, 0.35) 0%, transparent 55%),
+        radial-gradient(ellipse at 80% 10%, rgba(168, 85, 247, 0.28) 0%, transparent 50%),
+        radial-gradient(ellipse at 60% 80%, rgba(6, 182, 212, 0.25) 0%, transparent 55%),
+        radial-gradient(ellipse at 10% 75%, rgba(244, 114, 182, 0.2) 0%, transparent 50%),
+        #0a0a1e;
+    background-attachment: fixed;
+}
+
+/* Glass — frosted sidebar */
+[data-theme="glass"] .sidebar {
+    background: rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(20px) saturate(1.6);
+    -webkit-backdrop-filter: blur(20px) saturate(1.6);
+    border-right: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+/* Glass — frosted top-bar */
+[data-theme="glass"] .top-bar {
+    background: rgba(10, 10, 30, 0.5);
+    backdrop-filter: blur(20px) saturate(1.6);
+    -webkit-backdrop-filter: blur(20px) saturate(1.6);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Glass — frosted cards */
+[data-theme="glass"] .card,
+[data-theme="glass"] .stat-card {
+    background: rgba(255, 255, 255, 0.07);
+    backdrop-filter: blur(16px) saturate(1.5);
+    -webkit-backdrop-filter: blur(16px) saturate(1.5);
+    border: 1px solid rgba(255, 255, 255, 0.13);
+}
+
+[data-theme="glass"] .card:hover,
+[data-theme="glass"] .stat-card:hover {
+    background: rgba(255, 255, 255, 0.11);
+    border-color: rgba(255, 255, 255, 0.22);
+}
+
+/* Glass — frosted modals & dropdowns */
+[data-theme="glass"] .modal-content,
+[data-theme="glass"] .dropdown-menu {
+    background: rgba(20, 20, 50, 0.7);
+    backdrop-filter: blur(24px) saturate(1.6);
+    -webkit-backdrop-filter: blur(24px) saturate(1.6);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+/* Glass — data table rows */
+[data-theme="glass"] .data-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.07);
+}
+
+/* Glass — form inputs */
+[data-theme="glass"] .form-control,
+[data-theme="glass"] input,
+[data-theme="glass"] select,
+[data-theme="glass"] textarea {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.15);
+    backdrop-filter: blur(8px);
+    color: var(--text-primary);
+}
+
+/* Glass — log viewer */
+[data-theme="glass"] .log-viewer {
+    background: rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(12px);
+}
+
 /* ─── Settings Page Tabs ─── */
 .settings-tabs {
     display: flex;
