@@ -11906,36 +11906,85 @@ async function scanForIssues() {
     if (btn) { btn.disabled = true; btn.innerHTML = '<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Scanning...'; }
     if (upgradeAllBtn) upgradeAllBtn.style.display = 'none';
 
-    // Hide AI section while scanning
     var aiSection = document.getElementById('issues-ai-section');
     if (aiSection) aiSection.style.display = 'none';
 
-    var results = []; // Array of { node_id, hostname, version, issues, ai_analysis, is_self }
+    var results = [];
     var counts = { critical: 0, warning: 0, info: 0 };
 
-    // Find local node info and remote nodes
+    // Gather nodes and group by cluster
     var localNode = (typeof allNodes !== 'undefined') ? allNodes.find(function (n) { return n.is_self; }) : null;
-    var remoteNodes = (typeof allNodes !== 'undefined' && allNodes.length) ? allNodes.filter(function (n) { return !n.is_self && n.node_type !== 'proxmox'; }) : [];
-    var totalNodes = 1 + remoteNodes.length;
+    var wsNodes = (typeof allNodes !== 'undefined' && allNodes.length) ? allNodes.filter(function (n) { return n.node_type !== 'proxmox'; }) : [];
+    if (wsNodes.length === 0 && localNode) wsNodes = [localNode];
+    else if (wsNodes.length === 0) wsNodes = [{ id: 'local', hostname: 'local', is_self: true, cluster_name: 'WolfStack' }];
+
+    // Build cluster groups
+    var clusters = {};
+    wsNodes.forEach(function (n) {
+        var key = n.cluster_name || 'WolfStack';
+        if (!clusters[key]) clusters[key] = [];
+        clusters[key].push(n);
+    });
+    var clusterKeys = Object.keys(clusters).sort(function (a, b) {
+        if (a === 'WolfStack') return -1;
+        if (b === 'WolfStack') return 1;
+        return a.localeCompare(b);
+    });
+
+    var totalNodes = wsNodes.length;
     var completedNodes = 0;
 
-    // Set up the table skeleton with progress bar immediately
+    // Render cluster-grouped layout with placeholder "Scanning..." rows
     if (listEl) {
-        listEl.innerHTML = '<div class="card"><div class="card-body" style="padding:0; overflow-x:auto;">'
-            + '<div id="issues-progress" style="padding:12px 16px; background:var(--bg-secondary); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px;">'
+        var scaffoldHtml = '';
+        // Global progress bar
+        scaffoldHtml += '<div id="issues-progress" style="padding:12px 16px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; margin-bottom:16px; display:flex; align-items:center; gap:12px;">'
             + '<div style="flex:1; height:6px; background:var(--bg-tertiary); border-radius:3px; overflow:hidden;">'
             + '<div id="issues-progress-bar" style="width:0%; height:100%; background:var(--accent-primary); border-radius:3px; transition:width 0.3s ease;"></div></div>'
-            + '<span id="issues-progress-text" style="font-size:12px; color:var(--text-muted); white-space:nowrap;">Scanning 0/' + totalNodes + ' nodes...</span></div>'
-            + '<table style="width:100%; border-collapse:collapse; font-size:13px;">'
-            + '<thead><tr style="background:var(--bg-secondary); border-bottom:1px solid var(--border);">'
-            + '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Node</th>'
-            + '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">WolfStack</th>'
-            + '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Issues</th>'
-            + '<th style="padding:12px 16px; text-align:right; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Action</th>'
-            + '</tr></thead><tbody id="issues-table-body"></tbody></table></div></div>';
+            + '<span id="issues-progress-text" style="font-size:12px; color:var(--text-muted); white-space:nowrap;">Scanning 0/' + totalNodes + ' nodes...</span></div>';
+
+        clusterKeys.forEach(function (clusterName) {
+            var clusterNodes = clusters[clusterName];
+            var clusterId = 'issues-cluster-' + clusterName.replace(/[^a-z0-9]/gi, '-');
+            scaffoldHtml += '<div class="card" style="margin-bottom:16px;">';
+            // Cluster header
+            scaffoldHtml += '<div style="padding:12px 16px; background:linear-gradient(90deg, rgba(99,102,241,0.06), transparent); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px;">';
+            scaffoldHtml += '<span style="font-size:18px;">☁️</span>';
+            scaffoldHtml += '<span style="font-weight:600; font-size:14px; color:var(--text-primary);">' + escapeHtml(clusterName) + '</span>';
+            scaffoldHtml += '<span style="font-size:12px; color:var(--text-muted);">' + clusterNodes.length + ' node' + (clusterNodes.length !== 1 ? 's' : '') + '</span>';
+            scaffoldHtml += '</div>';
+            // Table
+            scaffoldHtml += '<div class="card-body" style="padding:0; overflow-x:auto;">';
+            scaffoldHtml += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
+            scaffoldHtml += '<thead><tr style="background:var(--bg-secondary); border-bottom:1px solid var(--border);">';
+            scaffoldHtml += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Node</th>';
+            scaffoldHtml += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">WolfStack</th>';
+            scaffoldHtml += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Issues</th>';
+            scaffoldHtml += '<th style="padding:10px 16px; text-align:right; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Action</th>';
+            scaffoldHtml += '</tr></thead><tbody id="' + clusterId + '-tbody">';
+            // Placeholder rows for each node
+            clusterNodes.forEach(function (node) {
+                var safeId = 'issue-row-' + (node.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
+                scaffoldHtml += '<tr id="' + safeId + '" style="border-bottom:1px solid var(--border);">';
+                scaffoldHtml += '<td style="padding:12px 16px; white-space:nowrap;">';
+                scaffoldHtml += '<div style="display:flex; align-items:center; gap:8px;">';
+                scaffoldHtml += '<span style="font-size:16px;">🖥️</span>';
+                scaffoldHtml += '<div>';
+                scaffoldHtml += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(node.hostname || node.id || 'local') + '</div>';
+                if (node.is_self) scaffoldHtml += '<div style="font-size:11px; color:var(--text-muted);">local</div>';
+                scaffoldHtml += '</div></div></td>';
+                scaffoldHtml += '<td style="padding:12px 16px;" colspan="3">';
+                scaffoldHtml += '<div style="display:flex; align-items:center; gap:8px; color:var(--text-muted); font-size:13px;">';
+                scaffoldHtml += '<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(99,102,241,0.2);border-top-color:rgba(99,102,241,0.8);border-radius:50%;animation:spin 0.7s linear infinite;"></span>';
+                scaffoldHtml += 'Scanning ' + escapeHtml(node.hostname || node.id || 'local') + '...</div>';
+                scaffoldHtml += '</td></tr>';
+            });
+            scaffoldHtml += '</tbody></table></div></div>';
+        });
+        listEl.innerHTML = scaffoldHtml;
     }
 
-    // Helper: update progress bar
+    // Helper to update progress
     function updateProgress() {
         completedNodes++;
         var pct = Math.round((completedNodes / totalNodes) * 100);
@@ -11945,7 +11994,7 @@ async function scanForIssues() {
         if (text) text.textContent = completedNodes < totalNodes ? ('Scanning ' + completedNodes + '/' + totalNodes + ' nodes...') : (totalNodes + ' nodes scanned ✓');
     }
 
-    // Helper: update the summary counters
+    // Helper to update summary counters
     function updateCounts() {
         var critEl = document.getElementById('issues-count-critical');
         var warnEl = document.getElementById('issues-count-warning');
@@ -11954,224 +12003,44 @@ async function scanForIssues() {
         if (critEl) critEl.textContent = counts.critical;
         if (warnEl) warnEl.textContent = counts.warning;
         if (infoEl) infoEl.textContent = counts.info;
-        if (nodesEl) nodesEl.textContent = results.length;
+        if (nodesEl) nodesEl.textContent = completedNodes;
     }
 
-    // Helper: add a result to the counts + table
-    function addResult(data) {
+    // Replace a placeholder row with actual result
+    function replaceNodeRow(nodeId, data) {
         results.push(data);
         (data.issues || []).forEach(function (issue) {
             if (counts[issue.severity] !== undefined) counts[issue.severity]++;
         });
-        updateCounts();
-        appendIssueRow(data, results.length - 1);
         updateProgress();
-    }
+        updateCounts();
 
-    // Scan local node first
-    try {
-        var resp = await fetch('/api/issues/scan');
-        var data = await resp.json();
-        data.node_id = localNode ? localNode.id : 'local';
-        data.is_self = true;
-        addResult(data);
-    } catch (e) {
-        addResult({ node_id: 'local', hostname: 'local', version: '?', issues: [{ severity: 'warning', category: 'scan', title: 'Scan failed', detail: e.message }], ai_analysis: null, is_self: true });
-    }
+        var safeId = 'issue-row-' + (nodeId || 'local').replace(/[^a-z0-9_-]/gi, '-');
+        var tr = document.getElementById(safeId);
+        if (!tr) return;
 
-    // Scan remote WolfStack nodes — fire all but render each as it arrives
-    if (remoteNodes.length > 0) {
-        var remotePromises = remoteNodes.map(function (node) {
-            return fetch('/api/nodes/' + encodeURIComponent(node.id) + '/proxy/issues/scan')
-                .then(function (r) {
-                    if (!r.ok) throw new Error('HTTP ' + r.status + (r.status === 404 ? ' — node may need WolfStack update' : ''));
-                    return r.json();
-                })
-                .then(function (data) { data.node_id = node.id; data.is_self = false; addResult(data); })
-                .catch(function (e) {
-                    addResult({ node_id: node.id, hostname: node.hostname || node.id, version: '?', issues: [{ severity: 'info', category: 'scan', title: 'Could not scan', detail: e.message }], ai_analysis: null, is_self: false });
-                });
-        });
-        await Promise.all(remotePromises);
-    }
+        var issues = data.issues || [];
+        var nodeVersion = data.version || '?';
 
-    issuesScanResults = results;
-
-    // Hide progress bar now that we're done
-    var progressEl = document.getElementById('issues-progress');
-    if (progressEl) progressEl.style.display = 'none';
-
-    // Now that all results are in, re-render the version column in case we can detect outdated nodes
-    var latestVersion = '0.0.0';
-    results.forEach(function (r) {
-        if (r.version && r.version !== '?' && compareVersions(r.version, latestVersion) > 0) {
-            latestVersion = r.version;
-        }
-    });
-    // Re-render the full table with correct version badges (now we know the latest)
-    renderIssueResults(results, latestVersion);
-
-    // Show Upgrade All button only if at least one node needs upgrading
-    var needsUpgrade = results.filter(function (r) { return r.version && r.version !== '?' && compareVersions(r.version, latestVersion) < 0; });
-    if (upgradeAllBtn) {
-        if (needsUpgrade.length > 0) {
-            upgradeAllBtn.style.display = 'inline-block';
-            upgradeAllBtn.innerHTML = '⚡ Upgrade All (' + needsUpgrade.length + ')';
-        } else {
-            upgradeAllBtn.style.display = 'none';
-        }
-    }
-
-    // Show AI analysis if any node returned one
-    var aiTexts = results.map(function (r) {
-        if (r.ai_analysis) return '**' + escapeHtml(r.hostname) + ':** ' + r.ai_analysis;
-        return null;
-    }).filter(Boolean);
-
-    if (aiTexts.length > 0) {
-        if (aiSection) {
-            aiSection.style.display = 'block';
-            var aiContent = document.getElementById('issues-ai-content');
-            if (aiContent) aiContent.innerHTML = aiTexts.map(function (t) { return formatAiResponse(t); }).join('<hr style="border-color:var(--border); margin:16px 0;">');
-        }
-    }
-
-    if (btn) { btn.disabled = false; btn.innerHTML = '🔄 Scan Now'; }
-}
-
-function appendIssueRow(r, idx) {
-    var tbody = document.getElementById('issues-table-body');
-    if (!tbody) return;
-
-    var severityBadge = function (sev) {
-        var colors = {
-            critical: { bg: 'rgba(239,68,68,0.15)', text: '#ef4444', icon: '🔴' },
-            warning: { bg: 'rgba(234,179,8,0.15)', text: '#eab308', icon: '🟡' },
-            info: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', icon: '🔵' }
+        var severityBadge = function (sev) {
+            var colors = { critical: { bg: 'rgba(239,68,68,0.15)', text: '#ef4444', icon: '🔴' }, warning: { bg: 'rgba(234,179,8,0.15)', text: '#eab308', icon: '🟡' }, info: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', icon: '🔵' } };
+            var c = colors[sev] || colors.info;
+            return '<span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:' + c.bg + '; color:' + c.text + ';">' + c.icon + ' ' + sev.toUpperCase() + '</span>';
         };
-        var c = colors[sev] || colors.info;
-        return '<span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:' + c.bg + '; color:' + c.text + ';">' + c.icon + ' ' + sev.toUpperCase() + '</span>';
-    };
+        var categoryIcons = { cpu: '⚡', memory: '🧠', disk: '💾', swap: '🔄', load: '📈', service: '⚙️', container: '📦', scan: '🔍' };
 
-    var categoryIcons = {
-        cpu: '⚡', memory: '🧠', disk: '💾', swap: '🔄', load: '📈',
-        service: '⚙️', container: '📦', scan: '🔍'
-    };
-
-    var issues = r.issues || [];
-    var rowBg = idx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
-    var nodeVersion = r.version || '?';
-
-    var html = '';
-    // Node
-    html += '<td style="padding:12px 16px; white-space:nowrap;">';
-    html += '<div style="display:flex; align-items:center; gap:8px;">';
-    html += '<span style="font-size:16px;">🖥️</span>';
-    html += '<div>';
-    html += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(r.hostname || 'Unknown') + '</div>';
-    if (r.is_self) html += '<div style="font-size:11px; color:var(--text-muted);">local</div>';
-    html += '</div></div></td>';
-
-    // Version — show plain version for now (will be updated with badges in final render)
-    html += '<td style="padding:12px 16px; white-space:nowrap;">';
-    html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(255,255,255,0.06); color:var(--text-secondary); border:1px solid var(--border);">v' + escapeHtml(nodeVersion) + '</span>';
-    html += '</td>';
-
-    // Issues
-    html += '<td style="padding:12px 16px;">';
-    if (issues.length === 0) {
-        html += '<span style="color:#10b981; font-weight:500;">✅ All clear</span>';
-    } else {
-        var order = { critical: 0, warning: 1, info: 2 };
-        var sorted = issues.slice().sort(function (a, b) { return (order[a.severity] || 9) - (order[b.severity] || 9); });
-        sorted.forEach(function (issue) {
-            var catIcon = categoryIcons[issue.category] || '❓';
-            html += '<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">';
-            html += severityBadge(issue.severity);
-            html += '<span style="font-size:14px;">' + catIcon + '</span>';
-            html += '<span style="color:var(--text-primary); font-weight:500;">' + escapeHtml(issue.title) + '</span>';
-            html += '<span style="color:var(--text-muted); font-size:12px;"> — ' + escapeHtml(issue.detail) + '</span>';
-            html += '</div>';
-        });
-    }
-    html += '</td>';
-
-    // Action — skip version comparison for now (final render will add upgrade buttons)
-    html += '<td style="padding:12px 16px; text-align:right; white-space:nowrap;">';
-    html += '<span style="color:var(--text-muted); font-size:12px;">—</span>';
-    html += '</td>';
-
-    var tr = document.createElement('tr');
-    tr.style.cssText = 'border-bottom:1px solid var(--border); background:' + rowBg + '; animation:fadeIn 0.3s ease;';
-    tr.innerHTML = html;
-    tbody.appendChild(tr);
-}
-
-function compareVersions(a, b) {
-    var pa = a.split('.').map(Number);
-    var pb = b.split('.').map(Number);
-    for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
-        var na = pa[i] || 0;
-        var nb = pb[i] || 0;
-        if (na > nb) return 1;
-        if (na < nb) return -1;
-    }
-    return 0;
-}
-
-function renderIssueResults(results, latestVersion) {
-    var listEl = document.getElementById('issues-list');
-    if (!listEl) return;
-
-    var severityBadge = function (sev) {
-        var colors = {
-            critical: { bg: 'rgba(239,68,68,0.15)', text: '#ef4444', icon: '🔴' },
-            warning: { bg: 'rgba(234,179,8,0.15)', text: '#eab308', icon: '🟡' },
-            info: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', icon: '🔵' }
-        };
-        var c = colors[sev] || colors.info;
-        return '<span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:' + c.bg + '; color:' + c.text + ';">' + c.icon + ' ' + sev.toUpperCase() + '</span>';
-    };
-
-    var categoryIcons = {
-        cpu: '⚡', memory: '🧠', disk: '💾', swap: '🔄', load: '📈',
-        service: '⚙️', container: '📦', scan: '🔍'
-    };
-
-    var html = '<div class="card"><div class="card-body" style="padding:0; overflow-x:auto;">';
-    html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
-    html += '<thead><tr style="background:var(--bg-secondary); border-bottom:1px solid var(--border);">';
-    html += '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Node</th>';
-    html += '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">WolfStack</th>';
-    html += '<th style="padding:12px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Issues</th>';
-    html += '<th style="padding:12px 16px; text-align:right; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Action</th>';
-    html += '</tr></thead><tbody>';
-
-    results.forEach(function (r, idx) {
-        var issues = r.issues || [];
-        var rowBg = idx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
-        var nodeVersion = r.version || '?';
-        var isBehind = nodeVersion !== '?' && latestVersion !== '0.0.0' && compareVersions(nodeVersion, latestVersion) < 0;
-
-        html += '<tr style="border-bottom:1px solid var(--border); background:' + rowBg + ';">';
-
+        var html = '';
         // Node
         html += '<td style="padding:12px 16px; white-space:nowrap;">';
         html += '<div style="display:flex; align-items:center; gap:8px;">';
-        html += '<span style="font-size:16px;">🖥️</span>';
-        html += '<div>';
-        html += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(r.hostname || 'Unknown') + '</div>';
-        if (r.is_self) html += '<div style="font-size:11px; color:var(--text-muted);">local</div>';
+        html += '<span style="font-size:16px;">🖥️</span><div>';
+        html += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(data.hostname || 'Unknown') + '</div>';
+        if (data.is_self) html += '<div style="font-size:11px; color:var(--text-muted);">local</div>';
         html += '</div></div></td>';
 
         // Version
         html += '<td style="padding:12px 16px; white-space:nowrap;">';
-        if (isBehind) {
-            html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(234,179,8,0.15); color:#eab308; border:1px solid rgba(234,179,8,0.3);">v' + escapeHtml(nodeVersion) + ' ↑</span>';
-            html += '<div style="font-size:10px; color:var(--text-muted); margin-top:2px;">latest: v' + escapeHtml(latestVersion) + '</div>';
-        } else {
-            html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3);">v' + escapeHtml(nodeVersion) + ' ✓</span>';
-        }
+        html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(255,255,255,0.06); color:var(--text-secondary); border:1px solid var(--border);">v' + escapeHtml(nodeVersion) + '</span>';
         html += '</td>';
 
         // Issues
@@ -12193,21 +12062,201 @@ function renderIssueResults(results, latestVersion) {
         }
         html += '</td>';
 
-        // Action — only show upgrade if version is behind
+        // Action placeholder (final render adds upgrade buttons)
         html += '<td style="padding:12px 16px; text-align:right; white-space:nowrap;">';
-        if (isBehind) {
-            html += '<button class="btn" onclick="issuesUpgradeNode(\'' + escapeHtml(r.node_id) + '\')" id="issues-upgrade-' + idx + '" ';
-            html += 'style="padding:6px 14px; font-size:12px; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3); border-radius:6px; cursor:pointer;">';
-            html += '⚡ Upgrade WolfStack</button>';
-        } else {
-            html += '<span style="color:var(--text-muted); font-size:12px;">Up to date</span>';
-        }
-        html += '</td>';
+        html += '<span style="color:var(--text-muted); font-size:12px;">—</span></td>';
 
-        html += '</tr>';
+        tr.innerHTML = html;
+        tr.style.animation = 'fadeIn 0.3s ease';
+    }
+
+    // Scan all nodes concurrently, replacing placeholder rows as results arrive
+    var scanPromises = wsNodes.map(function (node) {
+        var isLocal = !!node.is_self;
+        var url = isLocal ? '/api/issues/scan' : '/api/nodes/' + encodeURIComponent(node.id) + '/proxy/issues/scan';
+        return fetch(url)
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status + (r.status === 404 ? ' — node may need WolfStack update' : ''));
+                return r.json();
+            })
+            .then(function (data) {
+                data.node_id = node.id || 'local';
+                data.is_self = isLocal;
+                replaceNodeRow(data.node_id, data);
+            })
+            .catch(function (e) {
+                replaceNodeRow(node.id || 'local', { node_id: node.id || 'local', hostname: node.hostname || node.id || 'local', version: '?', issues: [{ severity: 'info', category: 'scan', title: 'Could not scan', detail: e.message }], ai_analysis: null, is_self: isLocal });
+            });
+    });
+    await Promise.all(scanPromises);
+
+    issuesScanResults = results;
+
+    // Hide progress bar
+    var progressEl = document.getElementById('issues-progress');
+    if (progressEl) progressEl.style.display = 'none';
+
+    // Final re-render with version badges and upgrade buttons
+    var latestVersion = '0.0.0';
+    results.forEach(function (r) {
+        if (r.version && r.version !== '?' && compareVersions(r.version, latestVersion) > 0) latestVersion = r.version;
+    });
+    renderIssueResults(results, latestVersion, clusters, clusterKeys);
+
+    // Upgrade All button
+    var needsUpgrade = results.filter(function (r) { return r.version && r.version !== '?' && compareVersions(r.version, latestVersion) < 0; });
+    if (upgradeAllBtn) {
+        if (needsUpgrade.length > 0) {
+            upgradeAllBtn.style.display = 'inline-block';
+            upgradeAllBtn.innerHTML = '⚡ Upgrade All (' + needsUpgrade.length + ')';
+        } else {
+            upgradeAllBtn.style.display = 'none';
+        }
+    }
+
+    // AI analysis
+    var aiTexts = results.map(function (r) {
+        if (r.ai_analysis) return '**' + escapeHtml(r.hostname) + ':** ' + r.ai_analysis;
+        return null;
+    }).filter(Boolean);
+    if (aiTexts.length > 0 && aiSection) {
+        aiSection.style.display = 'block';
+        var aiContent = document.getElementById('issues-ai-content');
+        if (aiContent) aiContent.innerHTML = aiTexts.map(function (t) { return formatAiResponse(t); }).join('<hr style="border-color:var(--border); margin:16px 0;">');
+    }
+
+    if (btn) { btn.disabled = false; btn.innerHTML = '🔄 Scan Now'; }
+}
+
+function compareVersions(a, b) {
+    var pa = a.split('.').map(Number);
+    var pb = b.split('.').map(Number);
+    for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+        var na = pa[i] || 0;
+        var nb = pb[i] || 0;
+        if (na > nb) return 1;
+        if (na < nb) return -1;
+    }
+    return 0;
+}
+
+function renderIssueResults(results, latestVersion, clusters, clusterKeys) {
+    var listEl = document.getElementById('issues-list');
+    if (!listEl) return;
+
+    // Build a lookup by node_id
+    var resultMap = {};
+    results.forEach(function (r) { resultMap[r.node_id] = r; });
+
+    var severityBadge = function (sev) {
+        var colors = { critical: { bg: 'rgba(239,68,68,0.15)', text: '#ef4444', icon: '🔴' }, warning: { bg: 'rgba(234,179,8,0.15)', text: '#eab308', icon: '🟡' }, info: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', icon: '🔵' } };
+        var c = colors[sev] || colors.info;
+        return '<span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:' + c.bg + '; color:' + c.text + ';">' + c.icon + ' ' + sev.toUpperCase() + '</span>';
+    };
+    var categoryIcons = { cpu: '⚡', memory: '🧠', disk: '💾', swap: '🔄', load: '📈', service: '⚙️', container: '📦', scan: '🔍' };
+
+    var html = '';
+    // If no cluster info, fall back to a simple list
+    if (!clusters || !clusterKeys) {
+        clusters = { 'WolfStack': results.map(function (r) { return { id: r.node_id, hostname: r.hostname, is_self: r.is_self }; }) };
+        clusterKeys = ['WolfStack'];
+    }
+
+    clusterKeys.forEach(function (clusterName) {
+        var clusterNodes = clusters[clusterName] || [];
+        var clusterIssueCount = 0;
+        clusterNodes.forEach(function (n) {
+            var r = resultMap[n.id || 'local'];
+            if (r) clusterIssueCount += (r.issues || []).length;
+        });
+
+        html += '<div class="card" style="margin-bottom:16px;">';
+        // Cluster header
+        html += '<div style="padding:12px 16px; background:linear-gradient(90deg, rgba(99,102,241,0.06), transparent); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px;">';
+        html += '<span style="font-size:18px;">☁️</span>';
+        html += '<span style="font-weight:600; font-size:14px; color:var(--text-primary);">' + escapeHtml(clusterName) + '</span>';
+        html += '<span style="font-size:12px; color:var(--text-muted);">' + clusterNodes.length + ' node' + (clusterNodes.length !== 1 ? 's' : '') + '</span>';
+        if (clusterIssueCount === 0) {
+            html += '<span style="margin-left:auto; font-size:12px; color:#10b981; font-weight:500;">✅ All clear</span>';
+        } else {
+            html += '<span style="margin-left:auto; font-size:12px; color:#eab308; font-weight:500;">' + clusterIssueCount + ' issue' + (clusterIssueCount !== 1 ? 's' : '') + '</span>';
+        }
+        html += '</div>';
+        // Table
+        html += '<div class="card-body" style="padding:0; overflow-x:auto;">';
+        html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
+        html += '<thead><tr style="background:var(--bg-secondary); border-bottom:1px solid var(--border);">';
+        html += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Node</th>';
+        html += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">WolfStack</th>';
+        html += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Issues</th>';
+        html += '<th style="padding:10px 16px; text-align:right; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Action</th>';
+        html += '</tr></thead><tbody>';
+
+        var rowIdx = 0;
+        clusterNodes.forEach(function (node) {
+            var r = resultMap[node.id || 'local'];
+            if (!r) return;
+            var issues = r.issues || [];
+            var rowBg = rowIdx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
+            var nodeVersion = r.version || '?';
+            var isBehind = nodeVersion !== '?' && latestVersion !== '0.0.0' && compareVersions(nodeVersion, latestVersion) < 0;
+
+            html += '<tr style="border-bottom:1px solid var(--border); background:' + rowBg + ';">';
+
+            // Node
+            html += '<td style="padding:12px 16px; white-space:nowrap;">';
+            html += '<div style="display:flex; align-items:center; gap:8px;">';
+            html += '<span style="font-size:16px;">🖥️</span><div>';
+            html += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(r.hostname || 'Unknown') + '</div>';
+            if (r.is_self) html += '<div style="font-size:11px; color:var(--text-muted);">local</div>';
+            html += '</div></div></td>';
+
+            // Version
+            html += '<td style="padding:12px 16px; white-space:nowrap;">';
+            if (isBehind) {
+                html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(234,179,8,0.15); color:#eab308; border:1px solid rgba(234,179,8,0.3);">v' + escapeHtml(nodeVersion) + ' ↑</span>';
+                html += '<div style="font-size:10px; color:var(--text-muted); margin-top:2px;">latest: v' + escapeHtml(latestVersion) + '</div>';
+            } else {
+                html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3);">v' + escapeHtml(nodeVersion) + ' ✓</span>';
+            }
+            html += '</td>';
+
+            // Issues
+            html += '<td style="padding:12px 16px;">';
+            if (issues.length === 0) {
+                html += '<span style="color:#10b981; font-weight:500;">✅ All clear</span>';
+            } else {
+                var order = { critical: 0, warning: 1, info: 2 };
+                var sorted = issues.slice().sort(function (a, b) { return (order[a.severity] || 9) - (order[b.severity] || 9); });
+                sorted.forEach(function (issue) {
+                    var catIcon = categoryIcons[issue.category] || '❓';
+                    html += '<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">';
+                    html += severityBadge(issue.severity);
+                    html += '<span style="font-size:14px;">' + catIcon + '</span>';
+                    html += '<span style="color:var(--text-primary); font-weight:500;">' + escapeHtml(issue.title) + '</span>';
+                    html += '<span style="color:var(--text-muted); font-size:12px;"> — ' + escapeHtml(issue.detail) + '</span>';
+                    html += '</div>';
+                });
+            }
+            html += '</td>';
+
+            // Action
+            html += '<td style="padding:12px 16px; text-align:right; white-space:nowrap;">';
+            if (isBehind) {
+                html += '<button class="btn" onclick="issuesUpgradeNode(\'' + escapeHtml(r.node_id) + '\')" ';
+                html += 'style="padding:6px 14px; font-size:12px; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3); border-radius:6px; cursor:pointer;">';
+                html += '⚡ Upgrade WolfStack</button>';
+            } else {
+                html += '<span style="color:var(--text-muted); font-size:12px;">Up to date</span>';
+            }
+            html += '</td>';
+            html += '</tr>';
+            rowIdx++;
+        });
+
+        html += '</tbody></table></div></div>';
     });
 
-    html += '</tbody></table></div></div>';
     listEl.innerHTML = html;
 }
 
