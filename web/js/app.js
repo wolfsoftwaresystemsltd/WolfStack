@@ -12206,6 +12206,8 @@ function renderAppStoreGrid() {
         return;
     }
 
+    filtered.sort((a, b) => a.name.localeCompare(b.name));
+
     grid.innerHTML = filtered.map(app => {
         const icon = APP_ICONS[app.id] || '📦';
         const targets = [];
