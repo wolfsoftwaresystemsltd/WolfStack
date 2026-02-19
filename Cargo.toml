@@ -15,7 +15,7 @@ actix-rt = "2"
 actix-ws = "0.3"
 actix-multipart = "0.7"
 portable-pty = "0.8"
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"
 
 # Serialization
@@ -29,9 +29,10 @@ tokio = { version = "1", features = ["full"] }
 # HTTP client for agent communication
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"], default-features = false }
 
-# TLS (OpenSSL — system native, no CryptoProvider headaches)
+# TLS
 openssl = "0.10"
-native-tls = "0.2"
+rustls = { version = "0.23", features = ["ring"] }
+webpki-roots = "0.26"
 
 # Logging
 tracing = "0.1"

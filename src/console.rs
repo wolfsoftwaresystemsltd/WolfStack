@@ -13,6 +13,44 @@ use futures::StreamExt;
 use tokio_tungstenite::tungstenite;
 use tracing::{info, error};
 
+/// Certificate verifier that accepts all certs (for self-signed inter-node TLS)
+#[derive(Debug)]
+struct DangerousVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for DangerousVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
 /// WebSocket console endpoint: /ws/console/{type}/{name}
 pub async fn console_ws(
     req: HttpRequest,
@@ -232,20 +270,13 @@ async fn remote_console_bridge(
         format!("ws://{}:{}{}", remote_host, remote_port, ws_path),
     ];
 
-    // Build TLS connector that accepts self-signed certs
+    // Build TLS connector that accepts self-signed certs (rustls)
     let tls_connector = {
-        let mut builder = native_tls::TlsConnector::builder();
-        builder.danger_accept_invalid_certs(true);
-        builder.danger_accept_invalid_hostnames(true);
-        match builder.build() {
-            Ok(c) => Some(tokio_tungstenite::Connector::NativeTls(c)),
-            Err(e) => {
-                error!("TLS connector error: {}", e);
-                let _ = session.text(format!("\r\n\x1b[31mTLS error: {}\x1b[0m\r\n", e)).await;
-                let _ = session.close(None).await;
-                return;
-            }
-        }
+        let config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(DangerousVerifier))
+            .with_no_client_auth();
+        Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
     };
 
     let mut remote_stream = None;
