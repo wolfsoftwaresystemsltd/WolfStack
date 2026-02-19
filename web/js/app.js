@@ -12270,6 +12270,46 @@ function issuesUpgradeAll() {
     showToast('⚡ WolfStack upgrade triggered on ' + outdated.length + ' node(s) — they will restart automatically.', 'success');
 }
 
+async function cleanSystem() {
+    if (!confirm('🧹 Clean system?\n\nThis will safely free disk space by:\n• Vacuuming journal logs to 200 MB\n• Clearing package cache (apt/dnf)\n• Pruning unused Docker resources\n• Removing old kernels\n• Deleting old /tmp files (>7 days)')) return;
+
+    var btn = document.getElementById('issues-clean-btn');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(59,130,246,0.2);border-top-color:#3b82f6;border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Cleaning...'; }
+
+    var baseUrl = getNodeApiBase(currentNodeId);
+    try {
+        var resp = await fetch(baseUrl + '/api/issues/clean', { method: 'POST', credentials: 'include' });
+        var data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
+
+        // Show results in a nice modal
+        var freedText = data.freed_mb > 0 ? ('🎉 Freed ~' + (data.freed_mb > 1024 ? (data.freed_mb / 1024).toFixed(1) + ' GB' : data.freed_mb + ' MB')) : '✅ System is clean';
+        var listHtml = (data.cleaned || []).map(function (item) {
+            return '<div style="display:flex; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid var(--border);">'
+                + '<span style="color:#10b981; font-size:14px;">✓</span>'
+                + '<span style="color:var(--text-primary); font-size:13px;">' + escapeHtml(item) + '</span></div>';
+        }).join('');
+
+        var overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
+        overlay.innerHTML = '<div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:480px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.5);">'
+            + '<div style="text-align:center; margin-bottom:20px;">'
+            + '<div style="font-size:48px; margin-bottom:8px;">🧹</div>'
+            + '<h3 style="font-size:18px; font-weight:700; color:var(--text-primary); margin:0 0 6px;">' + freedText + '</h3>'
+            + '</div>'
+            + '<div style="max-height:300px; overflow-y:auto;">' + listHtml + '</div>'
+            + '<div style="display:flex; justify-content:center; margin-top:20px;">'
+            + '<button onclick="this.closest(\'div[style*=fixed]\').remove()" style="padding:10px 28px; background:var(--accent-primary); color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:600; font-size:14px;">Done</button>'
+            + '</div></div>';
+        document.body.appendChild(overlay);
+        overlay.onclick = function (e) { if (e.target === overlay) overlay.remove(); };
+    } catch (e) {
+        showToast('Clean failed: ' + e.message, 'error');
+    }
+
+    if (btn) { btn.disabled = false; btn.innerHTML = '🧹 Clean'; }
+}
+
 // ═══════════════════════════════════════════════
 // ─── App Store ───
 // ═══════════════════════════════════════════════

@@ -6781,6 +6781,119 @@ pub async fn scan_issues(
     }))
 }
 
+/// POST /api/issues/clean — run safe cleanup to free disk space
+pub async fn clean_system(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let mut cleaned = Vec::new();
+    let mut total_freed_mb: f64 = 0.0;
+
+    // ── Journal logs → vacuum to 200M ──
+    if let Ok(before_out) = run_shell("journalctl --disk-usage 2>/dev/null") {
+        let before_mb = before_out.split("take up ").nth(1)
+            .and_then(|s| s.split(' ').next())
+            .map(|s| parse_size_to_mb(s))
+            .unwrap_or(0.0);
+
+        let _ = run_shell("journalctl --vacuum-size=200M 2>/dev/null");
+
+        let after_mb = run_shell("journalctl --disk-usage 2>/dev/null").ok()
+            .and_then(|o| o.split("take up ").nth(1).and_then(|s| s.split(' ').next()).map(|s| parse_size_to_mb(s)))
+            .unwrap_or(before_mb);
+
+        let freed = (before_mb - after_mb).max(0.0);
+        if freed > 1.0 {
+            total_freed_mb += freed;
+            cleaned.push(format!("Journal logs: freed {:.0} MB", freed));
+        }
+    }
+
+    // ── APT cache ──
+    if command_exists("apt") {
+        let before_mb = run_shell("du -sm /var/cache/apt/archives 2>/dev/null").ok()
+            .and_then(|o| o.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()))
+            .unwrap_or(0.0);
+
+        let _ = run_shell("apt-get clean -y 2>/dev/null");
+        let _ = run_shell("apt-get autoremove -y 2>/dev/null");
+
+        let after_mb = run_shell("du -sm /var/cache/apt/archives 2>/dev/null").ok()
+            .and_then(|o| o.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()))
+            .unwrap_or(0.0);
+
+        let freed = (before_mb - after_mb).max(0.0);
+        if freed > 1.0 {
+            total_freed_mb += freed;
+            cleaned.push(format!("APT cache: freed {:.0} MB", freed));
+        }
+    }
+
+    // ── DNF/YUM cache ──
+    if command_exists("dnf") {
+        let before_mb = run_shell("du -sm /var/cache/dnf 2>/dev/null").ok()
+            .and_then(|o| o.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()))
+            .unwrap_or(0.0);
+
+        let _ = run_shell("dnf clean all 2>/dev/null");
+
+        let after_mb = run_shell("du -sm /var/cache/dnf 2>/dev/null").ok()
+            .and_then(|o| o.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()))
+            .unwrap_or(0.0);
+
+        let freed = (before_mb - after_mb).max(0.0);
+        if freed > 1.0 {
+            total_freed_mb += freed;
+            cleaned.push(format!("DNF cache: freed {:.0} MB", freed));
+        }
+    } else if command_exists("yum") {
+        let _ = run_shell("yum clean all 2>/dev/null");
+        cleaned.push("YUM cache: cleaned".into());
+    }
+
+    // ── Old kernels (keep current + 1 previous) ──
+    if command_exists("apt") {
+        let out = run_shell("dpkg -l 'linux-image-*' 2>/dev/null | grep '^ii' | awk '{print $2}' | grep -v $(uname -r | sed 's/-generic//') | head -5").ok().unwrap_or_default();
+        let old_kernels: Vec<&str> = out.lines().filter(|l| !l.is_empty() && l.contains("linux-image")).collect();
+        if !old_kernels.is_empty() {
+            for kernel in &old_kernels {
+                let _ = run_shell(&format!("DEBIAN_FRONTEND=noninteractive apt-get remove -y {} 2>/dev/null", kernel));
+            }
+            cleaned.push(format!("Old kernels: removed {} package(s)", old_kernels.len()));
+        }
+    }
+
+    // ── Docker prune ──
+    if command_exists("docker") {
+        let out = run_shell("docker system prune -f 2>/dev/null").ok().unwrap_or_default();
+        // Parse "Total reclaimed space: 1.23GB" from output
+        if let Some(line) = out.lines().find(|l| l.contains("reclaimed space")) {
+            if let Some(size_str) = line.split(": ").nth(1) {
+                let mb = parse_size_to_mb(size_str.trim());
+                if mb > 1.0 {
+                    total_freed_mb += mb;
+                    cleaned.push(format!("Docker prune: freed {}", size_str.trim()));
+                }
+            }
+        }
+    }
+
+    // ── /tmp old files (>7 days) ──
+    let _ = run_shell("find /tmp -type f -atime +7 -delete 2>/dev/null");
+
+    if cleaned.is_empty() {
+        cleaned.push("System is already clean — nothing to free.".into());
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "ok": true,
+        "cleaned": cleaned,
+        "freed_mb": total_freed_mb.round() as u64,
+    }))
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -7002,6 +7115,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/upgrade", web::post().to(system_upgrade))
         // Issues Scanner
         .route("/api/issues/scan", web::get().to(scan_issues))
+        .route("/api/issues/clean", web::post().to(clean_system))
         // Security (Fail2ban, iptables, UFW)
         .route("/api/security/status", web::get().to(security_status))
         .route("/api/security/fail2ban/install", web::post().to(security_fail2ban_install))
