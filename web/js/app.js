@@ -97,15 +97,19 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', 'ai-settings': 'AI Agent', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues' };
+    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
         renderDatacenterOverview();
-    } else if (page === 'ai-settings') {
-        loadAiConfig();
-        loadAiStatus();
-        loadAiAlerts();
+    } else if (page === 'settings') {
+        // If AI tab is active, load AI data
+        const aiTab = document.getElementById('settings-tab-ai');
+        if (aiTab && aiTab.classList.contains('active')) {
+            loadAiConfig();
+            loadAiStatus();
+            loadAiAlerts();
+        }
     } else if (page === 'appstore') {
         loadAppStoreApps();
     } else if (page === 'issues') {
@@ -10319,7 +10323,8 @@ function formatAiResponse(text) {
 
 function openAiSettings() {
     if (aiChatOpen) toggleAiChat();
-    selectView('ai-settings');
+    selectView('settings');
+    switchSettingsTab('ai');
 }
 
 async function loadAiConfig() {
@@ -12969,3 +12974,58 @@ async function saveFail2banConfig(nodePrefix, btn) {
         btn.disabled = false;
     }
 }
+
+// ─── Theme System ───
+function applyTheme(themeId) {
+    const validThemes = ['dark', 'light', 'midnight', 'datacenter', 'forest', 'amber'];
+    if (!validThemes.includes(themeId)) themeId = 'dark';
+
+    // Apply to root element
+    if (themeId === 'dark') {
+        document.documentElement.removeAttribute('data-theme');
+    } else {
+        document.documentElement.setAttribute('data-theme', themeId);
+    }
+
+    // Save preference
+    localStorage.setItem('wolfstack-theme', themeId);
+
+    // Update theme picker cards (highlight active)
+    document.querySelectorAll('.theme-card').forEach(card => {
+        card.classList.toggle('active', card.getAttribute('data-theme-id') === themeId);
+    });
+}
+
+function initTheme() {
+    const saved = localStorage.getItem('wolfstack-theme') || 'dark';
+    applyTheme(saved);
+}
+
+function switchSettingsTab(tabName) {
+    // Deactivate all tabs and panels
+    document.querySelectorAll('.settings-tab-btn').forEach(btn => btn.classList.remove('active'));
+    document.querySelectorAll('.settings-tab-panel').forEach(p => p.classList.remove('active'));
+
+    // Activate the selected tab
+    const panel = document.getElementById(`settings-tab-${tabName}`);
+    if (panel) panel.classList.add('active');
+
+    // Highlight the correct button
+    document.querySelectorAll('.settings-tab-btn').forEach(btn => {
+        const btnText = btn.textContent.trim().toLowerCase();
+        const tabMap = { 'appearance': '🎨 appearance', 'ai': '🤖 ai agent', 'backup': '📦 config backup' };
+        if (btnText === (tabMap[tabName] || '').trim()) {
+            btn.classList.add('active');
+        }
+    });
+
+    // Lazy-load AI data when switching to AI tab
+    if (tabName === 'ai') {
+        loadAiConfig();
+        loadAiStatus();
+        loadAiAlerts();
+    }
+}
+
+// Apply saved theme immediately on load
+initTheme();

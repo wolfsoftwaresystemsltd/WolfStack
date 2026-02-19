@@ -53,7 +53,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v9.8.6</span>
+                <span class="version">v9.8.7</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -91,8 +91,7 @@
                 🔔 <span id="update-banner-text">Update available</span>
             </div>
             <div class="sidebar-icon-buttons">
-                <button class="btn btn-icon" onclick="selectView('ai-settings')" title="AI Settings">⚙️</button>
-                <button class="btn btn-icon" onclick="selectView('config-backup')" title="Config Backup">📦</button>
+                <button class="btn btn-icon" onclick="selectView('settings')" title="Settings">⚙️</button>
                 <button class="btn btn-icon" onclick="window.open('https://wolfscale.org', '_blank')"
                     title="Help & Docs">❓</button>
                 <button class="btn btn-icon" onclick="openAddServerModal()" title="Add Server">➕</button>
@@ -1608,176 +1607,306 @@
         </div>
 
         <!-- ═══ AI Agent Settings ═══ -->
-        <div id="page-ai-settings" class="page-view" style="display:none;">
+        <!-- ═══ Settings Page (Tabbed) ═══ -->
+        <div id="page-settings" class="page-view" style="display:none;">
             <div class="card">
-                <div class="card-header">
-                    <h3>🤖 AI Agent Settings</h3>
-                    <div style="font-size: 12px; color: var(--text-muted);">Configure your AI monitoring assistant</div>
+                <div class="card-header" style="flex-direction:column; align-items:stretch; padding-bottom:0;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+                        <h3>⚙️ Settings</h3>
+                        <div style="font-size: 12px; color: var(--text-muted);">WolfStack configuration</div>
+                    </div>
+                    <div class="settings-tabs">
+                        <button class="settings-tab-btn active" onclick="switchSettingsTab('appearance')">🎨
+                            Appearance</button>
+                        <button class="settings-tab-btn" onclick="switchSettingsTab('ai')">🤖 AI Agent</button>
+                        <button class="settings-tab-btn" onclick="switchSettingsTab('backup')">📦 Config Backup</button>
+                    </div>
                 </div>
                 <div class="card-body" style="padding:24px;">
-                    <!-- Status Banner -->
-                    <div id="ai-status-banner" style="padding:16px;border-radius:12px;margin-bottom:20px;
-                         background:var(--bg-tertiary);border:1px solid var(--border);">
-                        <div style="display:flex;align-items:center;gap:12px;">
-                            <span style="font-size:32px;">🐺</span>
-                            <div>
-                                <div style="font-weight:600;font-size:14px;" id="ai-status-text">Checking status...
+
+                    <!-- ─── Appearance Tab ─── -->
+                    <div id="settings-tab-appearance" class="settings-tab-panel active">
+                        <h4 style="margin:0 0 8px 0; font-size:16px; font-weight:600;">Theme</h4>
+                        <p style="font-size:13px; color:var(--text-muted); margin:0 0 20px 0;">Choose a visual theme for
+                            the WolfStack dashboard. Your selection is saved locally.</p>
+                        <div class="theme-grid" id="theme-grid">
+                            <!-- Dark (Default) -->
+                            <div class="theme-card active" onclick="applyTheme('dark')" data-theme-id="dark">
+                                <div class="theme-preview">
+                                    <div class="theme-preview-sidebar" style="background:#111827;"></div>
+                                    <div class="theme-preview-main" style="background:#0a0e1a;">
+                                        <div class="theme-preview-bar" style="background:#1a1f35;"></div>
+                                        <div class="theme-preview-card" style="background:#1a1f35;">
+                                            <div class="theme-preview-card-inner" style="background:#dc2626;"></div>
+                                            <div class="theme-preview-card-inner" style="background:#10b981;"></div>
+                                            <div class="theme-preview-card-inner" style="background:#f59e0b;"></div>
+                                        </div>
+                                    </div>
                                 </div>
-                                <div style="font-size:12px;color:var(--text-muted);" id="ai-status-detail">Loading...
+                                <div class="theme-card-info">
+                                    <div class="theme-card-name">WolfStack Dark</div>
+                                    <div class="theme-card-desc">Default — deep navy with red accents</div>
+                                </div>
+                            </div>
+                            <!-- Light -->
+                            <div class="theme-card" onclick="applyTheme('light')" data-theme-id="light">
+                                <div class="theme-preview">
+                                    <div class="theme-preview-sidebar"
+                                        style="background:#ffffff; border-right:1px solid #e2e4ea;"></div>
+                                    <div class="theme-preview-main" style="background:#f5f6fa;">
+                                        <div class="theme-preview-bar" style="background:#ffffff;"></div>
+                                        <div class="theme-preview-card" style="background:#ffffff;">
+                                            <div class="theme-preview-card-inner" style="background:#dc2626;"></div>
+                                            <div class="theme-preview-card-inner" style="background:#059669;"></div>
+                                            <div class="theme-preview-card-inner" style="background:#d97706;"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="theme-card-info">
+                                    <div class="theme-card-name">Light</div>
+                                    <div class="theme-card-desc">Clean white with red accents</div>
+                                </div>
+                            </div>
+                            <!-- Midnight -->
+                            <div class="theme-card" onclick="applyTheme('midnight')" data-theme-id="midnight">
+                                <div class="theme-preview">
+                                    <div class="theme-preview-sidebar" style="background:#0a0a0f;"></div>
+                                    <div class="theme-preview-main" style="background:#000000;">
+                                        <div class="theme-preview-bar" style="background:#111118;"></div>
+                                        <div class="theme-preview-card" style="background:#111118;">
+                                            <div class="theme-preview-card-inner" style="background:#06b6d4;"></div>
+                                            <div class="theme-preview-card-inner" style="background:#818cf8;"></div>
+                                            <div class="theme-preview-card-inner" style="background:#f43f5e;"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="theme-card-info">
+                                    <div class="theme-card-name">Midnight</div>
+                                    <div class="theme-card-desc">Pure black OLED with cyan accents</div>
+                                </div>
+                            </div>
+                            <!-- Datacenter -->
+                            <div class="theme-card" onclick="applyTheme('datacenter')" data-theme-id="datacenter">
+                                <div class="theme-preview">
+                                    <div class="theme-preview-sidebar" style="background:#243040;"></div>
+                                    <div class="theme-preview-main" style="background:#1d2733;">
+                                        <div class="theme-preview-bar" style="background:#2a3849;"></div>
+                                        <div class="theme-preview-card" style="background:#2a3849;">
+                                            <div class="theme-preview-card-inner" style="background:#3ba4c4;"></div>
+                                            <div class="theme-preview-card-inner" style="background:#2ea87e;"></div>
+                                            <div class="theme-preview-card-inner" style="background:#e0a030;"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="theme-card-info">
+                                    <div class="theme-card-name">Datacenter</div>
+                                    <div class="theme-card-desc">Utilitarian grey-blue with steel accents</div>
+                                </div>
+                            </div>
+                            <!-- Forest -->
+                            <div class="theme-card" onclick="applyTheme('forest')" data-theme-id="forest">
+                                <div class="theme-preview">
+                                    <div class="theme-preview-sidebar" style="background:#122218;"></div>
+                                    <div class="theme-preview-main" style="background:#0c1a10;">
+                                        <div class="theme-preview-bar" style="background:#1a3020;"></div>
+                                        <div class="theme-preview-card" style="background:#1a3020;">
+                                            <div class="theme-preview-card-inner" style="background:#22c55e;"></div>
+                                            <div class="theme-preview-card-inner" style="background:#38bdf8;"></div>
+                                            <div class="theme-preview-card-inner" style="background:#eab308;"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="theme-card-info">
+                                    <div class="theme-card-name">Forest</div>
+                                    <div class="theme-card-desc">Dark green with emerald accents</div>
+                                </div>
+                            </div>
+                            <!-- Amber Terminal -->
+                            <div class="theme-card" onclick="applyTheme('amber')" data-theme-id="amber">
+                                <div class="theme-preview">
+                                    <div class="theme-preview-sidebar" style="background:#121008;"></div>
+                                    <div class="theme-preview-main" style="background:#0a0800;">
+                                        <div class="theme-preview-bar" style="background:#1a1610;"></div>
+                                        <div class="theme-preview-card" style="background:#1a1610;">
+                                            <div class="theme-preview-card-inner" style="background:#f0a000;"></div>
+                                            <div class="theme-preview-card-inner" style="background:#88c020;"></div>
+                                            <div class="theme-preview-card-inner" style="background:#e04020;"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="theme-card-info">
+                                    <div class="theme-card-name">Amber Terminal</div>
+                                    <div class="theme-card-desc">Retro CRT hacker aesthetic</div>
                                 </div>
                             </div>
                         </div>
                     </div>
 
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">
-                        <!-- Left Column: Provider & Keys -->
-                        <div>
-                            <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);">🔑 LLM Provider</h4>
-                            <div class="form-group" style="margin-bottom:16px;">
-                                <label>Provider</label>
-                                <select id="ai-provider" class="form-control" onchange="onAiProviderChange()">
-                                    <option value="claude">Claude (Anthropic)</option>
-                                    <option value="gemini">Gemini (Google)</option>
-                                </select>
-                            </div>
-                            <div class="form-group" style="margin-bottom:16px;">
-                                <label>Claude API Key</label>
-                                <input type="password" id="ai-claude-key" class="form-control" placeholder="sk-ant-...">
-                            </div>
-                            <div class="form-group" style="margin-bottom:16px;">
-                                <label>Gemini API Key</label>
-                                <input type="password" id="ai-gemini-key" class="form-control" placeholder="AIza...">
-                            </div>
-                            <div class="form-group" style="margin-bottom:16px;">
-                                <label>Model</label>
-                                <select id="ai-model" class="form-control">
-                                    <option value="">Select a provider and enter API key first</option>
-                                </select>
-                            </div>
-                            <div class="form-group" style="margin-bottom:16px;">
-                                <label>Health Check Interval</label>
-                                <select id="ai-check-interval" class="form-control">
-                                    <option value="15">Every 15 minutes</option>
-                                    <option value="30">Every 30 minutes</option>
-                                    <option value="60" selected>Every hour</option>
-                                    <option value="360">Every 6 hours</option>
-                                    <option value="1440">Daily</option>
-                                </select>
+                    <!-- ─── AI Agent Tab ─── -->
+                    <div id="settings-tab-ai" class="settings-tab-panel">
+                        <!-- Status Banner -->
+                        <div id="ai-status-banner" style="padding:16px;border-radius:12px;margin-bottom:20px;
+                             background:var(--bg-input);border:1px solid var(--border);">
+                            <div style="display:flex;align-items:center;gap:12px;">
+                                <span style="font-size:32px;">🐺</span>
+                                <div>
+                                    <div style="font-weight:600;font-size:14px;" id="ai-status-text">Checking status...
+                                    </div>
+                                    <div style="font-size:12px;color:var(--text-muted);" id="ai-status-detail">
+                                        Loading...
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
-                        <!-- Right Column: Email & Alerts -->
-                        <div>
-                            <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);">📧 Email Alerts</h4>
-                            <div class="form-group" style="margin-bottom:16px;">
-                                <label style="display:flex;align-items:center;gap:8px;">
-                                    <input type="checkbox" id="ai-email-enabled"> Enable email alerts
-                                </label>
-                            </div>
-                            <div id="ai-email-fields">
-                                <div class="form-group" style="margin-bottom:12px;">
-                                    <label>Send alerts to</label>
-                                    <input type="email" id="ai-email-to" class="form-control"
-                                        placeholder="admin@example.com">
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">
+                            <!-- Left Column: Provider & Keys -->
+                            <div>
+                                <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);">🔑 LLM Provider
+                                </h4>
+                                <div class="form-group" style="margin-bottom:16px;">
+                                    <label>Provider</label>
+                                    <select id="ai-provider" class="form-control" onchange="onAiProviderChange()">
+                                        <option value="claude">Claude (Anthropic)</option>
+                                        <option value="gemini">Gemini (Google)</option>
+                                    </select>
                                 </div>
-                                <div class="form-group" style="margin-bottom:12px;">
-                                    <label>SMTP Host</label>
-                                    <input type="text" id="ai-smtp-host" class="form-control"
-                                        placeholder="smtp.gmail.com">
+                                <div class="form-group" style="margin-bottom:16px;">
+                                    <label>Claude API Key</label>
+                                    <input type="password" id="ai-claude-key" class="form-control"
+                                        placeholder="sk-ant-...">
                                 </div>
-                                <div class="form-group" style="margin-bottom:12px;">
-                                    <label>SMTP Port</label>
-                                    <input type="number" id="ai-smtp-port" class="form-control" value="587">
+                                <div class="form-group" style="margin-bottom:16px;">
+                                    <label>Gemini API Key</label>
+                                    <input type="password" id="ai-gemini-key" class="form-control"
+                                        placeholder="AIza...">
                                 </div>
-                                <div class="form-group" style="margin-bottom:12px;">
-                                    <label>SMTP User</label>
-                                    <input type="text" id="ai-smtp-user" class="form-control">
+                                <div class="form-group" style="margin-bottom:16px;">
+                                    <label>Model</label>
+                                    <select id="ai-model" class="form-control">
+                                        <option value="">Select a provider and enter API key first</option>
+                                    </select>
                                 </div>
-                                <div class="form-group" style="margin-bottom:12px;">
-                                    <label>SMTP Password</label>
-                                    <input type="password" id="ai-smtp-pass" class="form-control">
-                                </div>
-                                <div class="form-group" style="margin-bottom:12px;">
-                                    <label>SMTP Encryption</label>
-                                    <select id="ai-smtp-tls" class="form-control">
-                                        <option value="starttls">STARTTLS (port 587)</option>
-                                        <option value="tls">SSL/TLS (port 465)</option>
-                                        <option value="none">None</option>
+                                <div class="form-group" style="margin-bottom:16px;">
+                                    <label>Health Check Interval</label>
+                                    <select id="ai-check-interval" class="form-control">
+                                        <option value="15">Every 15 minutes</option>
+                                        <option value="30">Every 30 minutes</option>
+                                        <option value="60" selected>Every hour</option>
+                                        <option value="360">Every 6 hours</option>
+                                        <option value="1440">Daily</option>
                                     </select>
                                 </div>
                             </div>
 
-                            <h4 style="margin:20px 0 12px 0;font-size:14px;color:var(--accent-light);">📊 Recent Alerts
-                            </h4>
-                            <div id="ai-alerts-list" style="max-height:200px;overflow-y:auto;font-size:12px;">
-                                <div style="color:var(--text-muted);padding:12px;">No alerts yet</div>
+                            <!-- Right Column: Email & Alerts -->
+                            <div>
+                                <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);">📧 Email Alerts
+                                </h4>
+                                <div class="form-group" style="margin-bottom:16px;">
+                                    <label style="display:flex;align-items:center;gap:8px;">
+                                        <input type="checkbox" id="ai-email-enabled"> Enable email alerts
+                                    </label>
+                                </div>
+                                <div id="ai-email-fields">
+                                    <div class="form-group" style="margin-bottom:12px;">
+                                        <label>Send alerts to</label>
+                                        <input type="email" id="ai-email-to" class="form-control"
+                                            placeholder="admin@example.com">
+                                    </div>
+                                    <div class="form-group" style="margin-bottom:12px;">
+                                        <label>SMTP Host</label>
+                                        <input type="text" id="ai-smtp-host" class="form-control"
+                                            placeholder="smtp.gmail.com">
+                                    </div>
+                                    <div class="form-group" style="margin-bottom:12px;">
+                                        <label>SMTP Port</label>
+                                        <input type="number" id="ai-smtp-port" class="form-control" value="587">
+                                    </div>
+                                    <div class="form-group" style="margin-bottom:12px;">
+                                        <label>SMTP User</label>
+                                        <input type="text" id="ai-smtp-user" class="form-control">
+                                    </div>
+                                    <div class="form-group" style="margin-bottom:12px;">
+                                        <label>SMTP Password</label>
+                                        <input type="password" id="ai-smtp-pass" class="form-control">
+                                    </div>
+                                    <div class="form-group" style="margin-bottom:12px;">
+                                        <label>SMTP Encryption</label>
+                                        <select id="ai-smtp-tls" class="form-control">
+                                            <option value="starttls">STARTTLS (port 587)</option>
+                                            <option value="tls">SSL/TLS (port 465)</option>
+                                            <option value="none">None</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <h4 style="margin:20px 0 12px 0;font-size:14px;color:var(--accent-light);">📊 Recent
+                                    Alerts
+                                </h4>
+                                <div id="ai-alerts-list" style="max-height:200px;overflow-y:auto;font-size:12px;">
+                                    <div style="color:var(--text-muted);padding:12px;">No alerts yet</div>
+                                </div>
                             </div>
                         </div>
+
+                        <div style="margin-top:20px;display:flex;gap:12px;">
+                            <button class="btn btn-primary" onclick="saveAiConfig()">💾 Save Settings</button>
+                            <button class="btn btn-sm" onclick="testAiConnection()">🧪 Test Connection</button>
+                            <button class="btn btn-sm" onclick="sendTestEmail()">📧 Send Test Email</button>
+                        </div>
                     </div>
 
-                    <div style="margin-top:20px;display:flex;gap:12px;">
-                        <button class="btn btn-primary" onclick="saveAiConfig()">💾 Save Settings</button>
-                        <button class="btn btn-sm" onclick="testAiConnection()">🧪 Test Connection</button>
-                        <button class="btn btn-sm" onclick="sendTestEmail()">📧 Send Test Email</button>
-                    </div>
-                </div>
-            </div>
-        </div>
+                    <!-- ─── Config Backup Tab ─── -->
+                    <div id="settings-tab-backup" class="settings-tab-panel">
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+                            <!-- Export -->
+                            <div
+                                style="background:var(--bg-input);border-radius:12px;padding:20px;border:1px solid var(--border);">
+                                <h4 style="margin:0 0 8px 0;font-size:15px;">📤 Export Config</h4>
+                                <p style="font-size:13px;color:var(--text-muted);margin:0 0 16px 0;">
+                                    Download all cluster nodes, AI settings, storage config, backup schedules,
+                                    and IP mappings as a single JSON file.
+                                </p>
+                                <button class="btn btn-primary" onclick="exportConfig()" id="btn-export-config">
+                                    📥 Download Config
+                                </button>
+                            </div>
+                            <!-- Import -->
+                            <div
+                                style="background:var(--bg-input);border-radius:12px;padding:20px;border:1px solid var(--border);">
+                                <h4 style="margin:0 0 8px 0;font-size:15px;">📥 Import Config</h4>
+                                <p style="font-size:13px;color:var(--text-muted);margin:0 0 16px 0;">
+                                    Upload a previously exported config file to restore cluster links,
+                                    settings, and schedules on this server.
+                                </p>
+                                <input type="file" id="config-import-file" accept=".json" style="display:none;"
+                                    onchange="importConfigFile(this)">
+                                <button class="btn btn-primary"
+                                    onclick="document.getElementById('config-import-file').click()">
+                                    📤 Upload & Import
+                                </button>
+                            </div>
+                        </div>
 
-        <!-- ═══ Config Backup & Restore ═══ -->
-        <div id="page-config-backup" class="page-view" style="display:none;">
-            <div class="card">
-                <div class="card-header">
-                    <h3>📦 Config Backup & Restore</h3>
-                    <div style="font-size: 12px; color: var(--text-muted);">Export your WolfStack configuration and
-                        import it on other servers</div>
-                </div>
-                <div class="card-body" style="padding:24px;">
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
-                        <!-- Export -->
                         <div
-                            style="background:var(--bg-tertiary);border-radius:12px;padding:20px;border:1px solid var(--border);">
-                            <h4 style="margin:0 0 8px 0;font-size:15px;">📤 Export Config</h4>
-                            <p style="font-size:13px;color:var(--text-muted);margin:0 0 16px 0;">
-                                Download all cluster nodes, AI settings, storage config, backup schedules,
-                                and IP mappings as a single JSON file.
+                            style="margin-top:20px;padding:16px;background:var(--bg-secondary);border-radius:8px;border:1px solid var(--border);">
+                            <h4 style="margin:0 0 8px;font-size:14px;color:var(--text-muted);">ℹ️ What's included</h4>
+                            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:13px;">
+                                <div>✅ Cluster node links</div>
+                                <div>✅ AI agent config</div>
+                                <div>✅ Storage config</div>
+                                <div>✅ Backup schedules</div>
+                                <div>✅ IP mappings</div>
+                                <div>✅ PBS config</div>
+                            </div>
+                            <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0;">
+                                ⚠️ Does not include: login credentials, join tokens, TLS certificates, or container/VM
+                                data.
                             </p>
-                            <button class="btn btn-primary" onclick="exportConfig()" id="btn-export-config">
-                                📥 Download Config
-                            </button>
-                        </div>
-                        <!-- Import -->
-                        <div
-                            style="background:var(--bg-tertiary);border-radius:12px;padding:20px;border:1px solid var(--border);">
-                            <h4 style="margin:0 0 8px 0;font-size:15px;">📥 Import Config</h4>
-                            <p style="font-size:13px;color:var(--text-muted);margin:0 0 16px 0;">
-                                Upload a previously exported config file to restore cluster links,
-                                settings, and schedules on this server.
-                            </p>
-                            <input type="file" id="config-import-file" accept=".json" style="display:none;"
-                                onchange="importConfigFile(this)">
-                            <button class="btn btn-primary"
-                                onclick="document.getElementById('config-import-file').click()">
-                                📤 Upload & Import
-                            </button>
                         </div>
                     </div>
 
-                    <div
-                        style="margin-top:20px;padding:16px;background:var(--bg-secondary);border-radius:8px;border:1px solid var(--border);">
-                        <h4 style="margin:0 0 8px;font-size:14px;color:var(--text-muted);">ℹ️ What's included</h4>
-                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:13px;">
-                            <div>✅ Cluster node links</div>
-                            <div>✅ AI agent config</div>
-                            <div>✅ Storage config</div>
-                            <div>✅ Backup schedules</div>
-                            <div>✅ IP mappings</div>
-                            <div>✅ PBS config</div>
-                        </div>
-                        <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0;">
-                            ⚠️ Does not include: login credentials, join tokens, TLS certificates, or container/VM data.
-                        </p>
-                    </div>
                 </div>
             </div>
         </div>
