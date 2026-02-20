@@ -95,12 +95,17 @@ pub struct AlertConfig {
     pub alert_memory: bool,
     #[serde(default = "default_true")]
     pub alert_disk: bool,
+
+    // ── Check interval ──
+    #[serde(default = "default_check_interval")]
+    pub check_interval_secs: u64,  // how often to check thresholds (seconds)
 }
 
 fn default_cpu_threshold() -> f32 { 90.0 }
 fn default_mem_threshold() -> f32 { 90.0 }
 fn default_disk_threshold() -> f32 { 90.0 }
 fn default_true() -> bool { true }
+fn default_check_interval() -> u64 { 60 }
 
 impl Default for AlertConfig {
     fn default() -> Self {
@@ -118,6 +123,7 @@ impl Default for AlertConfig {
             alert_cpu: true,
             alert_memory: true,
             alert_disk: true,
+            check_interval_secs: 60,
         }
     }
 }
@@ -164,6 +170,7 @@ impl AlertConfig {
             "alert_cpu": self.alert_cpu,
             "alert_memory": self.alert_memory,
             "alert_disk": self.alert_disk,
+            "check_interval_secs": self.check_interval_secs,
         })
     }
 }

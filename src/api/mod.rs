@@ -7162,6 +7162,10 @@ pub async fn alerts_config_save(req: HttpRequest, state: web::Data<AppState>, bo
     if let Some(b) = v.get("alert_cpu").and_then(|v| v.as_bool()) { config.alert_cpu = b; }
     if let Some(b) = v.get("alert_memory").and_then(|v| v.as_bool()) { config.alert_memory = b; }
     if let Some(b) = v.get("alert_disk").and_then(|v| v.as_bool()) { config.alert_disk = b; }
+    if let Some(i) = v.get("check_interval_secs").and_then(|v| v.as_u64()) {
+        // Clamp to sensible range: 30 seconds to 1 hour
+        config.check_interval_secs = i.max(30).min(3600);
+    }
 
     match config.save() {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "saved": true })),

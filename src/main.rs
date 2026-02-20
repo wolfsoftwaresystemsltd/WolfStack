@@ -684,7 +684,9 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
 
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                // Use the configured interval (re-read each loop in case user changed it)
+                let interval = config.check_interval_secs.max(30);
+                tokio::time::sleep(Duration::from_secs(interval)).await;
             }
         });
 

@@ -1940,6 +1940,22 @@
                                     </div>
                                 </div>
 
+                                <h4 style="margin:16px 0 12px 0;font-size:14px;color:var(--accent-light);">⏱️ Check
+                                    Interval</h4>
+                                <div class="form-group" style="margin-bottom:16px;">
+                                    <label style="font-size:13px;">How often to check all nodes for threshold
+                                        alerts</label>
+                                    <select id="alerting-check-interval" class="form-control" style="max-width:240px;">
+                                        <option value="30">Every 30 seconds</option>
+                                        <option value="60" selected>Every 1 minute</option>
+                                        <option value="120">Every 2 minutes</option>
+                                        <option value="300">Every 5 minutes</option>
+                                        <option value="600">Every 10 minutes</option>
+                                    </select>
+                                    <small style="color:var(--text-muted);">Lower intervals = more responsive, higher
+                                        intervals = less load on nodes</small>
+                                </div>
+
                                 <h4 style="margin:0 0 12px 0;font-size:14px;color:var(--accent-light);">🔔 Events</h4>
                                 <div style="display:grid;gap:10px;">
                                     <label
