@@ -12668,9 +12668,10 @@ async function scanGlobalWolfNet() {
         var isLocal = !!node.is_self;
         var base = isLocal ? '' : '/api/nodes/' + encodeURIComponent(node.id) + '/proxy';
         var serverName = node.hostname || node.id || 'local';
+        var apiPrefix = isLocal ? '/api/' : '';
         var rows = [];
         try {
-            var wn = await fetch(base + '/api/networking/wolfnet', { credentials: 'include' }).then(function(r) { return r.ok ? r.json() : null; });
+            var wn = await fetch(base + '/' + apiPrefix + 'networking/wolfnet', { credentials: 'include' }).then(function(r) { return r.ok ? r.json() : null; });
             if (wn) {
                 var selfIp = (wn.ip || '').split('/')[0];
                 if (selfIp) rows.push({ server: serverName, type: 'WolfNet', name: serverName, ip: selfIp, state: wn.running ? 'Running' : 'Stopped' });
@@ -12680,7 +12681,7 @@ async function scanGlobalWolfNet() {
             }
         } catch(e) {}
         try {
-            var lxcData = await fetch(base + '/api/containers/lxc', { credentials: 'include' }).then(function(r) { return r.ok ? r.json() : null; });
+            var lxcData = await fetch(base + '/' + apiPrefix + 'containers/lxc', { credentials: 'include' }).then(function(r) { return r.ok ? r.json() : null; });
             if (lxcData) {
                 var list = Array.isArray(lxcData) ? lxcData : (lxcData.containers || []);
                 list.forEach(function(c) {
@@ -12689,7 +12690,7 @@ async function scanGlobalWolfNet() {
             }
         } catch(e) {}
         try {
-            var dockerData = await fetch(base + '/api/containers/docker', { credentials: 'include' }).then(function(r) { return r.ok ? r.json() : null; });
+            var dockerData = await fetch(base + '/' + apiPrefix + 'containers/docker', { credentials: 'include' }).then(function(r) { return r.ok ? r.json() : null; });
             if (dockerData) {
                 var list = Array.isArray(dockerData) ? dockerData : (dockerData.containers || []);
                 list.forEach(function(c) {
@@ -12710,7 +12711,7 @@ async function scanGlobalWolfNet() {
             }
         } catch(e) {}
         try {
-            var vmData = await fetch(base + '/api/vms', { credentials: 'include' }).then(function(r) { return r.ok ? r.json() : null; });
+            var vmData = await fetch(base + '/' + apiPrefix + 'vms', { credentials: 'include' }).then(function(r) { return r.ok ? r.json() : null; });
             if (vmData) {
                 var list = Array.isArray(vmData) ? vmData : (vmData.vms || []);
                 list.forEach(function(v) {
