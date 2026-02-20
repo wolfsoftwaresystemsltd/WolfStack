@@ -91,6 +91,12 @@ pub struct WolfRunService {
     /// Docker image (for Docker runtime) or unused for LXC
     pub image: String,
     pub replicas: u32,
+    /// Minimum number of replicas (scale-down floor)
+    #[serde(default)]
+    pub min_replicas: u32,
+    /// Maximum number of replicas (scale-up ceiling)
+    #[serde(default = "default_max_replicas")]
+    pub max_replicas: u32,
     #[serde(default)]
     pub runtime: Runtime,
     #[serde(default)]
@@ -114,6 +120,8 @@ pub struct WolfRunService {
     pub created_at: u64,
     pub updated_at: u64,
 }
+
+fn default_max_replicas() -> u32 { 10 }
 
 // ─── State Management ───
 
@@ -189,6 +197,8 @@ impl WolfRunState {
             name,
             image,
             replicas,
+            min_replicas: 0,
+            max_replicas: 10,
             runtime,
             lxc_config,
             env,
@@ -228,11 +238,32 @@ impl WolfRunState {
     pub fn scale(&self, id: &str, replicas: u32) -> bool {
         let mut svcs = self.services.write().unwrap();
         if let Some(svc) = svcs.iter_mut().find(|s| s.id == id) {
-            svc.replicas = replicas;
+            // Clamp to min/max bounds
+            let clamped = replicas.max(svc.min_replicas).min(svc.max_replicas);
+            svc.replicas = clamped;
             svc.updated_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
             drop(svcs);
             self.save();
-            info!("WolfRun: scaled {} to {} replicas", id, replicas);
+            info!("WolfRun: scaled {} to {} replicas (requested {}, bounds {}-{})", id, clamped, replicas, 0, 10);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Update service settings (min, max, desired replicas)
+    pub fn update_settings(&self, id: &str, min: Option<u32>, max: Option<u32>, desired: Option<u32>) -> bool {
+        let mut svcs = self.services.write().unwrap();
+        if let Some(svc) = svcs.iter_mut().find(|s| s.id == id) {
+            if let Some(mn) = min { svc.min_replicas = mn; }
+            if let Some(mx) = max { svc.max_replicas = mx; }
+            if let Some(d) = desired { svc.replicas = d; }
+            // Enforce: min <= desired <= max
+            if svc.min_replicas > svc.max_replicas { svc.min_replicas = svc.max_replicas; }
+            svc.replicas = svc.replicas.max(svc.min_replicas).min(svc.max_replicas);
+            svc.updated_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            drop(svcs);
+            self.save();
             true
         } else {
             false
@@ -299,6 +330,8 @@ impl WolfRunState {
             name,
             image: image.clone(),
             replicas: 1,
+            min_replicas: 1,
+            max_replicas: 10,
             runtime: runtime.clone(),
             lxc_config: match &runtime {
                 Runtime::Lxc => {

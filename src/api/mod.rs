@@ -7567,6 +7567,39 @@ pub async fn wolfrun_update(req: HttpRequest, state: web::Data<AppState>, path: 
 }
 
 #[derive(Deserialize)]
+pub struct WolfRunSettingsRequest {
+    pub min_replicas: Option<u32>,
+    pub max_replicas: Option<u32>,
+    pub desired: Option<u32>,
+}
+
+/// POST /api/wolfrun/services/{id}/settings — update service settings
+pub async fn wolfrun_settings(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<WolfRunSettingsRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    if state.wolfrun.update_settings(&id, body.min_replicas, body.max_replicas, body.desired) {
+        let wolfrun = Arc::clone(&state.wolfrun);
+        let cluster = Arc::clone(&state.cluster);
+        let secret = state.cluster_secret.clone();
+        actix_web::rt::spawn(async move {
+            crate::wolfrun::reconcile(&wolfrun, &cluster, &secret).await;
+        });
+        if let Some(svc) = state.wolfrun.get(&id) {
+            HttpResponse::Ok().json(serde_json::json!({
+                "updated": true,
+                "replicas": svc.replicas,
+                "min_replicas": svc.min_replicas,
+                "max_replicas": svc.max_replicas,
+            }))
+        } else {
+            HttpResponse::Ok().json(serde_json::json!({ "updated": true }))
+        }
+    } else {
+        HttpResponse::NotFound().json(serde_json::json!({ "error": "Service not found" }))
+    }
+}
+
+#[derive(Deserialize)]
 pub struct WolfRunAdoptRequest {
     pub name: String,              // WolfRun service name
     pub container_name: String,    // Existing container name
@@ -7858,6 +7891,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/wolfrun/services/{id}", web::delete().to(wolfrun_delete))
         .route("/api/wolfrun/services/{id}/scale", web::post().to(wolfrun_scale))
         .route("/api/wolfrun/services/{id}/action", web::post().to(wolfrun_service_action))
+        .route("/api/wolfrun/services/{id}/settings", web::post().to(wolfrun_settings))
         .route("/api/wolfrun/services/{id}/update", web::post().to(wolfrun_update))
         .route("/api/wolfrun/services/{id}/portforward", web::get().to(wolfrun_portforward_list))
         .route("/api/wolfrun/services/{id}/portforward", web::post().to(wolfrun_portforward_add))

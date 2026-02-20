@@ -958,6 +958,46 @@
                 </div>
             </div>
         </div>
+
+        <!-- Service Settings Modal -->
+        <div id="wolfrun-settings-modal" class="modal-overlay">
+            <div class="modal" style="max-width:420px; width:90%;">
+                <div class="modal-header">
+                    <h3>⚙️ Service Settings — <span id="wolfrun-settings-name"></span></h3>
+                    <button class="modal-close" onclick="closeWolfRunSettingsModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; margin-bottom:16px;">
+                        <div>
+                            <label
+                                style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Desired</label>
+                            <input type="number" id="wolfrun-settings-desired" class="form-control" min="0" max="100"
+                                style="text-align:center; font-size:18px; font-weight:700;">
+                        </div>
+                        <div>
+                            <label
+                                style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Minimum</label>
+                            <input type="number" id="wolfrun-settings-min" class="form-control" min="0" max="100"
+                                style="text-align:center; font-size:18px; font-weight:700;">
+                        </div>
+                        <div>
+                            <label
+                                style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Maximum</label>
+                            <input type="number" id="wolfrun-settings-max" class="form-control" min="0" max="100"
+                                style="text-align:center; font-size:18px; font-weight:700;">
+                        </div>
+                    </div>
+                    <p style="font-size:12px; color:var(--text-muted); margin:0;">
+                        ➖/➕ buttons will be disabled at min/max bounds. The reconciler ensures replicas stay within
+                        these limits.
+                    </p>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" onclick="closeWolfRunSettingsModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="saveWolfRunSettings()">💾 Save</button>
+                </div>
+            </div>
+        </div>
         </div>
 
         <!-- ═══ Issues Page ═══ -->
