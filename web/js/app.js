@@ -13860,8 +13860,11 @@ async function openWolfRunAdoptModal() {
     let nodes = window.allNodes || [];
     if (!nodes.length) {
         try {
-            const resp = await fetch(apiUrl('/api/nodes'));
-            if (resp.ok) nodes = await resp.json();
+            const resp = await fetch('/api/nodes');
+            if (resp.ok) {
+                const data = await resp.json();
+                nodes = Array.isArray(data) ? data : (data.nodes || []);
+            }
         } catch (e) { }
     }
 
