@@ -459,6 +459,21 @@ pub async fn reconcile(
     cluster: &ClusterState,
     cluster_secret: &str,
 ) {
+    // Prevent concurrent reconcile runs (race condition causes duplicate creates then scale-down)
+    static RECONCILING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RECONCILING.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_err() {
+        debug!("WolfRun: reconcile already in progress, skipping");
+        return;
+    }
+    // Ensure we release the lock on exit
+    struct ReconcileGuard;
+    impl Drop for ReconcileGuard {
+        fn drop(&mut self) {
+            RECONCILING.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _guard = ReconcileGuard;
+
     let services = wolfrun.list(None);
     if services.is_empty() { return; }
 
@@ -647,13 +662,8 @@ pub async fn reconcile(
             });
 
             for inst in running_instances.iter().take(excess as usize) {
-                let node = match cluster.get_node(&inst.node_id) {
-                    Some(n) => n,
-                    None => continue,
-                };
-
-                info!("WolfRun: stopping excess container {} on {}", inst.container_name, node.hostname);
-                stop_and_remove(&client, cluster_secret, &node, &inst.container_name, &service.runtime).await;
+                // Just un-manage — don't destroy the container. User can always stop it manually.
+                info!("WolfRun: removing excess instance {} from orchestration (container kept running)", inst.container_name);
                 wolfrun.remove_instance(&service.id, &inst.container_name);
             }
         }
