@@ -13734,7 +13734,7 @@ function renderWolfRunServices(services) {
 }
 
 function openWolfRunDeployModal() {
-    document.getElementById('wolfrun-deploy-modal').style.display = 'flex';
+    document.getElementById('wolfrun-deploy-modal').classList.add('active');
     document.getElementById('wolfrun-deploy-name').value = '';
     document.getElementById('wolfrun-deploy-image').value = '';
     document.getElementById('wolfrun-deploy-ports').value = '';
@@ -13746,7 +13746,7 @@ function openWolfRunDeployModal() {
 }
 
 function closeWolfRunDeployModal() {
-    document.getElementById('wolfrun-deploy-modal').style.display = 'none';
+    document.getElementById('wolfrun-deploy-modal').classList.remove('active');
 }
 
 function wolfrunRuntimeChanged() {
