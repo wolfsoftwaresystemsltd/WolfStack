@@ -298,7 +298,11 @@ function buildServerTree(nodes) {
                 <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><span style="position:relative;display:inline-block;margin-right:6px;">☁️<span style="position:absolute;bottom:-4px;right:-6px;min-width:15px;height:15px;line-height:15px;text-align:center;font-size:9px;font-weight:700;color:#fff;background:#16a34a;border-radius:50%;z-index:2;">${clusterNodes.length}</span></span>${clusterName}</span>
                 <span class="remove-server-btn" onclick="event.stopPropagation(); openWsClusterSettings('${escapedName}')" title="Cluster settings" style="margin-left:4px;">⚙️</span>
             </div>
-            <div class="server-node-children ${shouldExpandCluster ? 'expanded' : ''}" id="children-${clusterId}">`;
+            <div class="server-node-children ${shouldExpandCluster ? 'expanded' : ''}" id="children-${clusterId}">
+                <a class="nav-item server-child-item wolfrun-cluster-item" data-cluster="${escapedName}" data-view="wolfrun" onclick="showWolfRunPage('${escapedName}')" style="margin-left: 8px; padding: 6px 10px; display:flex; align-items:center; gap:6px;">
+                    <span class="icon" style="font-size:15px;">🏃</span> <span style="font-weight:600;">WolfRun</span>
+                    <span class="wolfrun-svc-count" id="wolfrun-count-${clusterId}" style="margin-left:auto; font-size:10px; padding:1px 6px; background:var(--primary-color,#6366f1); color:#fff; border-radius:10px; display:none;"></span>
+                </a>`;
 
         // Each node within the cluster
         clusterNodes.forEach(node => {
@@ -13577,6 +13581,272 @@ async function testAlerting() {
     }
 }
 
+// ═══ WolfRun Orchestration ═══
+
+let wolfrunCurrentCluster = '';
+let wolfrunRefreshTimer = null;
+
+function showWolfRunPage(clusterName) {
+    wolfrunCurrentCluster = clusterName;
+    currentPage = 'wolfrun';
+
+    // Switch to WolfRun page
+    document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
+    const el = document.getElementById('page-wolfrun');
+    if (el) el.style.display = 'block';
+
+    // Highlight sidebar item
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    const item = document.querySelector(`.wolfrun-cluster-item[data-cluster="${clusterName}"]`);
+    if (item) item.classList.add('active');
+
+    // Update page title
+    document.getElementById('page-title').textContent = `WolfRun — ${clusterName}`;
+    document.getElementById('wolfrun-cluster-label').textContent = `— ${clusterName}`;
+
+    loadWolfRunServices();
+
+    // Auto-refresh every 10s
+    if (wolfrunRefreshTimer) clearInterval(wolfrunRefreshTimer);
+    wolfrunRefreshTimer = setInterval(() => {
+        if (currentPage === 'wolfrun') loadWolfRunServices();
+        else clearInterval(wolfrunRefreshTimer);
+    }, 10000);
+}
+
+async function loadWolfRunServices() {
+    try {
+        const resp = await fetch(`/api/wolfrun/services?cluster=${encodeURIComponent(wolfrunCurrentCluster)}`);
+        if (!resp.ok) throw new Error('Failed to load services');
+        const services = await resp.json();
+        renderWolfRunServices(services);
+    } catch (e) {
+        console.error('WolfRun load error:', e);
+    }
+}
+
+function renderWolfRunServices(services) {
+    const tbody = document.getElementById('wolfrun-services-tbody');
+    const empty = document.getElementById('wolfrun-empty');
+    const table = document.getElementById('wolfrun-services-table');
+
+    if (services.length === 0) {
+        table.style.display = 'none';
+        empty.style.display = 'block';
+        document.getElementById('wolfrun-stat-services').textContent = '0';
+        document.getElementById('wolfrun-stat-running').textContent = '0';
+        document.getElementById('wolfrun-stat-pending').textContent = '0';
+        document.getElementById('wolfrun-stat-nodes').textContent = '0';
+        return;
+    }
+
+    table.style.display = '';
+    empty.style.display = 'none';
+
+    // Calculate stats
+    let totalRunning = 0, totalPending = 0;
+    const allNodes = new Set();
+    services.forEach(s => {
+        s.instances.forEach(i => {
+            if (i.status === 'running') totalRunning++;
+            else if (i.status === 'pending' || i.status === 'lost') totalPending++;
+            allNodes.add(i.node_id);
+        });
+    });
+
+    document.getElementById('wolfrun-stat-services').textContent = services.length;
+    document.getElementById('wolfrun-stat-running').textContent = totalRunning;
+    document.getElementById('wolfrun-stat-pending').textContent = totalPending;
+    document.getElementById('wolfrun-stat-nodes').textContent = allNodes.size;
+
+    // Render table rows
+    tbody.innerHTML = services.map(svc => {
+        const running = svc.instances.filter(i => i.status === 'running').length;
+        const total = svc.instances.length;
+        const desired = svc.replicas;
+
+        // Status badge
+        let statusBadge;
+        if (running === desired && desired > 0) {
+            statusBadge = `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);">
+                <span style="width:6px;height:6px;border-radius:50%;background:#10b981;display:inline-block;animation:pulse 2s infinite;"></span> Healthy
+            </span>`;
+        } else if (running > 0 && running < desired) {
+            statusBadge = `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;background:rgba(234,179,8,0.15);color:#eab308;border:1px solid rgba(234,179,8,0.3);">
+                <span style="width:6px;height:6px;border-radius:50%;background:#eab308;display:inline-block;"></span> Scaling
+            </span>`;
+        } else if (running === 0 && desired > 0) {
+            statusBadge = `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.3);">
+                <span style="width:6px;height:6px;border-radius:50%;background:#ef4444;display:inline-block;"></span> Down
+            </span>`;
+        } else {
+            statusBadge = `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;background:rgba(107,114,128,0.15);color:#9ca3af;border:1px solid rgba(107,114,128,0.3);">
+                <span style="width:6px;height:6px;border-radius:50%;background:#9ca3af;display:inline-block;"></span> Idle
+            </span>`;
+        }
+
+        // Runtime badge
+        const runtimeIcon = svc.runtime === 'Lxc' ? '📦' : '🐳';
+        const runtimeLabel = svc.runtime === 'Lxc' ? 'LXC' : 'Docker';
+
+        // Nodes — find hostnames from allNodes
+        const nodeIds = [...new Set(svc.instances.map(i => i.node_id))];
+        const nodeNames = nodeIds.map(nid => {
+            const n = allNodes ? (window.allNodes || []).find(n => n.id === nid) : null;
+            return n ? n.hostname : nid.substring(0, 8);
+        });
+        const nodeHtml = nodeNames.length > 0
+            ? nodeNames.map(h => `<span style="padding:2px 8px;border-radius:6px;font-size:11px;background:var(--bg-secondary);border:1px solid var(--border);white-space:nowrap;">${h}</span>`).join(' ')
+            : '<span style="color:var(--text-muted);font-size:12px;">—</span>';
+
+        // WolfNet IPs
+        const ips = svc.instances.filter(i => i.wolfnet_ip).map(i => i.wolfnet_ip);
+        const ipHtml = ips.length > 0
+            ? ips.map(ip => `<code style="font-size:11px;padding:2px 6px;background:rgba(16,185,129,0.1);border-radius:4px;color:#10b981;">${ip}</code>`).join(' ')
+            : '<span style="color:var(--text-muted);font-size:12px;">—</span>';
+
+        // Replica count with progress bar
+        const pct = desired > 0 ? Math.min(100, Math.round((running / desired) * 100)) : 0;
+        const barColor = running === desired ? '#10b981' : (running > 0 ? '#eab308' : '#ef4444');
+        const replicaHtml = `
+            <div style="display:flex;align-items:center;gap:8px;">
+                <strong style="font-size:13px;">${running}/${desired}</strong>
+                <div style="flex:1;min-width:50px;max-width:80px;height:6px;background:rgba(255,255,255,0.06);border-radius:3px;overflow:hidden;">
+                    <div style="width:${pct}%;height:100%;background:${barColor};border-radius:3px;transition:width 0.5s;"></div>
+                </div>
+            </div>`;
+
+        return `<tr>
+            <td style="font-weight:600;">${svc.name}</td>
+            <td>${runtimeIcon} ${runtimeLabel}</td>
+            <td><code style="font-size:12px;">${svc.image || '—'}</code></td>
+            <td>${replicaHtml}</td>
+            <td>${statusBadge}</td>
+            <td>${nodeHtml}</td>
+            <td>${ipHtml}</td>
+            <td style="text-align:right; white-space:nowrap;">
+                <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired - 1})" ${desired <= 0 ? 'disabled' : ''} title="Scale down" style="padding:4px 8px; font-size:12px;">➖</button>
+                <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired + 1})" title="Scale up" style="padding:4px 8px; font-size:12px;">➕</button>
+                <button class="btn btn-sm" onclick="wolfrunDelete('${svc.id}', '${svc.name}')" title="Delete" style="padding:4px 8px; font-size:12px; color:#ef4444;">🗑️</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function openWolfRunDeployModal() {
+    document.getElementById('wolfrun-deploy-modal').style.display = 'flex';
+    document.getElementById('wolfrun-deploy-name').value = '';
+    document.getElementById('wolfrun-deploy-image').value = '';
+    document.getElementById('wolfrun-deploy-ports').value = '';
+    document.getElementById('wolfrun-deploy-env').value = '';
+    document.getElementById('wolfrun-deploy-volumes').value = '';
+    document.getElementById('wolfrun-deploy-replicas').value = '1';
+    document.getElementById('wolfrun-deploy-runtime').value = 'docker';
+    wolfrunRuntimeChanged();
+}
+
+function closeWolfRunDeployModal() {
+    document.getElementById('wolfrun-deploy-modal').style.display = 'none';
+}
+
+function wolfrunRuntimeChanged() {
+    const rt = document.getElementById('wolfrun-deploy-runtime').value;
+    document.getElementById('wolfrun-docker-fields').style.display = rt === 'docker' ? '' : 'none';
+    document.getElementById('wolfrun-lxc-fields').style.display = rt === 'lxc' ? '' : 'none';
+}
+
+async function executeWolfRunDeploy() {
+    const name = document.getElementById('wolfrun-deploy-name').value.trim();
+    if (!name) { showToast('Please enter a service name', 'error'); return; }
+
+    const runtime = document.getElementById('wolfrun-deploy-runtime').value;
+    const replicas = parseInt(document.getElementById('wolfrun-deploy-replicas').value) || 1;
+    const restart = document.getElementById('wolfrun-deploy-restart').value;
+
+    const payload = {
+        name,
+        runtime,
+        replicas,
+        cluster_name: wolfrunCurrentCluster,
+        restart_policy: restart,
+    };
+
+    if (runtime === 'docker') {
+        const image = document.getElementById('wolfrun-deploy-image').value.trim();
+        if (!image) { showToast('Please enter a Docker image', 'error'); return; }
+        payload.image = image;
+        payload.ports = document.getElementById('wolfrun-deploy-ports').value.split('\n').map(s => s.trim()).filter(Boolean);
+        payload.env = document.getElementById('wolfrun-deploy-env').value.split('\n').map(s => s.trim()).filter(Boolean);
+        payload.volumes = document.getElementById('wolfrun-deploy-volumes').value.split('\n').map(s => s.trim()).filter(Boolean);
+    } else {
+        payload.lxc_distribution = document.getElementById('wolfrun-deploy-lxc-distro').value;
+        payload.lxc_release = document.getElementById('wolfrun-deploy-lxc-release').value;
+        payload.lxc_architecture = document.getElementById('wolfrun-deploy-lxc-arch').value;
+    }
+
+    const btn = document.getElementById('wolfrun-deploy-btn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Deploying...';
+
+    try {
+        const resp = await fetch('/api/wolfrun/services', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`Service "${name}" created — ${replicas} replica(s) will be scheduled`, 'success');
+            closeWolfRunDeployModal();
+            loadWolfRunServices();
+        } else {
+            showToast(data.error || 'Deploy failed', 'error');
+        }
+    } catch (e) {
+        showToast('Deploy failed: ' + e.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '🚀 Deploy';
+    }
+}
+
+async function wolfrunScale(serviceId, newReplicas) {
+    if (newReplicas < 0) newReplicas = 0;
+    try {
+        const resp = await fetch(`/api/wolfrun/services/${serviceId}/scale`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ replicas: newReplicas }),
+        });
+        if (resp.ok) {
+            showToast(`Scaled to ${newReplicas} replica(s)`, 'success');
+            loadWolfRunServices();
+        } else {
+            const data = await resp.json();
+            showToast(data.error || 'Scale failed', 'error');
+        }
+    } catch (e) {
+        showToast('Scale failed: ' + e.message, 'error');
+    }
+}
+
+async function wolfrunDelete(serviceId, serviceName) {
+    if (!confirm(`Delete service "${serviceName}"? This will stop and remove all containers.`)) return;
+    try {
+        const resp = await fetch(`/api/wolfrun/services/${serviceId}`, { method: 'DELETE' });
+        if (resp.ok) {
+            showToast(`Service "${serviceName}" deleted`, 'success');
+            loadWolfRunServices();
+        } else {
+            const data = await resp.json();
+            showToast(data.error || 'Delete failed', 'error');
+        }
+    } catch (e) {
+        showToast('Delete failed: ' + e.message, 'error');
+    }
+}
+
 // Apply saved theme immediately on load
 initTheme();
+
 

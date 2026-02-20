@@ -224,7 +224,7 @@
                                 WolfStack</h1>
                             <div
                                 style="color: var(--success); font-size: 16px; font-weight: 600; margin-top: 6px; opacity: 0.9; letter-spacing: 0.5px;">
-                                v6.1.8</div>
+                                v6.2.0</div>
                         </div>
 
                         <!-- Details -->
@@ -602,6 +602,221 @@
                         <button class="btn" onclick="closeAppStoreInstallModal()">Cancel</button>
                         <button class="btn btn-primary" id="appstore-install-btn" onclick="executeAppStoreInstall()">🚀
                             Install</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ WolfRun Orchestration Page ═══ -->
+        <div id="page-wolfrun" class="page-view" style="display:none;">
+            <!-- Header -->
+            <div class="card"
+                style="margin-bottom:20px; background:linear-gradient(135deg, rgba(16,185,129,0.12), rgba(99,102,241,0.08)); border-color:rgba(16,185,129,0.25);">
+                <div class="card-body"
+                    style="display:flex; align-items:center; justify-content:space-between; padding:28px 32px; flex-wrap:wrap; gap:16px;">
+                    <div style="display:flex; align-items:center; gap:20px;">
+                        <div
+                            style="width:64px; height:64px; background:linear-gradient(135deg,#10b981,#6366f1); border-radius:16px; display:flex; align-items:center; justify-content:center; font-size:32px; box-shadow:0 4px 20px rgba(16,185,129,0.3);">
+                            🏃</div>
+                        <div>
+                            <h2 style="font-size:24px; margin-bottom:4px; color:var(--text-primary); font-weight:700;">
+                                WolfRun <span id="wolfrun-cluster-label"
+                                    style="font-size:14px; font-weight:400; color:var(--text-secondary);"></span></h2>
+                            <p style="color:var(--text-secondary); font-size:13px; margin:0;">Container orchestration —
+                                deploy, scale, and manage Docker & LXC services across your cluster.</p>
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:10px; align-items:center;">
+                        <button class="btn btn-primary" onclick="openWolfRunDeployModal()" style="font-weight:600;">
+                            🚀 Deploy Service
+                        </button>
+                        <button class="btn" onclick="loadWolfRunServices()"
+                            style="background:var(--bg-secondary); border:1px solid var(--border);">
+                            🔄 Refresh
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Summary Stats -->
+            <div class="stats-grid" style="margin-bottom:20px;">
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Services</span>
+                        <div class="stat-icon" style="background:rgba(99,102,241,0.15); color:#6366f1;">📋</div>
+                    </div>
+                    <div class="stat-value" id="wolfrun-stat-services">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Running</span>
+                        <div class="stat-icon" style="background:rgba(16,185,129,0.15); color:#10b981;">✅</div>
+                    </div>
+                    <div class="stat-value" id="wolfrun-stat-running" style="color:#10b981;">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Pending</span>
+                        <div class="stat-icon" style="background:rgba(234,179,8,0.15); color:#eab308;">⏳</div>
+                    </div>
+                    <div class="stat-value" id="wolfrun-stat-pending" style="color:#eab308;">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Nodes Used</span>
+                        <div class="stat-icon" style="background:rgba(59,130,246,0.15); color:#3b82f6;">🖥️</div>
+                    </div>
+                    <div class="stat-value" id="wolfrun-stat-nodes">0</div>
+                </div>
+            </div>
+
+            <!-- Services Table -->
+            <div class="card" style="margin-bottom:20px;">
+                <div class="card-header">
+                    <h3>🏃 Deployed Services</h3>
+                </div>
+                <div class="card-body" style="overflow-x:auto;">
+                    <table class="data-table" id="wolfrun-services-table">
+                        <thead>
+                            <tr>
+                                <th>Service</th>
+                                <th>Runtime</th>
+                                <th>Image</th>
+                                <th>Replicas</th>
+                                <th>Status</th>
+                                <th>Nodes</th>
+                                <th>WolfNet IPs</th>
+                                <th style="text-align:right;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="wolfrun-services-tbody"></tbody>
+                    </table>
+                    <div id="wolfrun-empty"
+                        style="display:none; padding:48px; text-align:center; color:var(--text-muted);">
+                        <div style="font-size:48px; margin-bottom:12px;">🏃</div>
+                        <p style="font-size:14px; margin:0;">No services deployed yet. Click <strong>Deploy
+                                Service</strong> to get started.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Deploy Modal -->
+            <div id="wolfrun-deploy-modal" class="modal-overlay" style="display:none;">
+                <div class="modal" style="max-width:600px; width:90%;">
+                    <div class="modal-header">
+                        <h3>🚀 Deploy New Service</h3>
+                        <button class="modal-close" onclick="closeWolfRunDeployModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+                            <div>
+                                <label
+                                    style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Service
+                                    Name</label>
+                                <input type="text" id="wolfrun-deploy-name" class="form-control"
+                                    placeholder="my-service">
+                            </div>
+                            <div>
+                                <label
+                                    style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Runtime</label>
+                                <select id="wolfrun-deploy-runtime" class="form-control"
+                                    onchange="wolfrunRuntimeChanged()">
+                                    <option value="docker">🐳 Docker</option>
+                                    <option value="lxc">📦 LXC</option>
+                                </select>
+                            </div>
+                        </div>
+                        <!-- Docker fields -->
+                        <div id="wolfrun-docker-fields">
+                            <div style="margin-bottom:16px;">
+                                <label style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Docker
+                                    Image</label>
+                                <input type="text" id="wolfrun-deploy-image" class="form-control"
+                                    placeholder="nginx:alpine">
+                            </div>
+                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+                                <div>
+                                    <label
+                                        style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Ports
+                                        <span style="font-weight:400; color:var(--text-muted);">(one per
+                                            line)</span></label>
+                                    <textarea id="wolfrun-deploy-ports" class="form-control" rows="2"
+                                        placeholder="80:80&#10;443:443"
+                                        style="font-family:'JetBrains Mono',monospace; font-size:12px;"></textarea>
+                                </div>
+                                <div>
+                                    <label
+                                        style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Env
+                                        Vars <span
+                                            style="font-weight:400; color:var(--text-muted);">(KEY=VALUE)</span></label>
+                                    <textarea id="wolfrun-deploy-env" class="form-control" rows="2"
+                                        placeholder="NODE_ENV=production&#10;DB_HOST=db"
+                                        style="font-family:'JetBrains Mono',monospace; font-size:12px;"></textarea>
+                                </div>
+                            </div>
+                            <div style="margin-bottom:16px;">
+                                <label
+                                    style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Volumes
+                                    <span
+                                        style="font-weight:400; color:var(--text-muted);">(host:container)</span></label>
+                                <textarea id="wolfrun-deploy-volumes" class="form-control" rows="2"
+                                    placeholder="/data/app:/app/data"
+                                    style="font-family:'JetBrains Mono',monospace; font-size:12px;"></textarea>
+                            </div>
+                        </div>
+                        <!-- LXC fields -->
+                        <div id="wolfrun-lxc-fields" style="display:none;">
+                            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; margin-bottom:16px;">
+                                <div>
+                                    <label
+                                        style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Distribution</label>
+                                    <select id="wolfrun-deploy-lxc-distro" class="form-control">
+                                        <option value="ubuntu">Ubuntu</option>
+                                        <option value="debian">Debian</option>
+                                        <option value="alpine">Alpine</option>
+                                        <option value="centos">CentOS</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label
+                                        style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Release</label>
+                                    <input type="text" id="wolfrun-deploy-lxc-release" class="form-control"
+                                        value="jammy">
+                                </div>
+                                <div>
+                                    <label
+                                        style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Architecture</label>
+                                    <select id="wolfrun-deploy-lxc-arch" class="form-control">
+                                        <option value="amd64">amd64</option>
+                                        <option value="arm64">arm64</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Common fields -->
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+                            <div>
+                                <label
+                                    style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Replicas</label>
+                                <input type="number" id="wolfrun-deploy-replicas" class="form-control" value="1" min="1"
+                                    max="20">
+                            </div>
+                            <div>
+                                <label
+                                    style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Restart
+                                    Policy</label>
+                                <select id="wolfrun-deploy-restart" class="form-control">
+                                    <option value="always">Always</option>
+                                    <option value="on-failure">On Failure</option>
+                                    <option value="never">Never</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" onclick="closeWolfRunDeployModal()">Cancel</button>
+                        <button class="btn btn-primary" id="wolfrun-deploy-btn" onclick="executeWolfRunDeploy()">🚀
+                            Deploy</button>
                     </div>
                 </div>
             </div>

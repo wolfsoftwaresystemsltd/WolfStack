@@ -27,6 +27,7 @@ mod proxmox;
 mod mysql_editor;
 mod appstore;
 mod alerting;
+mod wolfrun;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_files;
@@ -199,6 +200,9 @@ async fn main() -> std::io::Result<()> {
 
         let cached_status: Arc<std::sync::RwLock<Option<serde_json::Value>>> = Arc::new(std::sync::RwLock::new(None));
 
+        // Initialize WolfRun orchestration state
+        let wolfrun_state = Arc::new(wolfrun::WolfRunState::new());
+
         // Create app state
         let app_state = web::Data::new(api::AppState {
             monitor: Mutex::new(mon),
@@ -211,6 +215,7 @@ async fn main() -> std::io::Result<()> {
             pbs_restore_progress: Mutex::new(Default::default()),
             ai_agent: ai_agent.clone(),
             cached_status: cached_status.clone(),
+            wolfrun: wolfrun_state.clone(),
         });
 
         // Background: periodic self-monitoring update
@@ -697,6 +702,20 @@ async fn main() -> std::io::Result<()> {
                 // Use the configured interval (re-read each loop in case user changed it)
                 let interval = config.check_interval_secs.max(30);
                 tokio::time::sleep(Duration::from_secs(interval)).await;
+            }
+        });
+
+        // Background: WolfRun reconciliation loop (every 15s)
+        let wolfrun_cluster = cluster.clone();
+        let wolfrun_secret = cluster_secret.clone();
+        let wolfrun_bg = wolfrun_state.clone();
+        tokio::spawn(async move {
+            // Wait 30 seconds after startup before first reconciliation
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            info!("WolfRun reconciliation loop started");
+            loop {
+                wolfrun::reconcile(&wolfrun_bg, &wolfrun_cluster, &wolfrun_secret).await;
+                tokio::time::sleep(Duration::from_secs(15)).await;
             }
         });
 

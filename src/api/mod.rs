@@ -26,7 +26,7 @@ mod pve_console;
 /// Build ordered URLs to try for inter-node communication.
 /// Tries: HTTPS on main port, HTTP on internal port (port+1), HTTP on main port.
 /// This ensures both TLS-enabled and HTTP-only nodes are reachable.
-fn build_node_urls(address: &str, port: u16, path: &str) -> Vec<String> {
+pub fn build_node_urls(address: &str, port: u16, path: &str) -> Vec<String> {
     vec![
         format!("https://{}:{}{}", address, port, path),
         format!("http://{}:{}{}", address, port + 1, path),
@@ -61,6 +61,8 @@ pub struct AppState {
     pub ai_agent: Arc<crate::ai::AiAgent>,
     /// Pre-built agent status response, updated every 2s by background task
     pub cached_status: Arc<std::sync::RwLock<Option<serde_json::Value>>>,
+    /// WolfRun orchestration state
+    pub wolfrun: Arc<crate::wolfrun::WolfRunState>,
 }
 
 /// Load or generate the join token from /etc/wolfstack/join-token
@@ -7234,6 +7236,172 @@ pub async fn alerts_test(req: HttpRequest, state: web::Data<AppState>) -> HttpRe
     HttpResponse::Ok().json(serde_json::json!({ "sent": ok_count, "results": details }))
 }
 
+// ─── WolfRun API ───
+
+/// GET /api/wolfrun/services — list all WolfRun services
+pub async fn wolfrun_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cluster = req.query_string().split('&')
+        .find_map(|p| p.strip_prefix("cluster="))
+        .map(|s| s.replace("%20", " "));
+    let services = state.wolfrun.list(cluster.as_deref());
+    HttpResponse::Ok().json(services)
+}
+
+/// GET /api/wolfrun/services/{id} — get a single service
+pub async fn wolfrun_get(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match state.wolfrun.get(&path.into_inner()) {
+        Some(svc) => HttpResponse::Ok().json(svc),
+        None => HttpResponse::NotFound().json(serde_json::json!({ "error": "Service not found" })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WolfRunCreateRequest {
+    pub name: String,
+    pub image: Option<String>,
+    pub replicas: Option<u32>,
+    pub cluster_name: String,
+    #[serde(default)]
+    pub runtime: Option<String>,     // "docker" (default) or "lxc"
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub ports: Vec<String>,
+    #[serde(default)]
+    pub volumes: Vec<String>,
+    #[serde(default)]
+    pub placement: Option<String>,   // "any", "prefer:<node_id>", "require:<node_id>"
+    #[serde(default)]
+    pub restart_policy: Option<String>, // "always", "on-failure", "never"
+    // LXC-specific
+    #[serde(default)]
+    pub lxc_distribution: Option<String>,
+    #[serde(default)]
+    pub lxc_release: Option<String>,
+    #[serde(default)]
+    pub lxc_architecture: Option<String>,
+}
+
+/// POST /api/wolfrun/services — create a new service
+pub async fn wolfrun_create(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfRunCreateRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let runtime = match body.runtime.as_deref().unwrap_or("docker") {
+        "lxc" => crate::wolfrun::Runtime::Lxc,
+        _ => crate::wolfrun::Runtime::Docker,
+    };
+
+    // Docker requires an image
+    if runtime == crate::wolfrun::Runtime::Docker && body.image.as_deref().unwrap_or("").is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Docker services require an image" }));
+    }
+
+    let placement = match body.placement.as_deref() {
+        Some(p) if p.starts_with("prefer:") => crate::wolfrun::Placement::PreferNode(p[7..].to_string()),
+        Some(p) if p.starts_with("require:") => crate::wolfrun::Placement::RequireNode(p[8..].to_string()),
+        _ => crate::wolfrun::Placement::Any,
+    };
+
+    let restart_policy = match body.restart_policy.as_deref() {
+        Some("on-failure") => crate::wolfrun::RestartPolicy::OnFailure,
+        Some("never") => crate::wolfrun::RestartPolicy::Never,
+        _ => crate::wolfrun::RestartPolicy::Always,
+    };
+
+    let lxc_config = if runtime == crate::wolfrun::Runtime::Lxc {
+        Some(crate::wolfrun::LxcConfig {
+            distribution: body.lxc_distribution.clone().unwrap_or_else(|| "ubuntu".to_string()),
+            release: body.lxc_release.clone().unwrap_or_else(|| "jammy".to_string()),
+            architecture: body.lxc_architecture.clone().unwrap_or_else(|| "amd64".to_string()),
+        })
+    } else {
+        None
+    };
+
+    let svc = state.wolfrun.create(
+        body.name.clone(),
+        body.image.clone().unwrap_or_default(),
+        body.replicas.unwrap_or(1),
+        body.cluster_name.clone(),
+        body.env.clone(),
+        body.ports.clone(),
+        body.volumes.clone(),
+        placement,
+        restart_policy,
+        runtime,
+        lxc_config,
+    );
+
+    HttpResponse::Ok().json(svc)
+}
+
+/// DELETE /api/wolfrun/services/{id} — delete a service and stop all instances
+pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+
+    // Stop all running containers first
+    if let Some(svc) = state.wolfrun.get(&id) {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap_or_default();
+
+        for inst in &svc.instances {
+            if let Some(node) = state.cluster.get_node(&inst.node_id) {
+                crate::wolfrun::stop_and_remove_pub(
+                    &client, &state.cluster_secret, &node, &inst.container_name, &svc.runtime,
+                ).await;
+            }
+        }
+    }
+
+    match state.wolfrun.delete(&id) {
+        Some(_) => HttpResponse::Ok().json(serde_json::json!({ "deleted": true })),
+        None => HttpResponse::NotFound().json(serde_json::json!({ "error": "Service not found" })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WolfRunScaleRequest {
+    pub replicas: u32,
+}
+
+/// POST /api/wolfrun/services/{id}/scale — scale replicas
+pub async fn wolfrun_scale(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<WolfRunScaleRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    if state.wolfrun.scale(&path.into_inner(), body.replicas) {
+        HttpResponse::Ok().json(serde_json::json!({ "scaled": true, "replicas": body.replicas }))
+    } else {
+        HttpResponse::NotFound().json(serde_json::json!({ "error": "Service not found" }))
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WolfRunUpdateRequest {
+    pub image: Option<String>,
+}
+
+/// POST /api/wolfrun/services/{id}/update — rolling update (change image)
+pub async fn wolfrun_update(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<WolfRunUpdateRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    if let Some(image) = &body.image {
+        if state.wolfrun.update_image(&id, image.clone()) {
+            // Clear instances so reconciliation redeploys with new image
+            state.wolfrun.update_instances(&id, Vec::new());
+            HttpResponse::Ok().json(serde_json::json!({ "updated": true, "image": image }))
+        } else {
+            HttpResponse::NotFound().json(serde_json::json!({ "error": "Service not found" }))
+        }
+    } else {
+        HttpResponse::BadRequest().json(serde_json::json!({ "error": "No image specified" }))
+    }
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -7478,6 +7646,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/alerts/config", web::get().to(alerts_config_get))
         .route("/api/alerts/config", web::post().to(alerts_config_save))
         .route("/api/alerts/test", web::post().to(alerts_test))
+        // WolfRun — container orchestration
+        .route("/api/wolfrun/services", web::get().to(wolfrun_list))
+        .route("/api/wolfrun/services", web::post().to(wolfrun_create))
+        .route("/api/wolfrun/services/{id}", web::get().to(wolfrun_get))
+        .route("/api/wolfrun/services/{id}", web::delete().to(wolfrun_delete))
+        .route("/api/wolfrun/services/{id}/scale", web::post().to(wolfrun_scale))
+        .route("/api/wolfrun/services/{id}/update", web::post().to(wolfrun_update))
         // Node proxy — forward API calls to remote nodes (must be last — wildcard path)
         .route("/api/nodes/{id}/proxy/{path:.*}", web::get().to(node_proxy))
         .route("/api/nodes/{id}/proxy/{path:.*}", web::post().to(node_proxy))
