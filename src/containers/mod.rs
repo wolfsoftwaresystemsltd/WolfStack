@@ -3764,6 +3764,7 @@ pub fn lxc_clone_local(source: &str, new_name: &str, storage: Option<&str>) -> R
 
         if output.status.success() {
             info!("Cloned {} → {} (VMID {})", source, new_name, new_vmid);
+            lxc_clone_fixup_ip(new_name);
             Ok(format!("Container '{}' cloned to '{}' (VMID {})", source, new_name, new_vmid))
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -3786,6 +3787,7 @@ pub fn lxc_clone_local(source: &str, new_name: &str, storage: Option<&str>) -> R
 
         if output.status.success() {
             info!("Cloned {} → {} via lxc-copy", source, new_name);
+            lxc_clone_fixup_ip(new_name);
             Ok(format!("Container '{}' cloned to '{}'", source, new_name))
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -4559,6 +4561,7 @@ pub fn lxc_clone_snapshot(container: &str, new_name: &str) -> Result<String, Str
             .map_err(|e| format!("pct clone failed: {}", e))?;
 
         if output.status.success() {
+            lxc_clone_fixup_ip(new_name);
             return Ok(format!("Container '{}' linked-cloned to '{}' (VMID {})", container, new_name, new_vmid));
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
