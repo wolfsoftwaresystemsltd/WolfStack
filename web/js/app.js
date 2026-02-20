@@ -13857,8 +13857,7 @@ async function saveWolfRunSettings() {
         if (resp.ok) {
             closeWolfRunSettingsModal();
             if (desired > currentRunning) {
-                // Show scaling progress modal
-                wolfrunScale(wolfrunSettingsServiceId, desired);
+                showScaleProgress(wolfrunSettingsServiceId, desired);
             } else {
                 showToast(`⚡ Settings saved — desired=${data.replicas}, min=${data.min_replicas}, max=${data.max_replicas}`, 'success');
                 loadWolfRunServices();
@@ -13893,27 +13892,6 @@ async function wolfrunAction(serviceId, action) {
 
 async function wolfrunScale(serviceId, newReplicas) {
     if (newReplicas < 0) newReplicas = 0;
-
-    // Fetch service name
-    let svcName = serviceId;
-    try {
-        const svcResp = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}`));
-        if (svcResp.ok) { const s = await svcResp.json(); svcName = s.name || serviceId; }
-    } catch (e) { }
-
-    const log = document.getElementById('wolfrun-scale-log');
-    document.getElementById('wolfrun-scale-name').textContent = svcName;
-    log.innerHTML = '';
-    document.getElementById('wolfrun-scale-modal').classList.add('active');
-
-    function addLog(msg) {
-        log.innerHTML += `<div>${msg}</div>`;
-        log.scrollTop = log.scrollHeight;
-    }
-
-    const direction = newReplicas > 0 ? 'up' : 'down';
-    addLog(`🔄 Requesting scale to <strong>${newReplicas}</strong> replicas...`);
-
     try {
         const resp = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}/scale`), {
             method: 'POST',
@@ -13922,21 +13900,32 @@ async function wolfrunScale(serviceId, newReplicas) {
         });
         if (!resp.ok) {
             const data = await resp.json().catch(() => ({}));
-            addLog(`❌ Scale failed: ${data.error || resp.statusText}`);
+            showToast(`Scale failed: ${data.error || resp.statusText}`, 'error');
             return;
         }
-        addLog(`✅ Desired replicas set to ${newReplicas}`);
-        addLog(`⏳ Waiting for reconciler to clone containers...`);
     } catch (e) {
-        addLog(`❌ Error: ${e.message}`);
+        showToast('Scale failed: ' + e.message, 'error');
         return;
     }
+    showScaleProgress(serviceId, newReplicas);
+}
 
-    // Poll for instance count to reach desired — update status in-place
-    addLog(`<div id="wolfrun-scale-status">📊 Checking...</div>`);
+async function showScaleProgress(serviceId, targetReplicas) {
+    let svcName = serviceId;
+    try {
+        const sr = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}`));
+        if (sr.ok) { const s = await sr.json(); svcName = s.name || serviceId; }
+    } catch (e) { }
+
+    const log = document.getElementById('wolfrun-scale-log');
+    document.getElementById('wolfrun-scale-name').textContent = svcName;
+    log.innerHTML = `<div>🔄 Scaling to <strong>${targetReplicas}</strong> replicas...</div>
+        <div>⏳ Waiting for containers to come up...</div>
+        <div id="wolfrun-scale-status">📊 Checking...</div>`;
+    document.getElementById('wolfrun-scale-modal').classList.add('active');
+
     let attempts = 0;
-    const maxAttempts = 20; // 20 * 3s = 60s
-    const pollInterval = 3000;
+    const maxAttempts = 20;
     const poll = setInterval(async () => {
         attempts++;
         try {
@@ -13946,24 +13935,21 @@ async function wolfrunScale(serviceId, newReplicas) {
                 const running = (svc.instances || []).filter(i => i.status === 'running').length;
                 const total = (svc.instances || []).length;
                 const el = document.getElementById('wolfrun-scale-status');
-                if (el) el.innerHTML = `📊 Instances: <strong>${running}</strong> running / ${total} total (target: ${newReplicas})`;
+                if (el) el.innerHTML = `📊 Instances: <strong>${running}</strong> running / ${total} total (target: ${targetReplicas})`;
                 loadWolfRunServices();
 
-                if (running >= newReplicas || attempts >= maxAttempts) {
+                if (running >= targetReplicas || attempts >= maxAttempts) {
                     clearInterval(poll);
-                    if (running >= newReplicas) {
-                        addLog(`<br>✅ <strong>Scaling complete!</strong> ${running} replicas running.`);
+                    if (running >= targetReplicas) {
+                        log.innerHTML += `<div><br>✅ <strong>Scaling complete!</strong> ${running} replicas running.</div>`;
                     } else {
-                        addLog(`<br>⏰ Still provisioning — check back shortly.`);
+                        log.innerHTML += `<div><br>⏰ Still provisioning — check back shortly.</div>`;
                     }
-                    setTimeout(() => {
-                        closeWolfRunScaleModal();
-                        loadWolfRunServices();
-                    }, 2000);
+                    setTimeout(() => { closeWolfRunScaleModal(); loadWolfRunServices(); }, 2000);
                 }
             }
         } catch (e) { }
-    }, pollInterval);
+    }, 3000);
 }
 
 function closeWolfRunScaleModal() {
