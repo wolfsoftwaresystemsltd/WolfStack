@@ -12565,7 +12565,7 @@ async function cleanSystem() {
 // ═══════════════════════════════════════════════
 
 var gwnScanData = []; // flat list of { server, type, name, ip, state }
-var gwnSortCol = 3;   // default sort by IP column
+var gwnSortCol = 4;   // default sort by IP column
 var gwnSortAsc = true;
 
 function ipToNum(ip) {
@@ -12585,32 +12585,33 @@ function renderGwnTable() {
     if (!content || gwnScanData.length === 0) return;
     var q = (document.getElementById('gwn-filter').value || '').toLowerCase();
     var filtered = gwnScanData.filter(function (r) {
-        return (r.server + ' ' + r.type + ' ' + r.name + ' ' + r.ip + ' ' + r.state).toLowerCase().includes(q);
+        return ((r.cluster || '') + ' ' + r.server + ' ' + r.type + ' ' + r.name + ' ' + r.ip + ' ' + r.state).toLowerCase().includes(q);
     });
     var sorted = filtered.slice().sort(function (a, b) {
-        var keys = ['server', 'type', 'name', 'ip', 'state'];
+        var keys = ['cluster', 'server', 'type', 'name', 'ip', 'state'];
         var key = keys[gwnSortCol] || 'ip';
         var va = a[key] || '', vb = b[key] || '';
         if (key === 'ip') { va = ipToNum(va); vb = ipToNum(vb); return gwnSortAsc ? va - vb : vb - va; }
         return gwnSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
     });
-    var arrows = ['', '', '', '', ''];
+    var arrows = ['', '', '', '', '', ''];
     arrows[gwnSortCol] = gwnSortAsc ? ' ▲' : ' ▼';
     var html = '<div class="card"><div class="card-body" style="padding:0; overflow-x:auto;">';
     html += '<table class="data-table" id="gwn-main-table"><thead><tr>';
-    html += '<th onclick="gwnSortBy(0)" style="cursor:pointer;">Server' + arrows[0] + '</th>';
-    html += '<th onclick="gwnSortBy(1)" style="cursor:pointer;">Type' + arrows[1] + '</th>';
-    html += '<th onclick="gwnSortBy(2)" style="cursor:pointer;">Name' + arrows[2] + '</th>';
-    html += '<th onclick="gwnSortBy(3)" style="cursor:pointer;">IP Address' + arrows[3] + '</th>';
-    html += '<th onclick="gwnSortBy(4)" style="cursor:pointer;">State' + arrows[4] + '</th>';
+    html += '<th onclick="gwnSortBy(0)" style="cursor:pointer;">Cluster' + arrows[0] + '</th>';
+    html += '<th onclick="gwnSortBy(1)" style="cursor:pointer;">Server' + arrows[1] + '</th>';
+    html += '<th onclick="gwnSortBy(2)" style="cursor:pointer;">Type' + arrows[2] + '</th>';
+    html += '<th onclick="gwnSortBy(3)" style="cursor:pointer;">Name' + arrows[3] + '</th>';
+    html += '<th onclick="gwnSortBy(4)" style="cursor:pointer;">IP Address' + arrows[4] + '</th>';
+    html += '<th onclick="gwnSortBy(5)" style="cursor:pointer;">State' + arrows[5] + '</th>';
     html += '</tr></thead><tbody>';
     if (sorted.length === 0) {
-        html += '<tr><td colspan="5" style="text-align:center; color:var(--text-muted); padding:24px;">No results</td></tr>';
+        html += '<tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:24px;">No results</td></tr>';
     } else {
         sorted.forEach(function (r) {
-            var typeIcon = r.type === 'WolfNet' ? '\uD83C\uDF10' : r.type === 'LXC' ? '\uD83D\uDCE6' : r.type === 'Docker' ? '\uD83D\uDC33' : '\uD83D\uDDA5\uFE0F';
-            var bg = r.type === 'WolfNet' ? 'rgba(59,130,246,0.08)' : r.type === 'LXC' ? 'rgba(234,179,8,0.08)' : r.type === 'Docker' ? 'rgba(99,102,241,0.08)' : r.type === 'VM' ? 'rgba(16,185,129,0.08)' : 'transparent';
-            html += '<tr style="background:' + bg + ';"><td>' + escapeHtml(r.server) + '</td><td>' + typeIcon + ' ' + escapeHtml(r.type) + '</td><td>' + escapeHtml(r.name) + '</td><td><code>' + escapeHtml(r.ip || '—') + '</code></td><td>' + escapeHtml(r.state) + '</td></tr>';
+            var typeIcon = r.type === 'WolfNet' ? '\uD83C\uDF10' : r.type === 'Peer' ? '\uD83D\uDD17' : r.type === 'LXC' ? '\uD83D\uDCE6' : r.type === 'Docker' ? '\uD83D\uDC33' : r.type === 'VM' ? '\uD83D\uDDA5\uFE0F' : '\u2796';
+            var bg = r.type === 'WolfNet' ? 'rgba(59,130,246,0.08)' : r.type === 'LXC' ? 'rgba(234,179,8,0.08)' : r.type === 'Docker' ? 'rgba(99,102,241,0.08)' : r.type === 'VM' ? 'rgba(16,185,129,0.08)' : r.type === 'Peer' ? 'rgba(59,130,246,0.04)' : 'transparent';
+            html += '<tr style="background:' + bg + ';"><td>' + escapeHtml(r.cluster || '') + '</td><td>' + escapeHtml(r.server) + '</td><td>' + typeIcon + ' ' + escapeHtml(r.type) + '</td><td>' + escapeHtml(r.name) + '</td><td><code>' + escapeHtml(r.ip || '—') + '</code></td><td>' + escapeHtml(r.state) + '</td></tr>';
         });
     }
     html += '</tbody></table></div></div>';
@@ -12629,7 +12630,7 @@ async function scanGlobalWolfNet() {
     var totalNodes = wsNodes.length, scannedNodes = 0;
 
     // Render table with placeholders immediately
-    var arrows = ['', '', '', '', ''];
+    var arrows = ['', '', '', '', '', ''];
     arrows[gwnSortCol] = gwnSortAsc ? ' \u25b2' : ' \u25bc';
     var tableHtml = '<div class="card"><div class="card-body" style="padding:0; overflow-x:auto;">';
     tableHtml += '<table class="data-table" id="gwn-main-table"><thead><tr>';
@@ -12641,7 +12642,7 @@ async function scanGlobalWolfNet() {
     tableHtml += '</tr></thead><tbody id="gwn-tbody">';
     wsNodes.forEach(function (n) {
         var safeId = (n.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
-        tableHtml += '<tr id="gwn-ph-' + safeId + '" style="color:var(--text-muted);"><td>' + escapeHtml(n.hostname || n.id || 'local') + '</td><td colspan="4"><span style="display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,0.15);border-top-color:var(--text-muted);border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Scanning...</td></tr>';
+        tableHtml += '<tr id="gwn-ph-' + safeId + '" style="color:var(--text-muted);"><td>' + escapeHtml(n.hostname || n.id || 'local') + '</td><td colspan="5"><span style="display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,0.15);border-top-color:var(--text-muted);border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Scanning...</td></tr>';
     });
     tableHtml += '</tbody></table></div></div>';
     if (content) content.innerHTML = tableHtml;
@@ -12654,11 +12655,11 @@ async function scanGlobalWolfNet() {
         if (ph) ph.remove();
         rows.forEach(function (r) {
             gwnScanData.push(r);
-            var typeIcon = r.type === 'WolfNet' ? '\uD83C\uDF10' : r.type === 'LXC' ? '\uD83D\uDCE6' : r.type === 'Docker' ? '\uD83D\uDC33' : '\uD83D\uDDA5\uFE0F';
-            var bg = r.type === 'WolfNet' ? 'rgba(59,130,246,0.08)' : r.type === 'LXC' ? 'rgba(234,179,8,0.08)' : r.type === 'Docker' ? 'rgba(99,102,241,0.08)' : r.type === 'VM' ? 'rgba(16,185,129,0.08)' : 'transparent';
+            var typeIcon = r.type === 'WolfNet' ? '\uD83C\uDF10' : r.type === 'Peer' ? '\uD83D\uDD17' : r.type === 'LXC' ? '\uD83D\uDCE6' : r.type === 'Docker' ? '\uD83D\uDC33' : r.type === 'VM' ? '\uD83D\uDDA5\uFE0F' : '\u2796';
+            var bg = r.type === 'WolfNet' ? 'rgba(59,130,246,0.08)' : r.type === 'LXC' ? 'rgba(234,179,8,0.08)' : r.type === 'Docker' ? 'rgba(99,102,241,0.08)' : r.type === 'VM' ? 'rgba(16,185,129,0.08)' : r.type === 'Peer' ? 'rgba(59,130,246,0.04)' : 'transparent';
             var tr = document.createElement('tr');
             tr.style.background = bg;
-            tr.innerHTML = '<td>' + escapeHtml(r.server) + '</td><td>' + typeIcon + ' ' + escapeHtml(r.type) + '</td><td>' + escapeHtml(r.name) + '</td><td><code>' + escapeHtml(r.ip || '\u2014') + '</code></td><td>' + escapeHtml(r.state) + '</td>';
+            tr.innerHTML = '<td>' + escapeHtml(r.cluster || '') + '</td><td>' + escapeHtml(r.server) + '</td><td>' + typeIcon + ' ' + escapeHtml(r.type) + '</td><td>' + escapeHtml(r.name) + '</td><td><code>' + escapeHtml(r.ip || '\u2014') + '</code></td><td>' + escapeHtml(r.state) + '</td>';
             tbody.appendChild(tr);
         });
         var el;
@@ -12671,13 +12672,17 @@ async function scanGlobalWolfNet() {
         var isLocal = !!node.is_self;
         var base = isLocal ? '' : '/api/nodes/' + encodeURIComponent(node.id) + '/proxy';
         var serverName = node.hostname || node.id || 'local';
+        var clusterName = node.cluster_name || '';
         var apiPrefix = isLocal ? '/api/' : '';
         var rows = [];
         try {
             var wn = await fetch(base + '/' + apiPrefix + 'networking/wolfnet', { credentials: 'include' }).then(function (r) { return r.ok ? r.json() : null; });
             if (wn) {
                 var selfIp = (wn.ip || '').split('/')[0];
-                if (selfIp) rows.push({ server: serverName, type: 'WolfNet', name: serverName, ip: selfIp, state: wn.running ? 'Running' : 'Stopped' });
+                if (selfIp) rows.push({ cluster: clusterName, server: serverName, type: 'WolfNet', name: serverName, ip: selfIp, state: wn.running ? 'Running' : 'Stopped' });
+                (wn.peers || []).forEach(function(p) {
+                    rows.push({ cluster: clusterName, server: serverName, type: 'Peer', name: p.name || 'peer', ip: (p.ip || '').split('/')[0], state: p.connected ? 'Connected' : 'Known' });
+                });
             }
         } catch (e) { }
         try {
@@ -12685,7 +12690,7 @@ async function scanGlobalWolfNet() {
             if (lxcData) {
                 var list = Array.isArray(lxcData) ? lxcData : (lxcData.containers || []);
                 list.forEach(function (c) {
-                    rows.push({ server: serverName, type: 'LXC', name: c.name || c.id || '?', ip: String(c.ip || c.ipv4 || '').split('/')[0], state: c.state || c.status || '?' });
+                    rows.push({ cluster: clusterName, server: serverName, type: 'LXC', name: c.name || c.id || '?', ip: String(c.ip || c.ipv4 || '').split('/')[0], state: c.state || c.status || '?' });
                 });
             }
         } catch (e) { }
@@ -12699,12 +12704,12 @@ async function scanGlobalWolfNet() {
                     var nets = (c.networks || (c.NetworkSettings && c.NetworkSettings.Networks) || {});
                     var entries = Object.entries(nets);
                     if (entries.length === 0) {
-                        rows.push({ server: serverName, type: 'Docker', name: name, ip: c.ip || '', state: state });
+                        rows.push({ cluster: clusterName, server: serverName, type: 'Docker', name: name, ip: c.ip || '', state: state });
                     } else {
                         entries.forEach(function (entry) {
                             var netInfo = entry[1];
                             var ip = ((netInfo && (netInfo.IPAddress || netInfo.ip_address)) || c.ip || '').split('/')[0];
-                            rows.push({ server: serverName, type: 'Docker', name: name + ' (' + entry[0] + ')', ip: ip, state: state });
+                            rows.push({ cluster: clusterName, server: serverName, type: 'Docker', name: name + ' (' + entry[0] + ')', ip: ip, state: state });
                         });
                     }
                 });
@@ -12718,12 +12723,12 @@ async function scanGlobalWolfNet() {
                     var raw = v.ips || v.ip_addresses || (v.ip ? [v.ip] : []);
                     var ips = Array.isArray(raw) ? raw : [raw];
                     ips.filter(function (x) { return x && !String(x).startsWith('127.'); }).forEach(function (ip) {
-                        rows.push({ server: serverName, type: 'VM', name: v.name || v.vmid || v.id || '?', ip: String(ip).split('/')[0], state: v.state || v.status || '?' });
+                        rows.push({ cluster: clusterName, server: serverName, type: 'VM', name: v.name || v.vmid || v.id || '?', ip: String(ip).split('/')[0], state: v.state || v.status || '?' });
                     });
                 });
             }
         } catch (e) { }
-        if (rows.length === 0) rows.push({ server: serverName, type: '-', name: '-', ip: '-', state: 'No data' });
+        if (rows.length === 0) rows.push({ cluster: clusterName, server: serverName, type: '-', name: '-', ip: '-', state: 'No data' });
         addRowsForNode(node.id, rows);
     }
 
