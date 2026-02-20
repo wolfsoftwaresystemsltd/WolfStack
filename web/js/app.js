@@ -11947,6 +11947,7 @@ function escapeHtml(str) {
 // ═══════════════════════════════════════════════
 
 var issuesScanResults = []; // cached for upgrade-all
+var issuesLatestVersion = '0.0.0'; // GitHub-resolved latest, cached after each scan
 
 async function checkIssuesAiBadge() {
     try {
@@ -12182,6 +12183,7 @@ async function scanForIssues() {
     await Promise.all(scanPromises);
 
     issuesScanResults = results;
+    issuesLatestVersion = latestVersion; // cache GitHub-resolved version for upgrade-all
 
     // Hide progress bar
     var progressEl = document.getElementById('issues-progress');
@@ -12467,10 +12469,13 @@ async function issuesUpgradeAll() {
         return;
     }
 
-    var latestVersion = '0.0.0';
-    issuesScanResults.forEach(function (r) {
-        if (r.version && r.version !== '?' && compareVersions(r.version, latestVersion) > 0) latestVersion = r.version;
-    });
+    // Use the GitHub-resolved version from the last scan; fall back to peer max if not set
+    var latestVersion = issuesLatestVersion && issuesLatestVersion !== '0.0.0' ? issuesLatestVersion : '0.0.0';
+    if (latestVersion === '0.0.0') {
+        issuesScanResults.forEach(function (r) {
+            if (r.version && r.version !== '?' && compareVersions(r.version, latestVersion) > 0) latestVersion = r.version;
+        });
+    }
 
     var outdated = issuesScanResults.filter(function (r) {
         return r.version && r.version !== '?' && compareVersions(r.version, latestVersion) < 0;
