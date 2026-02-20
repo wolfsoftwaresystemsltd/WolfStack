@@ -840,12 +840,14 @@ fn lxc_apply_wolfnet(container: &str) {
     }
 }
 
-/// Find the next free IP in 10.0.3.100-254 by scanning all container configs
+/// Find a free IP in 10.0.3.100-254 by checking ALL containers, LXCs, VMs, Docker
 fn find_free_bridge_ip() -> u8 {
     let mut used: Vec<u8> = Vec::new();
+
+    // 1. Scan LXC config files (covers stopped containers too)
     if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
         for entry in entries.flatten() {
-            // Check systemd-networkd config
+            // systemd-networkd
             let net_file = entry.path().join("rootfs/etc/systemd/network/eth0.network");
             if let Ok(content) = std::fs::read_to_string(&net_file) {
                 for line in content.lines() {
@@ -856,7 +858,7 @@ fn find_free_bridge_ip() -> u8 {
                     }
                 }
             }
-            // Check Netplan config
+            // Netplan
             let netplan_file = entry.path().join("rootfs/etc/netplan/50-wolfstack.yaml");
             if let Ok(content) = std::fs::read_to_string(&netplan_file) {
                 for line in content.lines() {
@@ -868,7 +870,7 @@ fn find_free_bridge_ip() -> u8 {
                     }
                 }
             }
-            // Check /etc/network/interfaces
+            // /etc/network/interfaces
             let ifaces_file = entry.path().join("rootfs/etc/network/interfaces");
             if let Ok(content) = std::fs::read_to_string(&ifaces_file) {
                 for line in content.lines() {
@@ -884,6 +886,41 @@ fn find_free_bridge_ip() -> u8 {
             }
         }
     }
+
+    // 2. Scan running LXC containers' actual IPs
+    for c in lxc_list_all() {
+        for ip_str in c.ip_address.split(',') {
+            let ip = ip_str.trim().replace(" (lxcbr0)", "").replace(" (eth0)", "");
+            if let Some(last) = ip.strip_prefix("10.0.3.") {
+                if let Ok(n) = last.trim().parse::<u8>() {
+                    used.push(n);
+                }
+            }
+        }
+    }
+
+    // 3. Scan Docker containers' IPs
+    for c in docker_list_all() {
+        for ip_str in c.ip_address.split(',') {
+            let ip = ip_str.trim();
+            if let Some(last) = ip.strip_prefix("10.0.3.") {
+                if let Ok(n) = last.trim().parse::<u8>() {
+                    used.push(n);
+                }
+            }
+        }
+    }
+
+    // 4. Randomize and check for collision, retry if needed
+    used.sort();
+    used.dedup();
+    for _ in 0..200 {
+        let candidate = 100 + (rand_byte() % 155); // 100-254
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+    }
+    // Fallback: sequential scan
     (100u8..=254).find(|i| !used.contains(i)).unwrap_or(100)
 }
 
