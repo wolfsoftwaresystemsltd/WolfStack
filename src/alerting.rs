@@ -1,7 +1,64 @@
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
+use std::collections::HashMap;
+use std::time::Instant;
 
 const ALERTS_CONFIG_FILE: &str = "/etc/wolfstack/alerts.json";
+
+/// Cooldown duration — same alert type for the same node won't re-fire within this window
+const ALERT_COOLDOWN_SECS: u64 = 15 * 60; // 15 minutes
+
+/// A threshold alert that was triggered
+#[derive(Debug, Clone)]
+pub struct ThresholdAlert {
+    pub alert_type: String,   // "cpu", "memory", "disk"
+    pub current: f32,         // current percentage
+    pub threshold: f32,       // configured threshold
+}
+
+/// Check a node's metrics against alerting thresholds.
+/// Returns a list of triggered alerts.
+pub fn check_thresholds(config: &AlertConfig, cpu_pct: f32, mem_pct: f32, disk_pct: f32) -> Vec<ThresholdAlert> {
+    let mut alerts = Vec::new();
+    if config.alert_cpu && cpu_pct >= config.cpu_threshold {
+        alerts.push(ThresholdAlert { alert_type: "cpu".into(), current: cpu_pct, threshold: config.cpu_threshold });
+    }
+    if config.alert_memory && mem_pct >= config.memory_threshold {
+        alerts.push(ThresholdAlert { alert_type: "memory".into(), current: mem_pct, threshold: config.memory_threshold });
+    }
+    if config.alert_disk && disk_pct >= config.disk_threshold {
+        alerts.push(ThresholdAlert { alert_type: "disk".into(), current: disk_pct, threshold: config.disk_threshold });
+    }
+    alerts
+}
+
+/// Check if a specific alert is in cooldown. Returns true if it should be suppressed.
+pub fn is_in_cooldown(cooldowns: &HashMap<String, Instant>, node_id: &str, alert_type: &str) -> bool {
+    let key = format!("{}:{}", node_id, alert_type);
+    if let Some(last) = cooldowns.get(&key) {
+        last.elapsed().as_secs() < ALERT_COOLDOWN_SECS
+    } else {
+        false
+    }
+}
+
+/// Record that an alert was just sent (sets cooldown timer)
+pub fn record_alert(cooldowns: &mut HashMap<String, Instant>, node_id: &str, alert_type: &str) {
+    let key = format!("{}:{}", node_id, alert_type);
+    cooldowns.insert(key, Instant::now());
+}
+
+/// Remove cooldown entry (for recovery notifications)
+pub fn clear_cooldown(cooldowns: &mut HashMap<String, Instant>, node_id: &str, alert_type: &str) {
+    let key = format!("{}:{}", node_id, alert_type);
+    cooldowns.remove(&key);
+}
+
+/// Check if a node+type was previously in an alerted state (has a cooldown entry)
+pub fn was_alerted(cooldowns: &HashMap<String, Instant>, node_id: &str, alert_type: &str) -> bool {
+    let key = format!("{}:{}", node_id, alert_type);
+    cooldowns.contains_key(&key)
+}
 
 /// Alerting configuration — persisted to /etc/wolfstack/alerts.json
 #[derive(Debug, Clone, Serialize, Deserialize)]

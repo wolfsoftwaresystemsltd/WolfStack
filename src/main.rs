@@ -562,6 +562,132 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
+        // Background: alerting threshold monitor (CPU, memory, disk) for ALL nodes
+        let alert_cluster = cluster.clone();
+        tokio::spawn(async move {
+            // Wait 90 seconds after startup before first check (let metrics stabilise)
+            tokio::time::sleep(Duration::from_secs(90)).await;
+            let mut cooldowns: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
+            loop {
+                let config = alerting::AlertConfig::load();
+                if config.enabled && config.has_channels() {
+                    let all_nodes = alert_cluster.get_all_nodes();
+
+                    // Only the primary alerter (lowest online node ID) sends alerts
+                    let self_id = &alert_cluster.self_id;
+                    let is_primary = all_nodes.iter()
+                        .filter(|n| n.online)
+                        .map(|n| &n.id)
+                        .min()
+                        .map(|min_id| min_id == self_id)
+                        .unwrap_or(true);
+
+                    if is_primary {
+                        for node in &all_nodes {
+                            if !node.online { continue; }
+                            let metrics = match &node.metrics {
+                                Some(m) => m,
+                                None => continue,
+                            };
+
+                            let cpu_pct = metrics.cpu_usage_percent;
+                            let mem_pct = metrics.memory_percent;
+                            let disk_pct = metrics.disks.iter()
+                                .map(|d| d.usage_percent)
+                                .fold(0.0_f32, f32::max);
+
+                            let display_name = if node.hostname.is_empty() { &node.address } else { &node.hostname };
+
+                            // Check thresholds
+                            let triggered = alerting::check_thresholds(&config, cpu_pct, mem_pct, disk_pct);
+
+                            for alert in &triggered {
+                                if !alerting::is_in_cooldown(&cooldowns, &node.id, &alert.alert_type) {
+                                    let type_label = match alert.alert_type.as_str() {
+                                        "cpu" => "CPU",
+                                        "memory" => "Memory",
+                                        "disk" => "Disk",
+                                        _ => &alert.alert_type,
+                                    };
+                                    let title = format!(
+                                        "[WolfStack ALERT] {} {} at {:.1}% on {}",
+                                        type_label, "threshold exceeded", alert.current, display_name
+                                    );
+                                    let body = format!(
+                                        "⚠️ {} Threshold Alert\n\n\
+                                         Hostname: {}\n\
+                                         Metric: {} usage\n\
+                                         Current: {:.1}%\n\
+                                         Threshold: {:.0}%\n\
+                                         Time: {}\n\n\
+                                         This alert will not repeat for 15 minutes.",
+                                        type_label, display_name, type_label,
+                                        alert.current, alert.threshold,
+                                        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+                                    );
+                                    tracing::info!("Threshold alert: {} {:.1}% >= {:.0}% on {}", alert.alert_type, alert.current, alert.threshold, display_name);
+                                    let cfg = config.clone();
+                                    let t = title.clone();
+                                    let b = body.clone();
+                                    tokio::spawn(async move {
+                                        alerting::send_alert(&cfg, &t, &b).await;
+                                    });
+                                    alerting::record_alert(&mut cooldowns, &node.id, &alert.alert_type);
+                                }
+                            }
+
+                            // Recovery notifications: if previously alerted but now below threshold
+                            let triggered_types: Vec<&str> = triggered.iter().map(|a| a.alert_type.as_str()).collect();
+                            for check_type in &["cpu", "memory", "disk"] {
+                                if !triggered_types.contains(check_type)
+                                    && alerting::was_alerted(&cooldowns, &node.id, check_type)
+                                {
+                                    let type_label = match *check_type {
+                                        "cpu" => "CPU",
+                                        "memory" => "Memory",
+                                        "disk" => "Disk",
+                                        _ => check_type,
+                                    };
+                                    let current_val = match *check_type {
+                                        "cpu" => cpu_pct,
+                                        "memory" => mem_pct,
+                                        "disk" => disk_pct,
+                                        _ => 0.0,
+                                    };
+                                    let title = format!(
+                                        "[WolfStack OK] {} recovered on {}",
+                                        type_label, display_name
+                                    );
+                                    let body = format!(
+                                        "✅ {} Recovered\n\n\
+                                         Hostname: {}\n\
+                                         Metric: {} usage\n\
+                                         Current: {:.1}%\n\
+                                         Time: {}\n\n\
+                                         {} usage has dropped below the threshold.",
+                                        type_label, display_name, type_label,
+                                        current_val,
+                                        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
+                                        type_label,
+                                    );
+                                    tracing::info!("Recovery alert: {} {:.1}% on {} (was previously over threshold)", check_type, current_val, display_name);
+                                    let cfg = config.clone();
+                                    let t = title.clone();
+                                    let b = body.clone();
+                                    tokio::spawn(async move {
+                                        alerting::send_alert(&cfg, &t, &b).await;
+                                    });
+                                    alerting::clear_cooldown(&mut cooldowns, &node.id, check_type);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        });
+
         // Determine web directory
         let web_dir = find_web_dir();
         info!("  Serving web UI from: {}", web_dir);
