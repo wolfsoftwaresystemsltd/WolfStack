@@ -53,7 +53,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v10.0.8</span>
+                <span class="version">v10.0.9</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -793,6 +793,9 @@
                     </div>
                 </div>
             </div>
+            <p style="margin-top:12px; font-size:12px; color:var(--text-muted); text-align:center;">
+                💡 If a cluster has no peers, go into the settings for the cluster and refresh the peers.
+            </p>
         </div>
 
         <!-- ═══ Documentation Page ═══ -->
@@ -3755,7 +3758,7 @@ region = us-east-1"></textarea>
             async function handleLogout() {
                 await fetch('/api/auth/logout', { method: 'POST' });
                 window.location.href = '/login.html';
-    }
+            }
         </script>
         <script>
             // Create AI Chat Bubble & Panel dynamically on document.body
@@ -3814,7 +3817,7 @@ region = us-east-1"></textarea>
                         bubble.style.display = 'flex';
                     }
                 }).catch(function () { });
-        ;
+                ;
         </script>
 
 </body>

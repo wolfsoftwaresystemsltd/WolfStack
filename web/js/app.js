@@ -12565,7 +12565,7 @@ async function cleanSystem() {
 // ═══════════════════════════════════════════════
 
 var gwnScanData = []; // flat list of { server, type, name, ip, state }
-var gwnSortCol = 4;   // default sort by IP column (Cluster|Server|Type|Name|IP|Peers|State)
+var gwnSortCol = 0;   // default sort by Cluster column (Cluster|Server|Type|Name|IP|Peers|State)
 var gwnSortAsc = true;
 
 function ipToNum(ip) {
