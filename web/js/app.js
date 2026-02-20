@@ -12635,11 +12635,13 @@ async function scanGlobalWolfNet() {
     arrows[gwnSortCol] = gwnSortAsc ? ' \u25b2' : ' \u25bc';
     var tableHtml = '<div class="card"><div class="card-body" style="padding:0; overflow-x:auto;">';
     tableHtml += '<table class="data-table" id="gwn-main-table"><thead><tr>';
-    tableHtml += '<th onclick="gwnSortBy(0)" style="cursor:pointer;">Server' + arrows[0] + '</th>';
-    tableHtml += '<th onclick="gwnSortBy(1)" style="cursor:pointer;">Type' + arrows[1] + '</th>';
-    tableHtml += '<th onclick="gwnSortBy(2)" style="cursor:pointer;">Name' + arrows[2] + '</th>';
-    tableHtml += '<th onclick="gwnSortBy(3)" style="cursor:pointer;">IP Address' + arrows[3] + '</th>';
-    tableHtml += '<th onclick="gwnSortBy(4)" style="cursor:pointer;">State' + arrows[4] + '</th>';
+    tableHtml += '<th onclick="gwnSortBy(0)" style="cursor:pointer;">Cluster' + arrows[0] + '</th>';
+    tableHtml += '<th onclick="gwnSortBy(1)" style="cursor:pointer;">Server' + arrows[1] + '</th>';
+    tableHtml += '<th onclick="gwnSortBy(2)" style="cursor:pointer;">Type' + arrows[2] + '</th>';
+    tableHtml += '<th onclick="gwnSortBy(3)" style="cursor:pointer;">Name' + arrows[3] + '</th>';
+    tableHtml += '<th onclick="gwnSortBy(4)" style="cursor:pointer;">WolfNet IP' + arrows[4] + '</th>';
+    tableHtml += '<th onclick="gwnSortBy(5)" style="cursor:pointer;">Peers' + arrows[5] + '</th>';
+    tableHtml += '<th onclick="gwnSortBy(6)" style="cursor:pointer;">State' + arrows[6] + '</th>';
     tableHtml += '</tr></thead><tbody id="gwn-tbody">';
     wsNodes.forEach(function (n) {
         var safeId = (n.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
@@ -12681,7 +12683,7 @@ async function scanGlobalWolfNet() {
             if (wn) {
                 var selfIp = (wn.ip || '').split('/')[0];
                 if (selfIp) {
-                    var peerList = (wn.peers || []).map(function(p) { return (p.name || '') + ':' + ((p.ip || '').split('/')[0]); }).join(', ');
+                    var peerList = (wn.peers || []).map(function (p) { return (p.name || '') + ':' + ((p.ip || '').split('/')[0]); }).join(', ');
                     rows.push({ cluster: clusterName, server: serverName, type: 'WolfNet', name: serverName, ip: selfIp, peers: peerList, state: wn.running ? 'Running' : 'Stopped' });
                 }
             }
