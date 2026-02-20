@@ -20,7 +20,7 @@ use crate::agent::{ClusterState, AgentMessage};
 use crate::auth::SessionManager;
 use crate::appstore;
 
-mod console;
+
 mod pve_console;
 
 /// Build ordered URLs to try for inter-node communication.
@@ -7301,7 +7301,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups/{id}", web::delete().to(backup_delete))
         .route("/api/backups/{id}/restore", web::post().to(backup_restore))
         // Console WebSocket
-        .route("/ws/console/{type}/{name}", web::get().to(console::console_ws))
+        .route("/ws/console/{type}/{name}", web::get().to(crate::console::console_ws))
         // Remote Console WebSocket proxy (bridges browser ↔ remote node's console)
         .route("/ws/remote-console/{node_id}/{type}/{name}", web::get().to(crate::console::remote_console_ws))
         // PVE Console WebSocket proxy
