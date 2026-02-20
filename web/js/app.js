@@ -13847,9 +13847,11 @@ async function saveWolfRunSettings() {
         });
         const data = await resp.json();
         if (resp.ok) {
-            showToast(`Settings saved: desired=${data.replicas}, min=${data.min_replicas}, max=${data.max_replicas}`, 'success');
+            showToast(`⚡ Settings saved — desired=${data.replicas}, min=${data.min_replicas}, max=${data.max_replicas}`, 'success');
             closeWolfRunSettingsModal();
             loadWolfRunServices();
+            setTimeout(() => loadWolfRunServices(), 3000);
+            setTimeout(() => loadWolfRunServices(), 8000);
         } else {
             showToast(data.error || 'Update failed', 'error');
         }
@@ -13887,8 +13889,11 @@ async function wolfrunScale(serviceId, newReplicas) {
             body: JSON.stringify({ replicas: newReplicas }),
         });
         if (resp.ok) {
-            showToast(`Scaled to ${newReplicas} replica(s)`, 'success');
+            showToast(`⚡ Scaling to ${newReplicas} — cloning container...`, 'success');
             loadWolfRunServices();
+            // Reload again after clone completes
+            setTimeout(() => loadWolfRunServices(), 3000);
+            setTimeout(() => loadWolfRunServices(), 8000);
         } else {
             const data = await resp.json();
             showToast(data.error || 'Scale failed', 'error');
