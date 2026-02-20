@@ -32,7 +32,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"], de
 
 # TLS
 openssl = "0.10"
-rustls = { version = "0.23", features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 webpki-roots = "0.26"
 
 # Logging
