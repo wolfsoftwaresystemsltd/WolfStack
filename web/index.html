@@ -1709,6 +1709,7 @@
                     <div class="settings-tabs">
                         <button class="settings-tab-btn active" onclick="switchSettingsTab('appearance')">🎨
                             Appearance</button>
+                        <button class="settings-tab-btn" onclick="switchSettingsTab('alerting')">🔔 Alerting</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('ai')">🤖 AI Agent</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('backup')">📦 Config Backup</button>
                     </div>
@@ -1849,6 +1850,130 @@
                                     <div class="theme-card-desc">Dark blue glassmorphism with shimmer</div>
                                 </div>
                             </div>
+                        </div>
+                    </div>
+
+                    <!-- ─── Alerting Tab ─── -->
+                    <div id="settings-tab-alerting" class="settings-tab-panel">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+                            <div>
+                                <h4 style="margin:0 0 4px 0;font-size:16px;font-weight:600;">Alerting & Notifications
+                                </h4>
+                                <p style="font-size:13px;color:var(--text-muted);margin:0;">Send alerts to Discord,
+                                    Slack, or Telegram when system events occur.</p>
+                            </div>
+                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                                <input type="checkbox" id="alerting-enabled"
+                                    style="width:18px;height:18px;cursor:pointer;">
+                                <span style="font-size:13px;font-weight:500;">Enable Alerting</span>
+                            </label>
+                        </div>
+
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">
+                            <!-- Left: Channels -->
+                            <div>
+                                <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);">📡 Notification
+                                    Channels</h4>
+                                <div class="form-group" style="margin-bottom:16px;">
+                                    <label>Discord Webhook URL</label>
+                                    <input type="text" id="alerting-discord" class="form-control"
+                                        placeholder="https://discord.com/api/webhooks/...">
+                                    <small style="color:var(--text-muted);">Server Settings → Integrations →
+                                        Webhooks</small>
+                                </div>
+                                <div class="form-group" style="margin-bottom:16px;">
+                                    <label>Slack Webhook URL</label>
+                                    <input type="text" id="alerting-slack" class="form-control"
+                                        placeholder="https://hooks.slack.com/services/...">
+                                    <small style="color:var(--text-muted);">api.slack.com/apps → Incoming
+                                        Webhooks</small>
+                                </div>
+                                <div class="form-group" style="margin-bottom:12px;">
+                                    <label>Telegram Bot Token</label>
+                                    <input type="text" id="alerting-tg-token" class="form-control"
+                                        placeholder="123456:ABC-DEF...">
+                                </div>
+                                <div class="form-group" style="margin-bottom:16px;">
+                                    <label>Telegram Chat ID</label>
+                                    <input type="text" id="alerting-tg-chat" class="form-control"
+                                        placeholder="-1001234567890">
+                                    <small style="color:var(--text-muted);">Talk to @BotFather, then @userinfobot for
+                                        chat ID</small>
+                                </div>
+
+                                <div id="alerting-channel-status"
+                                    style="font-size:12px;color:var(--text-muted);padding:8px 0;"></div>
+                            </div>
+
+                            <!-- Right: Thresholds & Events -->
+                            <div>
+                                <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);">⚡ Alert Rules
+                                </h4>
+                                <div
+                                    style="background:var(--bg-input);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px;">
+                                    <div
+                                        style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;">
+                                        <label style="font-size:13px;">CPU Threshold</label>
+                                        <div style="display:flex;align-items:center;gap:8px;">
+                                            <input type="range" id="alerting-cpu" min="50" max="100" value="90"
+                                                style="width:120px;"
+                                                oninput="this.nextElementSibling.textContent=this.value+'%'">
+                                            <span
+                                                style="font-size:13px;font-family:'JetBrains Mono',monospace;min-width:40px;">90%</span>
+                                        </div>
+                                        <label style="font-size:13px;">Memory Threshold</label>
+                                        <div style="display:flex;align-items:center;gap:8px;">
+                                            <input type="range" id="alerting-memory" min="50" max="100" value="90"
+                                                style="width:120px;"
+                                                oninput="this.nextElementSibling.textContent=this.value+'%'">
+                                            <span
+                                                style="font-size:13px;font-family:'JetBrains Mono',monospace;min-width:40px;">90%</span>
+                                        </div>
+                                        <label style="font-size:13px;">Disk Threshold</label>
+                                        <div style="display:flex;align-items:center;gap:8px;">
+                                            <input type="range" id="alerting-disk" min="50" max="100" value="90"
+                                                style="width:120px;"
+                                                oninput="this.nextElementSibling.textContent=this.value+'%'">
+                                            <span
+                                                style="font-size:13px;font-family:'JetBrains Mono',monospace;min-width:40px;">90%</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <h4 style="margin:0 0 12px 0;font-size:14px;color:var(--accent-light);">🔔 Events</h4>
+                                <div style="display:grid;gap:10px;">
+                                    <label
+                                        style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                                        <input type="checkbox" id="alerting-evt-offline" checked
+                                            style="width:16px;height:16px;"> Node goes offline
+                                    </label>
+                                    <label
+                                        style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                                        <input type="checkbox" id="alerting-evt-restored" checked
+                                            style="width:16px;height:16px;"> Node restored
+                                    </label>
+                                    <label
+                                        style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                                        <input type="checkbox" id="alerting-evt-cpu" checked
+                                            style="width:16px;height:16px;"> High CPU alert
+                                    </label>
+                                    <label
+                                        style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                                        <input type="checkbox" id="alerting-evt-memory" checked
+                                            style="width:16px;height:16px;"> High memory alert
+                                    </label>
+                                    <label
+                                        style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                                        <input type="checkbox" id="alerting-evt-disk" checked
+                                            style="width:16px;height:16px;"> High disk alert
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div style="margin-top:20px;display:flex;gap:12px;">
+                            <button class="btn btn-primary" onclick="saveAlertingConfig()">💾 Save Settings</button>
+                            <button class="btn btn-sm" onclick="testAlerting()">🧪 Send Test Alert</button>
                         </div>
                     </div>
 

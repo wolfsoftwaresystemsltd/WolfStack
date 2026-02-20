@@ -84,6 +84,8 @@ pub struct Node {
     pub has_lxc: bool,                    // Whether LXC is installed on this node
     #[serde(default)]
     pub has_kvm: bool,                    // Whether KVM/QEMU is installed on this node
+    #[serde(default)]
+    pub login_disabled: bool,             // Whether direct login is disabled on this node
 }
 
 fn default_node_type() -> String { "wolfstack".to_string() }
@@ -216,6 +218,7 @@ impl ClusterState {
             .or_else(|| Some("WolfStack".to_string()));
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let prev_login_disabled = nodes.get(&self.self_id).map(|n| n.login_disabled).unwrap_or(false);
         nodes.insert(self.self_id.clone(), Node {
             id: self.self_id.clone(),
             hostname: metrics.hostname.clone(),
@@ -241,6 +244,7 @@ impl ClusterState {
             has_docker,
             has_lxc,
             has_kvm,
+            login_disabled: prev_login_disabled,
         });
     }
 
@@ -344,6 +348,7 @@ impl ClusterState {
             has_docker: false,
             has_lxc: false,
             has_kvm: false,
+            login_disabled: false,
         });
         drop(nodes);
         self.save_nodes();
@@ -436,7 +441,7 @@ impl ClusterState {
     }
 
     /// Update node settings (hostname, address, port, token, fingerprint, cluster name)
-    pub fn update_node_settings(&self, id: &str, hostname: Option<String>, address: Option<String>, port: Option<u16>, pve_token: Option<String>, pve_fingerprint: Option<Option<String>>, cluster_name: Option<String>) -> bool {
+    pub fn update_node_settings(&self, id: &str, hostname: Option<String>, address: Option<String>, port: Option<u16>, pve_token: Option<String>, pve_fingerprint: Option<Option<String>>, cluster_name: Option<String>, login_disabled: Option<bool>) -> bool {
         let mut nodes = self.nodes.write().unwrap();
         if let Some(node) = nodes.get_mut(id) {
             if let Some(h) = hostname { node.hostname = h; }
@@ -444,6 +449,7 @@ impl ClusterState {
             if let Some(p) = port { node.port = p; }
             if let Some(token) = pve_token { node.pve_token = Some(token); }
             if let Some(fp) = pve_fingerprint { node.pve_fingerprint = fp; }
+            if let Some(disabled) = login_disabled { node.login_disabled = disabled; }
             if let Some(ref name) = cluster_name {
                 // Update both cluster_name fields so sidebar grouping works
                 node.cluster_name = Some(name.clone());
@@ -625,6 +631,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         has_docker: true,  // Proxmox always has container/VM support
                         has_lxc: true,
                         has_kvm: true,
+                        login_disabled: node.login_disabled,
                     });
 
                     // Reset fail count on success
@@ -705,6 +712,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                 has_docker,
                                 has_lxc,
                                 has_kvm,
+                                login_disabled: node.login_disabled,
                             });
 
                             // Reset fail count on success
@@ -759,6 +767,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                                 None
                                             },
                                             known.cluster_name.clone(),
+                                            None,  // don't propagate login_disabled via gossip
                                         );
                                     }
                                 } else {
@@ -847,6 +856,9 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                 .unwrap_or(true); // If no nodes online, we're it
 
             if is_primary {
+                // Load alerting config for webhook channels
+                let alert_config = crate::alerting::AlertConfig::load();
+
                 for node in current_nodes.iter().filter(|n| !n.is_self) {
                     let (was_online, hostname) = previous_states.get(&node.id)
                         .cloned()
@@ -873,6 +885,15 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         } else {
                             tracing::info!("Sent node-offline alert email for {}", display_name);
                         }
+                        // Send to webhook channels
+                        if alert_config.enabled && alert_config.alert_node_offline {
+                            let ac = alert_config.clone();
+                            let subj = subject.clone();
+                            let b = body.clone();
+                            tokio::spawn(async move {
+                                crate::alerting::send_alert(&ac, &subj, &b).await;
+                            });
+                        }
                     } else if !was_online && node.online {
                         // Node came back ONLINE
                         let subject = format!("[WolfStack OK] {} has been restored", display_name);
@@ -890,6 +911,15 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             warn!("Failed to send node-restored email for {}: {}", display_name, e);
                         } else {
                             tracing::info!("Sent node-restored alert email for {}", display_name);
+                        }
+                        // Send to webhook channels
+                        if alert_config.enabled && alert_config.alert_node_restored {
+                            let ac = alert_config.clone();
+                            let subj = subject.clone();
+                            let b = body.clone();
+                            tokio::spawn(async move {
+                                crate::alerting::send_alert(&ac, &subj, &b).await;
+                            });
                         }
                     }
                 }

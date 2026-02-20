@@ -26,6 +26,7 @@ mod vms;
 mod proxmox;
 mod mysql_editor;
 mod appstore;
+mod alerting;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_files;

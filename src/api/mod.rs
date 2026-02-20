@@ -170,6 +170,18 @@ pub struct LoginRequest {
 
 /// POST /api/auth/login — authenticate with Linux credentials
 pub async fn login(state: web::Data<AppState>, body: web::Json<LoginRequest>) -> HttpResponse {
+    // Check if direct login is disabled on this node
+    {
+        let nodes = state.cluster.nodes.read().unwrap();
+        if let Some(self_node) = nodes.get(&state.cluster.self_id) {
+            if self_node.login_disabled {
+                return HttpResponse::Forbidden().json(serde_json::json!({
+                    "success": false,
+                    "error": "Direct login is disabled on this server. Access it via the primary dashboard."
+                }));
+            }
+        }
+    }
     if crate::auth::authenticate_user(&body.username, &body.password) {
         let token = state.sessions.create_session(&body.username);
         let cookie = Cookie::build("wolfstack_session", &token)
@@ -190,6 +202,15 @@ pub async fn login(state: web::Data<AppState>, body: web::Json<LoginRequest>) ->
             "error": "Invalid username or password"
         }))
     }
+}
+
+/// GET /api/settings/login-disabled — check if direct login is disabled (no auth needed)
+pub async fn login_disabled_status(state: web::Data<AppState>) -> HttpResponse {
+    let disabled = {
+        let nodes = state.cluster.nodes.read().unwrap();
+        nodes.get(&state.cluster.self_id).map(|n| n.login_disabled).unwrap_or(false)
+    };
+    HttpResponse::Ok().json(serde_json::json!({ "login_disabled": disabled }))
 }
 
 /// POST /api/auth/logout — destroy session
@@ -484,6 +505,7 @@ pub struct UpdateNodeSettings {
     pub pve_fingerprint: Option<String>,
     pub pve_cluster_name: Option<String>,
     pub cluster_name: Option<String>,
+    pub login_disabled: Option<bool>,
 }
 
 pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<UpdateNodeSettings>) -> HttpResponse {
@@ -507,6 +529,7 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
         body.pve_token.clone(),
         fp,
         cluster_name,
+        body.login_disabled,
     ) {
         HttpResponse::Ok().json(serde_json::json!({ "updated": true }))
     } else {
@@ -7111,6 +7134,53 @@ pub async fn clean_system(
     }))
 }
 
+// ═══════════════════════════════════════════════
+// ─── Alerting & Notifications ───
+// ═══════════════════════════════════════════════
+
+pub async fn alerts_config_get(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let config = crate::alerting::AlertConfig::load();
+    HttpResponse::Ok().json(config.to_masked_json())
+}
+
+pub async fn alerts_config_save(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let mut config = crate::alerting::AlertConfig::load();
+    let v = body.into_inner();
+
+    if let Some(enabled) = v.get("enabled").and_then(|v| v.as_bool()) { config.enabled = enabled; }
+    if let Some(url) = v.get("discord_webhook").and_then(|v| v.as_str()) { config.discord_webhook = url.to_string(); }
+    if let Some(url) = v.get("slack_webhook").and_then(|v| v.as_str()) { config.slack_webhook = url.to_string(); }
+    if let Some(token) = v.get("telegram_bot_token").and_then(|v| v.as_str()) { config.telegram_bot_token = token.to_string(); }
+    if let Some(id) = v.get("telegram_chat_id").and_then(|v| v.as_str()) { config.telegram_chat_id = id.to_string(); }
+    if let Some(t) = v.get("cpu_threshold").and_then(|v| v.as_f64()) { config.cpu_threshold = t as f32; }
+    if let Some(t) = v.get("memory_threshold").and_then(|v| v.as_f64()) { config.memory_threshold = t as f32; }
+    if let Some(t) = v.get("disk_threshold").and_then(|v| v.as_f64()) { config.disk_threshold = t as f32; }
+    if let Some(b) = v.get("alert_node_offline").and_then(|v| v.as_bool()) { config.alert_node_offline = b; }
+    if let Some(b) = v.get("alert_node_restored").and_then(|v| v.as_bool()) { config.alert_node_restored = b; }
+    if let Some(b) = v.get("alert_cpu").and_then(|v| v.as_bool()) { config.alert_cpu = b; }
+    if let Some(b) = v.get("alert_memory").and_then(|v| v.as_bool()) { config.alert_memory = b; }
+    if let Some(b) = v.get("alert_disk").and_then(|v| v.as_bool()) { config.alert_disk = b; }
+
+    match config.save() {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "saved": true })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+pub async fn alerts_test(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let mut config = crate::alerting::AlertConfig::load();
+    config.enabled = true; // Force enable for test
+    let results = crate::alerting::send_test(&config).await;
+    let ok_count = results.iter().filter(|(_, r)| r.is_ok()).count();
+    let details: Vec<serde_json::Value> = results.iter().map(|(ch, r)| {
+        serde_json::json!({ "channel": ch, "success": r.is_ok(), "error": r.as_ref().err().map(|e| e.to_string()) })
+    }).collect();
+    HttpResponse::Ok().json(serde_json::json!({ "sent": ok_count, "results": details }))
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -7119,6 +7189,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/auth/login", web::post().to(login))
         .route("/api/auth/logout", web::post().to(logout))
         .route("/api/auth/check", web::get().to(auth_check))
+        .route("/api/settings/login-disabled", web::get().to(login_disabled_status))
         // Dashboard
         .route("/api/metrics", web::get().to(get_metrics))
         .route("/api/metrics/history", web::get().to(get_metrics_history))
@@ -7349,6 +7420,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/security/iptables/rules", web::get().to(security_iptables_rules))
         .route("/api/security/updates/check", web::post().to(security_check_updates))
         .route("/api/security/updates/apply", web::post().to(security_apply_updates))
+        // Alerting
+        .route("/api/alerts/config", web::get().to(alerts_config_get))
+        .route("/api/alerts/config", web::post().to(alerts_config_save))
+        .route("/api/alerts/test", web::post().to(alerts_test))
         // Node proxy — forward API calls to remote nodes (must be last — wildcard path)
         .route("/api/nodes/{id}/proxy/{path:.*}", web::get().to(node_proxy))
         .route("/api/nodes/{id}/proxy/{path:.*}", web::post().to(node_proxy))

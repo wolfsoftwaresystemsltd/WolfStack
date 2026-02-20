@@ -1832,17 +1832,32 @@ function renderServices(components) {
 }
 
 async function installComponent(name) {
-    showToast(`Installing ${name}...`, 'info');
+    // Show a progress overlay during component install
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.style.cssText = 'display:flex; z-index:10001;';
+    overlay.innerHTML = `
+        <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:380px; width:90%; text-align:center; box-shadow:0 20px 60px rgba(0,0,0,0.5); animation:modalSlideIn 0.3s ease;">
+            <div style="width:56px; height:56px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; margin:0 auto 20px;"></div>
+            <h3 style="color:var(--text-primary); font-size:17px; margin-bottom:8px; font-weight:700;">Installing ${escapeHtml(name)}</h3>
+            <p style="color:var(--text-secondary); font-size:13px; margin-bottom:16px;">This may take a minute…</p>
+            <div style="height:4px; background:var(--bg-secondary); border-radius:4px; overflow:hidden;">
+                <div style="height:100%; width:30%; background:linear-gradient(90deg,var(--accent),var(--accent-light)); border-radius:4px; animation:progressPulse 1.5s ease-in-out infinite;"></div>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
     try {
         const resp = await fetch(apiUrl(`/api/components/${name}/install`), { method: 'POST' });
         const data = await resp.json();
+        overlay.remove();
         if (resp.ok) {
-            showToast(data.message, 'success');
+            showToast(`✅ ${name} installed successfully`, 'success');
         } else {
             showToast(data.error || 'Installation failed', 'error');
         }
         loadComponents();
     } catch (e) {
+        overlay.remove();
         showToast('Failed: ' + e.message, 'error');
     }
 }
@@ -4532,6 +4547,21 @@ function openNodeSettings(nodeId) {
                     <label>TLS Fingerprint</label>
                     <input type="text" class="form-control" id="node-settings-pve-fingerprint" value="${node.pve_fingerprint || ''}">
                 </div>` : ''}
+
+                <div style="background:var(--bg-secondary,#161622);border:1px solid var(--border,#333);border-radius:8px;padding:14px 16px;margin-top:12px;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;">
+                        <div>
+                            <span style="font-weight:600;font-size:13px;color:var(--text,#fff);">🔒 Disable Direct Login</span>
+                            <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Prevent users from logging in directly. The server will still be accessible via the primary dashboard.</div>
+                        </div>
+                        <label style="position:relative;display:inline-block;width:44px;height:24px;flex-shrink:0;margin-left:16px;">
+                            <input type="checkbox" id="node-settings-login-disabled" ${node.login_disabled ? 'checked' : ''}
+                                style="opacity:0;width:0;height:0;position:absolute;">
+                            <span onclick="this.previousElementSibling.checked=!this.previousElementSibling.checked" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:${node.login_disabled ? 'var(--accent,#6366f1)' : 'var(--bg-input,#1e1e2e)'};transition:.3s;border-radius:24px;border:1px solid var(--border,#333);"></span>
+                            <span onclick="this.previousElementSibling.previousElementSibling.checked=!this.previousElementSibling.previousElementSibling.checked" style="position:absolute;content:'';height:18px;width:18px;left:${node.login_disabled ? '22px' : '3px'};bottom:3px;background:white;transition:.3s;border-radius:50%;pointer-events:none;"></span>
+                        </label>
+                    </div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
@@ -4697,6 +4727,16 @@ async function saveNodeSettings() {
     if (pveToken) updates.pve_token = pveToken;
     if (pveFingerprint !== undefined && document.getElementById('node-settings-pve-fingerprint')) {
         updates.pve_fingerprint = pveFingerprint || null;
+    }
+
+    // Login disabled toggle
+    const loginDisabledEl = document.getElementById('node-settings-login-disabled');
+    if (loginDisabledEl) {
+        const node = allNodes.find(n => n.id === nodeId);
+        const wasDisabled = node ? !!node.login_disabled : false;
+        if (loginDisabledEl.checked !== wasDisabled) {
+            updates.login_disabled = loginDisabledEl.checked;
+        }
     }
 
     if (Object.keys(updates).length === 0) {
@@ -12925,21 +12965,46 @@ async function executeAppStoreInstall() {
         userInputs[el.dataset.key] = el.value;
     });
 
-    const btn = document.getElementById('appstore-install-btn');
-    const origText = btn.textContent;
-    btn.textContent = '⏳ Installing...';
-    btn.disabled = true;
+    // Determine the install URL based on selected host
+    const selectedNodeId = document.getElementById('appstore-install-host').value;
+    const selectedNode = allNodes.find(n => n.id === selectedNodeId);
+    const hostName = selectedNode ? selectedNode.hostname : 'this server';
+    const targetLabel = appStoreInstallTarget === 'docker' ? '🐳 Docker' : appStoreInstallTarget === 'lxc' ? '📦 LXC' : '🖥️ Host';
+    const appName = (appStoreApps.find(a => a.id === appStoreInstallAppId) || {}).name || appStoreInstallAppId;
+
+    // Close the install modal and show progress overlay
+    closeAppStoreInstallModal();
+
+    const progressOverlay = document.createElement('div');
+    progressOverlay.className = 'modal-overlay active';
+    progressOverlay.style.cssText = 'display:flex; z-index:10001;';
+    progressOverlay.innerHTML = `
+        <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:420px; width:90%; text-align:center; box-shadow:0 20px 60px rgba(0,0,0,0.5); animation:modalSlideIn 0.3s ease;">
+            <div style="width:64px; height:64px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; margin:0 auto 20px;"></div>
+            <h3 style="color:var(--text-primary); font-size:18px; margin-bottom:6px; font-weight:700;">Installing ${escapeHtml(appName)}</h3>
+            <p style="color:var(--text-secondary); font-size:13px; margin-bottom:20px;">Deploying to <strong>${escapeHtml(hostName)}</strong> via ${targetLabel}</p>
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:20px; text-align:left;">
+                <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+                    <span style="color:var(--text-muted); font-size:12px;">Container</span>
+                    <span style="color:var(--text-primary); font-size:12px; font-weight:600;">${escapeHtml(name)}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between;">
+                    <span style="color:var(--text-muted); font-size:12px;">Status</span>
+                    <span id="install-progress-status" style="color:var(--accent-light); font-size:12px; font-weight:600;">⏳ Pulling image & configuring…</span>
+                </div>
+            </div>
+            <div style="height:4px; background:var(--bg-secondary); border-radius:4px; overflow:hidden;">
+                <div style="height:100%; width:30%; background:linear-gradient(90deg,var(--accent),var(--accent-light)); border-radius:4px; animation:progressPulse 1.5s ease-in-out infinite;"></div>
+            </div>
+            <p style="color:var(--text-muted); font-size:11px; margin-top:12px;">This may take a minute depending on image size…</p>
+        </div>`;
+    document.body.appendChild(progressOverlay);
 
     try {
-        // Determine the install URL based on selected host
-        const selectedNodeId = document.getElementById('appstore-install-host').value;
-        const selectedNode = allNodes.find(n => n.id === selectedNodeId);
         let installUrl;
         if (!selectedNode || selectedNode.is_self) {
-            // Local install
             installUrl = `/api/appstore/apps/${appStoreInstallAppId}/install`;
         } else {
-            // Remote install via proxy
             installUrl = `/api/nodes/${selectedNodeId}/proxy/appstore/apps/${appStoreInstallAppId}/install`;
         }
 
@@ -12953,15 +13018,10 @@ async function executeAppStoreInstall() {
             }),
         });
         const data = await res.json().catch(() => ({}));
-        if (res.ok) {
-            closeAppStoreInstallModal();
-            // Show a nice success alert
-            const selectedNodeId = document.getElementById('appstore-install-host').value;
-            const selectedNode = allNodes.find(n => n.id === selectedNodeId);
-            const hostName = selectedNode ? selectedNode.hostname : 'this server';
-            const targetLabel = appStoreInstallTarget === 'docker' ? '🐳 Docker' : appStoreInstallTarget === 'lxc' ? '📦 LXC' : '🖥️ Host';
-            const message = data.message || 'App deployed successfully';
+        progressOverlay.remove();
 
+        if (res.ok) {
+            const message = data.message || 'App deployed successfully';
             const alertOverlay = document.createElement('div');
             alertOverlay.className = 'modal-overlay active';
             alertOverlay.style.cssText = 'display:flex; z-index:10001;';
@@ -12998,10 +13058,8 @@ async function executeAppStoreInstall() {
             showToast(data.error || `Installation failed (HTTP ${res.status})`, 'error');
         }
     } catch (e) {
+        progressOverlay.remove();
         showToast('Installation failed: ' + e.message, 'error');
-    } finally {
-        btn.textContent = origText;
-        btn.disabled = false;
     }
 }
 
@@ -13389,19 +13447,112 @@ function switchSettingsTab(tabName) {
     // Highlight the correct button
     document.querySelectorAll('.settings-tab-btn').forEach(btn => {
         const btnText = btn.textContent.trim().toLowerCase();
-        const tabMap = { 'appearance': '🎨 appearance', 'ai': '🤖 ai agent', 'backup': '📦 config backup' };
+        const tabMap = { 'appearance': '\ud83c\udfa8 appearance', 'alerting': '\ud83d\udd14 alerting', 'ai': '\ud83e\udd16 ai agent', 'backup': '\ud83d\udce6 config backup' };
         if (btnText === (tabMap[tabName] || '').trim()) {
             btn.classList.add('active');
         }
     });
 
-    // Lazy-load AI data when switching to AI tab
+    // Lazy-load data when switching tabs
     if (tabName === 'ai') {
         loadAiConfig();
         loadAiStatus();
         loadAiAlerts();
+    } else if (tabName === 'alerting') {
+        loadAlertingConfig();
+    }
+}
+
+// \u2500\u2500\u2500 Alerting & Notifications \u2500\u2500\u2500
+async function loadAlertingConfig() {
+    try {
+        const resp = await fetch('/api/alerts/config');
+        if (!resp.ok) return;
+        const c = await resp.json();
+        document.getElementById('alerting-enabled').checked = c.enabled;
+        if (c.has_discord) document.getElementById('alerting-discord').placeholder = '\u2705 Configured (hidden)';
+        if (c.has_slack) document.getElementById('alerting-slack').placeholder = '\u2705 Configured (hidden)';
+        if (c.has_telegram) {
+            document.getElementById('alerting-tg-token').placeholder = '\u2705 Configured (hidden)';
+            document.getElementById('alerting-tg-chat').value = c.telegram_chat_id || '';
+        }
+        const cpuEl = document.getElementById('alerting-cpu');
+        const memEl = document.getElementById('alerting-memory');
+        const diskEl = document.getElementById('alerting-disk');
+        cpuEl.value = c.cpu_threshold || 90; cpuEl.nextElementSibling.textContent = cpuEl.value + '%';
+        memEl.value = c.memory_threshold || 90; memEl.nextElementSibling.textContent = memEl.value + '%';
+        diskEl.value = c.disk_threshold || 90; diskEl.nextElementSibling.textContent = diskEl.value + '%';
+        document.getElementById('alerting-evt-offline').checked = c.alert_node_offline !== false;
+        document.getElementById('alerting-evt-restored').checked = c.alert_node_restored !== false;
+        document.getElementById('alerting-evt-cpu').checked = c.alert_cpu !== false;
+        document.getElementById('alerting-evt-memory').checked = c.alert_memory !== false;
+        document.getElementById('alerting-evt-disk').checked = c.alert_disk !== false;
+        const channels = [];
+        if (c.has_discord) channels.push('\u2705 Discord');
+        if (c.has_slack) channels.push('\u2705 Slack');
+        if (c.has_telegram) channels.push('\u2705 Telegram');
+        const statusEl = document.getElementById('alerting-channel-status');
+        statusEl.innerHTML = channels.length
+            ? `<span style="color:var(--success);">${channels.join(' &nbsp;\u00b7&nbsp; ')}</span>`
+            : '<span style="color:var(--text-muted);">No channels configured yet</span>';
+    } catch (e) { /* ignore */ }
+}
+
+async function saveAlertingConfig() {
+    const payload = {
+        enabled: document.getElementById('alerting-enabled').checked,
+        cpu_threshold: parseInt(document.getElementById('alerting-cpu').value),
+        memory_threshold: parseInt(document.getElementById('alerting-memory').value),
+        disk_threshold: parseInt(document.getElementById('alerting-disk').value),
+        alert_node_offline: document.getElementById('alerting-evt-offline').checked,
+        alert_node_restored: document.getElementById('alerting-evt-restored').checked,
+        alert_cpu: document.getElementById('alerting-evt-cpu').checked,
+        alert_memory: document.getElementById('alerting-evt-memory').checked,
+        alert_disk: document.getElementById('alerting-evt-disk').checked,
+    };
+    const discord = document.getElementById('alerting-discord').value.trim();
+    const slack = document.getElementById('alerting-slack').value.trim();
+    const tgToken = document.getElementById('alerting-tg-token').value.trim();
+    const tgChat = document.getElementById('alerting-tg-chat').value.trim();
+    if (discord) payload.discord_webhook = discord;
+    if (slack) payload.slack_webhook = slack;
+    if (tgToken) payload.telegram_bot_token = tgToken;
+    if (tgChat) payload.telegram_chat_id = tgChat;
+
+    try {
+        const resp = await fetch('/api/alerts/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (resp.ok) {
+            showToast('Alerting settings saved', 'success');
+            loadAlertingConfig();
+        } else {
+            const data = await resp.json().catch(() => ({}));
+            showToast(data.error || 'Failed to save', 'error');
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function testAlerting() {
+    showToast('Sending test alert\u2026', 'info');
+    try {
+        const resp = await fetch('/api/alerts/test', { method: 'POST' });
+        const data = await resp.json();
+        if (data.sent > 0) {
+            const details = data.results.map(r => `${r.channel}: ${r.success ? '\u2705' : '\u274c ' + (r.error || 'failed')}`).join(', ');
+            showToast(`Test sent to ${data.sent} channel(s): ${details}`, 'success');
+        } else {
+            showToast('No channels configured \u2014 add a Discord, Slack, or Telegram webhook first', 'error');
+        }
+    } catch (e) {
+        showToast('Test failed: ' + e.message, 'error');
     }
 }
 
 // Apply saved theme immediately on load
 initTheme();
+
