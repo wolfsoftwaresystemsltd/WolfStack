@@ -12469,13 +12469,7 @@ async function issuesUpgradeAll() {
         return;
     }
 
-    // Use the GitHub-resolved version from the last scan; fall back to peer max if not set
-    var latestVersion = issuesLatestVersion && issuesLatestVersion !== '0.0.0' ? issuesLatestVersion : '0.0.0';
-    if (latestVersion === '0.0.0') {
-        issuesScanResults.forEach(function (r) {
-            if (r.version && r.version !== '?' && compareVersions(r.version, latestVersion) > 0) latestVersion = r.version;
-        });
-    }
+    var latestVersion = issuesLatestVersion;
 
     var outdated = issuesScanResults.filter(function (r) {
         return r.version && r.version !== '?' && compareVersions(r.version, latestVersion) < 0;
