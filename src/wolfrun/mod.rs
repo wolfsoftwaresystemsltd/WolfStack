@@ -714,9 +714,13 @@ pub async fn reconcile(
                                 // Both source and target on same remote node
                                 let clone_path = format!("/api/containers/lxc/{}/clone", template_name);
                                 let urls = crate::api::build_node_urls(&sn.address, sn.port, &clone_path);
+                                let clone_client = reqwest::Client::builder()
+                                    .timeout(std::time::Duration::from_secs(120))
+                                    .danger_accept_invalid_certs(true)
+                                    .build().unwrap_or_default();
                                 let mut ok = false;
                                 for url in &urls {
-                                    if let Ok(resp) = client.post(url)
+                                    if let Ok(resp) = clone_client.post(url)
                                         .header("X-WolfStack-Secret", cluster_secret)
                                         .json(&serde_json::json!({ "new_name": clone_name }))
                                         .send().await
@@ -726,7 +730,7 @@ pub async fn reconcile(
                                             let sp = format!("/api/containers/lxc/{}/start", clone_name);
                                             let su = crate::api::build_node_urls(&sn.address, sn.port, &sp);
                                             for u in &su {
-                                                if client.post(u).header("X-WolfStack-Secret", cluster_secret).send().await.is_ok() { break; }
+                                                if clone_client.post(u).header("X-WolfStack-Secret", cluster_secret).send().await.is_ok() { break; }
                                             }
                                             ok = true;
                                         }
@@ -763,33 +767,30 @@ pub async fn reconcile(
                                     let clone_path = format!("/api/containers/lxc/{}/clone", template_name);
                                     let urls = crate::api::build_node_urls(&sn.address, sn.port, &clone_path);
                                     let mut ok = false;
+                                    // Clone API can take 30+ seconds (lxc-copy), need longer timeout
+                                    let clone_client = reqwest::Client::builder()
+                                        .timeout(std::time::Duration::from_secs(120))
+                                        .danger_accept_invalid_certs(true)
+                                        .build().unwrap_or_default();
                                     for url in &urls {
-                                        info!("WolfRun: trying remote clone API: {}", url);
-                                        match client.post(url)
+                                        match clone_client.post(url)
                                             .header("X-WolfStack-Secret", cluster_secret)
                                             .json(&serde_json::json!({ "new_name": clone_name }))
                                             .send().await
                                         {
                                             Ok(resp) if resp.status().is_success() => {
-                                                info!("WolfRun: remote clone success on {}", sn.hostname);
                                                 // Start the clone on the remote node
                                                 let sp = format!("/api/containers/lxc/{}/start", clone_name);
                                                 let su = crate::api::build_node_urls(&sn.address, sn.port, &sp);
                                                 for u in &su {
-                                                    if client.post(u).header("X-WolfStack-Secret", cluster_secret).send().await.is_ok() { break; }
+                                                    if clone_client.post(u).header("X-WolfStack-Secret", cluster_secret).send().await.is_ok() { break; }
                                                 }
-                                                // Record on source node
                                                 target_node_id_final = source_node_id.clone();
                                                 ok = true;
                                                 break;
                                             }
-                                            Ok(resp) => {
-                                                let body = resp.text().await.unwrap_or_default();
-                                                warn!("WolfRun: remote clone failed ({}): {}", url, body);
-                                            }
-                                            Err(e) => {
-                                                warn!("WolfRun: remote clone error ({}): {}", url, e);
-                                            }
+                                            Ok(_) => { continue; }
+                                            Err(_) => { continue; }
                                         }
                                     }
                                     ok

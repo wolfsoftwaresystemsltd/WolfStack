@@ -2289,15 +2289,20 @@ pub async fn lxc_clone(
         return lxc_remote_clone(&state, &name, &body.new_name, target_node_id, body.storage.as_deref()).await;
     }
 
-    // Local clone
+    // Local clone — lxc-copy requires container to be stopped
+    let _ = containers::lxc_stop(&name);
     let storage = body.storage.as_deref();
     let result = if body.snapshot.unwrap_or(false) {
         containers::lxc_clone_snapshot(&name, &body.new_name)
     } else {
         containers::lxc_clone_local(&name, &body.new_name, storage)
     };
+    let _ = containers::lxc_start(&name); // restart template
     match result {
-        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(msg) => {
+            let _ = containers::lxc_start(&body.new_name); // start clone
+            HttpResponse::Ok().json(serde_json::json!({ "message": msg }))
+        },
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
 }
