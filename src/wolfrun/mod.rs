@@ -636,38 +636,118 @@ pub async fn reconcile(
         // 3. Scale up if under-provisioned
         if running < desired {
             let needed = desired - running;
-            debug!("WolfRun: service {} ({:?}) needs {} more instances (has {}/{})", service.name, service.runtime, needed, running, desired);
+            info!("WolfRun: service {} ({:?}) needs {} more instances (has {}/{})", service.name, service.runtime, needed, running, desired);
 
-            for _ in 0..needed {
-                let current = wolfrun.get(&service.id).unwrap_or(service.clone());
-                let node_id = match schedule(cluster, &current) {
-                    Some(id) => id,
-                    None => {
-                        warn!("WolfRun: no available node for service {}", service.name);
-                        break;
+            // Get the original container name (from the first instance, i.e. the adopted source)
+            let original_name = service.instances.first()
+                .map(|i| i.container_name.clone())
+                .unwrap_or_else(|| service.name.clone());
+
+            // Get node IDs that already have an instance of this service
+            let managed_node_ids: std::collections::HashSet<String> = live_instances.iter()
+                .map(|i| i.node_id.clone())
+                .collect();
+
+            let all_nodes = cluster.get_all_nodes();
+            let mut added = 0u32;
+
+            // Strategy 1: Discover existing containers with the same name on other nodes
+            for node in &all_nodes {
+                if added >= needed { break; }
+                if managed_node_ids.contains(&node.id) { continue; }
+                if !node.online { continue; }
+
+                // Check if this node has a container with the original name
+                let found = if node.is_self {
+                    let containers = match service.runtime {
+                        Runtime::Docker => crate::containers::docker_list_all(),
+                        Runtime::Lxc => crate::containers::lxc_list_all(),
+                    };
+                    containers.iter().find(|c| c.name == original_name).map(|c| {
+                        let wolfnet_ip = c.ip_address.split(',')
+                            .map(|s| s.trim())
+                            .find(|s| s.contains("wolfnet") || s.starts_with("10.10.10."))
+                            .map(|s| s.replace(" (wolfnet)", "").trim().to_string())
+                            .filter(|s| !s.is_empty());
+                        (c.state.to_lowercase(), wolfnet_ip)
+                    })
+                } else {
+                    // Query remote node for the container
+                    let list_path = container_list_path(&service.runtime);
+                    let urls = crate::api::build_node_urls(&node.address, node.port, list_path);
+                    let mut result = None;
+                    for url in &urls {
+                        if let Ok(resp) = client.get(url)
+                            .header("X-WolfStack-Secret", cluster_secret)
+                            .send().await
+                        {
+                            if let Ok(containers) = resp.json::<Vec<serde_json::Value>>().await {
+                                for c in &containers {
+                                    let name = c["name"].as_str().unwrap_or("");
+                                    if name == original_name {
+                                        let state = c["state"].as_str()
+                                            .or_else(|| c["status"].as_str())
+                                            .unwrap_or("unknown");
+                                        let wolfnet_ip = c["wolfnet_ip"].as_str().map(|s| s.to_string());
+                                        result = Some((state.to_lowercase(), wolfnet_ip));
+                                        break;
+                                    }
+                                }
+                            }
+                            break;
+                        }
                     }
+                    result
                 };
 
-                let instance_num = current.instances.len() + 1;
-                let container_name = format!("wolfrun-{}-{}", service.name.to_lowercase().replace(' ', "-"), instance_num);
+                if let Some((status, wolfnet_ip)) = found {
+                    info!("WolfRun: discovered existing container '{}' on {} (status: {})", original_name, node.hostname, status);
+                    wolfrun.add_instance(&service.id, ServiceInstance {
+                        node_id: node.id.clone(),
+                        container_name: original_name.clone(),
+                        wolfnet_ip,
+                        status,
+                        last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                    });
+                    added += 1;
+                }
+            }
 
-                let node = match cluster.get_node(&node_id) {
-                    Some(n) => n,
-                    None => continue,
-                };
+            // Strategy 2: If we still need more, create new containers from scratch
+            if added < needed {
+                let still_needed = needed - added;
+                info!("WolfRun: still need {} more instances, will create from scratch", still_needed);
+                for _ in 0..still_needed {
+                    let current = wolfrun.get(&service.id).unwrap_or(service.clone());
+                    let node_id = match schedule(cluster, &current) {
+                        Some(id) => id,
+                        None => {
+                            warn!("WolfRun: no available node for service {}", service.name);
+                            break;
+                        }
+                    };
 
-                info!("WolfRun: deploying {} ({:?}) on {} ({})", container_name, service.runtime, node.hostname, node_id);
+                    let instance_num = current.instances.len() + 1;
+                    let container_name = format!("wolfrun-{}-{}", service.name.to_lowercase().replace(' ', "-"), instance_num);
 
-                let mut env = service.env.clone();
-                env.push(format!("WOLFRUN_SERVICE={}", service.id));
-                env.push(format!("WOLFRUN_SERVICE_NAME={}", service.name));
+                    let node = match cluster.get_node(&node_id) {
+                        Some(n) => n,
+                        None => continue,
+                    };
 
-                match service.runtime {
-                    Runtime::Docker => {
-                        deploy_docker(&client, cluster_secret, &node, &container_name, service, &env, wolfrun, &node_id).await;
-                    }
-                    Runtime::Lxc => {
-                        deploy_lxc(&client, cluster_secret, &node, &container_name, service, wolfrun, &node_id).await;
+                    info!("WolfRun: creating new container {} ({:?}) on {} ({})", container_name, service.runtime, node.hostname, node_id);
+
+                    let mut env = service.env.clone();
+                    env.push(format!("WOLFRUN_SERVICE={}", service.id));
+                    env.push(format!("WOLFRUN_SERVICE_NAME={}", service.name));
+
+                    match service.runtime {
+                        Runtime::Docker => {
+                            deploy_docker(&client, cluster_secret, &node, &container_name, service, &env, wolfrun, &node_id).await;
+                        }
+                        Runtime::Lxc => {
+                            deploy_lxc(&client, cluster_secret, &node, &container_name, service, wolfrun, &node_id).await;
+                        }
                     }
                 }
             }
