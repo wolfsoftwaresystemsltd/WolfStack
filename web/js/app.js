@@ -13725,10 +13725,13 @@ function renderWolfRunServices(services) {
             <td>${nodeHtml}</td>
             <td>${vipHtml}</td>
             <td style="text-align:right; white-space:nowrap;">
+                <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'start')" title="Start All" style="padding:4px 8px; font-size:12px; color:#10b981;">▶️</button>
+                <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'stop')" title="Stop All" style="padding:4px 8px; font-size:12px; color:#eab308;">⏹️</button>
+                <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'restart')" title="Restart All" style="padding:4px 8px; font-size:12px; color:#3b82f6;">🔄</button>
                 <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired - 1})" ${desired <= 0 ? 'disabled' : ''} title="Scale down" style="padding:4px 8px; font-size:12px;">➖</button>
                 <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired + 1})" title="Scale up" style="padding:4px 8px; font-size:12px;">➕</button>
                 <button class="btn btn-sm" onclick="openWolfRunPortForward('${svc.id}', '${svc.name}', '${vip || ''}')" title="Port Forward" style="padding:4px 8px; font-size:12px; color:#818cf8;" ${!vip ? 'disabled' : ''}>🔀</button>
-                <button class="btn btn-sm" onclick="wolfrunDelete('${svc.id}', '${svc.name}')" title="Delete" style="padding:4px 8px; font-size:12px; color:#ef4444;">🗑️</button>
+                <button class="btn btn-sm" onclick="wolfrunDelete('${svc.id}', '${svc.name}')" title="Remove" style="padding:4px 8px; font-size:12px; color:#ef4444;">🗑️</button>
             </td>
         </tr>`;
     }).join('');
@@ -13808,6 +13811,26 @@ async function executeWolfRunDeploy() {
     } finally {
         btn.disabled = false;
         btn.textContent = '🚀 Deploy';
+    }
+}
+
+async function wolfrunAction(serviceId, action) {
+    try {
+        const resp = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}/action`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            const label = action.charAt(0).toUpperCase() + action.slice(1);
+            showToast(`${label}: ${data.ok} succeeded${data.failed ? ', ' + data.failed + ' failed' : ''}`, data.failed ? 'warning' : 'success');
+            setTimeout(() => loadWolfRunServices(), 1500);
+        } else {
+            showToast(data.error || `${action} failed`, 'error');
+        }
+    } catch (e) {
+        showToast(`${action} failed: ` + e.message, 'error');
     }
 }
 

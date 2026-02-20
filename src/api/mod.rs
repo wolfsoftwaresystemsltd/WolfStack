@@ -7356,6 +7356,80 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
 }
 
 #[derive(Deserialize)]
+pub struct WolfRunActionRequest {
+    pub action: String, // start, stop, restart
+}
+
+pub async fn wolfrun_service_action(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<WolfRunActionRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let action = &body.action;
+
+    let svc = match state.wolfrun.get(&id) {
+        Some(s) => s,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Service not found" })),
+    };
+
+    let runtime_path = match svc.runtime {
+        crate::wolfrun::Runtime::Docker => "docker",
+        crate::wolfrun::Runtime::Lxc => "lxc",
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_default();
+
+    let mut ok_count = 0u32;
+    let mut fail_count = 0u32;
+
+    for inst in &svc.instances {
+        if let Some(node) = state.cluster.get_node(&inst.node_id) {
+            let payload = serde_json::json!({ "action": action });
+            if node.is_self {
+                // Local container action
+                let api_path = format!("/api/containers/{}/{}/action", runtime_path, inst.container_name);
+                // Call our own handler directly via HTTP
+                let urls = vec![format!("http://127.0.0.1:{}{}", node.port, api_path)];
+                let mut success = false;
+                for url in &urls {
+                    if let Ok(resp) = client.post(url)
+                        .header("X-WolfStack-Secret", &state.cluster_secret)
+                        .json(&payload)
+                        .send().await {
+                        if resp.status().is_success() { success = true; break; }
+                    }
+                }
+                if success { ok_count += 1; } else { fail_count += 1; }
+            } else {
+                // Remote node
+                let api_path = format!("/api/containers/{}/{}/action", runtime_path, inst.container_name);
+                let urls = build_node_urls(&node.address, node.port, &api_path);
+                let mut success = false;
+                for url in &urls {
+                    if let Ok(resp) = client.post(url)
+                        .header("X-WolfStack-Secret", &state.cluster_secret)
+                        .json(&payload)
+                        .send().await {
+                        if resp.status().is_success() { success = true; break; }
+                    }
+                }
+                if success { ok_count += 1; } else { fail_count += 1; }
+            }
+        } else {
+            fail_count += 1;
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "action": action,
+        "ok": ok_count,
+        "failed": fail_count,
+    }))
+}
+
+#[derive(Deserialize)]
 pub struct WolfRunPortForwardRequest {
     pub public_ip: String,
     pub ports: Option<String>,       // Source ports on public IP
@@ -7758,6 +7832,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/wolfrun/services/{id}", web::get().to(wolfrun_get))
         .route("/api/wolfrun/services/{id}", web::delete().to(wolfrun_delete))
         .route("/api/wolfrun/services/{id}/scale", web::post().to(wolfrun_scale))
+        .route("/api/wolfrun/services/{id}/action", web::post().to(wolfrun_service_action))
         .route("/api/wolfrun/services/{id}/update", web::post().to(wolfrun_update))
         .route("/api/wolfrun/services/{id}/portforward", web::get().to(wolfrun_portforward_list))
         .route("/api/wolfrun/services/{id}/portforward", web::post().to(wolfrun_portforward_add))
