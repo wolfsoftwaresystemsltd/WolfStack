@@ -160,11 +160,18 @@ async fn pve_bridge(
 
     // Build TLS connector that accepts self-signed certs (PVE default)
     let tls_connector = {
-        let config = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(std::sync::Arc::new(DangerousVerifier))
-            .with_no_client_auth();
-        Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
+        let mut builder = native_tls::TlsConnector::builder();
+        builder.danger_accept_invalid_certs(true);
+        builder.danger_accept_invalid_hostnames(true);
+        match builder.build() {
+            Ok(c) => Some(tokio_tungstenite::Connector::NativeTls(c)),
+            Err(e) => {
+                error!("TLS connector error: {}", e);
+                let _ = session.text(format!("\r\n\x1b[31mTLS error: {}\x1b[0m\r\n", e)).await;
+                let _ = session.close(None).await;
+                return;
+            }
+        }
     };
 
     // Connect to PVE WebSocket

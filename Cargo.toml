@@ -1,6 +1,6 @@
 [package]
 name = "wolfstack"
-version = "10.1.8"
+version = "10.1.9"
 edition = "2021"
 authors = ["Wolf Software Systems Ltd"]
 description = "Server management platform for the Wolf software suite"
@@ -15,7 +15,8 @@ actix-rt = "2"
 actix-ws = "0.3"
 actix-multipart = "0.7"
 portable-pty = "0.8"
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+native-tls = "0.2"
 futures = "0.3"
 
 # Serialization
