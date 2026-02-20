@@ -1031,6 +1031,21 @@
         </div>
         </div>
 
+        <!-- Scaling Progress Modal -->
+        <div id="wolfrun-scale-modal" class="modal-overlay">
+            <div class="modal" style="max-width:420px; width:90%;">
+                <div class="modal-header">
+                    <h3>⚡ Scaling — <span id="wolfrun-scale-name"></span></h3>
+                    <button class="modal-close" onclick="closeWolfRunScaleModal()">&times;</button>
+                </div>
+                <div class="modal-body" style="text-align:center;">
+                    <div id="wolfrun-scale-log"
+                        style="background:var(--bg-secondary); border-radius:8px; padding:16px; min-height:60px; font-size:13px; font-family:monospace; line-height:2;">
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- ═══ Issues Page ═══ -->
         <div id="page-issues" class="page-view" style="display:none; padding-top:0;">
             <!-- Header -->

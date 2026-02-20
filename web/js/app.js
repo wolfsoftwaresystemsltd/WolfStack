@@ -13882,25 +13882,79 @@ async function wolfrunAction(serviceId, action) {
 
 async function wolfrunScale(serviceId, newReplicas) {
     if (newReplicas < 0) newReplicas = 0;
+
+    // Fetch service name
+    let svcName = serviceId;
+    try {
+        const svcResp = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}`));
+        if (svcResp.ok) { const s = await svcResp.json(); svcName = s.name || serviceId; }
+    } catch (e) { }
+
+    const log = document.getElementById('wolfrun-scale-log');
+    document.getElementById('wolfrun-scale-name').textContent = svcName;
+    log.innerHTML = '';
+    document.getElementById('wolfrun-scale-modal').classList.add('active');
+
+    function addLog(msg) {
+        log.innerHTML += `<div>${msg}</div>`;
+        log.scrollTop = log.scrollHeight;
+    }
+
+    const direction = newReplicas > 0 ? 'up' : 'down';
+    addLog(`🔄 Requesting scale to <strong>${newReplicas}</strong> replicas...`);
+
     try {
         const resp = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}/scale`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ replicas: newReplicas }),
         });
-        if (resp.ok) {
-            showToast(`⚡ Scaling to ${newReplicas} — cloning container...`, 'success');
-            loadWolfRunServices();
-            // Reload again after clone completes
-            setTimeout(() => loadWolfRunServices(), 3000);
-            setTimeout(() => loadWolfRunServices(), 8000);
-        } else {
-            const data = await resp.json();
-            showToast(data.error || 'Scale failed', 'error');
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            addLog(`❌ Scale failed: ${data.error || resp.statusText}`);
+            return;
         }
+        addLog(`✅ Desired replicas set to ${newReplicas}`);
+        addLog(`⏳ Waiting for reconciler to clone containers...`);
     } catch (e) {
-        showToast('Scale failed: ' + e.message, 'error');
+        addLog(`❌ Error: ${e.message}`);
+        return;
     }
+
+    // Poll for instance count to reach desired
+    let attempts = 0;
+    const maxAttempts = 20; // 20 * 3s = 60s
+    const pollInterval = 3000;
+    const poll = setInterval(async () => {
+        attempts++;
+        try {
+            const r = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}`));
+            if (r.ok) {
+                const svc = r.ok ? await r.json() : null;
+                const running = (svc.instances || []).filter(i => i.status === 'running').length;
+                const total = (svc.instances || []).length;
+                addLog(`📊 Instances: ${running} running / ${total} total (target: ${newReplicas})`);
+                loadWolfRunServices();
+
+                if (running >= newReplicas || attempts >= maxAttempts) {
+                    clearInterval(poll);
+                    if (running >= newReplicas) {
+                        addLog(`<br>✅ <strong>Scaling complete!</strong> ${running} replicas running.`);
+                    } else {
+                        addLog(`<br>⏰ Still provisioning — check back shortly.`);
+                    }
+                    setTimeout(() => {
+                        closeWolfRunScaleModal();
+                        loadWolfRunServices();
+                    }, 2000);
+                }
+            }
+        } catch (e) { }
+    }, pollInterval);
+}
+
+function closeWolfRunScaleModal() {
+    document.getElementById('wolfrun-scale-modal').classList.remove('active');
 }
 
 let wolfrunDeleteServiceId = null;
