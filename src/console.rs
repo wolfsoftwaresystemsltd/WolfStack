@@ -97,10 +97,18 @@ async fn console_session(
     cmd.env("TERM", "xterm-256color");
     match ctype.as_str() {
         "docker" => {
-            cmd.arg(format!("docker exec -it {} /bin/bash --login 2>/dev/null || docker exec -it {} /bin/sh -l", name, name));
+            cmd.arg(format!(
+                "docker exec -e TERM=xterm-256color -it {} /bin/sh -c \
+                 'if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi'",
+                name
+            ));
         }
         "lxc" => {
-            cmd.arg(format!("lxc-attach -n {} -- /bin/sh -c 'if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi'", name));
+            cmd.arg(format!(
+                "lxc-attach -n {} --set-var TERM=xterm-256color -- /bin/sh -c \
+                 'if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi'",
+                name
+            ));
         }
         "vm" => {
             // Connect to QEMU serial console via socat
