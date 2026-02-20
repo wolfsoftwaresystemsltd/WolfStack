@@ -226,7 +226,7 @@ async fn console_session(
 }
 
 /// WebSocket proxy endpoint: /ws/remote-console/{node_id}/{type}/{name}
-/// Opens a local PTY that SSH's into the remote node for the requested console.
+/// Bridges browser WS ↔ remote node's /ws/console/{type}/{name}
 pub async fn remote_console_ws(
     req: HttpRequest,
     path: web::Path<(String, String, String)>,
@@ -247,130 +247,145 @@ pub async fn remote_console_ws(
         return console_ws(req, web::Path::from((ctype, name)), body).await;
     }
 
-    let remote_host = node.address.clone();
     let (response, session, msg_stream) = actix_ws::handle(&req, body)?;
-
-    // Build SSH command based on console type
-    let ssh_cmd = match ctype.as_str() {
-        "host" => format!(
-            "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -t root@{} \
-             'export TERM=xterm-256color; if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi'",
-            remote_host
-        ),
-        "docker" => format!(
-            "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -t root@{} \
-             'docker exec -e TERM=xterm-256color -it {} /bin/sh -c \"if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi\"'",
-            remote_host, name
-        ),
-        "lxc" => format!(
-            "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -t root@{} \
-             'lxc-attach -n {} --set-var TERM=xterm-256color -- /bin/sh -c \"if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi\"'",
-            remote_host, name
-        ),
-        "upgrade" => format!(
-            "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -t root@{} \
-             'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/main/setup.sh | bash'",
-            remote_host
-        ),
-        _ => {
-            let mut session = session;
-            let _ = session.text("\r\n\x1b[31mUnknown container type\x1b[0m\r\n").await;
-            let _ = session.close(None).await;
-            return Ok(response);
-        }
-    };
-
-    actix_rt::spawn(remote_ssh_session(session, msg_stream, ssh_cmd, ctype, name, remote_host));
+    actix_rt::spawn(remote_console_bridge(session, msg_stream, node.address, node.port, ctype, name));
     Ok(response)
 }
 
-/// Run a remote console via SSH through a local PTY
-async fn remote_ssh_session(
+/// Bridge browser WS ↔ remote node's console WS
+async fn remote_console_bridge(
     mut session: actix_ws::Session,
     mut msg_stream: actix_ws::MessageStream,
-    ssh_cmd: String,
+    remote_host: String,
+    remote_port: u16,
     ctype: String,
     name: String,
-    remote_host: String,
 ) {
-    use portable_pty::{CommandBuilder, native_pty_system, PtySize};
-
-    let pty_system = native_pty_system();
-    let pty_pair = match pty_system.openpty(PtySize {
-        rows: 30, cols: 120, pixel_width: 0, pixel_height: 0,
-    }) {
-        Ok(pair) => pair,
-        Err(e) => {
-            error!("Failed to open PTY for remote SSH: {}", e);
-            let _ = session.text(format!("\r\n\x1b[31mFailed to open PTY: {}\x1b[0m\r\n", e)).await;
-            let _ = session.close(None).await;
-            return;
+    // Simple percent-encode for URL path
+    let encoded_name: String = name.bytes().map(|b| {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+            format!("{}", b as char)
+        } else {
+            format!("%{:02X}", b)
         }
-    };
+    }).collect();
+    let ws_path = format!("/ws/console/{}/{}", ctype, encoded_name);
+    let internal_port = remote_port + 1;
 
-    let mut cmd = CommandBuilder::new("sh");
-    cmd.arg("-c");
-    cmd.arg(&ssh_cmd);
-    cmd.env("TERM", "xterm-256color");
+    // URLs to try in order: wss main, ws internal, ws main
+    let urls = vec![
+        format!("wss://{}:{}{}", remote_host, remote_port, ws_path),
+        format!("ws://{}:{}{}", remote_host, internal_port, ws_path),
+        format!("ws://{}:{}{}", remote_host, remote_port, ws_path),
+    ];
 
-    let mut child = match pty_pair.slave.spawn_command(cmd) {
-        Ok(child) => child,
-        Err(e) => {
-            error!("Failed to spawn SSH: {}", e);
-            let _ = session.text(format!("\r\n\x1b[31mFailed to start SSH: {}\x1b[0m\r\n", e)).await;
-            let _ = session.close(None).await;
-            return;
-        }
-    };
-    drop(pty_pair.slave);
+    // Build TLS connector that accepts self-signed certs (rustls)
+    let tls_config = std::sync::Arc::new(
+        rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(DangerousVerifier))
+            .with_no_client_auth()
+    );
 
-    let reader = pty_pair.master.try_clone_reader().unwrap();
-    let writer = std::sync::Arc::new(std::sync::Mutex::new(pty_pair.master.take_writer().unwrap()));
+    let mut remote_stream = None;
+    let mut last_error = String::new();
 
-    // Read PTY output in a blocking task
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
-    let read_handle = tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        let mut reader = reader;
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.blocking_send(buf[..n].to_vec()).is_err() { break; }
-                }
-                Err(_) => break,
+    for url in &urls {
+        info!("Trying remote console URL: {}", url);
+
+        let result = if url.starts_with("wss://") {
+            // TLS connection with self-signed cert support
+            let ws_request = match tungstenite::client::IntoClientRequest::into_client_request(url.as_str()) {
+                Ok(req) => req,
+                Err(_) => continue,
+            };
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                tokio_tungstenite::connect_async_tls_with_config(
+                    ws_request,
+                    None,
+                    false,
+                    Some(tokio_tungstenite::Connector::Rustls(tls_config.clone())),
+                ),
+            ).await
+        } else {
+            // Plain WebSocket — use simple connect_async (no TLS at all)
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                tokio_tungstenite::connect_async(url.as_str()),
+            ).await
+        };
+
+        match result {
+            Ok(Ok((stream, _))) => {
+                info!("Remote console connected via {}", url);
+                remote_stream = Some(stream);
+                break;
+            }
+            Ok(Err(e)) => {
+                last_error = format!("{}", e);
+                info!("Remote console {} failed: {}", url, e);
+            }
+            Err(_) => {
+                last_error = "timed out".to_string();
+                info!("Remote console {} timed out", url);
             }
         }
-    });
+    }
 
-    // Bridge: PTY ↔ browser WebSocket
+    let remote_ws = match remote_stream {
+        Some(s) => s,
+        None => {
+            let _ = session.text(format!(
+                "\r\n\x1b[31mCould not connect to remote console on {}:{} ({})\x1b[0m\r\n",
+                remote_host, remote_port, last_error
+            )).await;
+            let _ = session.close(None).await;
+            return;
+        }
+    };
+
+    let (mut remote_sink, mut remote_rx) = remote_ws.split();
+
+    // Bridge loop
     loop {
         tokio::select! {
-            Some(bytes) = rx.recv() => {
-                if session.binary(bytes).await.is_err() { break; }
+            // Remote → Browser
+            msg = remote_rx.next() => {
+                match msg {
+                    Some(Ok(tungstenite::Message::Text(text))) => {
+                        if session.text(text.to_string()).await.is_err() { break; }
+                    }
+                    Some(Ok(tungstenite::Message::Binary(data))) => {
+                        if session.binary(data.to_vec()).await.is_err() { break; }
+                    }
+                    Some(Ok(tungstenite::Message::Ping(data))) => {
+                        let _ = futures::SinkExt::send(&mut remote_sink,
+                            tungstenite::Message::Pong(data)).await;
+                    }
+                    Some(Ok(tungstenite::Message::Close(reason))) => {
+                        let reason_str = reason.map(|r| format!("code={}, reason={}", r.code, r.reason))
+                            .unwrap_or_else(|| "no reason".to_string());
+                        let _ = session.text(format!(
+                            "\r\n\x1b[31mRemote console closed ({})\x1b[0m\r\n", reason_str
+                        )).await;
+                        break;
+                    }
+                    None => break,
+                    _ => {}
+                }
             }
+
+            // Browser → Remote
             msg = msg_stream.next() => {
                 match msg {
                     Some(Ok(actix_ws::Message::Text(text))) => {
-                        let w = writer.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            use std::io::Write;
-                            if let Ok(mut w) = w.lock() {
-                                let _ = w.write_all(text.as_bytes());
-                                let _ = w.flush();
-                            }
-                        }).await;
+                        if futures::SinkExt::send(&mut remote_sink,
+                            tungstenite::Message::Text(text.to_string())).await.is_err() { break; }
                     }
                     Some(Ok(actix_ws::Message::Binary(data))) => {
-                        let w = writer.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            use std::io::Write;
-                            if let Ok(mut w) = w.lock() {
-                                let _ = w.write_all(&data);
-                                let _ = w.flush();
-                            }
-                        }).await;
+                        if futures::SinkExt::send(&mut remote_sink,
+                            tungstenite::Message::Binary(data.to_vec())).await.is_err() { break; }
                     }
                     Some(Ok(actix_ws::Message::Ping(bytes))) => {
                         let _ = session.pong(&bytes).await;
@@ -382,8 +397,8 @@ async fn remote_ssh_session(
         }
     }
 
-    let _ = child.kill();
-    read_handle.abort();
+    // Cleanup
+    let _ = futures::SinkExt::close(&mut remote_sink).await;
     let _ = session.close(None).await;
-    info!("Remote SSH session ended for {} {} on {}", ctype, name, remote_host);
+    info!("Remote console session ended for {} {} on {}", ctype, name, remote_host);
 }
