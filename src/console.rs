@@ -94,12 +94,13 @@ async fn console_session(
     // Build command based on container type
     let mut cmd = CommandBuilder::new("sh");
     cmd.arg("-c");
+    cmd.env("TERM", "xterm-256color");
     match ctype.as_str() {
         "docker" => {
-            cmd.arg(format!("docker exec -it {} /bin/bash 2>/dev/null || docker exec -it {} /bin/sh", name, name));
+            cmd.arg(format!("docker exec -it {} /bin/bash --login 2>/dev/null || docker exec -it {} /bin/sh -l", name, name));
         }
         "lxc" => {
-            cmd.arg(format!("lxc-attach -n {} -- /bin/bash 2>/dev/null || lxc-attach -n {} -- /bin/sh", name, name));
+            cmd.arg(format!("lxc-attach -n {} -- /bin/sh -c 'if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi'", name));
         }
         "vm" => {
             // Connect to QEMU serial console via socat
@@ -107,8 +108,8 @@ async fn console_session(
             cmd.arg(format!("socat -,raw,echo=0 UNIX-CONNECT:{}", serial_sock));
         }
         "host" => {
-            // Host shell — open an interactive bash/sh session on this machine
-            cmd.arg("bash 2>/dev/null || sh");
+            // Host shell — open an interactive login bash/sh session on this machine
+            cmd.arg("if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi");
         }
         "upgrade" => {
             // WolfStack upgrade — re-run the setup script
