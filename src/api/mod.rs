@@ -7531,12 +7531,17 @@ pub async fn wolfrun_scale(req: HttpRequest, state: web::Data<AppState>, path: w
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
     if state.wolfrun.scale(&id, body.replicas) {
-        // Trigger an immediate reconcile in the background
+        // Trigger an immediate reconcile in the background (retry if lock held)
         let wolfrun = Arc::clone(&state.wolfrun);
         let cluster = Arc::clone(&state.cluster);
         let secret = state.cluster_secret.clone();
         actix_web::rt::spawn(async move {
-            crate::wolfrun::reconcile(&wolfrun, &cluster, &secret).await;
+            for attempt in 0..3 {
+                if attempt > 0 {
+                    actix_web::rt::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+                crate::wolfrun::reconcile(&wolfrun, &cluster, &secret).await;
+            }
         });
         HttpResponse::Ok().json(serde_json::json!({ "scaled": true, "replicas": body.replicas }))
     } else {
