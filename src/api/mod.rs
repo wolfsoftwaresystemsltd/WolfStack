@@ -7342,23 +7342,8 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
 
-    // Stop all running containers first
+    // Clean up LB iptables rules (but leave containers running)
     if let Some(svc) = state.wolfrun.get(&id) {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .danger_accept_invalid_certs(true)
-            .build()
-            .unwrap_or_default();
-
-        for inst in &svc.instances {
-            if let Some(node) = state.cluster.get_node(&inst.node_id) {
-                crate::wolfrun::stop_and_remove_pub(
-                    &client, &state.cluster_secret, &node, &inst.container_name, &svc.runtime,
-                ).await;
-            }
-        }
-
-        // Clean up LB iptables rules
         if let Some(ref vip) = svc.service_ip {
             crate::wolfrun::remove_lb_rules_for_vip(vip);
         }
