@@ -13887,12 +13887,13 @@ async function openWolfRunAdoptModal() {
     }
 
     // Get existing WolfRun services to filter out already-managed containers
+    // Use name+node_id composite key since containers on different nodes can share names
     let existingContainers = new Set();
     try {
         const svcResp = await fetch(apiUrl('/api/wolfrun/services'));
         if (svcResp.ok) {
             const svcs = await svcResp.json();
-            svcs.forEach(s => s.instances.forEach(i => existingContainers.add(i.container_name)));
+            svcs.forEach(s => s.instances.forEach(i => existingContainers.add(`${i.container_name}@${i.node_id}`)));
         }
     } catch (e) { /* ignore */ }
 
@@ -13919,7 +13920,7 @@ async function openWolfRunAdoptModal() {
                             name = c.Names[0].replace(/^\//, '');
                         }
                         if (!name) return;
-                        if (existingContainers.has(name)) return;
+                        if (existingContainers.has(`${name}@${node.id}`)) return;
                         containers.push({
                             name,
                             image: c.Image || c.image || '—',
@@ -13947,7 +13948,7 @@ async function openWolfRunAdoptModal() {
                     list.forEach(c => {
                         const name = c.name || '';
                         if (!name) return;
-                        if (existingContainers.has(name)) return;
+                        if (existingContainers.has(`${name}@${node.id}`)) return;
                         containers.push({
                             name,
                             image: c.distribution ? `${c.distribution} ${c.release || ''}`.trim() : '—',
