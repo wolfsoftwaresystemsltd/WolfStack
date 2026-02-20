@@ -2300,7 +2300,12 @@ pub async fn lxc_clone(
     let _ = containers::lxc_start(&name); // restart template
     match result {
         Ok(msg) => {
-            let _ = containers::lxc_start(&body.new_name); // start clone
+            // Remove duplicated wolfnet IP marker and allocate fresh one
+            let _ = std::fs::remove_dir_all(format!("/var/lib/lxc/{}/.wolfnet", body.new_name));
+            let _ = containers::lxc_start(&body.new_name);
+            if let Some(ip) = containers::next_available_wolfnet_ip() {
+                let _ = containers::lxc_attach_wolfnet(&body.new_name, &ip);
+            }
             HttpResponse::Ok().json(serde_json::json!({ "message": msg }))
         },
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
@@ -7422,7 +7427,12 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
             "destroyed": destroyed,
             "kept": kept,
         })),
-        None => HttpResponse::NotFound().json(serde_json::json!({ "error": "Service not found" })),
+        None => {
+            // Log available service IDs for debugging
+            let available: Vec<String> = state.wolfrun.list().iter().map(|s| format!("{} ({})", s.id, s.name)).collect();
+            warn!("WolfRun delete: service '{}' not found. Available: {:?}", id, available);
+            HttpResponse::NotFound().json(serde_json::json!({ "error": format!("Service not found: {}", id) }))
+        }
     }
 }
 

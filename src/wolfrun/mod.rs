@@ -720,7 +720,13 @@ pub async fn reconcile(
                                 match result {
                                     Ok(msg) => {
                                         info!("WolfRun: local clone success: {}", msg);
+                                        // Remove duplicated wolfnet IP marker from template
+                                        let _ = std::fs::remove_dir_all(format!("/var/lib/lxc/{}/.wolfnet", clone_name));
                                         let _ = crate::containers::lxc_start(&clone_name);
+                                        // Allocate a fresh wolfnet IP for the clone
+                                        if let Some(ip) = crate::containers::next_available_wolfnet_ip() {
+                                            let _ = crate::containers::lxc_attach_wolfnet(&clone_name, &ip);
+                                        }
                                         true
                                     }
                                     Err(e) => {
