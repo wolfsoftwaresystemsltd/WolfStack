@@ -691,6 +691,8 @@ pub async fn reconcile(
                             match crate::containers::lxc_clone(&template_name, &clone_name) {
                                 Ok(msg) => {
                                     info!("WolfRun: clone success: {}", msg);
+                                    // Restart the source template + start the new clone
+                                    let _ = crate::containers::lxc_start(&template_name);
                                     let _ = crate::containers::lxc_start(&clone_name);
                                     wolfrun.add_instance(&service.id, ServiceInstance {
                                         node_id: node_id.clone(),
