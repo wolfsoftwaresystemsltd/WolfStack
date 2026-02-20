@@ -13870,12 +13870,20 @@ async function openWolfRunAdoptModal() {
 
     // Filter to online nodes in this cluster
     const clusterNodes = nodes.filter(n =>
-        n.online && n.node_type !== 'proxmox'
+        n.online && n.node_type !== 'proxmox' &&
+        (n.cluster_name || 'WolfStack') === wolfrunCurrentCluster
     );
 
-    // If no nodes at all, include self as fallback
-    if (clusterNodes.length === 0) {
-        clusterNodes.push({ id: 'self', hostname: 'this node', is_self: true });
+    // Always ensure the local node is included (it may not appear in the nodes list)
+    const hasLocal = clusterNodes.some(n => n.is_self);
+    if (!hasLocal) {
+        // Find self node from full list, or add a fallback
+        const selfNode = nodes.find(n => n.is_self);
+        if (selfNode && (selfNode.cluster_name || 'WolfStack') === wolfrunCurrentCluster) {
+            clusterNodes.push(selfNode);
+        } else if (clusterNodes.length === 0) {
+            clusterNodes.push({ id: 'self', hostname: 'this server', is_self: true });
+        }
     }
 
     // Get existing WolfRun services to filter out already-managed containers
