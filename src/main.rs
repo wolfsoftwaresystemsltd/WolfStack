@@ -587,22 +587,12 @@ async fn main() -> std::io::Result<()> {
                 if config.enabled && config.has_channels() {
                     let all_nodes = alert_cluster.get_all_nodes();
 
-                    // Only the primary alerter (lowest online node ID) sends alerts
-                    let self_id = &alert_cluster.self_id;
-                    let is_primary = all_nodes.iter()
-                        .filter(|n| n.online)
-                        .map(|n| &n.id)
-                        .min()
-                        .map(|min_id| min_id == self_id)
-                        .unwrap_or(true);
-
-                    if is_primary {
-                        for node in &all_nodes {
-                            if !node.online { continue; }
-                            let metrics = match &node.metrics {
-                                Some(m) => m,
-                                None => continue,
-                            };
+                    for node in &all_nodes {
+                        if !node.online { continue; }
+                        let metrics = match &node.metrics {
+                            Some(m) => m,
+                            None => continue,
+                        };
 
                             let cpu_pct = metrics.cpu_usage_percent;
                             let mem_pct = metrics.memory_percent;
@@ -701,7 +691,6 @@ async fn main() -> std::io::Result<()> {
                                     alerting::clear_cooldown(&mut cooldowns, &node.id, check_type);
                                 }
                             }
-                        }
                     }
                 }
 
