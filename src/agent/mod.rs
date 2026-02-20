@@ -469,7 +469,7 @@ impl ClusterState {
                 }
                 // Persist login_disabled for self node (since save_nodes skips self)
                 if let Some(disabled) = login_disabled {
-                    Self::save_self_login_disabled(disabled);
+                    Self::save_login_disabled_file(disabled);
                 }
             }
             true
@@ -514,7 +514,7 @@ impl ClusterState {
     }
 
     /// Persist self login_disabled to disk
-    fn save_self_login_disabled(disabled: bool) {
+    pub fn save_login_disabled_file(disabled: bool) {
         let _ = std::fs::create_dir_all("/etc/wolfstack");
         if let Err(e) = std::fs::write(Self::SELF_LOGIN_DISABLED_FILE, if disabled { "true" } else { "false" }) {
             warn!("Failed to save self login_disabled: {}", e);

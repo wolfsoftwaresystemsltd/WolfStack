@@ -213,6 +213,23 @@ pub async fn login_disabled_status(state: web::Data<AppState>) -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({ "login_disabled": disabled }))
 }
 
+/// POST /api/settings/login-disabled — set login_disabled on this node (cluster-auth required)
+pub async fn set_login_disabled(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    // Accept both cluster auth (from remote dashboard) and session auth (local admin)
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let disabled = body.get("login_disabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    {
+        let mut nodes = state.cluster.nodes.write().unwrap();
+        if let Some(node) = nodes.get_mut(&state.cluster.self_id) {
+            node.login_disabled = disabled;
+        }
+    }
+    // Persist to disk
+    crate::agent::ClusterState::save_login_disabled_file(disabled);
+    info!("Login disabled set to {} via API", disabled);
+    HttpResponse::Ok().json(serde_json::json!({ "login_disabled": disabled }))
+}
+
 /// POST /api/auth/logout — destroy session
 pub async fn logout(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Some(token) = get_session_token(&req) {
@@ -531,6 +548,38 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
         cluster_name,
         body.login_disabled,
     ) {
+        // Propagate login_disabled to remote node so it takes effect on their login page
+        if let Some(disabled) = body.login_disabled {
+            let node = state.cluster.get_node(&id);
+            if let Some(node) = node {
+                if !node.is_self && node.node_type == "wolfstack" {
+                    let secret = state.cluster_secret.clone();
+                    let address = node.address.clone();
+                    let port = node.port;
+                    tokio::spawn(async move {
+                        let client = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(5))
+                            .danger_accept_invalid_certs(true)
+                            .build()
+                            .unwrap_or_default();
+                        let urls = build_node_urls(&address, port, "/api/settings/login-disabled");
+                        let payload = serde_json::json!({ "login_disabled": disabled });
+                        for url in &urls {
+                            if let Ok(_) = client.post(url)
+                                .header("X-WolfStack-Secret", &secret)
+                                .header("Content-Type", "application/json")
+                                .body(payload.to_string())
+                                .send()
+                                .await
+                            {
+                                tracing::info!("Propagated login_disabled={} to {}:{}", disabled, address, port);
+                                break;
+                            }
+                        }
+                    });
+                }
+            }
+        }
         HttpResponse::Ok().json(serde_json::json!({ "updated": true }))
     } else {
         HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" }))
@@ -7194,6 +7243,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/auth/logout", web::post().to(logout))
         .route("/api/auth/check", web::get().to(auth_check))
         .route("/api/settings/login-disabled", web::get().to(login_disabled_status))
+        .route("/api/settings/login-disabled", web::post().to(set_login_disabled))
         // Dashboard
         .route("/api/metrics", web::get().to(get_metrics))
         .route("/api/metrics/history", web::get().to(get_metrics_history))
