@@ -205,8 +205,9 @@ async fn pve_bridge(
     let (mut pve_sink, mut pve_stream_rx) = pve_stream.split();
 
     // Send the ticket as the first message to authenticate with PVE termproxy
-    // PVE expects: username:ticket\n
-    let auth_msg = format!("{}:{}\n", _user_from_token(&token), ticket);
+    // PVE expects the auth wrapped in termproxy protocol: 0:len:username:ticket\n
+    let auth_payload = format!("{}:{}\n", _user_from_token(&token), ticket);
+    let auth_msg = format!("0:{}:{}", auth_payload.len(), auth_payload);
     if let Err(e) = futures::SinkExt::send(&mut pve_sink, tungstenite::Message::Text(auth_msg)).await {
         error!("Failed to send PVE auth ticket: {}", e);
         let _ = session.close(None).await;
@@ -218,11 +219,31 @@ async fn pve_bridge(
     // Bridge loop
     loop {
         tokio::select! {
-            // PVE → Browser: PVE sends raw terminal output
+            // PVE → Browser: PVE sends terminal output wrapped in protocol (channel:length:data)
+            // We need to strip the protocol prefix and forward only the data payload
             msg = pve_stream_rx.next() => {
                 match msg {
                     Some(Ok(tungstenite::Message::Text(text))) => {
-                        if session.text(text).await.is_err() { break; }
+                        // Parse PVE termproxy protocol: "channel:length:data"
+                        // Channel 0 = terminal data, channel 1 = resize
+                        let payload = if text.starts_with("0:") || text.starts_with("1:") {
+                            // Find the second colon (after channel:length)
+                            if let Some(first_colon) = text.find(':') {
+                                if let Some(second_colon) = text[first_colon + 1..].find(':') {
+                                    let data_start = first_colon + 1 + second_colon + 1;
+                                    &text[data_start..]
+                                } else {
+                                    &text
+                                }
+                            } else {
+                                &text
+                            }
+                        } else {
+                            &text
+                        };
+                        if !payload.is_empty() {
+                            if session.text(payload.to_string()).await.is_err() { break; }
+                        }
                     }
                     Some(Ok(tungstenite::Message::Binary(data))) => {
                         if session.binary(data.to_vec()).await.is_err() { break; }
