@@ -546,10 +546,16 @@ pub async fn reconcile(
                             .find(|s| s.contains("wolfnet") || s.starts_with("10.10.10."))
                             .map(|s| s.replace(" (wolfnet)", "").trim().to_string())
                             .filter(|s| !s.is_empty());
+                        // Fallback: use bridge IP (10.0.3.x) if no wolfnet IP
+                        let ip = wolfnet_ip.or_else(|| {
+                            c.ip_address.split(',')
+                                .map(|s| s.trim().to_string())
+                                .find(|s| s.starts_with("10.0.3.") || s.starts_with("10.0.4.") || s.starts_with("192.168."))
+                        });
                         live_instances.push(ServiceInstance {
                             node_id: inst.node_id.clone(),
                             container_name: inst.container_name.clone(),
-                            wolfnet_ip,
+                            wolfnet_ip: ip,
                             status: c.state.to_lowercase(),
                             last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
                         });
@@ -1180,66 +1186,66 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String]) {
         }
     }).collect();
 
-    // Create round-robin DNAT rules
-    // iptables statistic --mode nth --every N distributes across N backends
-    for (i, backend) in backend_ips.iter().enumerate() {
-        let remaining = n - i;
+    // Create round-robin DNAT rules for both PREROUTING (external) and OUTPUT (local)
+    for chain in &["PREROUTING", "OUTPUT"] {
+        for (i, backend) in backend_ips.iter().enumerate() {
+            let remaining = n - i;
 
-        let mut args: Vec<String> = vec![
-            "-t".into(), "nat".into(), "-A".into(), "PREROUTING".into(),
-            "-d".into(), vip.to_string(),
-        ];
+            let mut args: Vec<String> = vec![
+                "-t".into(), "nat".into(), "-A".into(), chain.to_string(),
+                "-d".into(), vip.to_string(),
+            ];
 
-        // Add port matching if service has ports
-        if !lb_ports.is_empty() {
-            args.extend_from_slice(&["-p".into(), "tcp".into()]);
-            // Use multiport for multiple ports
-            if lb_ports.len() == 1 {
-                args.extend_from_slice(&["--dport".into(), lb_ports[0].clone()]);
-            } else {
-                args.extend_from_slice(&["-m".into(), "multiport".into(), "--dports".into(), lb_ports.join(",")]);
+            // Add port matching if service has ports
+            if !lb_ports.is_empty() {
+                args.extend_from_slice(&["-p".into(), "tcp".into()]);
+                if lb_ports.len() == 1 {
+                    args.extend_from_slice(&["--dport".into(), lb_ports[0].clone()]);
+                } else {
+                    args.extend_from_slice(&["-m".into(), "multiport".into(), "--dports".into(), lb_ports.join(",")]);
+                }
             }
-        }
 
-        // Add round-robin statistic (skip for last backend — it catches everything)
-        if remaining > 1 {
-            args.extend_from_slice(&[
-                "-m".into(), "statistic".into(),
-                "--mode".into(), "nth".into(),
-                "--every".into(), remaining.to_string(),
-                "--packet".into(), "0".into(),
-            ]);
-        }
+            // Add round-robin statistic (skip for last backend — it catches everything)
+            if remaining > 1 {
+                args.extend_from_slice(&[
+                    "-m".into(), "statistic".into(),
+                    "--mode".into(), "nth".into(),
+                    "--every".into(), remaining.to_string(),
+                    "--packet".into(), "0".into(),
+                ]);
+            }
 
-        // Add DNAT target
-        let dest = if !lb_ports.is_empty() {
-            format!("{}:{}", backend, lb_ports[0])
-        } else {
-            backend.clone()
-        };
-        args.extend_from_slice(&["-j".into(), "DNAT".into(), "--to-destination".into(), dest]);
+            // Add DNAT target
+            let dest = if !lb_ports.is_empty() {
+                format!("{}:{}", backend, lb_ports[0])
+            } else {
+                backend.clone()
+            };
+            args.extend_from_slice(&["-j".into(), "DNAT".into(), "--to-destination".into(), dest]);
+            args.extend_from_slice(&["-m".into(), "comment".into(), "--comment".into(), format!("wolfrun-lb-{}", vip)]);
 
-        // Add comment to identify WolfRun rules
-        args.extend_from_slice(&["-m".into(), "comment".into(), "--comment".into(), format!("wolfrun-lb-{}", vip)]);
+            let output = std::process::Command::new("iptables")
+                .args(args.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+                .output();
 
-        let output = std::process::Command::new("iptables")
-            .args(args.iter().map(|s| s.as_str()).collect::<Vec<_>>())
-            .output();
-
-        match output {
-            Ok(o) if o.status.success() => {},
-            Ok(o) => warn!("WolfRun LB: iptables rule failed for {} → {}: {}",
-                vip, backend, String::from_utf8_lossy(&o.stderr)),
-            Err(e) => warn!("WolfRun LB: failed to run iptables: {}", e),
+            match output {
+                Ok(o) if o.status.success() => {},
+                Ok(o) => warn!("WolfRun LB: iptables rule failed for {} → {}: {}",
+                    vip, backend, String::from_utf8_lossy(&o.stderr)),
+                Err(e) => warn!("WolfRun LB: failed to run iptables: {}", e),
+            }
         }
     }
 
-    // MASQUERADE for return traffic
-    let _ = std::process::Command::new("iptables")
-        .args(["-t", "nat", "-A", "POSTROUTING", "-d", &backend_ips.join(","),
-            "-m", "comment", "--comment", &format!("wolfrun-lb-{}", vip),
-            "-j", "MASQUERADE"])
-        .output();
+    // MASQUERADE for return traffic (per-backend)
+    for backend in backend_ips {
+        let _ = std::process::Command::new("iptables")
+            .args(["-t", "nat", "-A", "POSTROUTING", "-d", backend,
+                "-m", "comment", "--comment", &format!("wolfrun-lb-{}", vip),
+                "-j", "MASQUERADE"])
+            .output();
+    }
 
     info!("WolfRun LB: {} VIP {} → {} backend(s): {}",
         if n == 1 { "direct" } else { "round-robin" },
@@ -1251,7 +1257,7 @@ pub fn remove_lb_rules_for_vip(vip: &str) {
     let comment = format!("wolfrun-lb-{}", vip);
 
     // Remove from nat PREROUTING and POSTROUTING
-    for chain in &["PREROUTING", "POSTROUTING"] {
+    for chain in &["PREROUTING", "POSTROUTING", "OUTPUT"] {
         // List rules, find matching ones, remove in reverse order
         loop {
             let output = std::process::Command::new("iptables")
