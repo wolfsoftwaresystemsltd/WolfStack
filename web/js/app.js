@@ -13890,13 +13890,13 @@ async function openWolfRunAdoptModal() {
     // Scan all nodes in parallel
     const scanPromises = clusterNodes.map(async (node) => {
         const containers = [];
-        const proxyBase = node.is_self ? '' : `/api/nodes/${node.id}/proxy`;
+        const proxyPrefix = node.is_self ? '' : `/api/nodes/${node.id}/proxy`;
 
         // Docker containers
         try {
             const dockerUrl = node.is_self
                 ? apiUrl('/api/containers/docker')
-                : `${proxyBase}/api/containers/docker`;
+                : `${proxyPrefix}/containers/docker`;
             const resp = await fetch(dockerUrl);
             if (resp.ok) {
                 const list = await resp.json();
@@ -13928,7 +13928,7 @@ async function openWolfRunAdoptModal() {
         try {
             const lxcUrl = node.is_self
                 ? apiUrl('/api/containers/lxc')
-                : `${proxyBase}/api/containers/lxc`;
+                : `${proxyPrefix}/containers/lxc`;
             const resp = await fetch(lxcUrl);
             if (resp.ok) {
                 const list = await resp.json();
