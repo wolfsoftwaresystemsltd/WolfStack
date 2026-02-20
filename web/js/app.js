@@ -12471,7 +12471,12 @@ async function issuesUpgradeAll() {
         return;
     }
 
-    var latestVersion = issuesLatestVersion;
+    var latestVersion = issuesLatestVersion || '0.0.0';
+    if (latestVersion === '0.0.0') {
+        issuesScanResults.forEach(function (r) {
+            if (r.version && r.version !== '?' && compareVersions(r.version, latestVersion) > 0) latestVersion = r.version;
+        });
+    }
 
     var outdated = issuesScanResults.filter(function (r) {
         return r.version && r.version !== '?' && compareVersions(r.version, latestVersion) < 0;
