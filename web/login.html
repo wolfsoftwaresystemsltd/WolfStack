@@ -316,7 +316,7 @@
 
             <div id="error-msg" class="error-msg"></div>
 
-            <form id="login-form" onsubmit="handleLogin(event)">
+            <form id="login-form" onsubmit="handleLogin(event)" style="display:none;">
                 <div class="form-group">
                     <label for="username">Username</label>
                     <input type="text" id="username" name="username" placeholder="Linux system username"
@@ -332,7 +332,7 @@
                 </button>
             </form>
 
-            <div class="login-info">
+            <div class="login-info" id="login-info" style="display:none;">
                 <p>
                     <span class="icon">🔒</span> Authenticates with your Linux system account.<br>
                     Use your server's username and password.
@@ -366,9 +366,17 @@
                                 Access this server via the primary WolfStack dashboard.
                             </p>
                         </div>`;
+                } else {
+                    // Login is allowed — reveal the form
+                    document.getElementById('login-form').style.display = '';
+                    document.getElementById('login-info').style.display = '';
                 }
             })
-            .catch(() => { });
+            .catch(() => {
+                // If the check fails, show the form anyway (so you can still log in)
+                document.getElementById('login-form').style.display = '';
+                document.getElementById('login-info').style.display = '';
+            });
 
         // Check if already authenticated
         fetch('/api/auth/check')

@@ -104,6 +104,7 @@ impl ClusterState {
     const NODES_FILE: &'static str = "/etc/wolfstack/nodes.json";
     const DELETED_FILE: &'static str = "/etc/wolfstack/deleted_nodes.json";
     const SELF_CLUSTER_FILE: &'static str = "/etc/wolfstack/self_cluster.json";
+    const SELF_LOGIN_DISABLED_FILE: &'static str = "/etc/wolfstack/login_disabled";
 
     pub fn new(self_id: String, self_address: String, port: u16) -> Self {
         let state = Self {
@@ -218,7 +219,7 @@ impl ClusterState {
             .or_else(|| Some("WolfStack".to_string()));
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let prev_login_disabled = nodes.get(&self.self_id).map(|n| n.login_disabled).unwrap_or(false);
+        let prev_login_disabled = nodes.get(&self.self_id).map(|n| n.login_disabled);
         nodes.insert(self.self_id.clone(), Node {
             id: self.self_id.clone(),
             hostname: metrics.hostname.clone(),
@@ -244,7 +245,7 @@ impl ClusterState {
             has_docker,
             has_lxc,
             has_kvm,
-            login_disabled: prev_login_disabled,
+            login_disabled: prev_login_disabled.or_else(|| Self::load_self_login_disabled()).unwrap_or(false),
         });
     }
 
@@ -466,6 +467,10 @@ impl ClusterState {
                 if let Some(ref name) = final_cluster {
                     Self::save_self_cluster_name(name);
                 }
+                // Persist login_disabled for self node (since save_nodes skips self)
+                if let Some(disabled) = login_disabled {
+                    Self::save_self_login_disabled(disabled);
+                }
             }
             true
         } else {
@@ -492,6 +497,27 @@ impl ClusterState {
             if let Err(e) = std::fs::write(Self::SELF_CLUSTER_FILE, json) {
                 warn!("Failed to save self cluster name: {}", e);
             }
+        }
+    }
+
+    /// Load persisted login_disabled for self node
+    fn load_self_login_disabled() -> Option<bool> {
+        if let Ok(data) = std::fs::read_to_string(Self::SELF_LOGIN_DISABLED_FILE) {
+            let trimmed = data.trim();
+            match trimmed {
+                "true" | "1" => return Some(true),
+                "false" | "0" => return Some(false),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Persist self login_disabled to disk
+    fn save_self_login_disabled(disabled: bool) {
+        let _ = std::fs::create_dir_all("/etc/wolfstack");
+        if let Err(e) = std::fs::write(Self::SELF_LOGIN_DISABLED_FILE, if disabled { "true" } else { "false" }) {
+            warn!("Failed to save self login_disabled: {}", e);
         }
     }
 

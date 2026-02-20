@@ -4548,7 +4548,7 @@ function openNodeSettings(nodeId) {
                     <input type="text" class="form-control" id="node-settings-pve-fingerprint" value="${node.pve_fingerprint || ''}">
                 </div>` : ''}
 
-                <div style="background:var(--bg-secondary,#161622);border:1px solid var(--border,#333);border-radius:8px;padding:14px 16px;margin-top:12px;">
+                ${!isSelf ? `<div style="background:var(--bg-secondary,#161622);border:1px solid var(--border,#333);border-radius:8px;padding:14px 16px;margin-top:12px;">
                     <div style="display:flex;align-items:center;justify-content:space-between;">
                         <div>
                             <span style="font-weight:600;font-size:13px;color:var(--text,#fff);">🔒 Disable Direct Login</span>
@@ -4560,7 +4560,7 @@ function openNodeSettings(nodeId) {
                             <span class="toggle-knob" style="position:absolute;height:18px;width:18px;left:${node.login_disabled ? '22px' : '3px'};bottom:3px;background:white;transition:.3s;border-radius:50%;pointer-events:none;"></span>
                         </div>
                     </div>
-                </div>
+                </div>` : ''}
             </div>
             <div class="modal-footer">
                 <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
