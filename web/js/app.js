@@ -13837,7 +13837,7 @@ async function wolfrunAction(serviceId, action) {
 async function wolfrunScale(serviceId, newReplicas) {
     if (newReplicas < 0) newReplicas = 0;
     try {
-        const resp = await fetch(`/api/wolfrun/services/${serviceId}/scale`, {
+        const resp = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}/scale`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ replicas: newReplicas }),
@@ -13855,9 +13855,9 @@ async function wolfrunScale(serviceId, newReplicas) {
 }
 
 async function wolfrunDelete(serviceId, serviceName) {
-    if (!confirm(`Delete service "${serviceName}"? This will stop and remove all containers.`)) return;
+    if (!confirm(`Remove "${serviceName}" from WolfRun? Containers will keep running but won't be orchestrated.`)) return;
     try {
-        const resp = await fetch(`/api/wolfrun/services/${serviceId}`, { method: 'DELETE' });
+        const resp = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}`), { method: 'DELETE' });
         if (resp.ok) {
             showToast(`Service "${serviceName}" deleted`, 'success');
             loadWolfRunServices();

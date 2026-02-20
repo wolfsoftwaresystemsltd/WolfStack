@@ -297,10 +297,21 @@ impl WolfRunState {
         let svc = WolfRunService {
             id: id.clone(),
             name,
-            image,
+            image: image.clone(),
             replicas: 1,
-            runtime,
-            lxc_config: None,
+            runtime: runtime.clone(),
+            lxc_config: match &runtime {
+                Runtime::Lxc => {
+                    // Parse image field like "ubuntu 24.04" into distribution + release
+                    let parts: Vec<&str> = image.splitn(2, ' ').collect();
+                    Some(LxcConfig {
+                        distribution: parts.first().unwrap_or(&"ubuntu").to_string(),
+                        release: parts.get(1).unwrap_or(&"24.04").to_string(),
+                        architecture: "amd64".to_string(),
+                    })
+                }
+                _ => None,
+            },
             env,
             ports,
             volumes,
