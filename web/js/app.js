@@ -13921,7 +13921,8 @@ async function wolfrunScale(serviceId, newReplicas) {
         return;
     }
 
-    // Poll for instance count to reach desired
+    // Poll for instance count to reach desired — update status in-place
+    addLog(`<div id="wolfrun-scale-status">📊 Checking...</div>`);
     let attempts = 0;
     const maxAttempts = 20; // 20 * 3s = 60s
     const pollInterval = 3000;
@@ -13930,10 +13931,11 @@ async function wolfrunScale(serviceId, newReplicas) {
         try {
             const r = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}`));
             if (r.ok) {
-                const svc = r.ok ? await r.json() : null;
+                const svc = await r.json();
                 const running = (svc.instances || []).filter(i => i.status === 'running').length;
                 const total = (svc.instances || []).length;
-                addLog(`📊 Instances: ${running} running / ${total} total (target: ${newReplicas})`);
+                const el = document.getElementById('wolfrun-scale-status');
+                if (el) el.innerHTML = `📊 Instances: <strong>${running}</strong> running / ${total} total (target: ${newReplicas})`;
                 loadWolfRunServices();
 
                 if (running >= newReplicas || attempts >= maxAttempts) {
