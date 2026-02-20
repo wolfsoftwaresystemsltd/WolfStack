@@ -117,11 +117,15 @@ pub struct WolfRunService {
     /// Load-balanced virtual IP on WolfNet (auto-assigned)
     #[serde(default)]
     pub service_ip: Option<String>,
+    /// Load balancer policy: "round_robin" (default) or "ip_hash" (sticky sessions)
+    #[serde(default = "default_lb_policy")]
+    pub lb_policy: String,
     pub created_at: u64,
     pub updated_at: u64,
 }
 
 fn default_max_replicas() -> u32 { 10 }
+fn default_lb_policy() -> String { "round_robin".to_string() }
 
 // ─── State Management ───
 
@@ -209,6 +213,7 @@ impl WolfRunState {
             restart_policy,
             instances: Vec::new(),
             service_ip,
+            lb_policy: "round_robin".to_string(),
             created_at: now,
             updated_at: now,
         };
@@ -255,12 +260,15 @@ impl WolfRunState {
     }
 
     /// Update service settings (min, max, desired replicas)
-    pub fn update_settings(&self, id: &str, min: Option<u32>, max: Option<u32>, desired: Option<u32>) -> bool {
+    pub fn update_settings(&self, id: &str, min: Option<u32>, max: Option<u32>, desired: Option<u32>, lb_policy: Option<String>) -> bool {
         let mut svcs = self.services.write().unwrap();
         if let Some(svc) = svcs.iter_mut().find(|s| s.id == id) {
             if let Some(mn) = min { svc.min_replicas = mn; }
             if let Some(mx) = max { svc.max_replicas = mx; }
             if let Some(d) = desired { svc.replicas = d; }
+            if let Some(p) = lb_policy {
+                if p == "ip_hash" || p == "round_robin" { svc.lb_policy = p; }
+            }
             // Enforce: min <= desired <= max
             if svc.min_replicas > svc.max_replicas { svc.min_replicas = svc.max_replicas; }
             svc.replicas = svc.replicas.max(svc.min_replicas).min(svc.max_replicas);
@@ -356,6 +364,7 @@ impl WolfRunState {
             restart_policy: RestartPolicy::Always,
             instances: vec![instance],
             service_ip,
+            lb_policy: "round_robin".to_string(),
             created_at: now,
             updated_at: now,
         };
@@ -634,7 +643,7 @@ pub async fn reconcile(
                 .filter(|i| i.status == "running")
                 .filter_map(|i| i.wolfnet_ip.clone())
                 .collect();
-            rebuild_lb_rules(vip, &backend_ips, &service.ports);
+            rebuild_lb_rules(vip, &backend_ips, &service.ports, &service.lb_policy);
         }
 
         // 2. Count running instances
@@ -1157,9 +1166,9 @@ pub async fn stop_and_remove_pub(
 
 // ─── Load Balancer (iptables round-robin DNAT) ───
 
-/// Rebuild iptables round-robin DNAT rules for a service VIP.
-/// Clears old rules for this VIP and creates new ones distributing across backends.
-pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String]) {
+/// Rebuild iptables DNAT rules for a service VIP.
+/// Supports "round_robin" (nth statistic) and "ip_hash" (source-IP based sticky sessions).
+pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String], lb_policy: &str) {
     // First remove any existing rules for this VIP
     remove_lb_rules_for_vip(vip);
 
@@ -1186,7 +1195,7 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String]) {
         }
     }).collect();
 
-    // Create round-robin DNAT rules for both PREROUTING (external) and OUTPUT (local)
+    // Create DNAT rules for both PREROUTING (external) and OUTPUT (local)
     for chain in &["PREROUTING", "OUTPUT"] {
         for (i, backend) in backend_ips.iter().enumerate() {
             let remaining = n - i;
@@ -1206,14 +1215,29 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String]) {
                 }
             }
 
-            // Add round-robin statistic (skip for last backend — it catches everything)
-            if remaining > 1 {
-                args.extend_from_slice(&[
-                    "-m".into(), "statistic".into(),
-                    "--mode".into(), "nth".into(),
-                    "--every".into(), remaining.to_string(),
-                    "--packet".into(), "0".into(),
-                ]);
+            // Distribution mode
+            if lb_policy == "ip_hash" {
+                // ip_hash: use `statistic --mode random` for distribution.
+                // conntrack ensures all packets in a connection go to the same
+                // backend, giving session stickiness.
+                if remaining > 1 {
+                    let prob = 1.0 / remaining as f64;
+                    args.extend_from_slice(&[
+                        "-m".into(), "statistic".into(),
+                        "--mode".into(), "random".into(),
+                        "--probability".into(), format!("{:.6}", prob),
+                    ]);
+                }
+            } else {
+                // round_robin: nth-based distribution
+                if remaining > 1 {
+                    args.extend_from_slice(&[
+                        "-m".into(), "statistic".into(),
+                        "--mode".into(), "nth".into(),
+                        "--every".into(), remaining.to_string(),
+                        "--packet".into(), "0".into(),
+                    ]);
+                }
             }
 
             // Add DNAT target

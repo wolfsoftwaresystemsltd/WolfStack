@@ -13733,7 +13733,7 @@ function renderWolfRunServices(services) {
                 <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'restart')" title="Restart All" style="padding:4px 8px; font-size:12px; color:#3b82f6;">🔄</button>
                 <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired - 1})" ${desired <= minR ? 'disabled' : ''} title="Scale down" style="padding:4px 8px; font-size:12px;">➖</button>
                 <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired + 1})" ${desired >= maxR ? 'disabled' : ''} title="Scale up" style="padding:4px 8px; font-size:12px;">➕</button>
-                <button class="btn btn-sm" onclick="wolfrunSettings('${svc.id}', '${svc.name}', ${desired}, ${minR}, ${maxR})" title="Settings" style="padding:4px 8px; font-size:12px; color:#a78bfa;">⚙️</button>
+                <button class="btn btn-sm" onclick="wolfrunSettings('${svc.id}', '${svc.name}', ${desired}, ${minR}, ${maxR}, '${svc.lb_policy || 'round_robin'}')" title="Settings" style="padding:4px 8px; font-size:12px; color:#a78bfa;">⚙️</button>
                 <button class="btn btn-sm" onclick="openWolfRunPortForward('${svc.id}', '${svc.name}', '${vip || ''}')" title="Port Forward" style="padding:4px 8px; font-size:12px; color:#818cf8;" ${!vip ? 'disabled' : ''}>🔀</button>
                 <button class="btn btn-sm" onclick="wolfrunDelete('${svc.id}', '${svc.name}')" title="Remove" style="padding:4px 8px; font-size:12px; color:#ef4444;">🗑️</button>
             </td>
@@ -13820,12 +13820,13 @@ async function executeWolfRunDeploy() {
 
 let wolfrunSettingsServiceId = null;
 
-function wolfrunSettings(serviceId, name, currentDesired, currentMin, currentMax) {
+function wolfrunSettings(serviceId, name, currentDesired, currentMin, currentMax, lbPolicy) {
     wolfrunSettingsServiceId = serviceId;
     document.getElementById('wolfrun-settings-name').textContent = name;
     document.getElementById('wolfrun-settings-desired').value = currentDesired;
     document.getElementById('wolfrun-settings-min').value = currentMin;
     document.getElementById('wolfrun-settings-max').value = currentMax;
+    document.getElementById('wolfrun-settings-lb-policy').value = lbPolicy || 'round_robin';
     document.getElementById('wolfrun-settings-modal').classList.add('active');
 }
 
@@ -13839,6 +13840,7 @@ async function saveWolfRunSettings() {
     const desired = parseInt(document.getElementById('wolfrun-settings-desired').value, 10);
     const min = parseInt(document.getElementById('wolfrun-settings-min').value, 10);
     const max = parseInt(document.getElementById('wolfrun-settings-max').value, 10);
+    const lb_policy = document.getElementById('wolfrun-settings-lb-policy').value;
 
     // Get current running count before saving
     let currentRunning = 0;
@@ -13851,7 +13853,7 @@ async function saveWolfRunSettings() {
         const resp = await fetch(apiUrl(`/api/wolfrun/services/${wolfrunSettingsServiceId}/settings`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ desired, min_replicas: min, max_replicas: max }),
+            body: JSON.stringify({ desired, min_replicas: min, max_replicas: max, lb_policy }),
         });
         const data = await resp.json();
         if (resp.ok) {

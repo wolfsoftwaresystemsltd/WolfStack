@@ -987,9 +987,18 @@
                                 style="text-align:center; font-size:18px; font-weight:700;">
                         </div>
                     </div>
-                    <p style="font-size:12px; color:var(--text-muted); margin:0;">
-                        ➖/➕ buttons will be disabled at min/max bounds. The reconciler ensures replicas stay within
-                        these limits.
+                    <div style="margin-top:12px;">
+                        <label style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Load Balancer
+                            Policy</label>
+                        <select id="wolfrun-settings-lb-policy" class="form-control"
+                            style="font-size:14px; padding:8px;">
+                            <option value="round_robin">🔄 Round Robin</option>
+                            <option value="ip_hash">📌 IP Hash (Sticky Sessions)</option>
+                        </select>
+                    </div>
+                    <p style="font-size:12px; color:var(--text-muted); margin:8px 0 0;">
+                        ➖/➕ buttons will be disabled at min/max bounds. IP Hash keeps clients on the same backend for
+                        session persistence.
                     </p>
                 </div>
                 <div class="modal-footer">

@@ -7358,7 +7358,7 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
         }
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(30))
             .danger_accept_invalid_certs(true)
             .build()
             .ok();
@@ -7366,12 +7366,9 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
         for inst in &svc.instances {
             // Only destroy clones (contain "wolfrun" in name), leave original template
             if !inst.container_name.contains("wolfrun") {
-                info!("WolfRun delete: keeping original template '{}'", inst.container_name);
                 kept.push(inst.container_name.clone());
                 continue;
             }
-
-            info!("WolfRun delete: destroying clone '{}'", inst.container_name);
 
             if let Some(node) = state.cluster.get_node(&inst.node_id) {
                 if node.is_self {
@@ -7387,12 +7384,23 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
                     }
                     destroyed.push(inst.container_name.clone());
                 } else if let Some(ref c) = client {
-                    let path = match svc.runtime {
+                    // Remote node: stop first, then delete
+                    let stop_path = match svc.runtime {
+                        crate::wolfrun::Runtime::Docker => format!("/api/containers/docker/{}/stop", inst.container_name),
+                        crate::wolfrun::Runtime::Lxc => format!("/api/containers/lxc/{}/stop", inst.container_name),
+                    };
+                    let stop_urls = build_node_urls(&node.address, node.port, &stop_path);
+                    for url in &stop_urls {
+                        if c.post(url).header("X-WolfStack-Secret", &state.cluster_secret).send().await.is_ok() { break; }
+                    }
+
+                    // Now delete/destroy
+                    let del_path = match svc.runtime {
                         crate::wolfrun::Runtime::Docker => format!("/api/containers/docker/{}", inst.container_name),
                         crate::wolfrun::Runtime::Lxc => format!("/api/containers/lxc/{}", inst.container_name),
                     };
-                    let urls = build_node_urls(&node.address, node.port, &path);
-                    for url in &urls {
+                    let del_urls = build_node_urls(&node.address, node.port, &del_path);
+                    for url in &del_urls {
                         if let Ok(resp) = c.delete(url)
                             .header("X-WolfStack-Secret", &state.cluster_secret)
                             .send().await
@@ -7639,13 +7647,14 @@ pub struct WolfRunSettingsRequest {
     pub min_replicas: Option<u32>,
     pub max_replicas: Option<u32>,
     pub desired: Option<u32>,
+    pub lb_policy: Option<String>,
 }
 
 /// POST /api/wolfrun/services/{id}/settings — update service settings
 pub async fn wolfrun_settings(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<WolfRunSettingsRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
-    if state.wolfrun.update_settings(&id, body.min_replicas, body.max_replicas, body.desired) {
+    if state.wolfrun.update_settings(&id, body.min_replicas, body.max_replicas, body.desired, body.lb_policy.clone()) {
         let wolfrun = Arc::clone(&state.wolfrun);
         let cluster = Arc::clone(&state.cluster);
         let secret = state.cluster_secret.clone();
@@ -7658,6 +7667,7 @@ pub async fn wolfrun_settings(req: HttpRequest, state: web::Data<AppState>, path
                 "replicas": svc.replicas,
                 "min_replicas": svc.min_replicas,
                 "max_replicas": svc.max_replicas,
+                "lb_policy": svc.lb_policy,
             }))
         } else {
             HttpResponse::Ok().json(serde_json::json!({ "updated": true }))
