@@ -825,7 +825,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             // First IP = host WolfNet address, remaining = container/VM IPs
                             if wolfnet_ips.len() > 1 {
                                 let host_wn_ip = &wolfnet_ips[0];
-                                tracing::info!("Node {} wolfnet_ips: {:?} (host={}, {} container(s))", node.id, wolfnet_ips, host_wn_ip, wolfnet_ips.len() - 1);
+                                tracing::debug!("Node {} wolfnet_ips: {:?} (host={}, {} container(s))", node.id, wolfnet_ips, host_wn_ip, wolfnet_ips.len() - 1);
                                 for container_ip in &wolfnet_ips[1..] {
                                     if !container_ip.is_empty() {
                                         subnet_routes.insert(container_ip.clone(), host_wn_ip.clone());
