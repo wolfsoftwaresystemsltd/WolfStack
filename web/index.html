@@ -627,12 +627,8 @@
                         </div>
                     </div>
                     <div style="display:flex; gap:10px; align-items:center;">
-                        <button class="btn btn-primary" onclick="openWolfRunDeployModal()" style="font-weight:600;">
-                            🚀 Deploy New
-                        </button>
-                        <button class="btn" onclick="openWolfRunAdoptModal()"
-                            style="background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.3); font-weight:600;">
-                            📦 Adopt Existing
+                        <button class="btn btn-primary" onclick="openWolfRunAdoptModal()" style="font-weight:600;">
+                            📦 Select Source
                         </button>
                         <button class="btn" onclick="loadWolfRunServices()"
                             style="background:var(--bg-secondary); border:1px solid var(--border);">
@@ -878,13 +874,13 @@
         <div id="wolfrun-adopt-modal" class="modal-overlay">
             <div class="modal" style="max-width:700px; width:90%;">
                 <div class="modal-header">
-                    <h3>📦 Adopt Existing Container</h3>
+                    <h3>📦 Select Source Container</h3>
                     <button class="modal-close" onclick="closeWolfRunAdoptModal()">&times;</button>
                 </div>
                 <div class="modal-body">
                     <p style="font-size:13px; color:var(--text-secondary); margin:0 0 16px;">
-                        Select a running container from your cluster to bring under WolfRun management. WolfRun will
-                        keep it running and let you scale it across nodes.
+                        Select a container from your cluster to orchestrate with WolfRun. It will be kept running and
+                        you can scale it across nodes.
                     </p>
                     <div id="wolfrun-adopt-scanning" style="padding:32px; text-align:center; color:var(--text-muted);">
                         <div class="page-loading-spinner" style="margin:0 auto 12px;"></div>
@@ -897,7 +893,7 @@
                 <div class="modal-footer">
                     <button class="btn" onclick="closeWolfRunAdoptModal()">Cancel</button>
                     <button class="btn btn-primary" id="wolfrun-adopt-btn" onclick="executeWolfRunAdopt()" disabled>📦
-                        Adopt Selected</button>
+                        Add to WolfRun</button>
                 </div>
             </div>
         </div>

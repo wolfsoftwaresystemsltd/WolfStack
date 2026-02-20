@@ -13856,15 +13856,29 @@ async function openWolfRunAdoptModal() {
     document.getElementById('wolfrun-adopt-btn').disabled = true;
     wolfrunAdoptSelected = null;
 
-    // Scan all nodes in this cluster for containers
-    const clusterNodes = (window.allNodes || []).filter(n =>
-        (n.cluster_name || 'WolfStack') === wolfrunCurrentCluster && n.online && n.node_type !== 'proxmox'
+    // Get all nodes — use allNodes if available, otherwise fetch
+    let nodes = window.allNodes || [];
+    if (!nodes.length) {
+        try {
+            const resp = await fetch(apiUrl('/api/nodes'));
+            if (resp.ok) nodes = await resp.json();
+        } catch (e) { }
+    }
+
+    // Filter to online nodes in this cluster
+    const clusterNodes = nodes.filter(n =>
+        n.online && n.node_type !== 'proxmox'
     );
 
-    // Get existing WolfRun services to filter out already-adopted containers
+    // If no nodes at all, include self as fallback
+    if (clusterNodes.length === 0) {
+        clusterNodes.push({ id: 'self', hostname: 'this node', is_self: true });
+    }
+
+    // Get existing WolfRun services to filter out already-managed containers
     let existingContainers = new Set();
     try {
-        const svcResp = await fetch(`/api/wolfrun/services?cluster=${encodeURIComponent(wolfrunCurrentCluster)}`);
+        const svcResp = await fetch(apiUrl('/api/wolfrun/services'));
         if (svcResp.ok) {
             const svcs = await svcResp.json();
             svcs.forEach(s => s.instances.forEach(i => existingContainers.add(i.container_name)));
@@ -13873,55 +13887,78 @@ async function openWolfRunAdoptModal() {
 
     const allContainers = [];
 
-    // Fetch Docker and LXC containers from each node
-    for (const node of clusterNodes) {
+    // Scan all nodes in parallel
+    const scanPromises = clusterNodes.map(async (node) => {
+        const containers = [];
+        const proxyBase = node.is_self ? '' : `/api/nodes/${node.id}/proxy`;
+
+        // Docker containers
         try {
-            // Docker
-            if (node.has_docker !== false) {
-                const url = node.is_self ? '/api/containers/docker' : `/api/nodes/${node.id}/proxy/api/containers/docker`;
-                const resp = await fetch(url);
-                if (resp.ok) {
-                    const containers = await resp.json();
-                    containers.forEach(c => {
-                        const name = (c.Names || [c.name || ''])[0]?.replace(/^\//, '') || c.name || 'unknown';
-                        if (!existingContainers.has(name)) {
-                            allContainers.push({
-                                name: name,
-                                image: c.Image || c.image || '—',
-                                status: c.State || c.status || 'unknown',
-                                runtime: 'docker',
-                                node_id: node.id,
-                                hostname: node.hostname,
-                            });
+            const dockerUrl = node.is_self
+                ? apiUrl('/api/containers/docker')
+                : `${proxyBase}/api/containers/docker`;
+            const resp = await fetch(dockerUrl);
+            if (resp.ok) {
+                const list = await resp.json();
+                if (Array.isArray(list)) {
+                    list.forEach(c => {
+                        // Docker API returns Names as ["/name"], our API returns name directly
+                        let name = c.name || '';
+                        if (!name && Array.isArray(c.Names) && c.Names.length) {
+                            name = c.Names[0].replace(/^\//, '');
                         }
-                    });
-                }
-            }
-            // LXC
-            if (node.has_lxc !== false) {
-                const url = node.is_self ? '/api/containers/lxc' : `/api/nodes/${node.id}/proxy/api/containers/lxc`;
-                const resp = await fetch(url);
-                if (resp.ok) {
-                    const containers = await resp.json();
-                    containers.forEach(c => {
-                        const name = c.name || 'unknown';
-                        if (!existingContainers.has(name)) {
-                            allContainers.push({
-                                name: name,
-                                image: c.distribution ? `${c.distribution} ${c.release || ''}`.trim() : '—',
-                                status: c.status || c.state || 'unknown',
-                                runtime: 'lxc',
-                                node_id: node.id,
-                                hostname: node.hostname,
-                            });
-                        }
+                        if (!name) return;
+                        if (existingContainers.has(name)) return;
+                        containers.push({
+                            name,
+                            image: c.Image || c.image || '—',
+                            status: c.State || c.state || c.status || 'unknown',
+                            runtime: 'docker',
+                            node_id: node.id,
+                            hostname: node.hostname,
+                        });
                     });
                 }
             }
         } catch (e) {
-            console.error(`WolfRun adopt: error scanning ${node.hostname}:`, e);
+            console.warn(`WolfRun: Docker scan failed for ${node.hostname}:`, e.message);
         }
-    }
+
+        // LXC containers
+        try {
+            const lxcUrl = node.is_self
+                ? apiUrl('/api/containers/lxc')
+                : `${proxyBase}/api/containers/lxc`;
+            const resp = await fetch(lxcUrl);
+            if (resp.ok) {
+                const list = await resp.json();
+                if (Array.isArray(list)) {
+                    list.forEach(c => {
+                        const name = c.name || '';
+                        if (!name) return;
+                        if (existingContainers.has(name)) return;
+                        containers.push({
+                            name,
+                            image: c.distribution ? `${c.distribution} ${c.release || ''}`.trim() : '—',
+                            status: c.status || c.state || 'unknown',
+                            runtime: 'lxc',
+                            node_id: node.id,
+                            hostname: node.hostname,
+                        });
+                    });
+                }
+            }
+        } catch (e) {
+            console.warn(`WolfRun: LXC scan failed for ${node.hostname}:`, e.message);
+        }
+
+        return containers;
+    });
+
+    const results = await Promise.allSettled(scanPromises);
+    results.forEach(r => {
+        if (r.status === 'fulfilled') allContainers.push(...r.value);
+    });
 
     document.getElementById('wolfrun-adopt-scanning').style.display = 'none';
     const listEl = document.getElementById('wolfrun-adopt-list');
@@ -13929,8 +13966,9 @@ async function openWolfRunAdoptModal() {
 
     if (allContainers.length === 0) {
         listEl.innerHTML = `<div style="padding:32px; text-align:center; color:var(--text-muted);">
-            <div style="font-size:32px; margin-bottom:8px;">✅</div>
-            <p style="margin:0;">All containers are already managed by WolfRun, or no containers found.</p>
+            <div style="font-size:32px; margin-bottom:8px;">🔍</div>
+            <p style="margin:0;">No containers found, or all containers are already managed by WolfRun.</p>
+            <p style="margin:4px 0 0; font-size:12px;">Create a container or Docker on the Containers page first, then come back here to orchestrate it.</p>
         </div>`;
         return;
     }
@@ -13952,7 +13990,6 @@ async function openWolfRunAdoptModal() {
         </div>`;
     }).join('');
 
-    // Store for later
     window._wolfrunAdoptContainers = allContainers;
 }
 
@@ -13977,10 +14014,10 @@ async function executeWolfRunAdopt() {
 
     const btn = document.getElementById('wolfrun-adopt-btn');
     btn.disabled = true;
-    btn.textContent = '⏳ Adopting...';
+    btn.textContent = '⏳ Adding...';
 
     try {
-        const resp = await fetch('/api/wolfrun/services/adopt', {
+        const resp = await fetch(apiUrl('/api/wolfrun/services/adopt'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -13994,17 +14031,17 @@ async function executeWolfRunAdopt() {
         });
         const data = await resp.json();
         if (resp.ok) {
-            showToast(`"${c.name}" is now managed by WolfRun`, 'success');
+            showToast(`"${c.name}" added to WolfRun`, 'success');
             closeWolfRunAdoptModal();
             loadWolfRunServices();
         } else {
-            showToast(data.error || 'Adopt failed', 'error');
+            showToast(data.error || 'Failed to add', 'error');
         }
     } catch (e) {
-        showToast('Adopt failed: ' + e.message, 'error');
+        showToast('Failed: ' + e.message, 'error');
     } finally {
         btn.disabled = false;
-        btn.textContent = '📦 Adopt Selected';
+        btn.textContent = '📦 Add to WolfRun';
     }
 }
 
