@@ -12207,15 +12207,10 @@ async function scanForIssues() {
 
     renderIssueResults(results, latestVersion, clusters, clusterKeys);
 
-    // Upgrade All button
-    var needsUpgrade = results.filter(function (r) { return r.version && r.version !== '?' && compareVersions(r.version, latestVersion) < 0; });
+    // Upgrade All button — always visible after scan
     if (upgradeAllBtn) {
-        if (needsUpgrade.length > 0) {
-            upgradeAllBtn.style.display = 'inline-block';
-            upgradeAllBtn.innerHTML = '⚡ Upgrade All (' + needsUpgrade.length + ')';
-        } else {
-            upgradeAllBtn.style.display = 'none';
-        }
+        upgradeAllBtn.style.display = 'inline-block';
+        upgradeAllBtn.innerHTML = '⚡ Upgrade All (' + results.length + ')';
     }
 
     // AI analysis
@@ -12469,37 +12464,29 @@ async function issuesUpgradeAll() {
         return;
     }
 
-    var latestVersion = issuesLatestVersion || '0.0.0';
-    if (latestVersion === '0.0.0') {
-        issuesScanResults.forEach(function (r) {
-            if (r.version && r.version !== '?' && compareVersions(r.version, latestVersion) > 0) latestVersion = r.version;
-        });
-    }
+    // Upgrade ALL scanned nodes (force reinstall regardless of version)
+    var targets = issuesScanResults.filter(function (r) { return r.node_id; });
 
-    var outdated = issuesScanResults.filter(function (r) {
-        return r.version && r.version !== '?' && compareVersions(r.version, latestVersion) < 0;
-    });
-
-    if (outdated.length === 0) {
-        showToast('All nodes are already up to date.', 'info');
+    if (targets.length === 0) {
+        showToast('No nodes found — run a scan first.', 'warning');
         return;
     }
 
-    var nodeList = outdated.map(function (r) { return '\uD83D\uDDA5\uFE0F ' + escapeHtml(r.hostname || r.node_id) + ' (v' + r.version + ' \u2192 v' + latestVersion + ')'; });
+    var nodeList = targets.map(function (r) { return '\uD83D\uDDA5\uFE0F ' + escapeHtml(r.hostname || r.node_id) + ' (v' + (r.version || '?') + ')'; });
     try {
-        await showIssuesConfirm('\u26A1', 'Upgrade ' + outdated.length + ' Server' + (outdated.length !== 1 ? 's' : '') + '?',
-            'This will trigger a background upgrade on all outdated nodes.', nodeList, '\u26A1 Upgrade All', '#f59e0b');
+        await showIssuesConfirm('\u26A1', 'Upgrade ' + targets.length + ' Server' + (targets.length !== 1 ? 's' : '') + '?',
+            'This will trigger a background upgrade on <strong>all</strong> nodes.', nodeList, '\u26A1 Upgrade All', '#f59e0b');
     } catch (e) { return; }
 
-    var modal = showProgressModal('\u26A1', 'Upgrading ' + outdated.length + ' Server' + (outdated.length !== 1 ? 's' : ''));
+    var modal = showProgressModal('\u26A1', 'Upgrading ' + targets.length + ' Server' + (targets.length !== 1 ? 's' : ''));
 
-    outdated.forEach(function (r) {
+    targets.forEach(function (r) {
         var safeId = (r.node_id || 'local').replace(/[^a-z0-9_-]/gi, '-');
         modal.addRow(safeId, r.hostname || r.node_id);
     });
 
-    for (var i = 0; i < outdated.length; i++) {
-        var r = outdated[i];
+    for (var i = 0; i < targets.length; i++) {
+        var r = targets[i];
         var node = allNodes.find(function (n) { return n.id === r.node_id; });
         var safeId = (r.node_id || 'local').replace(/[^a-z0-9_-]/gi, '-');
         var url = (node && !node.is_self) ? '/api/nodes/' + encodeURIComponent(r.node_id) + '/proxy/upgrade' : '/api/upgrade';
