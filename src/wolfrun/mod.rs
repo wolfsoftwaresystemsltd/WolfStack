@@ -654,9 +654,23 @@ pub async fn reconcile(
                     None => continue,
                 };
 
+                // Pick best clone source: prefer a running instance, fall back to any instance
+                let source_instance = live_instances.iter()
+                    .find(|i| i.status == "running")
+                    .or_else(|| live_instances.first())
+                    .or_else(|| service.instances.first());
+
+                let template_name = source_instance
+                    .map(|i| i.container_name.clone())
+                    .unwrap_or_else(|| service.name.clone());
+
+                // Find which node the template lives on
+                let template_node_id = source_instance
+                    .map(|i| i.node_id.clone());
+
                 match service.runtime {
                     Runtime::Docker => {
-                        let container_name = format!("wolfrun-{}-{}", service.name.to_lowercase().replace(' ', "-"), instance_num);
+                        let container_name = format!("{}-wolfrun-{}", instance_num, service.name.to_lowercase().replace(' ', "-"));
                         info!("WolfRun: creating Docker container {} on {} ({})", container_name, node.hostname, node_id);
 
                         let mut env = service.env.clone();
@@ -666,10 +680,7 @@ pub async fn reconcile(
                         deploy_docker(&client, cluster_secret, &node, &container_name, service, &env, wolfrun, &node_id).await;
                     }
                     Runtime::Lxc => {
-                        // LXC: clone from the original (template) container
-                        let template_name = service.instances.first()
-                            .map(|inst| inst.container_name.clone())
-                            .unwrap_or_else(|| service.name.clone());
+                        // LXC: clone from the template container
                         let clone_name = format!("{}-wolfrun-{}", instance_num, template_name);
 
                         info!("WolfRun: cloning LXC '{}' → '{}' on {} ({})", template_name, clone_name, node.hostname, node_id);
