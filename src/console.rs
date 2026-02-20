@@ -61,9 +61,11 @@ async fn console_session(
     match ctype.as_str() {
         "docker" => {
             cmd.arg(format!(
-                "docker exec -e TERM=xterm-256color -it {} /bin/sh -c \
-                 'if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi'",
-                name
+                "docker exec -e TERM=xterm-256color -it {} /bin/bash --login 2>/dev/null || \
+                 docker exec -e TERM=xterm-256color -it {} /bin/sh -l 2>/dev/null || \
+                 docker exec -e TERM=xterm-256color -it {} /bin/ash 2>/dev/null || \
+                 echo 'No shell available in this container'",
+                name, name, name, 
             ));
         }
         "lxc" => {
