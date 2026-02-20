@@ -13839,6 +13839,14 @@ async function saveWolfRunSettings() {
     const desired = parseInt(document.getElementById('wolfrun-settings-desired').value, 10);
     const min = parseInt(document.getElementById('wolfrun-settings-min').value, 10);
     const max = parseInt(document.getElementById('wolfrun-settings-max').value, 10);
+
+    // Get current running count before saving
+    let currentRunning = 0;
+    try {
+        const sr = await fetch(apiUrl(`/api/wolfrun/services/${wolfrunSettingsServiceId}`));
+        if (sr.ok) { const s = await sr.json(); currentRunning = (s.instances || []).filter(i => i.status === 'running').length; }
+    } catch (e) { }
+
     try {
         const resp = await fetch(apiUrl(`/api/wolfrun/services/${wolfrunSettingsServiceId}/settings`), {
             method: 'POST',
@@ -13847,11 +13855,14 @@ async function saveWolfRunSettings() {
         });
         const data = await resp.json();
         if (resp.ok) {
-            showToast(`⚡ Settings saved — desired=${data.replicas}, min=${data.min_replicas}, max=${data.max_replicas}`, 'success');
             closeWolfRunSettingsModal();
-            loadWolfRunServices();
-            setTimeout(() => loadWolfRunServices(), 3000);
-            setTimeout(() => loadWolfRunServices(), 8000);
+            if (desired > currentRunning) {
+                // Show scaling progress modal
+                wolfrunScale(wolfrunSettingsServiceId, desired);
+            } else {
+                showToast(`⚡ Settings saved — desired=${data.replicas}, min=${data.min_replicas}, max=${data.max_replicas}`, 'success');
+                loadWolfRunServices();
+            }
         } else {
             showToast(data.error || 'Update failed', 'error');
         }
