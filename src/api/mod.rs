@@ -7357,11 +7357,91 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
                 ).await;
             }
         }
+
+        // Clean up LB iptables rules
+        if let Some(ref vip) = svc.service_ip {
+            crate::wolfrun::remove_lb_rules_for_vip(vip);
+        }
     }
 
     match state.wolfrun.delete(&id) {
         Some(_) => HttpResponse::Ok().json(serde_json::json!({ "deleted": true })),
         None => HttpResponse::NotFound().json(serde_json::json!({ "error": "Service not found" })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WolfRunPortForwardRequest {
+    pub public_ip: String,
+    pub ports: Option<String>,       // Source ports on public IP
+    pub dest_ports: Option<String>,   // Destination ports on VIP
+    pub protocol: String,             // "tcp", "udp", "all"
+    pub label: Option<String>,
+}
+
+/// POST /api/wolfrun/services/{id}/portforward — add external port forward to service VIP
+pub async fn wolfrun_portforward_add(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<WolfRunPortForwardRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+
+    let svc = match state.wolfrun.get(&id) {
+        Some(s) => s,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Service not found" })),
+    };
+
+    let vip = match &svc.service_ip {
+        Some(ip) => ip.clone(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Service has no VIP assigned" })),
+    };
+
+    let default_label = format!("WolfRun: {}", svc.name);
+    let label = body.label.as_deref().unwrap_or(&default_label);
+
+    match crate::networking::add_ip_mapping(
+        &body.public_ip,
+        &vip,
+        body.ports.as_deref(),
+        body.dest_ports.as_deref(),
+        &body.protocol,
+        label,
+    ) {
+        Ok(mapping) => HttpResponse::Ok().json(mapping),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/wolfrun/services/{id}/portforward — list port forwards for a service
+pub async fn wolfrun_portforward_list(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+
+    let svc = match state.wolfrun.get(&id) {
+        Some(s) => s,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Service not found" })),
+    };
+
+    let vip = match &svc.service_ip {
+        Some(ip) => ip.clone(),
+        None => return HttpResponse::Ok().json(serde_json::json!([])),
+    };
+
+    // Filter IP mappings that target this service's VIP
+    let all_mappings = crate::networking::list_ip_mappings();
+    let service_mappings: Vec<_> = all_mappings.into_iter()
+        .filter(|m| m.wolfnet_ip == vip)
+        .collect();
+
+    HttpResponse::Ok().json(service_mappings)
+}
+
+/// DELETE /api/wolfrun/services/{id}/portforward/{rule_id} — remove a port forward
+pub async fn wolfrun_portforward_delete(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (_service_id, rule_id) = path.into_inner();
+
+    match crate::networking::remove_ip_mapping(&rule_id) {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "deleted": true })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
     }
 }
 
@@ -7694,6 +7774,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/wolfrun/services/{id}", web::delete().to(wolfrun_delete))
         .route("/api/wolfrun/services/{id}/scale", web::post().to(wolfrun_scale))
         .route("/api/wolfrun/services/{id}/update", web::post().to(wolfrun_update))
+        .route("/api/wolfrun/services/{id}/portforward", web::get().to(wolfrun_portforward_list))
+        .route("/api/wolfrun/services/{id}/portforward", web::post().to(wolfrun_portforward_add))
+        .route("/api/wolfrun/services/{id}/portforward/{rule_id}", web::delete().to(wolfrun_portforward_delete))
         // Node proxy — forward API calls to remote nodes (must be last — wildcard path)
         .route("/api/nodes/{id}/proxy/{path:.*}", web::get().to(node_proxy))
         .route("/api/nodes/{id}/proxy/{path:.*}", web::post().to(node_proxy))

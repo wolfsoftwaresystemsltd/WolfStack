@@ -13699,10 +13699,10 @@ function renderWolfRunServices(services) {
             ? nodeNames.map(h => `<span style="padding:2px 8px;border-radius:6px;font-size:11px;background:var(--bg-secondary);border:1px solid var(--border);white-space:nowrap;">${h}</span>`).join(' ')
             : '<span style="color:var(--text-muted);font-size:12px;">—</span>';
 
-        // WolfNet IPs
-        const ips = svc.instances.filter(i => i.wolfnet_ip).map(i => i.wolfnet_ip);
-        const ipHtml = ips.length > 0
-            ? ips.map(ip => `<code style="font-size:11px;padding:2px 6px;background:rgba(16,185,129,0.1);border-radius:4px;color:#10b981;">${ip}</code>`).join(' ')
+        // Service VIP (load balancer)
+        const vip = svc.service_ip;
+        const vipHtml = vip
+            ? `<code style="font-size:11px;padding:2px 6px;background:rgba(99,102,241,0.12);border-radius:4px;color:#818cf8;">${vip}</code>`
             : '<span style="color:var(--text-muted);font-size:12px;">—</span>';
 
         // Replica count with progress bar
@@ -13723,10 +13723,11 @@ function renderWolfRunServices(services) {
             <td>${replicaHtml}</td>
             <td>${statusBadge}</td>
             <td>${nodeHtml}</td>
-            <td>${ipHtml}</td>
+            <td>${vipHtml}</td>
             <td style="text-align:right; white-space:nowrap;">
                 <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired - 1})" ${desired <= 0 ? 'disabled' : ''} title="Scale down" style="padding:4px 8px; font-size:12px;">➖</button>
                 <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired + 1})" title="Scale up" style="padding:4px 8px; font-size:12px;">➕</button>
+                <button class="btn btn-sm" onclick="openWolfRunPortForward('${svc.id}', '${svc.name}', '${vip || ''}')" title="Port Forward" style="padding:4px 8px; font-size:12px; color:#818cf8;" ${!vip ? 'disabled' : ''}>🔀</button>
                 <button class="btn btn-sm" onclick="wolfrunDelete('${svc.id}', '${svc.name}')" title="Delete" style="padding:4px 8px; font-size:12px; color:#ef4444;">🗑️</button>
             </td>
         </tr>`;
@@ -14004,6 +14005,105 @@ async function executeWolfRunAdopt() {
     } finally {
         btn.disabled = false;
         btn.textContent = '📦 Adopt Selected';
+    }
+}
+
+let wolfrunPFServiceId = null;
+
+async function openWolfRunPortForward(serviceId, serviceName, vip) {
+    wolfrunPFServiceId = serviceId;
+    document.getElementById('wolfrun-pf-svc-name').textContent = serviceName;
+    document.getElementById('wolfrun-pf-vip').textContent = vip;
+    document.getElementById('wolfrun-pf-publicip').value = '';
+    document.getElementById('wolfrun-pf-srcports').value = '';
+    document.getElementById('wolfrun-pf-dstports').value = '';
+    document.getElementById('wolfrun-pf-modal').classList.add('active');
+
+    // Load existing port forwards for this service
+    await loadWolfRunPortForwards(serviceId);
+}
+
+function closeWolfRunPFModal() {
+    document.getElementById('wolfrun-pf-modal').classList.remove('active');
+}
+
+async function loadWolfRunPortForwards(serviceId) {
+    const el = document.getElementById('wolfrun-pf-existing');
+    try {
+        const resp = await fetch(`/api/wolfrun/services/${serviceId}/portforward`);
+        const forwards = await resp.json();
+
+        if (!forwards.length) {
+            el.innerHTML = `<div style="padding:12px; text-align:center; color:var(--text-muted); font-size:13px; border:1px dashed var(--border); border-radius:8px;">
+                No port forwards configured yet
+            </div>`;
+            return;
+        }
+
+        el.innerHTML = `<div style="font-size:12px; font-weight:600; margin-bottom:8px; color:var(--text-secondary);">Active Forwards</div>` +
+            forwards.map(f => {
+                const srcPorts = f.ports ? `:${f.ports}` : '';
+                const dstPorts = f.dest_ports ? `:${f.dest_ports}` : srcPorts;
+                return `<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg-secondary);border-radius:8px;margin-bottom:6px;border:1px solid var(--border);">
+                    <span style="font-size:14px;">${f.protocol === 'tcp' ? '🌐' : f.protocol === 'udp' ? '📡' : '🔗'}</span>
+                    <code style="font-size:12px; flex:1; color:var(--text-primary);">${f.public_ip}${srcPorts} → VIP${dstPorts}</code>
+                    <span style="font-size:10px; padding:2px 6px; border-radius:4px; background:rgba(99,102,241,0.12); color:#818cf8;">${f.protocol}</span>
+                    <button class="btn btn-sm" onclick="deleteWolfRunPortForward('${serviceId}', '${f.id}')" style="padding:2px 6px; font-size:11px; color:#ef4444;">✕</button>
+                </div>`;
+            }).join('');
+    } catch (e) {
+        el.innerHTML = `<div style="color:var(--text-muted);font-size:12px;">Failed to load forwards</div>`;
+    }
+}
+
+async function addWolfRunPortForward() {
+    if (!wolfrunPFServiceId) return;
+
+    const publicIp = document.getElementById('wolfrun-pf-publicip').value.trim();
+    const protocol = document.getElementById('wolfrun-pf-protocol').value;
+    const srcPorts = document.getElementById('wolfrun-pf-srcports').value.trim();
+    const dstPorts = document.getElementById('wolfrun-pf-dstports').value.trim();
+
+    if (!publicIp) { showToast('Public IP is required', 'error'); return; }
+
+    try {
+        const resp = await fetch(`/api/wolfrun/services/${wolfrunPFServiceId}/portforward`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                public_ip: publicIp,
+                protocol,
+                ports: srcPorts || null,
+                dest_ports: dstPorts || null,
+            }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast('Port forward added', 'success');
+            document.getElementById('wolfrun-pf-publicip').value = '';
+            document.getElementById('wolfrun-pf-srcports').value = '';
+            document.getElementById('wolfrun-pf-dstports').value = '';
+            await loadWolfRunPortForwards(wolfrunPFServiceId);
+        } else {
+            showToast(data.error || 'Failed to add forward', 'error');
+        }
+    } catch (e) {
+        showToast('Failed to add forward: ' + e.message, 'error');
+    }
+}
+
+async function deleteWolfRunPortForward(serviceId, ruleId) {
+    try {
+        const resp = await fetch(`/api/wolfrun/services/${serviceId}/portforward/${ruleId}`, { method: 'DELETE' });
+        if (resp.ok) {
+            showToast('Port forward removed', 'success');
+            await loadWolfRunPortForwards(serviceId);
+        } else {
+            const data = await resp.json();
+            showToast(data.error || 'Failed to remove forward', 'error');
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
     }
 }
 

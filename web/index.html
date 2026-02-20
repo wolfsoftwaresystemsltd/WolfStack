@@ -689,7 +689,7 @@
                                 <th>Replicas</th>
                                 <th>Status</th>
                                 <th>Nodes</th>
-                                <th>WolfNet IPs</th>
+                                <th>Service VIP</th>
                                 <th style="text-align:right;">Actions</th>
                             </tr>
                         </thead>
@@ -898,6 +898,67 @@
                     <button class="btn" onclick="closeWolfRunAdoptModal()">Cancel</button>
                     <button class="btn btn-primary" id="wolfrun-adopt-btn" onclick="executeWolfRunAdopt()" disabled>📦
                         Adopt Selected</button>
+                </div>
+            </div>
+        </div>
+        </div>
+
+        <!-- Port Forward Modal -->
+        <div id="wolfrun-pf-modal" class="modal-overlay">
+            <div class="modal" style="max-width:600px; width:90%;">
+                <div class="modal-header">
+                    <h3>🔀 Port Forward — <span id="wolfrun-pf-svc-name"></span></h3>
+                    <button class="modal-close" onclick="closeWolfRunPFModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p style="font-size:13px; color:var(--text-secondary); margin:0 0 12px;">
+                        Forward external traffic to Service VIP <code id="wolfrun-pf-vip" style="color:#818cf8;"></code>
+                    </p>
+
+                    <div id="wolfrun-pf-existing" style="margin-bottom:16px;">
+                        <!-- Existing forwards loaded by JS -->
+                    </div>
+
+                    <div
+                        style="background:var(--bg-secondary); border-radius:10px; padding:16px; border:1px solid var(--border);">
+                        <h4 style="margin:0 0 12px; font-size:14px; font-weight:600;">Add Port Forward</h4>
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                            <div>
+                                <label style="font-size:12px; font-weight:600; display:block; margin-bottom:4px;">Public
+                                    IP</label>
+                                <input type="text" id="wolfrun-pf-publicip" class="form-control"
+                                    placeholder="e.g. 203.0.113.1">
+                            </div>
+                            <div>
+                                <label
+                                    style="font-size:12px; font-weight:600; display:block; margin-bottom:4px;">Protocol</label>
+                                <select id="wolfrun-pf-protocol" class="form-control">
+                                    <option value="tcp">TCP</option>
+                                    <option value="udp">UDP</option>
+                                    <option value="all">All</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                            <div>
+                                <label style="font-size:12px; font-weight:600; display:block; margin-bottom:4px;">Source
+                                    Ports</label>
+                                <input type="text" id="wolfrun-pf-srcports" class="form-control"
+                                    placeholder="e.g. 80,443">
+                            </div>
+                            <div>
+                                <label style="font-size:12px; font-weight:600; display:block; margin-bottom:4px;">Dest
+                                    Ports <span style="color:var(--text-muted);">(optional)</span></label>
+                                <input type="text" id="wolfrun-pf-dstports" class="form-control"
+                                    placeholder="Same as source">
+                            </div>
+                        </div>
+                        <button class="btn btn-primary" onclick="addWolfRunPortForward()" style="width:100%;">Add
+                            Forward</button>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" onclick="closeWolfRunPFModal()">Close</button>
                 </div>
             </div>
         </div>

@@ -108,6 +108,9 @@ pub struct WolfRunService {
     pub restart_policy: RestartPolicy,
     #[serde(default)]
     pub instances: Vec<ServiceInstance>,
+    /// Load-balanced virtual IP on WolfNet (auto-assigned)
+    #[serde(default)]
+    pub service_ip: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -176,6 +179,11 @@ impl WolfRunState {
                   runtime: Runtime, lxc_config: Option<LxcConfig>) -> WolfRunService {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let id = format!("svc-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        // Allocate a Service VIP on WolfNet for load balancing
+        let service_ip = crate::containers::next_available_wolfnet_ip();
+        if let Some(ref vip) = service_ip {
+            info!("WolfRun: allocated Service VIP {} for {}", vip, name);
+        }
         let svc = WolfRunService {
             id: id.clone(),
             name,
@@ -190,6 +198,7 @@ impl WolfRunState {
             placement,
             restart_policy,
             instances: Vec::new(),
+            service_ip,
             created_at: now,
             updated_at: now,
         };
@@ -280,6 +289,11 @@ impl WolfRunState {
             last_seen: now,
         };
 
+        // Allocate a Service VIP on WolfNet for load balancing
+        let service_ip = crate::containers::next_available_wolfnet_ip();
+        if let Some(ref vip) = service_ip {
+            info!("WolfRun: allocated Service VIP {} for adopted container {}", vip, container_name);
+        }
         let svc = WolfRunService {
             id: id.clone(),
             name,
@@ -294,6 +308,7 @@ impl WolfRunState {
             placement: Placement::Any,
             restart_policy: RestartPolicy::Always,
             instances: vec![instance],
+            service_ip,
             created_at: now,
             updated_at: now,
         };
@@ -514,6 +529,15 @@ pub async fn reconcile(
 
         // Update instances with live state
         wolfrun.update_instances(&service.id, live_instances.clone());
+
+        // Rebuild load balancer rules for this service's VIP
+        if let Some(ref vip) = service.service_ip {
+            let backend_ips: Vec<String> = live_instances.iter()
+                .filter(|i| i.status == "running")
+                .filter_map(|i| i.wolfnet_ip.clone())
+                .collect();
+            rebuild_lb_rules(vip, &backend_ips, &service.ports);
+        }
 
         // 2. Count running instances
         let running = live_instances.iter().filter(|i| i.status == "running").count() as u32;
@@ -894,4 +918,149 @@ pub async fn stop_and_remove_pub(
     runtime: &Runtime,
 ) {
     stop_and_remove(client, cluster_secret, node, container_name, runtime).await;
+}
+
+// ─── Load Balancer (iptables round-robin DNAT) ───
+
+/// Rebuild iptables round-robin DNAT rules for a service VIP.
+/// Clears old rules for this VIP and creates new ones distributing across backends.
+pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String]) {
+    // First remove any existing rules for this VIP
+    remove_lb_rules_for_vip(vip);
+
+    if backend_ips.is_empty() {
+        debug!("WolfRun LB: no backends for VIP {} — skipping", vip);
+        return;
+    }
+
+    // Assign the VIP to wolfnet0 (idempotent — ignore error if already assigned)
+    let cidr = format!("{}/32", vip);
+    let _ = std::process::Command::new("ip")
+        .args(["addr", "add", &cidr, "dev", "wolfnet0"])
+        .output();
+
+    let n = backend_ips.len();
+
+    // Parse service ports to get the container-side ports for LB rules
+    // Port format is "host_port:container_port" or just "port"
+    let lb_ports: Vec<String> = ports.iter().map(|p| {
+        if let Some((_host, container)) = p.split_once(':') {
+            container.to_string()
+        } else {
+            p.clone()
+        }
+    }).collect();
+
+    // Create round-robin DNAT rules
+    // iptables statistic --mode nth --every N distributes across N backends
+    for (i, backend) in backend_ips.iter().enumerate() {
+        let remaining = n - i;
+
+        let mut args: Vec<String> = vec![
+            "-t".into(), "nat".into(), "-A".into(), "PREROUTING".into(),
+            "-d".into(), vip.to_string(),
+        ];
+
+        // Add port matching if service has ports
+        if !lb_ports.is_empty() {
+            args.extend_from_slice(&["-p".into(), "tcp".into()]);
+            // Use multiport for multiple ports
+            if lb_ports.len() == 1 {
+                args.extend_from_slice(&["--dport".into(), lb_ports[0].clone()]);
+            } else {
+                args.extend_from_slice(&["-m".into(), "multiport".into(), "--dports".into(), lb_ports.join(",")]);
+            }
+        }
+
+        // Add round-robin statistic (skip for last backend — it catches everything)
+        if remaining > 1 {
+            args.extend_from_slice(&[
+                "-m".into(), "statistic".into(),
+                "--mode".into(), "nth".into(),
+                "--every".into(), remaining.to_string(),
+                "--packet".into(), "0".into(),
+            ]);
+        }
+
+        // Add DNAT target
+        let dest = if !lb_ports.is_empty() {
+            format!("{}:{}", backend, lb_ports[0])
+        } else {
+            backend.clone()
+        };
+        args.extend_from_slice(&["-j".into(), "DNAT".into(), "--to-destination".into(), dest]);
+
+        // Add comment to identify WolfRun rules
+        args.extend_from_slice(&["-m".into(), "comment".into(), "--comment".into(), format!("wolfrun-lb-{}", vip)]);
+
+        let output = std::process::Command::new("iptables")
+            .args(args.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+            .output();
+
+        match output {
+            Ok(o) if o.status.success() => {},
+            Ok(o) => warn!("WolfRun LB: iptables rule failed for {} → {}: {}",
+                vip, backend, String::from_utf8_lossy(&o.stderr)),
+            Err(e) => warn!("WolfRun LB: failed to run iptables: {}", e),
+        }
+    }
+
+    // MASQUERADE for return traffic
+    let _ = std::process::Command::new("iptables")
+        .args(["-t", "nat", "-A", "POSTROUTING", "-d", &backend_ips.join(","),
+            "-m", "comment", "--comment", &format!("wolfrun-lb-{}", vip),
+            "-j", "MASQUERADE"])
+        .output();
+
+    info!("WolfRun LB: {} VIP {} → {} backend(s): {}",
+        if n == 1 { "direct" } else { "round-robin" },
+        vip, n, backend_ips.join(", "));
+}
+
+/// Remove all iptables rules tagged with a WolfRun LB comment for a given VIP
+pub fn remove_lb_rules_for_vip(vip: &str) {
+    let comment = format!("wolfrun-lb-{}", vip);
+
+    // Remove from nat PREROUTING and POSTROUTING
+    for chain in &["PREROUTING", "POSTROUTING"] {
+        // List rules, find matching ones, remove in reverse order
+        loop {
+            let output = std::process::Command::new("iptables")
+                .args(["-t", "nat", "-L", chain, "--line-numbers", "-n"])
+                .output();
+
+            let lines = match output {
+                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+                _ => break,
+            };
+
+            // Find the first rule with our comment
+            let mut found_num: Option<String> = None;
+            for line in lines.lines() {
+                if line.contains(&comment) {
+                    if let Some(num) = line.split_whitespace().next() {
+                        if num.parse::<u32>().is_ok() {
+                            found_num = Some(num.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            match found_num {
+                Some(num) => {
+                    let _ = std::process::Command::new("iptables")
+                        .args(["-t", "nat", "-D", chain, &num])
+                        .output();
+                }
+                None => break, // No more rules for this VIP
+            }
+        }
+    }
+
+    // Remove the VIP from wolfnet0 (best-effort)
+    let cidr = format!("{}/32", vip);
+    let _ = std::process::Command::new("ip")
+        .args(["addr", "del", &cidr, "dev", "wolfnet0"])
+        .output();
 }
