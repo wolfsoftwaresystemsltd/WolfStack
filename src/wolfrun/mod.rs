@@ -482,6 +482,37 @@ pub async fn reconcile(
         for inst in &service.instances {
             let node = all_nodes.iter().find(|n| n.id == inst.node_id);
             match node {
+                Some(n) if n.online && n.is_self => {
+                    // Local node — query containers directly (avoids HTTP self-call issues)
+                    let containers = match service.runtime {
+                        Runtime::Docker => crate::containers::docker_list_all(),
+                        Runtime::Lxc => crate::containers::lxc_list_all(),
+                    };
+                    let found = containers.iter().find(|c| c.name == inst.container_name);
+                    if let Some(c) = found {
+                        // Extract wolfnet IP from ip_address field (format: "10.10.10.5 (wolfnet)" or "192.168.1.1, 10.10.10.5 (wolfnet)")
+                        let wolfnet_ip = c.ip_address.split(',')
+                            .map(|s| s.trim())
+                            .find(|s| s.contains("wolfnet") || s.starts_with("10.10.10."))
+                            .map(|s| s.replace(" (wolfnet)", "").trim().to_string())
+                            .filter(|s| !s.is_empty());
+                        live_instances.push(ServiceInstance {
+                            node_id: inst.node_id.clone(),
+                            container_name: inst.container_name.clone(),
+                            wolfnet_ip,
+                            status: c.state.to_lowercase(),
+                            last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                        });
+                    } else {
+                        live_instances.push(ServiceInstance {
+                            node_id: inst.node_id.clone(),
+                            container_name: inst.container_name.clone(),
+                            wolfnet_ip: None,
+                            status: "lost".to_string(),
+                            last_seen: inst.last_seen,
+                        });
+                    }
+                }
                 Some(n) if n.online => {
                     let urls = crate::api::build_node_urls(
                         &n.address, n.port,

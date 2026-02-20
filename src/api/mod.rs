@@ -7383,41 +7383,57 @@ pub async fn wolfrun_service_action(req: HttpRequest, state: web::Data<AppState>
 
     let mut ok_count = 0u32;
     let mut fail_count = 0u32;
+    let mut errors: Vec<String> = Vec::new();
 
     for inst in &svc.instances {
         if let Some(node) = state.cluster.get_node(&inst.node_id) {
-            let payload = serde_json::json!({ "action": action });
             if node.is_self {
-                // Local container action
-                let api_path = format!("/api/containers/{}/{}/action", runtime_path, inst.container_name);
-                // Call our own handler directly via HTTP
-                let urls = vec![format!("http://127.0.0.1:{}{}", node.port, api_path)];
-                let mut success = false;
-                for url in &urls {
-                    if let Ok(resp) = client.post(url)
-                        .header("X-WolfStack-Secret", &state.cluster_secret)
-                        .json(&payload)
-                        .send().await {
-                        if resp.status().is_success() { success = true; break; }
+                // Local container — call functions directly (avoids HTTP self-call issues)
+                let result = match (&svc.runtime, action.as_str()) {
+                    (crate::wolfrun::Runtime::Docker, "start") => crate::containers::docker_start(&inst.container_name),
+                    (crate::wolfrun::Runtime::Docker, "stop") => crate::containers::docker_stop(&inst.container_name),
+                    (crate::wolfrun::Runtime::Docker, "restart") => crate::containers::docker_restart(&inst.container_name),
+                    (crate::wolfrun::Runtime::Lxc, "start") => crate::containers::lxc_start(&inst.container_name),
+                    (crate::wolfrun::Runtime::Lxc, "stop") => crate::containers::lxc_stop(&inst.container_name),
+                    (crate::wolfrun::Runtime::Lxc, "restart") => {
+                        let _ = crate::containers::lxc_stop(&inst.container_name);
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        crate::containers::lxc_start(&inst.container_name)
+                    }
+                    _ => Err(format!("Unknown action: {}", action)),
+                };
+                match result {
+                    Ok(_) => { ok_count += 1; }
+                    Err(e) => {
+                        errors.push(format!("{}: {}", inst.container_name, e));
+                        fail_count += 1;
                     }
                 }
-                if success { ok_count += 1; } else { fail_count += 1; }
             } else {
                 // Remote node
                 let api_path = format!("/api/containers/{}/{}/action", runtime_path, inst.container_name);
                 let urls = build_node_urls(&node.address, node.port, &api_path);
+                let payload = serde_json::json!({ "action": action });
                 let mut success = false;
                 for url in &urls {
-                    if let Ok(resp) = client.post(url)
+                    match client.post(url)
                         .header("X-WolfStack-Secret", &state.cluster_secret)
                         .json(&payload)
                         .send().await {
-                        if resp.status().is_success() { success = true; break; }
+                        Ok(resp) if resp.status().is_success() => { success = true; break; }
+                        Ok(resp) => {
+                            let body = resp.text().await.unwrap_or_default();
+                            errors.push(format!("{} on {}: {}", inst.container_name, node.hostname, body));
+                        }
+                        Err(e) => {
+                            errors.push(format!("{} on {}: {}", inst.container_name, node.hostname, e));
+                        }
                     }
                 }
                 if success { ok_count += 1; } else { fail_count += 1; }
             }
         } else {
+            errors.push(format!("{}: node not found", inst.container_name));
             fail_count += 1;
         }
     }
@@ -7426,6 +7442,7 @@ pub async fn wolfrun_service_action(req: HttpRequest, state: web::Data<AppState>
         "action": action,
         "ok": ok_count,
         "failed": fail_count,
+        "errors": errors,
     }))
 }
 
@@ -7512,7 +7529,15 @@ pub struct WolfRunScaleRequest {
 /// POST /api/wolfrun/services/{id}/scale — scale replicas
 pub async fn wolfrun_scale(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<WolfRunScaleRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    if state.wolfrun.scale(&path.into_inner(), body.replicas) {
+    let id = path.into_inner();
+    if state.wolfrun.scale(&id, body.replicas) {
+        // Trigger an immediate reconcile in the background
+        let wolfrun = Arc::clone(&state.wolfrun);
+        let cluster = Arc::clone(&state.cluster);
+        let secret = state.cluster_secret.clone();
+        actix_web::rt::spawn(async move {
+            crate::wolfrun::reconcile(&wolfrun, &cluster, &secret).await;
+        });
         HttpResponse::Ok().json(serde_json::json!({ "scaled": true, "replicas": body.replicas }))
     } else {
         HttpResponse::NotFound().json(serde_json::json!({ "error": "Service not found" }))
