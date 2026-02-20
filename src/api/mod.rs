@@ -7402,6 +7402,46 @@ pub async fn wolfrun_update(req: HttpRequest, state: web::Data<AppState>, path: 
     }
 }
 
+#[derive(Deserialize)]
+pub struct WolfRunAdoptRequest {
+    pub name: String,              // WolfRun service name
+    pub container_name: String,    // Existing container name
+    pub node_id: String,           // Node where container runs
+    pub image: String,             // Container image (for Docker)
+    pub runtime: Option<String>,   // "docker" or "lxc"
+    pub cluster_name: String,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub ports: Vec<String>,
+    #[serde(default)]
+    pub volumes: Vec<String>,
+}
+
+/// POST /api/wolfrun/services/adopt — adopt an existing container into WolfRun
+pub async fn wolfrun_adopt(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfRunAdoptRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let runtime = match body.runtime.as_deref().unwrap_or("docker") {
+        "lxc" => crate::wolfrun::Runtime::Lxc,
+        _ => crate::wolfrun::Runtime::Docker,
+    };
+
+    let svc = state.wolfrun.adopt(
+        body.name.clone(),
+        body.container_name.clone(),
+        body.node_id.clone(),
+        body.image.clone(),
+        runtime,
+        body.cluster_name.clone(),
+        body.env.clone(),
+        body.ports.clone(),
+        body.volumes.clone(),
+    );
+
+    HttpResponse::Ok().json(svc)
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -7649,6 +7689,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // WolfRun — container orchestration
         .route("/api/wolfrun/services", web::get().to(wolfrun_list))
         .route("/api/wolfrun/services", web::post().to(wolfrun_create))
+        .route("/api/wolfrun/services/adopt", web::post().to(wolfrun_adopt))
         .route("/api/wolfrun/services/{id}", web::get().to(wolfrun_get))
         .route("/api/wolfrun/services/{id}", web::delete().to(wolfrun_delete))
         .route("/api/wolfrun/services/{id}/scale", web::post().to(wolfrun_scale))

@@ -255,6 +255,57 @@ impl WolfRunState {
         self.save();
     }
 
+    /// Adopt an existing container as a WolfRun service.
+    /// The container is registered as the first running instance.
+    pub fn adopt(
+        &self,
+        name: String,
+        container_name: String,
+        node_id: String,
+        image: String,
+        runtime: Runtime,
+        cluster_name: String,
+        env: Vec<String>,
+        ports: Vec<String>,
+        volumes: Vec<String>,
+    ) -> WolfRunService {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+
+        let instance = ServiceInstance {
+            container_name: container_name.clone(),
+            node_id,
+            status: "running".to_string(),
+            wolfnet_ip: None,
+            last_seen: now,
+        };
+
+        let svc = WolfRunService {
+            id: id.clone(),
+            name,
+            image,
+            replicas: 1,
+            runtime,
+            lxc_config: None,
+            env,
+            ports,
+            volumes,
+            cluster_name,
+            placement: Placement::Any,
+            restart_policy: RestartPolicy::Always,
+            instances: vec![instance],
+            created_at: now,
+            updated_at: now,
+        };
+        {
+            let mut svcs = self.services.write().unwrap();
+            svcs.push(svc.clone());
+        }
+        self.save();
+        info!("WolfRun: adopted container '{}' as service {} ({})", container_name, svc.name, id);
+        svc
+    }
+
     /// Add an instance to a service
     pub fn add_instance(&self, service_id: &str, instance: ServiceInstance) {
         let mut svcs = self.services.write().unwrap();

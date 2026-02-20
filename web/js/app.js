@@ -13846,6 +13846,167 @@ async function wolfrunDelete(serviceId, serviceName) {
     }
 }
 
+let wolfrunAdoptSelected = null;
+
+async function openWolfRunAdoptModal() {
+    document.getElementById('wolfrun-adopt-modal').classList.add('active');
+    document.getElementById('wolfrun-adopt-scanning').style.display = '';
+    document.getElementById('wolfrun-adopt-list').style.display = 'none';
+    document.getElementById('wolfrun-adopt-btn').disabled = true;
+    wolfrunAdoptSelected = null;
+
+    // Scan all nodes in this cluster for containers
+    const clusterNodes = (window.allNodes || []).filter(n =>
+        (n.cluster_name || 'WolfStack') === wolfrunCurrentCluster && n.online && n.node_type !== 'proxmox'
+    );
+
+    // Get existing WolfRun services to filter out already-adopted containers
+    let existingContainers = new Set();
+    try {
+        const svcResp = await fetch(`/api/wolfrun/services?cluster=${encodeURIComponent(wolfrunCurrentCluster)}`);
+        if (svcResp.ok) {
+            const svcs = await svcResp.json();
+            svcs.forEach(s => s.instances.forEach(i => existingContainers.add(i.container_name)));
+        }
+    } catch (e) { /* ignore */ }
+
+    const allContainers = [];
+
+    // Fetch Docker and LXC containers from each node
+    for (const node of clusterNodes) {
+        try {
+            // Docker
+            if (node.has_docker !== false) {
+                const url = node.is_self ? '/api/containers/docker' : `/api/nodes/${node.id}/proxy/api/containers/docker`;
+                const resp = await fetch(url);
+                if (resp.ok) {
+                    const containers = await resp.json();
+                    containers.forEach(c => {
+                        const name = (c.Names || [c.name || ''])[0]?.replace(/^\//, '') || c.name || 'unknown';
+                        if (!existingContainers.has(name)) {
+                            allContainers.push({
+                                name: name,
+                                image: c.Image || c.image || '—',
+                                status: c.State || c.status || 'unknown',
+                                runtime: 'docker',
+                                node_id: node.id,
+                                hostname: node.hostname,
+                            });
+                        }
+                    });
+                }
+            }
+            // LXC
+            if (node.has_lxc !== false) {
+                const url = node.is_self ? '/api/containers/lxc' : `/api/nodes/${node.id}/proxy/api/containers/lxc`;
+                const resp = await fetch(url);
+                if (resp.ok) {
+                    const containers = await resp.json();
+                    containers.forEach(c => {
+                        const name = c.name || 'unknown';
+                        if (!existingContainers.has(name)) {
+                            allContainers.push({
+                                name: name,
+                                image: c.distribution ? `${c.distribution} ${c.release || ''}`.trim() : '—',
+                                status: c.status || c.state || 'unknown',
+                                runtime: 'lxc',
+                                node_id: node.id,
+                                hostname: node.hostname,
+                            });
+                        }
+                    });
+                }
+            }
+        } catch (e) {
+            console.error(`WolfRun adopt: error scanning ${node.hostname}:`, e);
+        }
+    }
+
+    document.getElementById('wolfrun-adopt-scanning').style.display = 'none';
+    const listEl = document.getElementById('wolfrun-adopt-list');
+    listEl.style.display = '';
+
+    if (allContainers.length === 0) {
+        listEl.innerHTML = `<div style="padding:32px; text-align:center; color:var(--text-muted);">
+            <div style="font-size:32px; margin-bottom:8px;">✅</div>
+            <p style="margin:0;">All containers are already managed by WolfRun, or no containers found.</p>
+        </div>`;
+        return;
+    }
+
+    listEl.innerHTML = allContainers.map((c, i) => {
+        const runtimeIcon = c.runtime === 'lxc' ? '📦' : '🐳';
+        const statusColor = c.status === 'running' ? '#10b981' : (c.status === 'exited' || c.status === 'stopped') ? '#ef4444' : '#eab308';
+        return `<div class="wolfrun-adopt-item" data-idx="${i}" onclick="selectWolfrunAdopt(${i})"
+            style="display:flex; align-items:center; gap:12px; padding:12px 16px; border:1px solid var(--border); border-radius:8px; margin-bottom:8px; cursor:pointer; transition:all 0.15s;">
+            <input type="radio" name="wolfrun-adopt" style="accent-color:var(--accent); flex-shrink:0;">
+            <span style="font-size:18px;">${runtimeIcon}</span>
+            <div style="flex:1; min-width:0;">
+                <div style="font-weight:600; font-size:13px;">${c.name}</div>
+                <div style="font-size:11px; color:var(--text-muted);">${c.image} · ${c.hostname}</div>
+            </div>
+            <span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:500; background:${statusColor}22; color:${statusColor}; border:1px solid ${statusColor}44;">
+                <span style="width:5px; height:5px; border-radius:50%; background:${statusColor};"></span> ${c.status}
+            </span>
+        </div>`;
+    }).join('');
+
+    // Store for later
+    window._wolfrunAdoptContainers = allContainers;
+}
+
+function selectWolfrunAdopt(idx) {
+    wolfrunAdoptSelected = idx;
+    document.getElementById('wolfrun-adopt-btn').disabled = false;
+    document.querySelectorAll('.wolfrun-adopt-item').forEach((el, i) => {
+        el.style.borderColor = i === idx ? 'var(--accent)' : 'var(--border)';
+        el.style.background = i === idx ? 'rgba(99,102,241,0.06)' : '';
+        el.querySelector('input[type=radio]').checked = (i === idx);
+    });
+}
+
+function closeWolfRunAdoptModal() {
+    document.getElementById('wolfrun-adopt-modal').classList.remove('active');
+}
+
+async function executeWolfRunAdopt() {
+    if (wolfrunAdoptSelected === null) return;
+    const c = window._wolfrunAdoptContainers[wolfrunAdoptSelected];
+    if (!c) return;
+
+    const btn = document.getElementById('wolfrun-adopt-btn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Adopting...';
+
+    try {
+        const resp = await fetch('/api/wolfrun/services/adopt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: c.name,
+                container_name: c.name,
+                node_id: c.node_id,
+                image: c.image,
+                runtime: c.runtime,
+                cluster_name: wolfrunCurrentCluster,
+            }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`"${c.name}" is now managed by WolfRun`, 'success');
+            closeWolfRunAdoptModal();
+            loadWolfRunServices();
+        } else {
+            showToast(data.error || 'Adopt failed', 'error');
+        }
+    } catch (e) {
+        showToast('Adopt failed: ' + e.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '📦 Adopt Selected';
+    }
+}
+
 // Apply saved theme immediately on load
 initTheme();
 
