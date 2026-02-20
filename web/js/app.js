@@ -13498,6 +13498,14 @@ async function loadAlertingConfig() {
 }
 
 async function saveAlertingConfig() {
+    // Find the save button and show saving state
+    const btn = event && event.target ? event.target.closest('button') : null;
+    const origBtnHtml = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.innerHTML = '⏳ Saving…';
+        btn.disabled = true;
+    }
+
     const payload = {
         enabled: document.getElementById('alerting-enabled').checked,
         cpu_threshold: parseInt(document.getElementById('alerting-cpu').value),
@@ -13525,14 +13533,27 @@ async function saveAlertingConfig() {
             body: JSON.stringify(payload)
         });
         if (resp.ok) {
-            showToast('Alerting settings saved', 'success');
+            showToast('Alerting settings saved ✓', 'success');
+            if (btn) {
+                btn.innerHTML = '✓ Saved!';
+                btn.style.background = 'var(--success)';
+                btn.style.borderColor = 'var(--success)';
+                setTimeout(() => {
+                    btn.innerHTML = origBtnHtml;
+                    btn.style.background = '';
+                    btn.style.borderColor = '';
+                    btn.disabled = false;
+                }, 2000);
+            }
             loadAlertingConfig();
         } else {
             const data = await resp.json().catch(() => ({}));
             showToast(data.error || 'Failed to save', 'error');
+            if (btn) { btn.innerHTML = origBtnHtml; btn.disabled = false; }
         }
     } catch (e) {
         showToast('Failed: ' + e.message, 'error');
+        if (btn) { btn.innerHTML = origBtnHtml; btn.disabled = false; }
     }
 }
 
