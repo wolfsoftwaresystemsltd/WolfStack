@@ -279,13 +279,13 @@ async fn remote_console_bridge(
         format!("ws://{}:{}{}", remote_host, remote_port, ws_path),
     ];
 
-    // Build TLS connector that accepts self-signed certs (rustls)
-    let tls_connector = {
+    // Build TLS connector that accepts self-signed certs (rustls) — only used for wss:// URLs
+    let tls_config = {
         let config = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(std::sync::Arc::new(DangerousVerifier))
             .with_no_client_auth();
-        Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
+        std::sync::Arc::new(config)
     };
 
     let mut remote_stream = None;
@@ -296,13 +296,20 @@ async fn remote_console_bridge(
             Err(_) => continue,
         };
 
+        // Only use TLS connector for wss:// URLs; plain ws:// must connect without TLS
+        let connector = if url.starts_with("wss://") {
+            Some(tokio_tungstenite::Connector::Rustls(tls_config.clone()))
+        } else {
+            None
+        };
+
         match tokio::time::timeout(
             std::time::Duration::from_secs(3),
             tokio_tungstenite::connect_async_tls_with_config(
                 ws_request,
                 None,
                 false,
-                tls_connector.clone(),
+                connector,
             ),
         ).await {
             Ok(Ok((stream, _))) => {
