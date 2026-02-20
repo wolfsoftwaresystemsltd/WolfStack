@@ -53,7 +53,7 @@
                     style="width:36px;height:36px;"></div>
             <div>
                 <h1>WolfStack</h1>
-                <span class="version">v9.9.9</span>
+                <span class="version">v9.9.10</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -637,6 +637,16 @@
                                 <option value="6h" style="background:var(--bg-card);">Every 6 Hours</option>
                                 <option value="12h" style="background:var(--bg-card);">Every 12 Hours</option>
                                 <option value="daily" style="background:var(--bg-card);">Daily</option>
+                            </select>
+                        </div>
+                        <div
+                            style="display:flex; align-items:center; gap:6px; background:var(--bg-input); border:1px solid var(--border); border-radius:8px; padding:4px 10px;">
+                            <span style="font-size:11px; color:var(--text-muted); white-space:nowrap;">📦
+                                Channel:</span>
+                            <select id="issues-channel-select"
+                                style="background:transparent; border:none; color:var(--text-primary); font-size:12px; font-weight:500; cursor:pointer; outline:none; font-family:inherit;">
+                                <option value="master" style="background:var(--bg-card);">Stable (master)</option>
+                                <option value="beta" style="background:var(--bg-card);">Beta</option>
                             </select>
                         </div>
                         <button class="btn" onclick="issuesUpgradeAll()" id="issues-upgrade-all-btn"
@@ -3741,7 +3751,7 @@ region = us-east-1"></textarea>
             async function handleLogout() {
                 await fetch('/api/auth/logout', { method: 'POST' });
                 window.location.href = '/login.html';
-            }
+    }
         </script>
         <script>
             // Create AI Chat Bubble & Panel dynamically on document.body
@@ -3800,7 +3810,7 @@ region = us-east-1"></textarea>
                         bubble.style.display = 'flex';
                     }
                 }).catch(function () { });
-            })();
+        ;
         </script>
 
 </body>

@@ -12485,11 +12485,12 @@ async function issuesUpgradeAll() {
         modal.addRow(safeId, r.hostname || r.node_id);
     });
 
+    var channel = (document.getElementById('issues-channel-select') || {}).value || 'master';
     for (var i = 0; i < targets.length; i++) {
         var r = targets[i];
         var node = allNodes.find(function (n) { return n.id === r.node_id; });
         var safeId = (r.node_id || 'local').replace(/[^a-z0-9_-]/gi, '-');
-        var url = (node && !node.is_self) ? '/api/nodes/' + encodeURIComponent(r.node_id) + '/proxy/upgrade' : '/api/upgrade';
+        var url = (node && !node.is_self) ? '/api/nodes/' + encodeURIComponent(r.node_id) + '/proxy/upgrade?channel=' + channel : '/api/upgrade?channel=' + channel;
         try {
             await fetch(url, { method: 'POST' });
             modal.updateRow(safeId, true, 'Command sent \u2713');

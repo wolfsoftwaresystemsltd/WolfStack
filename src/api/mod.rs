@@ -5815,22 +5815,32 @@ fn import_nodes(nodes_val: &serde_json::Value, state: &web::Data<AppState>) -> R
 }
 
 /// POST /api/upgrade — run the WolfStack upgrade script in the background
+/// Optional query param: ?channel=beta (defaults to master)
 pub async fn system_upgrade(
     req: HttpRequest, state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    info!("System upgrade triggered via API");
+
+    let channel = query.get("channel").map(|s| s.as_str()).unwrap_or("master");
+    let (branch, flag) = if channel == "beta" { ("beta", " --beta") } else { ("master", "") };
+    info!("System upgrade triggered via API (channel: {})", branch);
+
+    let cmd = format!(
+        "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/{}/setup.sh | sudo bash -s --{}",
+        branch, flag
+    );
 
     // Spawn the upgrade script as a detached background process
     match std::process::Command::new("bash")
-        .args(["-c", "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash"])
+        .args(["-c", &cmd])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
     {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({
-            "message": "Upgrade started — WolfStack will restart automatically when complete."
+            "message": format!("Upgrade started ({} channel) — WolfStack will restart automatically when complete.", branch)
         })),
         Err(e) => {
             error!("Failed to start upgrade: {}", e);
