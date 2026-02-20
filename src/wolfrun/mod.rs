@@ -238,7 +238,10 @@ impl WolfRunState {
     pub fn scale(&self, id: &str, replicas: u32) -> bool {
         let mut svcs = self.services.write().unwrap();
         if let Some(svc) = svcs.iter_mut().find(|s| s.id == id) {
-            // Clamp to min/max bounds
+            // Auto-raise max if user is scaling beyond current max
+            if replicas > svc.max_replicas {
+                svc.max_replicas = replicas;
+            }
             let clamped = replicas.max(svc.min_replicas).min(svc.max_replicas);
             svc.replicas = clamped;
             svc.updated_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
