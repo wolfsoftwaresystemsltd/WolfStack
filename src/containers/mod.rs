@@ -2991,6 +2991,25 @@ pub fn next_available_wolfnet_ip() -> Option<String> {
     used.insert("10.10.10.1".to_string());
     used.insert("10.10.10.255".to_string());
 
+    // Scan live IPs on wolfnet0 interface (catches VIPs, manual assignments)
+    if let Ok(output) = std::process::Command::new("ip")
+        .args(["addr", "show", "wolfnet0"])
+        .output() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            // Lines like: "inet 10.10.10.3/24 ..." or "inet 10.10.10.40/32 ..."
+            if trimmed.starts_with("inet ") {
+                if let Some(cidr) = trimmed.split_whitespace().nth(1) {
+                    let ip = cidr.split('/').next().unwrap_or("").to_string();
+                    if !ip.is_empty() {
+                        used.insert(ip);
+                    }
+                }
+            }
+        }
+    }
+
     // Scan all LXC containers for WolfNet IPs
     if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
         for entry in entries.flatten() {
@@ -3029,6 +3048,46 @@ pub fn next_available_wolfnet_ip() -> Option<String> {
             let ip = line.trim().to_string();
             if !ip.is_empty() && ip != "<no value>" {
                 used.insert(ip);
+            }
+        }
+    }
+
+    // Scan WolfRun services for service VIPs and all instance WolfNet IPs
+    // This prevents VIP or remote-node container IPs from being re-allocated
+    if let Ok(content) = std::fs::read_to_string("/etc/wolfstack/wolfrun/services.json") {
+        if let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+            for svc in &services {
+                // Service VIP
+                if let Some(vip) = svc.get("service_ip").and_then(|v| v.as_str()) {
+                    if !vip.is_empty() {
+                        used.insert(vip.to_string());
+                    }
+                }
+                // All instance WolfNet IPs (may be on remote nodes)
+                if let Some(instances) = svc.get("instances").and_then(|v| v.as_array()) {
+                    for inst in instances {
+                        if let Some(ip) = inst.get("wolfnet_ip").and_then(|v| v.as_str()) {
+                            if !ip.is_empty() {
+                                used.insert(ip.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Scan IP mappings to avoid colliding with port-forward destinations
+    if let Ok(content) = std::fs::read_to_string("/etc/wolfstack/ip-mappings.json") {
+        if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(mappings) = wrapper.get("mappings").and_then(|v| v.as_array()) {
+                for m in mappings {
+                    if let Some(ip) = m.get("wolfnet_ip").and_then(|v| v.as_str()) {
+                        if !ip.is_empty() {
+                            used.insert(ip.to_string());
+                        }
+                    }
+                }
             }
         }
     }
