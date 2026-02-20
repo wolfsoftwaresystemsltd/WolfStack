@@ -7342,10 +7342,61 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
 
-    // Clean up LB iptables rules (but leave containers running)
+    // Clean up cloned containers (names containing "wolfrun") but keep the original template
     if let Some(svc) = state.wolfrun.get(&id) {
+        // Clean up LB iptables rules
         if let Some(ref vip) = svc.service_ip {
             crate::wolfrun::remove_lb_rules_for_vip(vip);
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .danger_accept_invalid_certs(true)
+            .build()
+            .ok();
+
+        for inst in &svc.instances {
+            // Only destroy clones (contain "wolfrun" in name), leave original template
+            if !inst.container_name.contains("wolfrun") {
+                info!("WolfRun delete: keeping original template '{}'", inst.container_name);
+                continue;
+            }
+
+            info!("WolfRun delete: destroying clone '{}'", inst.container_name);
+
+            if let Some(node) = state.cluster.get_node(&inst.node_id) {
+                if node.is_self {
+                    // Local: stop and destroy directly
+                    match svc.runtime {
+                        crate::wolfrun::Runtime::Docker => {
+                            let _ = crate::containers::docker_stop(&inst.container_name);
+                            let _ = crate::containers::docker_remove(&inst.container_name);
+                        }
+                        crate::wolfrun::Runtime::Lxc => {
+                            let _ = crate::containers::lxc_stop(&inst.container_name);
+                            let _ = crate::containers::lxc_destroy(&inst.container_name);
+                        }
+                    }
+                } else if let Some(ref c) = client {
+                    // Remote: call delete API
+                    let path = match svc.runtime {
+                        crate::wolfrun::Runtime::Docker => format!("/api/containers/docker/{}", inst.container_name),
+                        crate::wolfrun::Runtime::Lxc => format!("/api/containers/lxc/{}", inst.container_name),
+                    };
+                    let urls = build_node_urls(&node.address, node.port, &path);
+                    for url in &urls {
+                        if let Ok(resp) = c.delete(url)
+                            .header("X-WolfStack-Secret", &state.cluster_secret)
+                            .send().await
+                        {
+                            if resp.status().is_success() {
+                                info!("WolfRun delete: remote destroy of '{}' on {} succeeded", inst.container_name, node.hostname);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 

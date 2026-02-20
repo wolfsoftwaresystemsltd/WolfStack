@@ -13899,7 +13899,7 @@ async function wolfrunScale(serviceId, newReplicas) {
 }
 
 async function wolfrunDelete(serviceId, serviceName) {
-    if (!confirm(`Remove "${serviceName}" from WolfRun? Containers will keep running but won't be orchestrated.`)) return;
+    if (!confirm(`Delete "${serviceName}"?\n\n• Cloned containers will be DESTROYED\n• Your original template container will be kept`)) return;
     try {
         const resp = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}`), { method: 'DELETE' });
         if (resp.ok) {
