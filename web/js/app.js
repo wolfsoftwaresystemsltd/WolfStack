@@ -12609,7 +12609,8 @@ function renderGwnTable() {
     } else {
         sorted.forEach(function (r) {
             var typeIcon = r.type === 'WolfNet' ? '\uD83C\uDF10' : r.type === 'LXC' ? '\uD83D\uDCE6' : r.type === 'Docker' ? '\uD83D\uDC33' : '\uD83D\uDDA5\uFE0F';
-            html += '<tr><td>' + escapeHtml(r.server) + '</td><td>' + typeIcon + ' ' + escapeHtml(r.type) + '</td><td>' + escapeHtml(r.name) + '</td><td><code>' + escapeHtml(r.ip || '—') + '</code></td><td>' + escapeHtml(r.state) + '</td></tr>';
+            var bg = r.type === 'WolfNet' ? 'rgba(59,130,246,0.08)' : r.type === 'LXC' ? 'rgba(234,179,8,0.08)' : r.type === 'Docker' ? 'rgba(99,102,241,0.08)' : r.type === 'VM' ? 'rgba(16,185,129,0.08)' : 'transparent';
+            html += '<tr style="background:' + bg + ';"><td>' + escapeHtml(r.server) + '</td><td>' + typeIcon + ' ' + escapeHtml(r.type) + '</td><td>' + escapeHtml(r.name) + '</td><td><code>' + escapeHtml(r.ip || '—') + '</code></td><td>' + escapeHtml(r.state) + '</td></tr>';
         });
     }
     html += '</tbody></table></div></div>';
@@ -12654,7 +12655,9 @@ async function scanGlobalWolfNet() {
         rows.forEach(function (r) {
             gwnScanData.push(r);
             var typeIcon = r.type === 'WolfNet' ? '\uD83C\uDF10' : r.type === 'LXC' ? '\uD83D\uDCE6' : r.type === 'Docker' ? '\uD83D\uDC33' : '\uD83D\uDDA5\uFE0F';
+            var bg = r.type === 'WolfNet' ? 'rgba(59,130,246,0.08)' : r.type === 'LXC' ? 'rgba(234,179,8,0.08)' : r.type === 'Docker' ? 'rgba(99,102,241,0.08)' : r.type === 'VM' ? 'rgba(16,185,129,0.08)' : 'transparent';
             var tr = document.createElement('tr');
+            tr.style.background = bg;
             tr.innerHTML = '<td>' + escapeHtml(r.server) + '</td><td>' + typeIcon + ' ' + escapeHtml(r.type) + '</td><td>' + escapeHtml(r.name) + '</td><td><code>' + escapeHtml(r.ip || '\u2014') + '</code></td><td>' + escapeHtml(r.state) + '</td>';
             tbody.appendChild(tr);
         });
