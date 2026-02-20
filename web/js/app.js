@@ -13903,19 +13903,83 @@ async function wolfrunScale(serviceId, newReplicas) {
     }
 }
 
+let wolfrunDeleteServiceId = null;
+
 async function wolfrunDelete(serviceId, serviceName) {
-    if (!confirm(`Delete "${serviceName}"?\n\n• Cloned containers will be DESTROYED\n• Your original template container will be kept`)) return;
+    wolfrunDeleteServiceId = serviceId;
+    document.getElementById('wolfrun-delete-name').textContent = serviceName;
+    document.getElementById('wolfrun-delete-confirm').style.display = '';
+    document.getElementById('wolfrun-delete-progress').style.display = 'none';
+    document.getElementById('wolfrun-delete-log').innerHTML = '';
+
+    // Fetch service details to show instances
+    const instDiv = document.getElementById('wolfrun-delete-instances');
+    instDiv.innerHTML = '<span style="color:var(--text-muted);">Loading...</span>';
     try {
-        const resp = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}`), { method: 'DELETE' });
+        const resp = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}`));
         if (resp.ok) {
-            showToast(`Service "${serviceName}" deleted`, 'success');
-            loadWolfRunServices();
-        } else {
-            const data = await resp.json();
-            showToast(data.error || 'Delete failed', 'error');
+            const svc = await resp.json();
+            if (svc.instances && svc.instances.length > 0) {
+                instDiv.innerHTML = svc.instances.map(inst => {
+                    const isClone = inst.container_name.includes('wolfrun');
+                    return `<div style="padding:4px 0; border-bottom:1px solid var(--border-color);">
+                        ${isClone ? '🗑️' : '🛡️'} <strong>${inst.container_name}</strong>
+                        <span style="color:var(--text-muted);">on ${inst.node_id.slice(0, 8)}…</span>
+                        ${isClone
+                            ? '<span style="color:#ef4444; float:right;">WILL BE DESTROYED</span>'
+                            : '<span style="color:#10b981; float:right;">KEPT (template)</span>'
+                        }
+                    </div>`;
+                }).join('');
+            } else {
+                instDiv.innerHTML = '<span style="color:var(--text-muted);">No instances</span>';
+            }
         }
     } catch (e) {
-        showToast('Delete failed: ' + e.message, 'error');
+        instDiv.innerHTML = '<span style="color:#ef4444;">Could not load instances</span>';
+    }
+
+    document.getElementById('wolfrun-delete-modal').classList.add('active');
+}
+
+function closeWolfRunDeleteModal() {
+    document.getElementById('wolfrun-delete-modal').classList.remove('active');
+}
+
+async function executeWolfRunDelete() {
+    const log = document.getElementById('wolfrun-delete-log');
+    document.getElementById('wolfrun-delete-confirm').style.display = 'none';
+    document.getElementById('wolfrun-delete-progress').style.display = '';
+
+    function addLog(msg, color) {
+        log.innerHTML += `<div style="color:${color || 'var(--text-primary)'}">${msg}</div>`;
+        log.scrollTop = log.scrollHeight;
+    }
+
+    addLog('🔄 Starting service deletion...', 'var(--text-muted)');
+
+    try {
+        const resp = await fetch(apiUrl(`/api/wolfrun/services/${wolfrunDeleteServiceId}`), { method: 'DELETE' });
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data.destroyed && data.destroyed.length > 0) {
+                data.destroyed.forEach(c => addLog(`🗑️ Destroyed clone: ${c}`, '#ef4444'));
+            }
+            if (data.kept && data.kept.length > 0) {
+                data.kept.forEach(c => addLog(`🛡️ Kept template: ${c}`, '#10b981'));
+            }
+            addLog('', '');
+            addLog('✅ Service deleted successfully!', '#10b981');
+            setTimeout(() => {
+                closeWolfRunDeleteModal();
+                loadWolfRunServices();
+            }, 1500);
+        } else {
+            const data = await resp.json().catch(() => ({}));
+            addLog(`❌ Delete failed: ${data.error || resp.statusText}`, '#ef4444');
+        }
+    } catch (e) {
+        addLog(`❌ Error: ${e.message}`, '#ef4444');
     }
 }
 

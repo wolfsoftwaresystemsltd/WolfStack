@@ -7342,6 +7342,9 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
 
+    let mut destroyed: Vec<String> = Vec::new();
+    let mut kept: Vec<String> = Vec::new();
+
     // Clean up cloned containers (names containing "wolfrun") but keep the original template
     if let Some(svc) = state.wolfrun.get(&id) {
         // Clean up LB iptables rules
@@ -7359,6 +7362,7 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
             // Only destroy clones (contain "wolfrun" in name), leave original template
             if !inst.container_name.contains("wolfrun") {
                 info!("WolfRun delete: keeping original template '{}'", inst.container_name);
+                kept.push(inst.container_name.clone());
                 continue;
             }
 
@@ -7366,7 +7370,6 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
 
             if let Some(node) = state.cluster.get_node(&inst.node_id) {
                 if node.is_self {
-                    // Local: stop and destroy directly
                     match svc.runtime {
                         crate::wolfrun::Runtime::Docker => {
                             let _ = crate::containers::docker_stop(&inst.container_name);
@@ -7377,8 +7380,8 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
                             let _ = crate::containers::lxc_destroy(&inst.container_name);
                         }
                     }
+                    destroyed.push(inst.container_name.clone());
                 } else if let Some(ref c) = client {
-                    // Remote: call delete API
                     let path = match svc.runtime {
                         crate::wolfrun::Runtime::Docker => format!("/api/containers/docker/{}", inst.container_name),
                         crate::wolfrun::Runtime::Lxc => format!("/api/containers/lxc/{}", inst.container_name),
@@ -7390,7 +7393,7 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
                             .send().await
                         {
                             if resp.status().is_success() {
-                                info!("WolfRun delete: remote destroy of '{}' on {} succeeded", inst.container_name, node.hostname);
+                                destroyed.push(inst.container_name.clone());
                             }
                             break;
                         }
@@ -7401,7 +7404,11 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
     }
 
     match state.wolfrun.delete(&id) {
-        Some(_) => HttpResponse::Ok().json(serde_json::json!({ "deleted": true })),
+        Some(_) => HttpResponse::Ok().json(serde_json::json!({
+            "deleted": true,
+            "destroyed": destroyed,
+            "kept": kept,
+        })),
         None => HttpResponse::NotFound().json(serde_json::json!({ "error": "Service not found" })),
     }
 }

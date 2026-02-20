@@ -998,6 +998,37 @@
                 </div>
             </div>
         </div>
+
+        <!-- Service Delete Modal -->
+        <div id="wolfrun-delete-modal" class="modal-overlay">
+            <div class="modal" style="max-width:480px; width:90%;">
+                <div class="modal-header">
+                    <h3>🗑️ Delete Service — <span id="wolfrun-delete-name"></span></h3>
+                    <button class="modal-close" onclick="closeWolfRunDeleteModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div id="wolfrun-delete-confirm" style="text-align:center;">
+                        <div style="font-size:48px; margin-bottom:12px;">⚠️</div>
+                        <p style="font-size:14px; margin-bottom:16px;">This will <strong>destroy all cloned
+                                containers</strong> created by WolfRun scaling.</p>
+                        <p style="font-size:13px; color:var(--text-muted); margin-bottom:20px;">Your original template
+                            container will be kept safe.</p>
+                        <div id="wolfrun-delete-instances"
+                            style="text-align:left; background:var(--bg-secondary); border-radius:8px; padding:12px; margin-bottom:16px; max-height:200px; overflow-y:auto; font-size:12px; font-family:monospace;">
+                        </div>
+                        <button class="btn" style="margin-right:8px;"
+                            onclick="closeWolfRunDeleteModal()">Cancel</button>
+                        <button class="btn" style="background:#ef4444; color:white;"
+                            onclick="executeWolfRunDelete()">🗑️ Delete Now</button>
+                    </div>
+                    <div id="wolfrun-delete-progress" style="display:none;">
+                        <div id="wolfrun-delete-log"
+                            style="background:var(--bg-secondary); border-radius:8px; padding:12px; min-height:80px; max-height:250px; overflow-y:auto; font-size:12px; font-family:monospace; line-height:1.8;">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
         </div>
 
         <!-- ═══ Issues Page ═══ -->
