@@ -4554,12 +4554,11 @@ function openNodeSettings(nodeId) {
                             <span style="font-weight:600;font-size:13px;color:var(--text,#fff);">🔒 Disable Direct Login</span>
                             <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Prevent users from logging in directly. The server will still be accessible via the primary dashboard.</div>
                         </div>
-                        <label style="position:relative;display:inline-block;width:44px;height:24px;flex-shrink:0;margin-left:16px;">
-                            <input type="checkbox" id="node-settings-login-disabled" ${node.login_disabled ? 'checked' : ''}
-                                style="opacity:0;width:0;height:0;position:absolute;">
-                            <span onclick="this.previousElementSibling.checked=!this.previousElementSibling.checked" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:${node.login_disabled ? 'var(--accent,#6366f1)' : 'var(--bg-input,#1e1e2e)'};transition:.3s;border-radius:24px;border:1px solid var(--border,#333);"></span>
-                            <span onclick="this.previousElementSibling.previousElementSibling.checked=!this.previousElementSibling.previousElementSibling.checked" style="position:absolute;content:'';height:18px;width:18px;left:${node.login_disabled ? '22px' : '3px'};bottom:3px;background:white;transition:.3s;border-radius:50%;pointer-events:none;"></span>
-                        </label>
+                        <div onclick="(function(el){var cb=el.querySelector('input');cb.checked=!cb.checked;var t=el.querySelector('.toggle-track'),k=el.querySelector('.toggle-knob');t.style.background=cb.checked?'var(--accent,#6366f1)':'var(--bg-input,#1e1e2e)';k.style.left=cb.checked?'22px':'3px';})(this)" style="position:relative;display:inline-block;width:44px;height:24px;flex-shrink:0;margin-left:16px;cursor:pointer;">
+                            <input type="checkbox" id="node-settings-login-disabled" ${node.login_disabled ? 'checked' : ''} style="opacity:0;width:0;height:0;position:absolute;">
+                            <span class="toggle-track" style="position:absolute;top:0;left:0;right:0;bottom:0;background:${node.login_disabled ? 'var(--accent,#6366f1)' : 'var(--bg-input,#1e1e2e)'};transition:.3s;border-radius:24px;border:1px solid var(--border,#333);"></span>
+                            <span class="toggle-knob" style="position:absolute;height:18px;width:18px;left:${node.login_disabled ? '22px' : '3px'};bottom:3px;background:white;transition:.3s;border-radius:50%;pointer-events:none;"></span>
+                        </div>
                     </div>
                 </div>
             </div>
