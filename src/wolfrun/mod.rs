@@ -433,17 +433,30 @@ pub fn schedule(
     // Filter eligible nodes
     let eligible: Vec<_> = nodes.iter().filter(|n| {
         // Must be online
-        if !n.online { return false; }
+        if !n.online {
+            debug!("WolfRun schedule: skipping {} — offline", n.hostname);
+            return false;
+        }
         // Must have the required runtime
         match service.runtime {
-            Runtime::Docker => { if !n.has_docker { return false; } }
-            Runtime::Lxc => { if !n.has_lxc { return false; } }
+            Runtime::Docker => { if !n.has_docker {
+                debug!("WolfRun schedule: skipping {} — no Docker", n.hostname);
+                return false;
+            } }
+            Runtime::Lxc => { if !n.has_lxc {
+                debug!("WolfRun schedule: skipping {} — no LXC", n.hostname);
+                return false;
+            } }
         }
         // Must be in the same cluster
         let node_cluster = n.cluster_name.as_deref().unwrap_or("WolfStack");
-        if node_cluster != service.cluster_name { return false; }
+        if node_cluster != service.cluster_name {
+            debug!("WolfRun schedule: skipping {} — cluster '{}' != service '{}'", n.hostname, node_cluster, service.cluster_name);
+            return false;
+        }
         // Must be in the allowed nodes list (if specified)
         if !service.allowed_nodes.is_empty() && !service.allowed_nodes.contains(&n.id) {
+            debug!("WolfRun schedule: skipping {} — not in allowed_nodes", n.hostname);
             return false;
         }
         // Check placement constraints
@@ -454,7 +467,18 @@ pub fn schedule(
     }).collect();
 
     if eligible.is_empty() {
-        warn!("WolfRun: no eligible nodes for service {} in cluster {}", service.name, service.cluster_name);
+        // Show WHY no nodes matched
+        let reasons: Vec<String> = nodes.iter().map(|n| {
+            if !n.online { return format!("{}: offline", n.hostname); }
+            match service.runtime {
+                Runtime::Docker => { if !n.has_docker { return format!("{}: no Docker", n.hostname); } }
+                Runtime::Lxc => { if !n.has_lxc { return format!("{}: no LXC (has_lxc=false)", n.hostname); } }
+            }
+            let nc = n.cluster_name.as_deref().unwrap_or("WolfStack");
+            if nc != service.cluster_name { return format!("{}: cluster '{}' != '{}'", n.hostname, nc, service.cluster_name); }
+            format!("{}: unknown", n.hostname)
+        }).collect();
+        warn!("WolfRun: no eligible nodes for service {} in cluster {} — reasons: {:?}", service.name, service.cluster_name, reasons);
         return None;
     }
 
@@ -753,11 +777,17 @@ pub async fn reconcile(
                                         info!("WolfRun: local clone success: {}", msg);
                                         // lxc_clone_local already called lxc_clone_fixup_ip
                                         // (unique bridge IP + MAC + wolfnet marker removal)
-                                        // Just start the clone
-                                        let start_result = crate::containers::lxc_start(&clone_name);
-                                        if start_result.is_err() {
-                                            std::thread::sleep(std::time::Duration::from_secs(2));
-                                            let _ = crate::containers::lxc_start(&clone_name);
+                                        // Start the clone
+                                        match crate::containers::lxc_start(&clone_name) {
+                                            Ok(_) => info!("WolfRun: started clone {}", clone_name),
+                                            Err(ref e) => {
+                                                warn!("WolfRun: lxc_start failed for {}: {}", clone_name, e);
+                                                // Retry once after delay
+                                                std::thread::sleep(std::time::Duration::from_secs(2));
+                                                if let Err(e2) = crate::containers::lxc_start(&clone_name) {
+                                                    warn!("WolfRun: lxc_start retry also failed for {}: {}", clone_name, e2);
+                                                }
+                                            }
                                         }
                                         // Allocate a fresh wolfnet IP for the clone
                                         if let Some(ip) = crate::containers::next_available_wolfnet_ip() {
