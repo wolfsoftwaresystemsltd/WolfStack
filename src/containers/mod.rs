@@ -3597,6 +3597,24 @@ fn pct_next_vmid() -> Result<u32, String> {
     cleaned.parse::<u32>().map_err(|e| format!("Invalid VMID '{}': {}", cleaned, e))
 }
 
+/// Find a Proxmox VMID by container hostname/name
+fn pct_find_vmid(name: &str) -> Option<u32> {
+    let output = Command::new("pct").arg("list").output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 {
+            let vmid = parts[0];
+            let hostname = parts[2..].join(" ");
+            // Match by hostname or VMID
+            if hostname == name || vmid == name {
+                return vmid.parse().ok();
+            }
+        }
+    }
+    None
+}
+
 /// Download a template to Proxmox's template storage if not already cached
 fn pct_ensure_template(storage: &str, distribution: &str, release: &str, architecture: &str) -> Result<String, String> {
     // Check if template already exists
@@ -5096,3 +5114,86 @@ pub fn docker_list_volumes(container: &str) -> Vec<ContainerMount> {
         _ => Vec::new(),
     }
 }
+
+/// Export a Docker container as a tar image for migration.
+/// Uses `docker commit` to snapshot the container state, then `docker save` to tar.
+#[allow(dead_code)]
+pub fn docker_export(container_name: &str) -> Result<String, String> {
+    let image_tag = format!("wolfrun-migrate:{}", container_name);
+    let tar_path = format!("/tmp/wolfrun-migrate-{}.tar", container_name);
+    info!("Exporting Docker container '{}' to {}", container_name, tar_path);
+
+    // Commit the container to an image
+    let output = Command::new("docker")
+        .args(["commit", container_name, &image_tag])
+        .output()
+        .map_err(|e| format!("docker commit failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!("docker commit failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+
+    // Save the image to a tar file
+    let output = Command::new("docker")
+        .args(["save", "-o", &tar_path, &image_tag])
+        .output()
+        .map_err(|e| format!("docker save failed: {}", e))?;
+
+    // Clean up the temporary image
+    let _ = Command::new("docker").args(["rmi", &image_tag]).output();
+
+    if output.status.success() {
+        info!("Exported Docker '{}' to {} ({})", container_name, tar_path,
+            std::fs::metadata(&tar_path).map(|m| format!("{} MB", m.len() / 1_048_576)).unwrap_or_default());
+        Ok(tar_path)
+    } else {
+        Err(format!("docker save failed: {}", String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+/// Import a Docker image from a tar file, then create and start a container.
+#[allow(dead_code)]
+pub fn docker_import(
+    container_name: &str,
+    tar_path: &str,
+    ports: &[String],
+    env: &[String],
+    volumes: &[String],
+) -> Result<String, String> {
+    info!("Importing Docker container '{}' from {}", container_name, tar_path);
+
+    // Load the image
+    let output = Command::new("docker")
+        .args(["load", "-i", tar_path])
+        .output()
+        .map_err(|e| format!("docker load failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!("docker load failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+
+    // Parse the loaded image name from stdout (e.g., "Loaded image: wolfrun-migrate:name")
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let image_name = stdout.lines()
+        .find(|l| l.contains("Loaded image"))
+        .and_then(|l| l.split(": ").nth(1))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| format!("wolfrun-migrate:{}", container_name));
+
+    // Create container from the loaded image
+    let wolfnet_ip = next_available_wolfnet_ip();
+    docker_create(
+        container_name, &image_name, ports, env,
+        wolfnet_ip.as_deref(), None, None, None, volumes,
+    )?;
+
+    // Start it
+    docker_start(container_name)?;
+
+    // Clean up the migration image
+    let _ = Command::new("docker").args(["rmi", &image_name]).output();
+
+    info!("Imported Docker '{}' and started", container_name);
+    Ok(format!("Container '{}' imported and running", container_name))
+}
+
