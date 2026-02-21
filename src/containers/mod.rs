@@ -939,7 +939,71 @@ fn find_free_bridge_ip() -> u8 {
         }
     }
 
-    // 4. Randomize and check for collision, retry if needed
+    // 4. GLOBAL: Scan cluster container cache (all remote nodes' containers)
+    //    The heartbeat sync writes container data to /etc/wolfstack/cluster-containers/
+    if let Ok(entries) = std::fs::read_dir("/etc/wolfstack/cluster-containers") {
+        for entry in entries.flatten() {
+            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(containers) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                    for c in &containers {
+                        if let Some(ips) = c.get("ip_address").and_then(|v| v.as_str()) {
+                            for ip_str in ips.split(',') {
+                                let ip = ip_str.trim()
+                                    .replace(" (lxcbr0)", "").replace(" (eth0)", "");
+                                if let Some(last) = ip.strip_prefix("10.0.3.") {
+                                    if let Ok(n) = last.trim().parse::<u8>() {
+                                        used.push(n);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. GLOBAL: Scan WolfRun services for all instance IPs across the cluster
+    if let Ok(content) = std::fs::read_to_string("/etc/wolfstack/wolfrun/services.json") {
+        if let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+            for svc in &services {
+                if let Some(instances) = svc.get("instances").and_then(|v| v.as_array()) {
+                    for inst in instances {
+                        // Check bridge_ip field if tracked
+                        if let Some(ip) = inst.get("bridge_ip").and_then(|v| v.as_str()) {
+                            if let Some(last) = ip.strip_prefix("10.0.3.") {
+                                if let Ok(n) = last.trim().parse::<u8>() {
+                                    used.push(n);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. GLOBAL: Scan IP mappings (port forward destinations may use bridge IPs)
+    if let Ok(content) = std::fs::read_to_string("/etc/wolfstack/ip-mappings.json") {
+        if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(mappings) = wrapper.get("mappings").and_then(|v| v.as_array()) {
+                for m in mappings {
+                    // Check all IP fields for bridge IPs
+                    for key in &["container_ip", "bridge_ip", "ip"] {
+                        if let Some(ip) = m.get(*key).and_then(|v| v.as_str()) {
+                            if let Some(last) = ip.strip_prefix("10.0.3.") {
+                                if let Ok(n) = last.trim().parse::<u8>() {
+                                    used.push(n);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 7. Randomize and check for collision, retry if needed
     used.sort();
     used.dedup();
     for _ in 0..200 {
