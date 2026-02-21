@@ -13730,15 +13730,46 @@ function renderWolfRunServices(services) {
                 </div>
             </div>`;
 
-        return `<tr>
-            <td style="font-weight:600;">${svc.name}</td>
+        // Instance detail rows (container name, node, IP, status)
+        const instanceRows = svc.instances.map(inst => {
+            const instNode = (window.allNodes || []).find(n => n.id === inst.node_id);
+            const instHostname = instNode ? instNode.hostname : inst.node_id.substring(0, 12);
+            const statusColor = inst.status === 'running' ? '#10b981' : (inst.status === 'pending' ? '#eab308' : '#ef4444');
+            const ipHtml = inst.wolfnet_ip
+                ? `<code style="font-size:11px;padding:2px 6px;background:rgba(59,130,246,0.12);border-radius:4px;color:#60a5fa;">${inst.wolfnet_ip}</code>`
+                : '<span style="color:var(--text-muted);font-size:11px;">—</span>';
+            return `<tr class="wolfrun-inst-row wolfrun-inst-${svc.id}" style="display:none; background:var(--bg-input);">
+                <td style="padding-left:32px;font-size:12px;color:var(--text-secondary);">
+                    <span style="color:var(--text-muted);">└</span> 🐳 <code style="font-size:11px;">${inst.container_name}</code>
+                </td>
+                <td colspan="2" style="font-size:12px;">
+                    <span style="padding:2px 8px;border-radius:6px;font-size:11px;background:var(--bg-secondary);border:1px solid var(--border);">${instHostname}</span>
+                </td>
+                <td style="font-size:12px;">${ipHtml}</td>
+                <td>
+                    <span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:${statusColor};">
+                        <span style="width:6px;height:6px;border-radius:50%;background:${statusColor};display:inline-block;"></span>
+                        ${inst.status}
+                    </span>
+                </td>
+                <td colspan="3"></td>
+            </tr>`;
+        }).join('');
+
+        const hasInstances = svc.instances.length > 0;
+        const toggleBtn = hasInstances
+            ? `<span class="wolfrun-toggle" data-svc="${svc.id}" onclick="toggleWolfRunInstances('${svc.id}')" style="cursor:pointer;margin-right:6px;font-size:10px;color:var(--text-muted);transition:transform 0.2s;">▶</span>`
+            : '<span style="display:inline-block;width:16px;"></span>';
+
+        return `<tr style="cursor:pointer;" onclick="toggleWolfRunInstances('${svc.id}')">
+            <td style="font-weight:600;">${toggleBtn}${svc.name}</td>
             <td>${runtimeIcon} ${runtimeLabel}</td>
             <td><code style="font-size:12px;">${svc.image || '—'}</code></td>
             <td>${replicaHtml}</td>
             <td>${statusBadge}</td>
             <td>${nodeHtml}</td>
             <td>${vipHtml}</td>
-            <td style="text-align:right; white-space:nowrap;">
+            <td style="text-align:right; white-space:nowrap;" onclick="event.stopPropagation();">
                 <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'start')" title="Start All" style="padding:4px 8px; font-size:12px; color:#10b981;">▶️</button>
                 <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'stop')" title="Stop All" style="padding:4px 8px; font-size:12px; color:#eab308;">⏹️</button>
                 <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'restart')" title="Restart All" style="padding:4px 8px; font-size:12px; color:#3b82f6;">🔄</button>
@@ -13748,8 +13779,16 @@ function renderWolfRunServices(services) {
                 <button class="btn btn-sm" onclick="openWolfRunPortForward('${svc.id}', '${svc.name}', '${vip || ''}')" title="Port Forward" style="padding:4px 8px; font-size:12px; color:#818cf8;" ${!vip ? 'disabled' : ''}>🔀</button>
                 <button class="btn btn-sm" onclick="wolfrunDelete('${svc.id}', '${svc.name}')" title="Remove" style="padding:4px 8px; font-size:12px; color:#ef4444;">🗑️</button>
             </td>
-        </tr>`;
+        </tr>${instanceRows}`;
     }).join('');
+}
+
+function toggleWolfRunInstances(svcId) {
+    const rows = document.querySelectorAll(`.wolfrun-inst-${svcId}`);
+    const toggle = document.querySelector(`.wolfrun-toggle[data-svc="${svcId}"]`);
+    const visible = rows.length > 0 && rows[0].style.display !== 'none';
+    rows.forEach(r => r.style.display = visible ? 'none' : '');
+    if (toggle) toggle.textContent = visible ? '▶' : '▼';
 }
 
 function openWolfRunDeployModal() {
