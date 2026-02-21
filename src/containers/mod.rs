@@ -15,7 +15,7 @@ use tracing::{info, error, warn};
 
 // ─── WolfNet Route Cache ───
 // Keep container→host route map in memory; only flush to disk when it changes.
-static WOLFNET_ROUTES: std::sync::LazyLock<Mutex<std::collections::HashMap<String, String>>> =
+pub static WOLFNET_ROUTES: std::sync::LazyLock<Mutex<std::collections::HashMap<String, String>>> =
     std::sync::LazyLock::new(|| {
         // Seed from existing routes file on startup
         let mut map = std::collections::HashMap::new();
@@ -42,6 +42,18 @@ pub fn update_wolfnet_routes(new_routes: &std::collections::HashMap<String, Stri
         flush_routes_to_disk(&cache);
     }
     changed
+}
+
+/// Replace the entire route table with the given complete set of routes.
+/// Unlike update_wolfnet_routes (which merges), this is authoritative —
+/// it ensures stale routes are removed and the file reflects current reality.
+pub fn replace_wolfnet_routes(complete_routes: std::collections::HashMap<String, String>) {
+    let mut cache = WOLFNET_ROUTES.lock().unwrap();
+    if *cache == complete_routes {
+        return; // No change — skip disk write + SIGHUP
+    }
+    *cache = complete_routes;
+    flush_routes_to_disk(&cache);
 }
 
 /// Write the route map to /var/run/wolfnet/routes.json and signal WolfNet to reload.

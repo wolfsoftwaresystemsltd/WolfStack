@@ -877,10 +877,50 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
         }
     }
 
-    // Update in-memory route cache; only flushes to disk + SIGHUP if anything changed
-    if !subnet_routes.is_empty() {
-        crate::containers::update_wolfnet_routes(&subnet_routes);
+    // Build updated route table. Strategy:
+    // - Start from existing routes (preserves routes for nodes we couldn't reach)
+    // - Remove entries for nodes we successfully polled (we have fresh data)
+    // - Add all fresh routes (local + successfully polled remote nodes)
+    // This cleans up stale routes without losing routes during temporary outages.
+
+    // 1. Add LOCAL container/VM/VIP IPs → this node's wolfnet IP
+    let local_ips = crate::containers::wolfnet_used_ips();
+    let local_wn_ip = local_ips.first().cloned().unwrap_or_default();
+    if local_ips.len() > 1 {
+        let host_wn_ip = &local_ips[0];
+        for ip in &local_ips[1..] {
+            if !ip.is_empty() && ip != host_wn_ip {
+                subnet_routes.insert(ip.clone(), host_wn_ip.clone());
+            }
+        }
     }
+
+    // 2. subnet_routes now has: local container routes + remote container routes
+
+    // 3. Build the safe replacement: existing routes minus polled nodes, plus fresh data
+    //    Collect which host IPs we have fresh data for (local + successfully polled remotes)
+    let mut fresh_hosts: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if !local_wn_ip.is_empty() {
+        fresh_hosts.insert(local_wn_ip);
+    }
+    for v in subnet_routes.values() {
+        fresh_hosts.insert(v.clone());
+    }
+
+    // Start from existing routes, remove entries for hosts we have fresh data for
+    let existing = crate::containers::WOLFNET_ROUTES.lock().unwrap().clone();
+    let mut final_routes = std::collections::HashMap::new();
+    for (k, v) in &existing {
+        if !fresh_hosts.contains(v) {
+            // Keep routes for hosts we COULDN'T poll (stale but better than nothing)
+            final_routes.insert(k.clone(), v.clone());
+        }
+    }
+    // Add all fresh routes
+    final_routes.extend(subnet_routes);
+
+    // Replace atomically
+    crate::containers::replace_wolfnet_routes(final_routes);
 
     // After polling, detect state changes and send emails
     // Only the node with the lowest ID sends emails to avoid duplicates
