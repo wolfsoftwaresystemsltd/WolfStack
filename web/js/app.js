@@ -14267,8 +14267,17 @@ async function openWolfRunAdoptModal() {
 
     const allContainers = [];
 
+    // Deduplicate cluster nodes by ID to prevent double-scanning
+    const seenNodeIds = new Set();
+    const dedupedNodes = clusterNodes.filter(n => {
+        const key = n.id || 'self';
+        if (seenNodeIds.has(key)) return false;
+        seenNodeIds.add(key);
+        return true;
+    });
+
     // Scan all nodes in parallel
-    const scanPromises = clusterNodes.map(async (node) => {
+    const scanPromises = dedupedNodes.map(async (node) => {
         const containers = [];
         const proxyPrefix = node.is_self ? '' : `/api/nodes/${node.id}/proxy`;
 
@@ -14339,6 +14348,17 @@ async function openWolfRunAdoptModal() {
     results.forEach(r => {
         if (r.status === 'fulfilled') allContainers.push(...r.value);
     });
+
+    // Deduplicate by name@node_id
+    const seenContainers = new Set();
+    const uniqueContainers = allContainers.filter(c => {
+        const key = `${c.name}@${c.node_id}`;
+        if (seenContainers.has(key)) return false;
+        seenContainers.add(key);
+        return true;
+    });
+    allContainers.length = 0;
+    allContainers.push(...uniqueContainers);
 
     document.getElementById('wolfrun-adopt-scanning').style.display = 'none';
     const listEl = document.getElementById('wolfrun-adopt-list');
