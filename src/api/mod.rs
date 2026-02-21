@@ -3060,18 +3060,39 @@ pub async fn wolfnet_next_ip(
         }
     }
 
-    // Inject remote IPs into the in-memory route cache so next_available_wolfnet_ip sees them
-    if !remote_ips.is_empty() {
-        let mut cache = containers::WOLFNET_ROUTES.lock().unwrap();
-        for ip in &remote_ips {
-            if !cache.contains_key(ip) {
-                // Use "remote" as a placeholder peer — the actual peer doesn't matter for allocation
-                cache.insert(ip.clone(), "remote".to_string());
+    // Build a combined set of used IPs (local + remote) for allocation
+    // Do NOT inject into WOLFNET_ROUTES cache — that would corrupt routing
+    // with invalid "remote" gateway values
+    let mut all_used: std::collections::HashSet<String> = remote_ips;
+
+    // Add local used IPs
+    for ip in containers::wolfnet_used_ips() {
+        all_used.insert(ip);
+    }
+
+    // Add IPs from WOLFNET_ROUTES cache (without modifying it)
+    {
+        let cache = containers::WOLFNET_ROUTES.lock().unwrap();
+        for ip in cache.keys() {
+            all_used.insert(ip.clone());
+        }
+    }
+
+    // Add IPs from routes.json
+    if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json") {
+        if let Ok(routes) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
+            for ip in routes.keys() {
+                all_used.insert(ip.clone());
             }
         }
     }
 
-    match containers::next_available_wolfnet_ip() {
+    // Find next available IP in 10.10.10.2-254 that isn't in the combined used set
+    let next_ip = (2..=254u8)
+        .map(|i| format!("10.10.10.{}", i))
+        .find(|ip| !all_used.contains(ip));
+
+    match next_ip {
         Some(ip) => HttpResponse::Ok().json(serde_json::json!({ "ip": ip })),
         None => HttpResponse::Ok().json(serde_json::json!({ "ip": null, "error": "No available IPs in 10.10.10.0/24" })),
     }
