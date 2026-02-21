@@ -13,6 +13,44 @@ use std::process::Command;
 use std::sync::Mutex;
 use tracing::{info, error, warn};
 
+/// One-time WolfNet networking initialization — called at WolfStack startup.
+/// Sets kernel parameters needed for container traffic to flow through wolfnet0.
+pub fn wolfnet_init() {
+    // Check if wolfnet0 exists
+    let exists = Command::new("ip").args(["link", "show", "wolfnet0"]).output()
+        .map(|o| o.status.success()).unwrap_or(false);
+    if !exists {
+        info!("wolfnet0 not found — skipping WolfNet init");
+        return;
+    }
+
+    info!("WolfNet init: setting up kernel networking for container routing");
+
+    // Enable IP forwarding (required for routing between wolfnet0 and lxcbr0)
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]).output();
+
+    // Disable reverse path filtering on wolfnet0 (packets arrive from tunnel,
+    // source IPs don't match wolfnet0's directly-connected subnet)
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.rp_filter=0"]).output();
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.all.rp_filter=0"]).output();
+
+    // Disable ICMP redirects on wolfnet0 (we ARE the router for remote containers,
+    // the kernel shouldn't tell peers to "go direct")
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.send_redirects=0"]).output();
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.all.send_redirects=0"]).output();
+
+    // FORWARD chain: allow traffic between wolfnet0 and lxcbr0 in both directions
+    let check = Command::new("iptables")
+        .args(["-C", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output();
+    if check.map(|o| !o.status.success()).unwrap_or(true) {
+        let _ = Command::new("iptables").args(["-I", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output();
+        let _ = Command::new("iptables").args(["-I", "FORWARD", "-i", "lxcbr0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
+        info!("WolfNet init: added FORWARD rules for wolfnet0 ↔ lxcbr0");
+    }
+
+    info!("WolfNet init: kernel networking ready");
+}
+
 // ─── WolfNet Route Cache ───
 // Keep container→host route map in memory; only flush to disk when it changes.
 pub static WOLFNET_ROUTES: std::sync::LazyLock<Mutex<std::collections::HashMap<String, String>>> =

@@ -135,6 +135,8 @@ async fn main() -> std::io::Result<()> {
     containers::ensure_lxc_bridge();
     // Re-apply host routes for running containers (routes are lost on restart)
     containers::reapply_wolfnet_routes();
+    // Set kernel networking prerequisites for WolfNet container routing
+    containers::wolfnet_init();
 
     // Load built-in cluster secret for inter-node authentication
     let cluster_secret = auth::load_cluster_secret();
