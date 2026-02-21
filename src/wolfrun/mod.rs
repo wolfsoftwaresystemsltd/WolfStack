@@ -657,14 +657,21 @@ pub async fn reconcile(
             rebuild_lb_rules(vip, &backend_ips, &service.ports, &service.lb_policy);
         }
 
-        // 2. Count running instances
+        // 2. Count instances for scaling decisions
+        // Count ALL existing instances (running + stopped) — a stopped container is being
+        // set up and should NOT trigger creating yet another clone.  Only "lost" instances
+        // (containers that vanished from their node) should be replaced.
+        let existing = live_instances.iter()
+            .filter(|i| i.status == "running" || i.status == "stopped")
+            .count() as u32;
         let running = live_instances.iter().filter(|i| i.status == "running").count() as u32;
         let desired = service.replicas;
 
-        // 3. Scale up if under-provisioned
-        if running < desired {
-            let needed = desired - running;
-            info!("WolfRun: service {} ({:?}) needs {} more instances (has {}/{})", service.name, service.runtime, needed, running, desired);
+        // 3. Scale up if under-provisioned (based on EXISTING count, not running)
+        if existing < desired {
+            let needed = desired - existing;
+            info!("WolfRun: service {} ({:?}) needs {} more instances (existing: {}, running: {}, desired: {})",
+                service.name, service.runtime, needed, existing, running, desired);
 
             for i in 0..needed {
                 let current = wolfrun.get(&service.id).unwrap_or(service.clone());
