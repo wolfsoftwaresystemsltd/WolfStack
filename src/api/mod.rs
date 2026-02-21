@@ -7488,31 +7488,48 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
                     }
                     destroyed.push(inst.container_name.clone());
                 } else if let Some(ref c) = client {
-                    // Remote node: stop first, then delete
-                    let stop_path = match svc.runtime {
-                        crate::wolfrun::Runtime::Docker => format!("/api/containers/docker/{}/stop", inst.container_name),
-                        crate::wolfrun::Runtime::Lxc => format!("/api/containers/lxc/{}/stop", inst.container_name),
+                    // Remote node: use the action API to stop then remove
+                    let action_path = match svc.runtime {
+                        crate::wolfrun::Runtime::Docker => format!("/api/containers/docker/{}/action", inst.container_name),
+                        crate::wolfrun::Runtime::Lxc => format!("/api/containers/lxc/{}/action", inst.container_name),
                     };
-                    let stop_urls = build_node_urls(&node.address, node.port, &stop_path);
-                    for url in &stop_urls {
-                        if c.post(url).header("X-WolfStack-Secret", &state.cluster_secret).send().await.is_ok() { break; }
-                    }
+                    let action_urls = build_node_urls(&node.address, node.port, &action_path);
 
-                    // Now delete/destroy
-                    let del_path = match svc.runtime {
-                        crate::wolfrun::Runtime::Docker => format!("/api/containers/docker/{}", inst.container_name),
-                        crate::wolfrun::Runtime::Lxc => format!("/api/containers/lxc/{}", inst.container_name),
-                    };
-                    let del_urls = build_node_urls(&node.address, node.port, &del_path);
-                    for url in &del_urls {
-                        if let Ok(resp) = c.delete(url)
+                    // Stop the container first
+                    for url in &action_urls {
+                        match c.post(url)
                             .header("X-WolfStack-Secret", &state.cluster_secret)
+                            .header("Content-Type", "application/json")
+                            .body(r#"{"action":"stop"}"#)
                             .send().await
                         {
-                            if resp.status().is_success() {
-                                destroyed.push(inst.container_name.clone());
+                            Ok(_) => break,
+                            Err(_) => continue,
+                        }
+                    }
+
+                    // Small delay for container to stop
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                    // Now remove/destroy the container
+                    let remove_action = match svc.runtime {
+                        crate::wolfrun::Runtime::Docker => r#"{"action":"remove"}"#,
+                        crate::wolfrun::Runtime::Lxc => r#"{"action":"destroy"}"#,
+                    };
+                    for url in &action_urls {
+                        match c.post(url)
+                            .header("X-WolfStack-Secret", &state.cluster_secret)
+                            .header("Content-Type", "application/json")
+                            .body(remove_action)
+                            .send().await
+                        {
+                            Ok(resp) => {
+                                if resp.status().is_success() {
+                                    destroyed.push(inst.container_name.clone());
+                                }
+                                break;
                             }
-                            break;
+                            Err(_) => continue,
                         }
                     }
                 }
