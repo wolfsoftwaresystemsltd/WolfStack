@@ -751,11 +751,9 @@ pub async fn reconcile(
                                 match result {
                                     Ok(msg) => {
                                         info!("WolfRun: local clone success: {}", msg);
-                                        // Remove duplicated wolfnet IP marker
-                                        let _ = std::fs::remove_dir_all(format!("/var/lib/lxc/{}/.wolfnet", clone_name));
-                                        // Assign unique bridge IP + MAC (prevents conflict with template)
-                                        crate::containers::lxc_clone_fixup_ip(&clone_name);
-                                        // Start the clone — retry once if first attempt fails
+                                        // lxc_clone_local already called lxc_clone_fixup_ip
+                                        // (unique bridge IP + MAC + wolfnet marker removal)
+                                        // Just start the clone
                                         let start_result = crate::containers::lxc_start(&clone_name);
                                         if start_result.is_err() {
                                             std::thread::sleep(std::time::Duration::from_secs(2));
