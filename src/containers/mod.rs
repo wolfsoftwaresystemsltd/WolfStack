@@ -869,20 +869,23 @@ fn lxc_apply_wolfnet(container: &str) {
             let bridge_ip = assign_container_bridge_ip(container);
             info!("Container {} → bridge={}, wolfnet={}", container, bridge_ip, ip);
 
-            // Apply IPs via lxc-attach (immediate effect)
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", bridge_ip), "dev", "eth0"])
-                .output();
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "route", "replace", "default", "via", "10.0.3.1"])
-                .output();
-            // Restart networking (try all methods for distro compat)
+            // Restart networking FIRST (try all methods for distro compat)
+            // Must happen before adding IPs — netplan apply / systemd-networkd
+            // would wipe IPs added before the restart.
             let _ = Command::new("lxc-attach")
                 .args(["-n", container, "--", "sh", "-c",
                     "systemctl restart systemd-networkd 2>/dev/null; \
                      netplan apply 2>/dev/null; \
                      /etc/init.d/networking restart 2>/dev/null; \
                      true"])
+                .output();
+
+            // Now add bridge IP on eth0 (survives because restart already happened)
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", bridge_ip), "dev", "eth0"])
+                .output();
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "ip", "route", "replace", "default", "via", "10.0.3.1"])
                 .output();
 
             // Add WolfNet IP as secondary /32 on eth0
@@ -3267,6 +3270,16 @@ pub fn next_available_wolfnet_ip() -> Option<String> {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // Cluster-wide: check routes.json which contains ALL container/VIP IPs
+    // from ALL nodes (populated by poll_remote_nodes)
+    if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json") {
+        if let Ok(routes) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
+            for ip in routes.keys() {
+                used.insert(ip.clone());
             }
         }
     }
