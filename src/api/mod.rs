@@ -2141,6 +2141,7 @@ pub struct CloneRequest {
     pub snapshot: Option<bool>,  // LXC only — use copy-on-write clone
     pub storage: Option<String>, // target storage (Proxmox ID or path)
     pub target_node: Option<String>, // clone to a different node in the cluster
+    pub wolfnet_ip: Option<String>,  // pre-allocated wolfnet IP (avoids cross-node conflicts)
 }
 
 #[derive(Deserialize)]
@@ -2286,7 +2287,7 @@ pub async fn lxc_clone(
 
     // Remote clone: export → transfer → import on target node
     if let Some(ref target_node_id) = body.target_node {
-        return lxc_remote_clone(&state, &name, &body.new_name, target_node_id, body.storage.as_deref()).await;
+        return lxc_remote_clone(&state, &name, &body.new_name, target_node_id, body.storage.as_deref(), body.wolfnet_ip.as_deref()).await;
     }
 
     // Local clone — lxc-copy requires container to be stopped
@@ -2319,6 +2320,7 @@ async fn lxc_remote_clone(
     new_name: &str,
     target_node_id: &str,
     storage: Option<&str>,
+    wolfnet_ip: Option<&str>,
 ) -> HttpResponse {
     // 1. Find target node
     let node = match state.cluster.get_node(target_node_id) {
@@ -2382,12 +2384,17 @@ async fn lxc_remote_clone(
     let mut last_err: Option<String> = None;
 
     for import_url in &import_urls {
-        let form = reqwest::multipart::Form::new()
+        let mut form = reqwest::multipart::Form::new()
             .text("new_name", new_name.to_string())
             .text("storage", storage_val.clone())
             .text("meta", meta_json.clone())
             .part("archive", reqwest::multipart::Part::bytes(archive_bytes.clone())
                 .file_name(file_name.clone()));
+
+        // Pass pre-allocated wolfnet IP to avoid cross-node conflicts
+        if let Some(ip) = wolfnet_ip {
+            form = form.text("wolfnet_ip", ip.to_string());
+        }
 
         match client.post(import_url)
             .header("X-WolfStack-Secret", state.cluster_secret.clone())
@@ -2490,7 +2497,7 @@ pub async fn lxc_migrate(
     let new_name = body.new_name.as_deref().unwrap_or(&name);
 
     // Clone to target node
-    let clone_resp = lxc_remote_clone(&state, &name, new_name, &body.target_node, body.storage.as_deref()).await;
+    let clone_resp = lxc_remote_clone(&state, &name, new_name, &body.target_node, body.storage.as_deref(), None).await;
 
     // If clone succeeded, destroy source
     if clone_resp.status().is_success() {
@@ -2585,6 +2592,7 @@ async fn lxc_import_endpoint_inner(
     let mut new_name = String::new();
     let mut storage = None;
     let mut archive_path = None;
+    let mut wolfnet_ip: Option<String> = None;
 
     use futures::StreamExt;
     while let Some(item) = payload.next().await {
@@ -2609,6 +2617,14 @@ async fn lxc_import_endpoint_inner(
                 }
                 let s = String::from_utf8_lossy(&buf).trim().to_string();
                 if !s.is_empty() { storage = Some(s); }
+            }
+            "wolfnet_ip" => {
+                let mut buf = Vec::new();
+                while let Some(chunk) = field.next().await {
+                    if let Ok(data) = chunk { buf.extend_from_slice(&data); }
+                }
+                let s = String::from_utf8_lossy(&buf).trim().to_string();
+                if !s.is_empty() { wolfnet_ip = Some(s); }
             }
             "archive" => {
                 let filename = field.content_disposition()
@@ -2656,8 +2672,9 @@ async fn lxc_import_endpoint_inner(
             // Start the imported container
             let _ = containers::lxc_start(&new_name);
 
-            // Allocate a fresh wolfnet IP (unique across the cluster)
-            if let Some(ip) = containers::next_available_wolfnet_ip() {
+            // Allocate a fresh wolfnet IP — use pre-allocated one from orchestrator if available
+            let ip_to_use = wolfnet_ip.clone().or_else(|| containers::next_available_wolfnet_ip());
+            if let Some(ip) = ip_to_use {
                 let _ = containers::lxc_attach_wolfnet(&new_name, &ip);
                 info!("Imported '{}': started + wolfnet IP {}", new_name, ip);
             }

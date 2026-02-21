@@ -790,18 +790,25 @@ pub async fn reconcile(
 
                             // Register PENDING instance NOW — before clone starts.
                             // This prevents the next reconcile from creating another.
+                            // Pre-allocate wolfnet IP on the orchestrator (has global view
+                            // via services.json + local state) to avoid cross-node conflicts.
+                            let pre_alloc_ip = crate::containers::next_available_wolfnet_ip();
                             wolfrun.add_instance(&service.id, ServiceInstance {
                                 node_id: node_id.clone(),
                                 container_name: clone_name.clone(),
-                                wolfnet_ip: None,
+                                wolfnet_ip: pre_alloc_ip.clone(),
                                 status: "pending".to_string(),
                                 last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
                             });
 
-                            let clone_payload = serde_json::json!({
+                            let mut clone_payload = serde_json::json!({
                                 "new_name": clone_name,
                                 "target_node": node_id,
                             });
+                            // Pass the pre-allocated IP to the target node
+                            if let Some(ref ip) = pre_alloc_ip {
+                                clone_payload["wolfnet_ip"] = serde_json::json!(ip);
+                            }
 
                             let mut ok = false;
                             if let Some(ref sn) = source_node {
