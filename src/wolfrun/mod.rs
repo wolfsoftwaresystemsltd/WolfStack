@@ -755,8 +755,12 @@ pub async fn reconcile(
                                         let _ = std::fs::remove_dir_all(format!("/var/lib/lxc/{}/.wolfnet", clone_name));
                                         // Assign unique bridge IP + MAC (prevents conflict with template)
                                         crate::containers::lxc_clone_fixup_ip(&clone_name);
-                                        // Start the clone
-                                        let _ = crate::containers::lxc_start(&clone_name);
+                                        // Start the clone — retry once if first attempt fails
+                                        let start_result = crate::containers::lxc_start(&clone_name);
+                                        if start_result.is_err() {
+                                            std::thread::sleep(std::time::Duration::from_secs(2));
+                                            let _ = crate::containers::lxc_start(&clone_name);
+                                        }
                                         // Allocate a fresh wolfnet IP for the clone
                                         if let Some(ip) = crate::containers::next_available_wolfnet_ip() {
                                             let _ = crate::containers::lxc_attach_wolfnet(&clone_name, &ip);

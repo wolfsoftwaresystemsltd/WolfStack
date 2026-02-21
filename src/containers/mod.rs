@@ -4695,24 +4695,19 @@ pub fn lxc_clone_snapshot(container: &str, new_name: &str) -> Result<String, Str
     }
 }
 
-/// After cloning, assign a new unique IP so the clone doesn't conflict with the original
 pub fn lxc_clone_fixup_ip(new_name: &str) {
     let new_last = find_free_bridge_ip();
     let new_ip = format!("10.0.3.{}", new_last);
     info!("Assigning new bridge IP {} to cloned container {}", new_ip, new_name);
 
-    // Write multi-distro network config
+    // Write multi-distro network config inside rootfs
     write_container_network_config(new_name, &new_ip);
 
     // Remove WolfNet IP marker from clone (it shouldn't inherit the original's WolfNet IP)
     let wolfnet_dir = format!("/var/lib/lxc/{}/.wolfnet", new_name);
     let _ = std::fs::remove_dir_all(&wolfnet_dir);
 
-    // Remove first-boot marker so the clone gets its own first-boot setup
-    let marker = format!("/var/lib/lxc/{}/.wolfstack_setup_done", new_name);
-    let _ = std::fs::remove_file(&marker);
-
-    // Update the LXC config hwaddr to generate a unique MAC
+    // Update the LXC config: hwaddr (unique MAC) + ipv4.address (unique bridge IP)
     let config_path = format!("/var/lib/lxc/{}/config", new_name);
     if let Ok(config) = std::fs::read_to_string(&config_path) {
         let new_mac = format!("00:16:3e:{:02x}:{:02x}:{:02x}",
@@ -4720,12 +4715,19 @@ pub fn lxc_clone_fixup_ip(new_name: &str) {
         let updated = config.lines().map(|line| {
             if line.starts_with("lxc.net.0.hwaddr") {
                 format!("lxc.net.0.hwaddr = {}", new_mac)
+            } else if line.starts_with("lxc.net.0.ipv4.address") {
+                format!("lxc.net.0.ipv4.address = {}/24", new_ip)
             } else {
                 line.to_string()
             }
         }).collect::<Vec<_>>().join("\n");
         let _ = std::fs::write(&config_path, updated);
     }
+
+    // Write the setup_done marker so lxc_post_start_setup doesn't
+    // redundantly re-assign the bridge IP we just set
+    let marker = format!("/var/lib/lxc/{}/.wolfstack_setup_done", new_name);
+    let _ = std::fs::write(&marker, "cloned");
 }
 
 fn rand_byte() -> u8 {
