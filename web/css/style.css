@@ -425,6 +425,62 @@
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
+/* ─── Deep Red Theme ─── */
+[data-theme="deepred"] {
+    --bg-primary: #100408;
+    --bg-secondary: #1a080e;
+    --bg-card: #240c14;
+    --bg-card-hover: #2e101a;
+    --bg-input: #0e0306;
+    --border: #3a1420;
+    --border-light: #501c2c;
+    --text-primary: #f0dde2;
+    --text-secondary: #b08090;
+    --text-muted: #704858;
+    --accent: #dc2626;
+    --accent-light: #f87171;
+    --accent-glow: rgba(220, 38, 38, 0.18);
+    --success: #10b981;
+    --success-bg: rgba(16, 185, 129, 0.1);
+    --warning: #f59e0b;
+    --warning-bg: rgba(245, 158, 11, 0.1);
+    --danger: #ef4444;
+    --danger-bg: rgba(239, 68, 68, 0.12);
+    --info: #f87171;
+    --info-bg: rgba(248, 113, 113, 0.1);
+    --gradient-main: linear-gradient(135deg, #7f1d1d 0%, #dc2626 50%, #f87171 100%);
+    --gradient-success: linear-gradient(135deg, #10b981 0%, #34d399 100%);
+    --gradient-danger: linear-gradient(135deg, #b91c1c 0%, #ef4444 100%);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 4px 20px rgba(40, 0, 10, 0.6);
+    --shadow-lg: 0 10px 40px rgba(40, 0, 10, 0.7);
+    --shadow-glow: 0 0 30px rgba(220, 38, 38, 0.2);
+}
+
+[data-theme="deepred"] body {
+    background:
+        radial-gradient(ellipse at 20% 15%, rgba(120, 20, 30, 0.25) 0%, transparent 50%),
+        radial-gradient(ellipse at 80% 80%, rgba(80, 10, 20, 0.20) 0%, transparent 50%),
+        radial-gradient(ellipse at 50% 50%, rgba(30, 5, 10, 0.80) 0%, transparent 70%),
+        #100408;
+    background-attachment: fixed;
+}
+
+[data-theme="deepred"] .sidebar {
+    background: rgba(18, 6, 10, 0.95);
+    border-right: 1px solid rgba(120, 30, 50, 0.25);
+}
+
+[data-theme="deepred"] .top-bar {
+    background: rgba(16, 4, 8, 0.95);
+    border-bottom: 1px solid rgba(120, 30, 50, 0.20);
+}
+
+[data-theme="deepred"] .log-viewer {
+    background: #080204;
+    color: #e8a0a0;
+}
+
 /* ─── Settings Page Tabs ─── */
 .settings-tabs {
     display: flex;
