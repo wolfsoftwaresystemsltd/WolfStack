@@ -1069,29 +1069,25 @@ fn find_free_bridge_ip() -> u8 {
     (100u8..=254).find(|i| !used.contains(i)).unwrap_or(100)
 }
 
-/// Assign a unique bridge IP to a container, write network config, return IP string.
-/// Persists the bridge IP to .wolfnet/bridge_ip so it's reused on restart
-/// (prevents accumulating duplicate bridge IPs).
+/// Assign a bridge IP to a container. If a WolfNet IP is provided, derives the
+/// bridge IP from its last octet (10.10.10.101 → 10.0.3.101). Otherwise allocates
+/// the next free bridge IP. Writes network config in either case.
 fn assign_container_bridge_ip(container: &str) -> String {
-    // Check if we already assigned a bridge IP to this container
-    let bridge_ip_file = format!("/var/lib/lxc/{}/.wolfnet/bridge_ip", container);
-    if let Ok(existing) = std::fs::read_to_string(&bridge_ip_file) {
-        let existing = existing.trim().to_string();
-        if !existing.is_empty() {
-            // Reuse the existing bridge IP — don't allocate a new one
-            write_container_network_config(container, &existing);
-            return existing;
+    // Try to derive from wolfnet IP (deterministic — no allocation needed)
+    let wolfnet_ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", container);
+    if let Ok(wolfnet_ip) = std::fs::read_to_string(&wolfnet_ip_file) {
+        let wolfnet_ip = wolfnet_ip.trim();
+        if let Some(last_octet) = wolfnet_ip.rsplit('.').next() {
+            let ip = format!("10.0.3.{}", last_octet);
+            write_container_network_config(container, &ip);
+            return ip;
         }
     }
 
-    // Allocate a new bridge IP
+    // Fallback: allocate next free bridge IP (for containers without WolfNet)
     let last = find_free_bridge_ip();
     let ip = format!("10.0.3.{}", last);
     write_container_network_config(container, &ip);
-
-    // Persist for future reuse
-    let _ = std::fs::write(&bridge_ip_file, &ip);
-
     ip
 }
 
