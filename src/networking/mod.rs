@@ -1599,6 +1599,15 @@ fn apply_mapping_rules(m: &IpMapping) -> Result<(), String> {
         vec![]
     };
 
+    // Check if target is a WolfRun VIP with backends
+    if let Some((backends, lb_policy)) = resolve_wolfrun_vip(&m.wolfnet_ip) {
+        if !backends.is_empty() {
+            return apply_vip_mapping_rules(m, &backends, &lb_policy, &gateway_ip, &proto_args, &src_port_args);
+        }
+    }
+
+    // Standard mapping (non-VIP target)
+
     // Build DNAT destination — include port if dest_ports differs from source
     let dnat_dest = if let Some(ref dp) = m.dest_ports {
         if !dp.is_empty() {
@@ -1611,7 +1620,6 @@ fn apply_mapping_rules(m: &IpMapping) -> Result<(), String> {
     };
 
     // Dest port args (for matching translated traffic in POSTROUTING/FORWARD)
-    // After DNAT, the destination port is the dest_port, so use that for matching
     let dest_port_args: Vec<String> = {
         let effective_ports = m.dest_ports.as_ref().or(m.ports.as_ref());
         if let Some(ports) = effective_ports {
@@ -1636,7 +1644,6 @@ fn apply_mapping_rules(m: &IpMapping) -> Result<(), String> {
     ], &proto_args, &src_port_args, &["-j", "DNAT", "--to-destination", &dnat_dest])?;
 
     // SNAT: ensure return traffic goes back through this gateway
-    // After DNAT, destination port is the translated one
     run_iptables(&[
         "-t", "nat", "-A", "POSTROUTING", "-d", &m.wolfnet_ip,
     ], &proto_args, &dest_port_args, &["-j", "SNAT", "--to-source", &gateway_ip])?;
@@ -1650,10 +1657,154 @@ fn apply_mapping_rules(m: &IpMapping) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve a WolfRun VIP to its backend IPs and LB policy.
+/// Returns None if the IP is not a WolfRun service VIP.
+fn resolve_wolfrun_vip(ip: &str) -> Option<(Vec<String>, String)> {
+    let data = std::fs::read_to_string("/etc/wolfstack/wolfrun/services.json").ok()?;
+    let services: Vec<serde_json::Value> = serde_json::from_str(&data).ok()?;
+    for svc in &services {
+        if svc.get("service_ip").and_then(|v| v.as_str()) == Some(ip) {
+            let lb_policy = svc.get("lb_policy").and_then(|v| v.as_str())
+                .unwrap_or("round_robin").to_string();
+            let backends: Vec<String> = svc.get("instances")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|i| i.get("status").and_then(|s| s.as_str()) == Some("running"))
+                        .filter_map(|i| i.get("wolfnet_ip").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Some((backends, lb_policy));
+        }
+    }
+    None
+}
+
+/// Apply mapping rules for a WolfRun VIP — DNAT directly to backends
+/// with round-robin or ip_hash distribution (same as WolfRun's own LB logic).
+/// This avoids DNAT'ing to the VIP which is a local route (kernel → INPUT → RST).
+fn apply_vip_mapping_rules(
+    m: &IpMapping,
+    backends: &[String],
+    lb_policy: &str,
+    gateway_ip: &str,
+    proto_args: &[String],
+    src_port_args: &[String],
+) -> Result<(), String> {
+    let n = backends.len();
+    let dest_port = m.dest_ports.as_ref().or(m.ports.as_ref())
+        .map(|s| s.as_str()).unwrap_or("");
+
+    let comment = format!("wolfstack-vip-map-{}", m.id);
+
+    for chain in &["PREROUTING", "OUTPUT"] {
+        for (i, backend) in backends.iter().enumerate() {
+            let remaining = n - i;
+
+            let mut args: Vec<String> = vec![
+                "-t".into(), "nat".into(), "-A".into(), chain.to_string(),
+                "-d".into(), m.public_ip.clone(),
+            ];
+
+            // Add protocol + port matching
+            for a in proto_args { args.push(a.clone()); }
+            for a in src_port_args { args.push(a.clone()); }
+
+            // Distribution mode
+            if remaining > 1 {
+                if lb_policy == "ip_hash" {
+                    let prob = 1.0 / remaining as f64;
+                    args.extend_from_slice(&[
+                        "-m".into(), "statistic".into(),
+                        "--mode".into(), "random".into(),
+                        "--probability".into(), format!("{:.6}", prob),
+                    ]);
+                } else {
+                    // round_robin
+                    args.extend_from_slice(&[
+                        "-m".into(), "statistic".into(),
+                        "--mode".into(), "nth".into(),
+                        "--every".into(), remaining.to_string(),
+                        "--packet".into(), "0".into(),
+                    ]);
+                }
+            }
+
+            // DNAT target — include dest port if specified
+            let dnat_dest = if !dest_port.is_empty() {
+                format!("{}:{}", backend, dest_port)
+            } else {
+                backend.clone()
+            };
+
+            args.extend_from_slice(&[
+                "-j".into(), "DNAT".into(),
+                "--to-destination".into(), dnat_dest,
+                "-m".into(), "comment".into(),
+                "--comment".into(), comment.clone(),
+            ]);
+
+            run_iptables_vec(&args)?;
+        }
+    }
+
+    // SNAT + FORWARD for each backend
+    for backend in backends {
+        // SNAT
+        let mut snat_args = vec![
+            "-t".into(), "nat".into(), "-A".into(), "POSTROUTING".into(),
+            "-d".into(), backend.clone(),
+        ];
+        for a in proto_args { snat_args.push(a.clone()); }
+        snat_args.extend_from_slice(&[
+            "-m".into(), "comment".into(), "--comment".into(), comment.clone(),
+            "-j".into(), "SNAT".into(), "--to-source".into(), gateway_ip.to_string(),
+        ]);
+        run_iptables_vec(&snat_args)?;
+
+        // FORWARD (insert at top)
+        let mut fwd_args = vec![
+            "-I".into(), "FORWARD".into(), "1".into(),
+            "-d".into(), backend.clone(),
+        ];
+        for a in proto_args { fwd_args.push(a.clone()); }
+        fwd_args.extend_from_slice(&[
+            "-m".into(), "conntrack".into(), "--ctstate".into(), "DNAT".into(),
+            "-m".into(), "comment".into(), "--comment".into(), comment.clone(),
+            "-j".into(), "ACCEPT".into(),
+        ]);
+        run_iptables_vec(&fwd_args)?;
+    }
+
+    info!("Applied VIP iptables rules for {} → {} ({} backends, {})",
+        m.public_ip, m.wolfnet_ip, n, lb_policy);
+    Ok(())
+}
+
+/// Run iptables with a Vec<String> of args
+fn run_iptables_vec(args: &[String]) -> Result<(), String> {
+    let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let output = Command::new("iptables")
+        .args(&str_args)
+        .output()
+        .map_err(|e| format!("Failed to run iptables: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!("iptables {} failed: {}", str_args.join(" "), stderr));
+    }
+    Ok(())
+}
+
 /// Remove iptables rules for a mapping (best-effort, uses -D instead of -A)
 fn remove_mapping_rules(m: &IpMapping) {
     let gateway_ip = detect_wolfnet_gateway_ip().unwrap_or_default();
 
+    // Try VIP comment-based cleanup first (handles round-robin/ip_hash rules)
+    let vip_comment = format!("wolfstack-vip-map-{}", m.id);
+    let removed_vip = remove_rules_by_comment(&vip_comment);
+
+    // Also remove standard (non-VIP) rules
     let proto_args: Vec<String> = if m.protocol != "all" {
         vec!["-p".into(), m.protocol.clone()]
     } else {
@@ -1710,7 +1861,49 @@ fn remove_mapping_rules(m: &IpMapping) {
         "-D", "FORWARD", "-d", &m.wolfnet_ip,
     ], &proto_args, &dest_port_args, &["-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"]);
 
-    info!("Removed iptables rules for {} → {}", m.public_ip, m.wolfnet_ip);
+    info!("Removed iptables rules for {} → {}{}", m.public_ip, m.wolfnet_ip,
+        if removed_vip > 0 { format!(" ({} VIP rules)", removed_vip) } else { String::new() });
+}
+
+/// Remove all iptables rules matching a comment string (used for VIP cleanup)
+fn remove_rules_by_comment(comment: &str) -> usize {
+    let mut removed = 0;
+    for (table, chains) in &[
+        ("nat", vec!["PREROUTING", "OUTPUT", "POSTROUTING"]),
+        ("filter", vec!["FORWARD"]),
+    ] {
+        for chain in chains {
+            loop {
+                let output = Command::new("iptables")
+                    .args(["-t", table, "-L", chain, "--line-numbers", "-n"])
+                    .output();
+                let text = match output {
+                    Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+                    _ => break,
+                };
+                // Find first rule with our comment (search from bottom to avoid index shift)
+                let mut found = None;
+                for line in text.lines().rev() {
+                    if line.contains(comment) {
+                        if let Some(num) = line.split_whitespace().next().and_then(|n| n.parse::<u32>().ok()) {
+                            found = Some(num);
+                            break;
+                        }
+                    }
+                }
+                match found {
+                    Some(num) => {
+                        let _ = Command::new("iptables")
+                            .args(["-t", table, "-D", chain, &num.to_string()])
+                            .output();
+                        removed += 1;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    removed
 }
 
 /// Run an iptables command with base args + protocol + port + tail args
