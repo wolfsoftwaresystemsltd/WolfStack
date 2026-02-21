@@ -4173,6 +4173,11 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
 
     if output.status.success() {
         info!("LXC container {} created successfully", name);
+
+        // Ensure LXC config has proper networking (the download template often
+        // omits hwaddr, bridge, etc., leaving the container without networking)
+        lxc_ensure_network_config(name);
+
         let storage_info = storage_path.filter(|p| !p.is_empty() && *p != "/var/lib/lxc")
             .map(|p| format!(" on {}", p))
             .unwrap_or_default();
@@ -4708,31 +4713,62 @@ pub fn lxc_clone_fixup_ip(new_name: &str) {
     let wolfnet_dir = format!("/var/lib/lxc/{}/.wolfnet", new_name);
     let _ = std::fs::remove_dir_all(&wolfnet_dir);
 
-    // Update the LXC config: hwaddr (unique MAC) + ipv4.address (unique bridge IP)
+    // Update the LXC config: rootfs path, hostname, hwaddr, ipv4.address, and ensure
+    // all required networking fields are present
     let config_path = format!("/var/lib/lxc/{}/config", new_name);
     if let Ok(config) = std::fs::read_to_string(&config_path) {
         let new_mac = format!("00:16:3e:{:02x}:{:02x}:{:02x}",
             rand_byte(), rand_byte(), new_last);
+        let correct_rootfs = format!("dir:/var/lib/lxc/{}/rootfs", new_name);
         let mut has_hwaddr = false;
+        let mut has_type = false;
+        let mut has_link = false;
+        let mut has_name = false;
+        let mut has_flags = false;
         let mut updated: Vec<String> = config.lines().map(|line| {
-            if line.starts_with("lxc.net.0.hwaddr") {
-                has_hwaddr = true;
-                format!("lxc.net.0.hwaddr = {}", new_mac)
-            } else if line.starts_with("lxc.net.0.ipv4.address") {
-                format!("lxc.net.0.ipv4.address = {}/24", new_ip)
-            } else {
-                line.to_string()
+            let trimmed = line.trim();
+            // Fix rootfs path to point to the new container name
+            if trimmed.starts_with("lxc.rootfs.path") {
+                return format!("lxc.rootfs.path = {}", correct_rootfs);
             }
+            // Fix hostname to match the new container name
+            if trimmed.starts_with("lxc.uts.name") {
+                return format!("lxc.uts.name = {}", new_name);
+            }
+            // Track and update network config fields
+            if trimmed.starts_with("lxc.net.0.hwaddr") {
+                has_hwaddr = true;
+                return format!("lxc.net.0.hwaddr = {}", new_mac);
+            }
+            if trimmed.starts_with("lxc.net.0.type") { has_type = true; }
+            if trimmed.starts_with("lxc.net.0.link") { has_link = true; }
+            if trimmed.starts_with("lxc.net.0.name") { has_name = true; }
+            if trimmed.starts_with("lxc.net.0.flags") { has_flags = true; }
+            if trimmed.starts_with("lxc.net.0.ipv4.address") {
+                return format!("lxc.net.0.ipv4.address = {}/24", new_ip);
+            }
+            line.to_string()
         }).collect();
-        // If the template had no hwaddr line, append one so the clone has a unique MAC
-        if !has_hwaddr {
-            // Insert after the first lxc.net.0 line for clean ordering
-            let insert_pos = updated.iter().position(|l| l.starts_with("lxc.net.0."))
+
+        // Add any missing networking fields
+        let mut net_additions = Vec::new();
+        if !has_type  { net_additions.push("lxc.net.0.type = veth".to_string()); }
+        if !has_link  { net_additions.push("lxc.net.0.link = lxcbr0".to_string()); }
+        if !has_flags { net_additions.push("lxc.net.0.flags = up".to_string()); }
+        if !has_name  { net_additions.push("lxc.net.0.name = eth0".to_string()); }
+        if !has_hwaddr { net_additions.push(format!("lxc.net.0.hwaddr = {}", new_mac)); }
+
+        if !net_additions.is_empty() {
+            // Insert after existing lxc.net.0 lines, or at end
+            let insert_pos = updated.iter().rposition(|l| l.trim().starts_with("lxc.net.0."))
                 .map(|p| p + 1)
                 .unwrap_or(updated.len());
-            updated.insert(insert_pos, format!("lxc.net.0.hwaddr = {}", new_mac));
-            info!("Added missing hwaddr {} to cloned container {}", new_mac, new_name);
+            for (i, line) in net_additions.iter().enumerate() {
+                updated.insert(insert_pos + i, line.clone());
+            }
+            info!("Added missing network config to cloned container {}: {:?}", new_name, net_additions);
         }
+
         let _ = std::fs::write(&config_path, updated.join("\n"));
     }
 
@@ -4740,6 +4776,55 @@ pub fn lxc_clone_fixup_ip(new_name: &str) {
     // redundantly re-assign the bridge IP we just set
     let marker = format!("/var/lib/lxc/{}/.wolfstack_setup_done", new_name);
     let _ = std::fs::write(&marker, "cloned");
+}
+
+/// Ensure an LXC container has proper networking config after creation.
+/// The `lxc-create -t download` template often omits hwaddr, bridge, etc.
+pub fn lxc_ensure_network_config(name: &str) {
+    let config_path = format!("/var/lib/lxc/{}/config", name);
+    let config = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let mut has_type = false;
+    let mut has_link = false;
+    let mut has_name = false;
+    let mut has_flags = false;
+    let mut has_hwaddr = false;
+
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("lxc.net.0.type")  { has_type = true; }
+        if trimmed.starts_with("lxc.net.0.link")  { has_link = true; }
+        if trimmed.starts_with("lxc.net.0.name")  { has_name = true; }
+        if trimmed.starts_with("lxc.net.0.flags") { has_flags = true; }
+        if trimmed.starts_with("lxc.net.0.hwaddr") { has_hwaddr = true; }
+    }
+
+    let mut additions = Vec::new();
+    if !has_type   { additions.push("lxc.net.0.type = veth".to_string()); }
+    if !has_link   { additions.push("lxc.net.0.link = lxcbr0".to_string()); }
+    if !has_flags  { additions.push("lxc.net.0.flags = up".to_string()); }
+    if !has_name   { additions.push("lxc.net.0.name = eth0".to_string()); }
+    if !has_hwaddr {
+        let last = find_free_bridge_ip();
+        let mac = format!("00:16:3e:{:02x}:{:02x}:{:02x}", rand_byte(), rand_byte(), last);
+        additions.push(format!("lxc.net.0.hwaddr = {}", mac));
+    }
+
+    if additions.is_empty() { return; }
+
+    let mut lines: Vec<String> = config.lines().map(|l| l.to_string()).collect();
+    // Insert after existing lxc.net.0 lines, or at end
+    let insert_pos = lines.iter().rposition(|l| l.trim().starts_with("lxc.net.0."))
+        .map(|p| p + 1)
+        .unwrap_or(lines.len());
+    for (i, line) in additions.iter().enumerate() {
+        lines.insert(insert_pos + i, line.clone());
+    }
+    let _ = std::fs::write(&config_path, lines.join("\n"));
+    info!("Ensured network config for container {}: {:?}", name, additions);
 }
 
 fn rand_byte() -> u8 {
