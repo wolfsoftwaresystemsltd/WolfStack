@@ -13807,6 +13807,35 @@ async function executeWolfRunDeploy() {
     btn.disabled = true;
     btn.textContent = '⏳ Deploying...';
 
+    // Show progress log box
+    let logBox = document.getElementById('wolfrun-deploy-log');
+    if (!logBox) {
+        logBox = document.createElement('div');
+        logBox.id = 'wolfrun-deploy-log';
+        logBox.style.cssText = 'margin-top:16px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px 14px; max-height:200px; overflow-y:auto; font-family:"JetBrains Mono",monospace; font-size:12px; line-height:1.8; color:var(--text-secondary);';
+        btn.parentElement.appendChild(logBox);
+    }
+    logBox.style.display = '';
+    logBox.innerHTML = '';
+
+    function logStep(icon, msg, color) {
+        const line = document.createElement('div');
+        line.innerHTML = `<span style="color:${color || 'var(--text-muted)'}">${icon}</span> ${msg}`;
+        logBox.appendChild(line);
+        logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    logStep('📋', `Validating service <b>${name}</b>...`, 'var(--info)');
+    await new Promise(r => setTimeout(r, 300));
+
+    logStep('📦', runtime === 'docker'
+        ? `Image: <b>${payload.image}</b>`
+        : `Template: <b>${payload.lxc_distribution}/${payload.lxc_release}</b>`, 'var(--accent-light)');
+    logStep('🔢', `Replicas: <b>${replicas}</b> | Restart: <b>${restart}</b>`, 'var(--text-secondary)');
+    await new Promise(r => setTimeout(r, 200));
+
+    logStep('📡', 'Sending deployment request to API...', 'var(--warning)');
+
     try {
         const resp = await fetch('/api/wolfrun/services', {
             method: 'POST',
@@ -13815,13 +13844,48 @@ async function executeWolfRunDeploy() {
         });
         const data = await resp.json();
         if (resp.ok) {
-            showToast(`Service "${name}" created — ${replicas} replica(s) will be scheduled`, 'success');
-            closeWolfRunDeployModal();
+            logStep('✅', `Service <b>"${name}"</b> created successfully`, 'var(--success)');
+            logStep('⏳', `Scheduling ${replicas} replica(s) on available nodes...`, 'var(--info)');
+
+            // Poll for instance status a few times
+            const serviceId = data.id;
+            if (serviceId) {
+                for (let i = 0; i < 6; i++) {
+                    await new Promise(r => setTimeout(r, 5000));
+                    try {
+                        const sr = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}`));
+                        const sdata = await sr.json();
+                        const instances = sdata.instances || [];
+                        const running = instances.filter(inst => inst.status === 'running').length;
+                        const total = instances.length;
+                        if (total > 0) {
+                            logStep('🔄', `Instances: <b>${running}/${replicas}</b> running (${total} total)`, running > 0 ? 'var(--success)' : 'var(--warning)');
+                        }
+                        if (running >= replicas) {
+                            logStep('🎉', `All <b>${replicas}</b> replica(s) running!`, 'var(--success)');
+                            break;
+                        }
+                        if (i === 5 && running < replicas) {
+                            logStep('⏳', `Still scheduling — ${running}/${replicas} running. Check services list for updates.`, 'var(--warning)');
+                        }
+                    } catch { break; }
+                }
+            }
+
+            logStep('✅', 'Deployment complete', 'var(--success)');
             loadWolfRunServices();
+
+            // Auto-close after a short delay
+            setTimeout(() => {
+                closeWolfRunDeployModal();
+                if (logBox) logBox.style.display = 'none';
+            }, 3000);
         } else {
+            logStep('❌', `Error: ${data.error || 'Deploy failed'}`, 'var(--danger)');
             showToast(data.error || 'Deploy failed', 'error');
         }
     } catch (e) {
+        logStep('❌', `Connection failed: ${e.message}`, 'var(--danger)');
         showToast('Deploy failed: ' + e.message, 'error');
     } finally {
         btn.disabled = false;
