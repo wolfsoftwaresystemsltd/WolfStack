@@ -1036,6 +1036,7 @@ async fn deploy_docker(
 }
 
 /// Deploy an LXC container on a node
+#[allow(dead_code)]
 async fn deploy_lxc(
     client: &reqwest::Client,
     cluster_secret: &str,
@@ -1118,6 +1119,7 @@ async fn deploy_lxc(
 }
 
 /// Stop and remove a container (Docker or LXC)
+#[allow(dead_code)]
 async fn stop_and_remove(
     client: &reqwest::Client,
     cluster_secret: &str,
@@ -1171,6 +1173,7 @@ async fn stop_and_remove(
 }
 
 /// Public wrapper for stop_and_remove — used by the API delete handler
+#[allow(dead_code)]
 pub async fn stop_and_remove_pub(
     client: &reqwest::Client,
     cluster_secret: &str,
