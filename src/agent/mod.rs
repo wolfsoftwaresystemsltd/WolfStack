@@ -908,9 +908,14 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
     }
 
     // Start from existing routes, remove entries for hosts we have fresh data for
+    // Also remove any entries with invalid (non-IP) gateway values (cleanup from past bug)
     let existing = crate::containers::WOLFNET_ROUTES.lock().unwrap().clone();
     let mut final_routes = std::collections::HashMap::new();
     for (k, v) in &existing {
+        // Skip entries with invalid gateway values (e.g. "remote" from a past bug)
+        if v.split('.').count() != 4 || v.parse::<std::net::Ipv4Addr>().is_err() {
+            continue;
+        }
         if !fresh_hosts.contains(v) {
             // Keep routes for hosts we COULDN'T poll (stale but better than nothing)
             final_routes.insert(k.clone(), v.clone());
