@@ -582,9 +582,60 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                 }
             }
         }
+        // Propagate cluster_name to remote WolfStack node so its own reconcile works correctly
+        let cluster_name = body.cluster_name.clone().or(body.pve_cluster_name.clone());
+        if let Some(ref name) = cluster_name {
+            let node = state.cluster.get_node(&id);
+            if let Some(node) = node {
+                if !node.is_self && node.node_type == "wolfstack" {
+                    let secret = state.cluster_secret.clone();
+                    let address = node.address.clone();
+                    let port = node.port;
+                    let cluster_name_val = name.clone();
+                    tokio::spawn(async move {
+                        let client = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(5))
+                            .danger_accept_invalid_certs(true)
+                            .build()
+                            .unwrap_or_default();
+                        let urls = build_node_urls(&address, port, "/api/agent/cluster-name");
+                        let payload = serde_json::json!({ "cluster_name": cluster_name_val });
+                        for url in &urls {
+                            if client.post(url)
+                                .header("X-WolfStack-Secret", &secret)
+                                .json(&payload)
+                                .send()
+                                .await
+                                .is_ok()
+                            {
+                                tracing::info!("Propagated cluster_name='{}' to {}:{}", cluster_name_val, address, port);
+                                break;
+                            }
+                        }
+                    });
+                }
+            }
+        }
         HttpResponse::Ok().json(serde_json::json!({ "updated": true }))
     } else {
         HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" }))
+    }
+}
+
+/// POST /api/agent/cluster-name — accept cluster name update from admin node
+pub async fn agent_set_cluster_name(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    if let Err(e) = require_cluster_auth(&req, &state) { return e; }
+    if let Some(name) = body.get("cluster_name").and_then(|v| v.as_str()) {
+        tracing::info!("Received cluster_name update from admin node: '{}'", name);
+        let mut nodes = state.cluster.nodes.write().unwrap();
+        if let Some(n) = nodes.get_mut(&state.cluster.self_id) {
+            n.cluster_name = Some(name.to_string());
+        }
+        drop(nodes);
+        crate::agent::ClusterState::save_self_cluster_name(name);
+        HttpResponse::Ok().json(serde_json::json!({ "updated": true, "cluster_name": name }))
+    } else {
+        HttpResponse::BadRequest().json(serde_json::json!({ "error": "cluster_name required" }))
     }
 }
 
@@ -8102,6 +8153,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // Agent (cluster-secret auth — inter-node communication)
         .route("/api/agent/status", web::get().to(agent_status))
         .route("/api/agent/storage/apply", web::post().to(agent_storage_apply))
+        .route("/api/agent/cluster-name", web::post().to(agent_set_cluster_name))
         .route("/api/wolfnet/used-ips", web::get().to(wolfnet_used_ips_endpoint))
         // Geolocation proxy (ip-api.com is HTTP-only, browsers block mixed content on HTTPS pages)
         .route("/api/geolocate", web::get().to(geolocate))

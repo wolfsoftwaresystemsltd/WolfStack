@@ -478,7 +478,8 @@ pub fn schedule(
                 Runtime::Lxc => { if !n.has_lxc { return format!("{}: no LXC (has_lxc=false)", n.hostname); } }
             }
             let nc = n.cluster_name.as_deref().unwrap_or("WolfStack");
-            if nc != service.cluster_name { return format!("{}: cluster '{}' != '{}'", n.hostname, nc, service.cluster_name); }
+            let nc_source = if n.cluster_name.is_some() { "" } else { " (default)" };
+            if nc != service.cluster_name { return format!("{}: cluster '{}'{} != '{}'", n.hostname, nc, nc_source, service.cluster_name); }
             format!("{}: unknown", n.hostname)
         }).collect();
         warn!("WolfRun: no eligible nodes for service {} in cluster {} — reasons: {:?}", service.name, service.cluster_name, reasons);

@@ -491,7 +491,7 @@ impl ClusterState {
     }
 
     /// Persist self cluster_name to disk (survives reinstalls)
-    fn save_self_cluster_name(name: &str) {
+    pub fn save_self_cluster_name(name: &str) {
         let _ = std::fs::create_dir_all("/etc/wolfstack");
         if let Ok(json) = serde_json::to_string(name) {
             if let Err(e) = std::fs::write(Self::SELF_CLUSTER_FILE, json) {
@@ -754,7 +754,23 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                 .unwrap_or_default();
                             for known in known_nodes {
                                 if known.id == cluster.self_id {
-                                    continue; // Skip ourselves by ID
+                                    // Accept cluster_name updates from gossip (admin may have changed it on another node)
+                                    if let Some(ref gossiped_cluster) = known.cluster_name {
+                                        let current_cluster = {
+                                            let nodes_r = cluster.nodes.read().unwrap();
+                                            nodes_r.get(&cluster.self_id).and_then(|n| n.cluster_name.clone())
+                                        };
+                                        if current_cluster.as_deref() != Some(gossiped_cluster) {
+                                            tracing::info!("Gossip: updating self cluster_name to '{}' (was {:?})", gossiped_cluster, current_cluster);
+                                            let mut nodes_w = cluster.nodes.write().unwrap();
+                                            if let Some(n) = nodes_w.get_mut(&cluster.self_id) {
+                                                n.cluster_name = Some(gossiped_cluster.clone());
+                                            }
+                                            drop(nodes_w);
+                                            ClusterState::save_self_cluster_name(gossiped_cluster);
+                                        }
+                                    }
+                                    continue;
                                 }
                                 // Also skip if this is us by hostname+port (gossip may report different address)
                                 if known.node_type == "wolfstack" && known.hostname == self_hostname && known.port == cluster.port {

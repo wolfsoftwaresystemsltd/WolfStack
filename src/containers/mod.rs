@@ -3662,6 +3662,7 @@ fn pct_next_vmid() -> Result<u32, String> {
 }
 
 /// Find a Proxmox VMID by container hostname/name
+#[allow(dead_code)]
 fn pct_find_vmid(name: &str) -> Option<u32> {
     let output = Command::new("pct").arg("list").output().ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
