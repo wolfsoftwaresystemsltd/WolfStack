@@ -639,6 +639,25 @@ pub async fn agent_set_cluster_name(req: HttpRequest, state: web::Data<AppState>
     }
 }
 
+/// POST /api/agent/wolfnet-routes — accept WolfNet route updates from orchestrator
+/// Used to push VIP routes to all nodes so they can reach service VIPs via the orchestrator
+pub async fn agent_set_wolfnet_routes(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    if let Err(e) = require_cluster_auth(&req, &state) { return e; }
+    if let Some(routes) = body.get("routes").and_then(|v| v.as_object()) {
+        let mut route_map = std::collections::HashMap::new();
+        for (k, v) in routes {
+            if let Some(ip) = v.as_str() {
+                route_map.insert(k.clone(), ip.to_string());
+            }
+        }
+        let changed = crate::containers::update_wolfnet_routes(&route_map);
+        tracing::info!("Received {} WolfNet route(s) from orchestrator (changed={})", route_map.len(), changed);
+        HttpResponse::Ok().json(serde_json::json!({ "updated": changed, "routes": route_map.len() }))
+    } else {
+        HttpResponse::BadRequest().json(serde_json::json!({ "error": "routes object required" }))
+    }
+}
+
 /// POST /api/cluster/wolfnet-sync — ensure all WolfStack nodes in a cluster know about each other's WolfNet peers
 #[derive(Deserialize)]
 pub struct WolfNetSyncRequest {
@@ -8154,6 +8173,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/agent/status", web::get().to(agent_status))
         .route("/api/agent/storage/apply", web::post().to(agent_storage_apply))
         .route("/api/agent/cluster-name", web::post().to(agent_set_cluster_name))
+        .route("/api/agent/wolfnet-routes", web::post().to(agent_set_wolfnet_routes))
         .route("/api/wolfnet/used-ips", web::get().to(wolfnet_used_ips_endpoint))
         // Geolocation proxy (ip-api.com is HTTP-only, browsers block mixed content on HTTPS pages)
         .route("/api/geolocate", web::get().to(geolocate))
