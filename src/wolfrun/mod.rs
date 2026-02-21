@@ -639,7 +639,17 @@ pub async fn reconcile(
                                             let state = c["state"].as_str()
                                                 .or_else(|| c["status"].as_str())
                                                 .unwrap_or("unknown");
-                                            let wolfnet_ip = c["wolfnet_ip"].as_str().map(|s| s.to_string());
+                                            // Extract wolfnet IP from ip_address field (same as local path)
+                                            let ip_addr = c["ip_address"].as_str().unwrap_or("");
+                                            let wolfnet_ip = ip_addr.split(',')
+                                                .map(|s| s.trim())
+                                                .find(|s| s.contains("wolfnet") || s.starts_with("10.10.10."))
+                                                .map(|s| s.replace(" (wolfnet)", "").trim().to_string())
+                                                .filter(|s| !s.is_empty())
+                                                .or_else(|| {
+                                                    // Fallback: try wolfnet_ip field if present
+                                                    c["wolfnet_ip"].as_str().map(|s| s.to_string())
+                                                });
                                             live_instances.push(ServiceInstance {
                                                 node_id: inst.node_id.clone(),
                                                 container_name: inst.container_name.clone(),
