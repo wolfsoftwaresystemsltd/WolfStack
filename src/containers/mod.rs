@@ -170,6 +170,50 @@ pub fn cleanup_stale_wolfnet_routes() {
     if removed > 0 {
         info!("Cleaned up {} stale WolfNet kernel route(s)", removed);
     }
+
+    // Ensure Docker containers with wolfnet.ip labels have correct host routes
+    // (route via docker0, not lxcbr0 or missing entirely)
+    if let Ok(output) = Command::new("docker")
+        .args(["ps", "-a", "--format", "{{.Names}}"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for name in text.lines().filter(|l| !l.is_empty()) {
+            if let Ok(inspect) = Command::new("docker")
+                .args(["inspect", "--format", "{{index .Config.Labels \"wolfnet.ip\"}}", name])
+                .output()
+            {
+                let label = String::from_utf8_lossy(&inspect.stdout).trim().to_string();
+                if label.is_empty() || label == "<no value>" { continue; }
+
+                // Check if the container is running (needs a PID for nsenter)
+                let pid_out = Command::new("docker")
+                    .args(["inspect", "--format", "{{.State.Pid}}", name])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                if pid_out.is_empty() || pid_out == "0" { continue; }
+
+                // Ensure host route via docker0 (idempotent — replace if exists)
+                let _ = Command::new("ip")
+                    .args(["route", "replace", &format!("{}/32", label), "dev", "docker0"])
+                    .output();
+
+                // Ensure static ARP entry (get MAC via docker inspect)
+                if let Ok(mac_out) = Command::new("docker")
+                    .args(["inspect", "--format", "{{range .NetworkSettings.Networks}}{{.MacAddress}}{{end}}", name])
+                    .output()
+                {
+                    let mac = String::from_utf8_lossy(&mac_out.stdout).trim().to_string();
+                    if !mac.is_empty() {
+                        let _ = Command::new("ip")
+                            .args(["neigh", "replace", &label, "lladdr", &mac, "dev", "docker0", "nud", "permanent"])
+                            .output();
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ─── WolfNet Integration ───
