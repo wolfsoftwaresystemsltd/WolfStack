@@ -736,7 +736,7 @@ pub async fn reconcile(
         // trigger creating yet another clone. Only truly "lost" instances (container
         // vanished from an ONLINE node) should be replaced.
         let existing = live_instances.iter()
-            .filter(|i| i.status == "running" || i.status == "stopped" || i.status == "pending" || i.status == "offline")
+            .filter(|i| i.status == "running" || i.status == "stopped" || i.status == "pending" || i.status == "offline" || i.status == "created" || i.status == "exited")
             .count() as u32;
         let running = live_instances.iter().filter(|i| i.status == "running").count() as u32;
         let desired = service.replicas;
@@ -992,7 +992,7 @@ pub async fn reconcile(
         // 5. Handle stopped containers that should be running (restart policy)
         if matches!(service.restart_policy, RestartPolicy::Always) {
             for inst in &live_instances {
-                if inst.status == "exited" || inst.status == "dead" || inst.status == "stopped" {
+                if inst.status == "exited" || inst.status == "dead" || inst.status == "stopped" || inst.status == "created" {
                     let node = match cluster.get_node(&inst.node_id) {
                         Some(n) => n,
                         None => continue,
