@@ -684,13 +684,16 @@ pub async fn reconcile(
                     }
                 }
                 _ => {
-                    // Node offline or unknown
+                    // Node offline or unknown — keep instance as "offline" (not "lost")
+                    // so it's still counted as existing and doesn't trigger replacement clones.
+                    // This prevents duplicate containers on WolfStack restart when remote
+                    // nodes haven't re-joined gossip yet.
                     if inst.status == "pending" {
                         live_instances.push(inst.clone());
                     } else {
-                        let mut lost = inst.clone();
-                        lost.status = "lost".to_string();
-                        live_instances.push(lost);
+                        let mut offline = inst.clone();
+                        offline.status = "offline".to_string();
+                        live_instances.push(offline);
                     }
                 }
             }
@@ -770,11 +773,11 @@ pub async fn reconcile(
         }
 
         // 2. Count instances for scaling decisions
-        // Count ALL existing instances (running + stopped) — a stopped container is being
-        // set up and should NOT trigger creating yet another clone.  Only "lost" instances
-        // (containers that vanished from their node) should be replaced.
+        // Count ALL existing instances (running + stopped + offline) — they should NOT
+        // trigger creating yet another clone. Only truly "lost" instances (container
+        // vanished from an ONLINE node) should be replaced.
         let existing = live_instances.iter()
-            .filter(|i| i.status == "running" || i.status == "stopped" || i.status == "pending")
+            .filter(|i| i.status == "running" || i.status == "stopped" || i.status == "pending" || i.status == "offline")
             .count() as u32;
         let running = live_instances.iter().filter(|i| i.status == "running").count() as u32;
         let desired = service.replicas;
@@ -1345,18 +1348,24 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String], lb_
         return;
     }
 
-    // Make the VIP locally routable so iptables PREROUTING DNAT can intercept it.
-    // Using `ip route add local` (instead of `ip addr add`) avoids making it a
-    // real interface address — the kernel accepts packets for it without binding
-    // to wolfnet0, which prevents ARP/routing conflicts.
+    // Bind the VIP as a secondary address on wolfnet0 so the kernel both accepts
+    // traffic for it (DNAT / ICMP echo) and routes replies back through the tunnel.
     let cidr = format!("{}/32", vip);
-    // Remove any stale interface address first (from earlier versions)
-    let _ = std::process::Command::new("ip")
-        .args(["addr", "del", &cidr, "dev", "wolfnet0"])
+    // Idempotent: add if not already present
+    let check = std::process::Command::new("ip")
+        .args(["addr", "show", "dev", "wolfnet0"])
         .output();
-    // Add as local route (idempotent — replace if exists)
+    let already_has = check.as_ref().map(|o| {
+        String::from_utf8_lossy(&o.stdout).contains(&format!("{}/32", vip))
+    }).unwrap_or(false);
+    if !already_has {
+        let _ = std::process::Command::new("ip")
+            .args(["addr", "add", &cidr, "dev", "wolfnet0"])
+            .output();
+    }
+    // Remove any stale local route from earlier versions
     let _ = std::process::Command::new("ip")
-        .args(["route", "replace", "local", &cidr, "dev", "lo"])
+        .args(["route", "del", "local", &cidr, "dev", "lo"])
         .output();
 
     // One-time setup: ip_forward + rp_filter + FORWARD chain rules
