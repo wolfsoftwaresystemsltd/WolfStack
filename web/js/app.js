@@ -5064,6 +5064,67 @@ async function installRuntime(runtime) {
 
 let cachedInterfaces = [];
 
+async function loadWolfNetRoutesTable() {
+    try {
+        const resp = await fetch(apiUrl('/api/wolfnet/routes'));
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        // Find or create the container div after the peers section
+        let container = document.getElementById('wolfnet-routes-container');
+        if (!container) {
+            // Insert after the peers card
+            const peersSection = document.getElementById('wolfnet-peers-table');
+            if (!peersSection) return;
+            // Walk up to the card wrapper
+            const card = peersSection.closest('.card') || peersSection.parentElement;
+            container = document.createElement('div');
+            container.id = 'wolfnet-routes-container';
+            container.style.marginTop = '16px';
+            card.parentElement.insertBefore(container, card.nextSibling);
+        }
+
+        const entries = data.entries || [];
+        if (entries.length === 0) {
+            container.innerHTML = '';
+            return;
+        }
+
+        // Sort: host first, then local, then remote, by IP
+        entries.sort((a, b) => {
+            const order = { host: 0, local: 1, remote: 2 };
+            const ao = order[a.type] ?? 3, bo = order[b.type] ?? 3;
+            if (ao !== bo) return ao - bo;
+            return (a.ip || '').localeCompare(b.ip || '', undefined, { numeric: true });
+        });
+
+        let html = `<div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+            <h3 style="margin:0; font-size:14px;">🌐 WolfNet IPs &amp; Routes</h3>
+            <span style="font-size:11px; color:var(--text-muted);">Cache: ${data.routes_cache_count} · routes.json: ${data.routes_json_count}</span>
+        </div><div class="card-body" style="padding:0; overflow-x:auto;">
+        <table class="data-table"><thead><tr>
+            <th>WolfNet IP</th><th>Type</th><th>Gateway</th><th>Source</th>
+        </tr></thead><tbody>`;
+
+        entries.forEach(e => {
+            const typeIcon = e.type === 'host' ? '🖥️' : e.type === 'local' ? '📦' : '🌍';
+            const typeLabel = e.type === 'host' ? 'Host' : e.type === 'local' ? 'Local' : 'Remote';
+            const bg = e.type === 'host' ? 'rgba(59,130,246,0.1)' : e.type === 'local' ? 'rgba(34,197,94,0.08)' : 'rgba(168,85,247,0.08)';
+            html += `<tr style="background:${bg};">
+                <td style="font-family:var(--font-mono); font-size:12px; font-weight:600;">${escapeHtml(e.ip || '—')}</td>
+                <td>${typeIcon} ${typeLabel}</td>
+                <td style="font-family:var(--font-mono); font-size:12px;">${escapeHtml(e.gateway || '—')}</td>
+                <td style="font-size:11px; color:var(--text-muted);">${escapeHtml(e.source || '')}</td>
+            </tr>`;
+        });
+
+        html += '</tbody></table></div></div>';
+        container.innerHTML = html;
+    } catch (e) {
+        console.warn('WolfNet routes table:', e.message);
+    }
+}
+
 async function loadNetworking() {
     try {
         const [ifResp, dnsResp, wnResp, mappingsResp] = await Promise.all([
@@ -5859,6 +5920,8 @@ function renderWolfNetPage(wn, config, localInfo, fullStatus) {
         }
     }
 
+    // Load WolfNet routes/IPs table below peers
+    loadWolfNetRoutesTable();
     // Populate structured settings from config
     if (config) {
         const getVal = (key) => {

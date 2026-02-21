@@ -2153,6 +2153,57 @@ pub async fn wolfnet_used_ips_endpoint(_req: HttpRequest, _state: web::Data<AppS
     HttpResponse::Ok().json(ips)
 }
 
+/// GET /api/wolfnet/routes — returns the full WOLFNET_ROUTES cache + local used IPs for debugging
+pub async fn wolfnet_routes_debug(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    // Get the WOLFNET_ROUTES cache (container_ip -> gateway_host_ip)
+    let routes = containers::WOLFNET_ROUTES.lock().unwrap().clone();
+
+    // Get local used IPs with labels
+    let local_ips = containers::wolfnet_used_ips();
+    let host_ip = local_ips.first().cloned().unwrap_or_default();
+
+    // Build a combined view: each IP with its type and route info
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+
+    // Local used IPs
+    for (i, ip) in local_ips.iter().enumerate() {
+        entries.push(serde_json::json!({
+            "ip": ip,
+            "type": if i == 0 { "host" } else { "local" },
+            "gateway": if i == 0 { "self" } else { &host_ip },
+            "source": "local"
+        }));
+    }
+
+    // Remote routes from cache
+    for (ip, gateway) in &routes {
+        // Skip if already in local list
+        if local_ips.contains(ip) { continue; }
+        entries.push(serde_json::json!({
+            "ip": ip,
+            "type": "remote",
+            "gateway": gateway,
+            "source": "cache"
+        }));
+    }
+
+    // Also read routes.json for comparison
+    let routes_json = std::fs::read_to_string("/var/run/wolfnet/routes.json")
+        .ok()
+        .and_then(|c| serde_json::from_str::<std::collections::HashMap<String, String>>(&c).ok())
+        .unwrap_or_default();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "entries": entries,
+        "routes_cache_count": routes.len(),
+        "routes_json_count": routes_json.len(),
+        "host_ip": host_ip,
+        "local_ips": local_ips,
+    }))
+}
+
 /// GET /api/containers/docker/stats — Docker container stats
 pub async fn docker_stats(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
@@ -8247,6 +8298,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/agent/cluster-name", web::post().to(agent_set_cluster_name))
         .route("/api/agent/wolfnet-routes", web::post().to(agent_set_wolfnet_routes))
         .route("/api/wolfnet/used-ips", web::get().to(wolfnet_used_ips_endpoint))
+        .route("/api/wolfnet/routes", web::get().to(wolfnet_routes_debug))
         // Geolocation proxy (ip-api.com is HTTP-only, browsers block mixed content on HTTPS pages)
         .route("/api/geolocate", web::get().to(geolocate))
         // App Store
