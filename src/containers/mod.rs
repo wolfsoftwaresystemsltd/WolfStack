@@ -173,6 +173,7 @@ pub fn cleanup_stale_wolfnet_routes() {
 
     // Ensure Docker containers with wolfnet.ip labels have correct host routes
     // (route via docker0, not lxcbr0 or missing entirely)
+    let mut docker_found = false;
     if let Ok(output) = Command::new("docker")
         .args(["ps", "-a", "--format", "{{.Names}}"])
         .output()
@@ -194,6 +195,8 @@ pub fn cleanup_stale_wolfnet_routes() {
                     .unwrap_or_default();
                 if pid_out.is_empty() || pid_out == "0" { continue; }
 
+                docker_found = true;
+
                 // Ensure host route via docker0 (idempotent — replace if exists)
                 let _ = Command::new("ip")
                     .args(["route", "replace", &format!("{}/32", label), "dev", "docker0"])
@@ -211,8 +214,42 @@ pub fn cleanup_stale_wolfnet_routes() {
                             .output();
                     }
                 }
+
+                // Ensure container has the WolfNet IP alias on eth0 (via nsenter)
+                let _ = Command::new("nsenter")
+                    .args(["--target", &pid_out, "--net", "ip", "addr", "add", &format!("{}/32", label), "dev", "eth0"])
+                    .output(); // Silently ignores EEXIST
+
+                // Ensure container can route WolfNet subnet via bridge gateway
+                let gateway = Command::new("docker")
+                    .args(["network", "inspect", "bridge", "--format", "{{range .IPAM.Config}}{{.Gateway}}{{end}}"])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_else(|_| "172.17.0.1".to_string());
+                let gw = if gateway.is_empty() { "172.17.0.1".to_string() } else { gateway };
+                let _ = Command::new("nsenter")
+                    .args(["--target", &pid_out, "--net", "ip", "route", "replace", "10.10.10.0/24", "via", &gw])
+                    .output();
             }
         }
+    }
+
+    // Ensure iptables forwarding rules are at the TOP of FORWARD chain
+    // (before DOCKER-USER/DOCKER-FORWARD which may DROP traffic)
+    if docker_found {
+        let _ = Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]).output();
+        let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.docker0.proxy_arp=1"]).output();
+
+        // Remove old rules first (idempotent — ignore errors)
+        let _ = Command::new("iptables").args(["-D", "FORWARD", "-i", "wolfnet0", "-o", "docker0", "-j", "ACCEPT"]).output();
+        let _ = Command::new("iptables").args(["-D", "FORWARD", "-i", "docker0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
+        // Remove duplicates if any
+        let _ = Command::new("iptables").args(["-D", "FORWARD", "-i", "wolfnet0", "-o", "docker0", "-j", "ACCEPT"]).output();
+        let _ = Command::new("iptables").args(["-D", "FORWARD", "-i", "docker0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
+
+        // Re-insert at position 1 (before DOCKER-USER/DOCKER-FORWARD)
+        let _ = Command::new("iptables").args(["-I", "FORWARD", "1", "-i", "docker0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
+        let _ = Command::new("iptables").args(["-I", "FORWARD", "1", "-i", "wolfnet0", "-o", "docker0", "-j", "ACCEPT"]).output();
     }
 }
 
