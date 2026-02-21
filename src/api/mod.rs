@@ -2644,6 +2644,24 @@ async fn lxc_import_endpoint_inner(
     match containers::lxc_import(archive.to_str().unwrap(), &new_name, storage.as_deref()) {
         Ok(msg) => {
             let _ = std::fs::remove_file(&archive);
+
+            // Remove duplicated wolfnet IP from the template (both standalone and Proxmox)
+            let wolfnet_marker = format!("/var/lib/lxc/{}/.wolfnet", new_name);
+            let _ = std::fs::remove_dir_all(&wolfnet_marker);
+
+            // Also strip any wolfnet veth config from the imported container
+            // so it doesn't conflict with the template's IP
+            containers::lxc_clone_fixup_ip(&new_name);
+
+            // Start the imported container
+            let _ = containers::lxc_start(&new_name);
+
+            // Allocate a fresh wolfnet IP (unique across the cluster)
+            if let Some(ip) = containers::next_available_wolfnet_ip() {
+                let _ = containers::lxc_attach_wolfnet(&new_name, &ip);
+                info!("Imported '{}': started + wolfnet IP {}", new_name, ip);
+            }
+
             HttpResponse::Ok().json(serde_json::json!({"message": msg}))
         }
         Err(e) => {
@@ -2951,7 +2969,13 @@ pub async fn docker_import(
     }
 
     match containers::docker_import_image(&tar_path, &container_name) {
-        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(msg) => {
+            // Start the imported container
+            let _ = containers::docker_start(&container_name);
+            info!("Docker import '{}': container started", container_name);
+
+            HttpResponse::Ok().json(serde_json::json!({ "message": msg }))
+        },
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
 }

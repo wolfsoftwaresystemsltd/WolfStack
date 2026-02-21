@@ -4632,7 +4632,7 @@ pub fn lxc_clone_snapshot(container: &str, new_name: &str) -> Result<String, Str
 }
 
 /// After cloning, assign a new unique IP so the clone doesn't conflict with the original
-fn lxc_clone_fixup_ip(new_name: &str) {
+pub fn lxc_clone_fixup_ip(new_name: &str) {
     let new_last = find_free_bridge_ip();
     let new_ip = format!("10.0.3.{}", new_last);
     info!("Assigning new bridge IP {} to cloned container {}", new_ip, new_name);
