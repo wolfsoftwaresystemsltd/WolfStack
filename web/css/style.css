@@ -1614,10 +1614,11 @@ body {
     position: fixed;
     top: 20px;
     right: 20px;
-    z-index: 300;
+    z-index: 10000;
     display: flex;
     flex-direction: column;
     gap: 10px;
+    pointer-events: none;
 }
 
 .toast {
@@ -1632,6 +1633,8 @@ body {
     font-size: 13px;
     animation: slideIn 0.3s ease;
     max-width: 400px;
+    transition: opacity 0.3s ease, transform 0.3s ease;
+    pointer-events: auto;
 }
 
 .toast.success {
