@@ -651,6 +651,12 @@ pub async fn agent_set_wolfnet_routes(req: HttpRequest, state: web::Data<AppStat
             }
         }
         let changed = crate::containers::update_wolfnet_routes(&route_map);
+        // Also add kernel routes so traffic for VIPs enters the wolfnet tunnel
+        for vip in route_map.keys() {
+            let _ = std::process::Command::new("ip")
+                .args(["route", "replace", &format!("{}/32", vip), "dev", "wolfnet0"])
+                .output();
+        }
         tracing::info!("Received {} WolfNet route(s) from orchestrator (changed={})", route_map.len(), changed);
         HttpResponse::Ok().json(serde_json::json!({ "updated": changed, "routes": route_map.len() }))
     } else {
