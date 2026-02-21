@@ -1641,9 +1641,9 @@ fn apply_mapping_rules(m: &IpMapping) -> Result<(), String> {
         "-t", "nat", "-A", "POSTROUTING", "-d", &m.wolfnet_ip,
     ], &proto_args, &dest_port_args, &["-j", "SNAT", "--to-source", &gateway_ip])?;
 
-    // FORWARD: allow DNAT'd traffic
+    // FORWARD: allow DNAT'd traffic (must be at top before Docker chains DROP it)
     run_iptables(&[
-        "-A", "FORWARD", "-d", &m.wolfnet_ip,
+        "-I", "FORWARD", "1", "-d", &m.wolfnet_ip,
     ], &proto_args, &dest_port_args, &["-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"])?;
 
     info!("Applied iptables rules for {} → {}", m.public_ip, m.wolfnet_ip);
