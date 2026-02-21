@@ -1203,49 +1203,60 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String], lb_
         .args(["addr", "add", &cidr, "dev", "wolfnet0"])
         .output();
 
-    // Ensure forwarding is enabled so DNATed traffic reaches containers
-    let _ = std::process::Command::new("sysctl")
-        .args(["-w", "net.ipv4.ip_forward=1"])
-        .output();
-
-    // FORWARD rules: allow traffic between wolfnet0 and container bridges
-    for bridge in &["docker0", "lxcbr0"] {
-        // Check if rule already exists
-        let check = std::process::Command::new("iptables")
-            .args(["-C", "FORWARD", "-i", "wolfnet0", "-o", bridge, "-j", "ACCEPT"])
+    // One-time setup: ip_forward + FORWARD chain rules (only on first call)
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static VIP_INFRA_READY: AtomicBool = AtomicBool::new(false);
+    if !VIP_INFRA_READY.load(Ordering::Relaxed) {
+        let _ = std::process::Command::new("sysctl")
+            .args(["-w", "net.ipv4.ip_forward=1"])
             .output();
-        if check.map(|o| !o.status.success()).unwrap_or(true) {
-            let _ = std::process::Command::new("iptables")
-                .args(["-I", "FORWARD", "-i", "wolfnet0", "-o", bridge, "-j", "ACCEPT"])
+        for bridge in &["docker0", "lxcbr0"] {
+            let check = std::process::Command::new("iptables")
+                .args(["-C", "FORWARD", "-i", "wolfnet0", "-o", bridge, "-j", "ACCEPT"])
                 .output();
-            let _ = std::process::Command::new("iptables")
-                .args(["-I", "FORWARD", "-i", bridge, "-o", "wolfnet0", "-j", "ACCEPT"])
-                .output();
+            if check.map(|o| !o.status.success()).unwrap_or(true) {
+                let _ = std::process::Command::new("iptables")
+                    .args(["-I", "FORWARD", "-i", "wolfnet0", "-o", bridge, "-j", "ACCEPT"])
+                    .output();
+                let _ = std::process::Command::new("iptables")
+                    .args(["-I", "FORWARD", "-i", bridge, "-o", "wolfnet0", "-j", "ACCEPT"])
+                    .output();
+            }
         }
+        VIP_INFRA_READY.store(true, Ordering::Relaxed);
+        info!("WolfRun LB: one-time infra setup complete (ip_forward + FORWARD rules)");
     }
 
-    // Send gratuitous ARP so peers learn where the VIP lives
-    let _ = std::process::Command::new("arping")
-        .args(["-U", "-c", "2", "-I", "wolfnet0", vip])
-        .output();
+    // Send gratuitous ARP in background (don't block the reconcile loop)
+    let vip_owned = vip.to_string();
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("arping")
+            .args(["-U", "-c", "1", "-I", "wolfnet0", &vip_owned])
+            .output();
+    });
 
-    // Push VIP into local WolfNet routes so peers can route to it.
-    // Map VIP → this host's wolfnet0 IP (same as container IPs).
-    if let Ok(output) = std::process::Command::new("ip")
-        .args(["addr", "show", "wolfnet0"])
-        .output()
-    {
-        let text = String::from_utf8_lossy(&output.stdout);
-        if let Some(host_ip) = text.lines()
-            .find(|l| l.contains("inet ") && !l.contains(&format!("{}/", vip)))
-            .and_then(|l| l.trim().split_whitespace().nth(1))
-            .and_then(|s| s.split('/').next())
-        {
-            let mut routes = std::collections::HashMap::new();
-            routes.insert(vip.to_string(), host_ip.to_string());
-            crate::containers::update_wolfnet_routes(&routes);
-            info!("WolfRun LB: pushed VIP {} → host {} into routes.json", vip, host_ip);
-        }
+    // Push VIP into local WolfNet routes (cached host IP to avoid spawning a process every cycle)
+    use std::sync::OnceLock;
+    static HOST_WOLFNET_IP: OnceLock<Option<String>> = OnceLock::new();
+    let host_ip = HOST_WOLFNET_IP.get_or_init(|| {
+        std::process::Command::new("ip")
+            .args(["addr", "show", "wolfnet0"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                let text = String::from_utf8_lossy(&o.stdout).to_string();
+                text.lines()
+                    .find(|l| l.contains("inet "))
+                    .and_then(|l| l.trim().split_whitespace().nth(1))
+                    .and_then(|s| s.split('/').next())
+                    .map(|s| s.to_string())
+            })
+    });
+    if let Some(host_ip) = host_ip {
+        let mut routes = std::collections::HashMap::new();
+        routes.insert(vip.to_string(), host_ip.clone());
+        crate::containers::update_wolfnet_routes(&routes);
+        debug!("WolfRun LB: VIP {} → host {} in routes", vip, host_ip);
     }
 
     let n = backend_ips.len();
