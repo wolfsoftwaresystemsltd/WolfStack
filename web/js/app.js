@@ -13742,7 +13742,7 @@ function renderWolfRunServices(services) {
             const isPve = instNode && instNode.is_proxmox;
             const instIcon = svc.runtime === 'Docker' ? '🐳' : (isPve ? '🖥️' : '📦');
             const instType = svc.runtime === 'Docker' ? 'Docker' : (isPve ? 'Proxmox LXC' : 'LXC');
-            return `<tr class="wolfrun-inst-row wolfrun-inst-${svc.id}" style="display:none; background:var(--bg-input);">
+            return `<tr class="wolfrun-inst-row wolfrun-inst-${svc.id}" style="background:var(--bg-input);">
                 <td style="padding-left:32px;font-size:12px;color:var(--text-secondary);">
                     <span style="color:var(--text-muted);">└</span> ${instIcon} <code style="font-size:11px;">${inst.container_name}</code>
                     <span style="font-size:10px;color:var(--text-muted);margin-left:4px;">${instType}</span>
@@ -13763,7 +13763,7 @@ function renderWolfRunServices(services) {
 
         const hasInstances = svc.instances.length > 0;
         const toggleBtn = hasInstances
-            ? `<span class="wolfrun-toggle" data-svc="${svc.id}" onclick="toggleWolfRunInstances('${svc.id}')" style="cursor:pointer;margin-right:6px;font-size:10px;color:var(--text-muted);transition:transform 0.2s;">▶</span>`
+            ? `<span class="wolfrun-toggle" data-svc="${svc.id}" onclick="toggleWolfRunInstances('${svc.id}')" style="cursor:pointer;margin-right:6px;font-size:10px;color:var(--text-muted);transition:transform 0.2s;">▼</span>`
             : '<span style="display:inline-block;width:16px;"></span>';
 
         return `<tr style="cursor:pointer;" onclick="toggleWolfRunInstances('${svc.id}')">

@@ -775,33 +775,39 @@ pub async fn reconcile(
                                 ok
                             } else { false }
                         } else {
-                            // Different nodes: clone-and-migrate.
-                            // Clone from the ORIGINAL template on the source node,
-                            // then migrate the clone to the target node.
-                            info!("WolfRun: cross-node LXC — cloning '{}' on source, migrating to {}",
-                                template_name, node.hostname);
+                            // ── Cross-node clone-and-migrate (3 steps) ──
+                            // Step 1: Clone from original template on source node (new name)
+                            // Step 2: Migrate the clone to the target node
+                            // Step 3: Start on target node
+                            let src_hostname = source_node.as_ref().map(|n| n.hostname.as_str()).unwrap_or("unknown");
+                            info!("WolfRun: ── STEP 1/3 ── Cloning '{}' on {} as '{}'",
+                                template_name, src_hostname, clone_name);
+                            info!("WolfRun: ── STEP 2/3 ── Migrating '{}' → {}",
+                                clone_name, node.hostname);
+                            info!("WolfRun: ── STEP 3/3 ── Starting '{}' on {}",
+                                clone_name, node.hostname);
 
-                            // Build the clone API call on the source node
+                            // The clone API with target_node handles all 3 steps atomically:
+                            // clone locally → export → transfer → import → start on target
                             let clone_payload = serde_json::json!({
                                 "new_name": clone_name,
-                                "target_node": node_id,  // scheduler's target node
+                                "target_node": node_id,
                             });
 
+                            let mut ok = false;
                             if let Some(ref sn) = source_node {
                                 let clone_path = format!("/api/containers/lxc/{}/clone", template_name);
                                 let urls = if sn.is_self {
-                                    // Source is this node — call ourselves
                                     vec![format!("https://127.0.0.1:{}{}", sn.port, clone_path)]
                                 } else {
                                     crate::api::build_node_urls(&sn.address, sn.port, &clone_path)
                                 };
 
                                 let migrate_client = reqwest::Client::builder()
-                                    .timeout(std::time::Duration::from_secs(600))  // 10 min for large transfers
+                                    .timeout(std::time::Duration::from_secs(600))
                                     .danger_accept_invalid_certs(true)
                                     .build().unwrap_or_default();
 
-                                let mut ok = false;
                                 for url in &urls {
                                     match migrate_client.post(url)
                                         .header("X-WolfStack-Secret", cluster_secret)
@@ -809,35 +815,35 @@ pub async fn reconcile(
                                         .send().await
                                     {
                                         Ok(resp) if resp.status().is_success() => {
-                                            info!("WolfRun: clone-migrate success: {} → {}", template_name, node.hostname);
+                                            info!("WolfRun: ✅ Clone-migrate complete: '{}' running on {}", clone_name, node.hostname);
                                             ok = true;
                                             break;
                                         }
                                         Ok(resp) => {
                                             let err = resp.text().await.unwrap_or_default();
-                                            warn!("WolfRun: clone-migrate failed: {}", err);
+                                            warn!("WolfRun: ❌ Clone-migrate failed: {}", err);
                                             break;
                                         }
                                         Err(e) => {
-                                            warn!("WolfRun: clone-migrate request error: {}", e);
+                                            warn!("WolfRun: clone-migrate connection error: {}", e);
                                             continue;
                                         }
                                     }
                                 }
-
-                                if ok {
-                                    wolfrun.add_instance(&service.id, ServiceInstance {
-                                        node_id: node_id.clone(),  // target node
-                                        container_name: clone_name,
-                                        wolfnet_ip: None,
-                                        status: "running".to_string(),
-                                        last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-                                    });
-                                } else {
-                                    warn!("WolfRun: failed to clone-migrate '{}' to {}", template_name, node.hostname);
-                                }
                             }
-                            continue;  // skip the add_instance below (handled above)
+
+                            if ok {
+                                wolfrun.add_instance(&service.id, ServiceInstance {
+                                    node_id: node_id.clone(),
+                                    container_name: clone_name,
+                                    wolfnet_ip: None,
+                                    status: "running".to_string(),
+                                    last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                                });
+                            } else {
+                                warn!("WolfRun: failed to clone-migrate '{}' to {}", template_name, node.hostname);
+                            }
+                            continue;
                         };
 
                         if cloned {
