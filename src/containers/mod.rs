@@ -1069,11 +1069,29 @@ fn find_free_bridge_ip() -> u8 {
     (100u8..=254).find(|i| !used.contains(i)).unwrap_or(100)
 }
 
-/// Assign a unique bridge IP to a container, write network config, return IP string
+/// Assign a unique bridge IP to a container, write network config, return IP string.
+/// Persists the bridge IP to .wolfnet/bridge_ip so it's reused on restart
+/// (prevents accumulating duplicate bridge IPs).
 fn assign_container_bridge_ip(container: &str) -> String {
+    // Check if we already assigned a bridge IP to this container
+    let bridge_ip_file = format!("/var/lib/lxc/{}/.wolfnet/bridge_ip", container);
+    if let Ok(existing) = std::fs::read_to_string(&bridge_ip_file) {
+        let existing = existing.trim().to_string();
+        if !existing.is_empty() {
+            // Reuse the existing bridge IP — don't allocate a new one
+            write_container_network_config(container, &existing);
+            return existing;
+        }
+    }
+
+    // Allocate a new bridge IP
     let last = find_free_bridge_ip();
     let ip = format!("10.0.3.{}", last);
     write_container_network_config(container, &ip);
+
+    // Persist for future reuse
+    let _ = std::fs::write(&bridge_ip_file, &ip);
+
     ip
 }
 
