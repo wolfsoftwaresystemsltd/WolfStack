@@ -1950,13 +1950,16 @@ pub async fn docker_create(
     body: web::Json<DockerCreateRequest>,
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    // Append short UUID to ensure unique names across cluster nodes
+    let short_id = &uuid::Uuid::new_v4().to_string()[..8];
+    let unique_name = format!("{}-{}", body.name, short_id);
     let ports = body.ports.as_deref().unwrap_or(&[]);
     let env = body.env.as_deref().unwrap_or(&[]);
     let wolfnet_ip = body.wolfnet_ip.as_deref();
     let memory = body.memory_limit.as_deref();
     let cpus = body.cpu_cores.as_deref();
     let storage = body.storage_limit.as_deref();
-    match containers::docker_create(&body.name, &body.image, ports, env, wolfnet_ip, memory, cpus, storage, &body.volumes) {
+    match containers::docker_create(&unique_name, &body.image, ports, env, wolfnet_ip, memory, cpus, storage, &body.volumes) {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
@@ -1990,6 +1993,10 @@ pub async fn lxc_create(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
 
+    // Append short UUID to ensure unique names across cluster nodes
+    let short_id = &uuid::Uuid::new_v4().to_string()[..8];
+    let unique_name = format!("{}-{}", body.name, short_id);
+
     // On Proxmox, pct_create handles password, memory, and CPU natively
     if containers::is_proxmox() {
         let storage = body.storage_path.as_deref();
@@ -2004,7 +2011,7 @@ pub async fn lxc_create(
         let cpu_cores = body.cpu_cores.as_deref().and_then(|c| c.parse::<u32>().ok());
 
         return match containers::pct_create_api(
-            &body.name, &body.distribution, &body.release, &body.architecture,
+            &unique_name, &body.distribution, &body.release, &body.architecture,
             storage, password, memory_mb, cpu_cores,
             body.wolfnet_ip.as_deref(),
         ) {
@@ -2015,14 +2022,14 @@ pub async fn lxc_create(
 
     // Standalone LXC path
     let storage = body.storage_path.as_deref();
-    match containers::lxc_create(&body.name, &body.distribution, &body.release, &body.architecture, storage) {
+    match containers::lxc_create(&unique_name, &body.distribution, &body.release, &body.architecture, storage) {
         Ok(msg) => {
             let mut messages = vec![msg];
 
             // Set root password if provided
             if let Some(ref password) = body.root_password {
                 if !password.is_empty() {
-                    match containers::lxc_set_root_password(&body.name, password) {
+                    match containers::lxc_set_root_password(&unique_name, password) {
                         Ok(pw_msg) => messages.push(pw_msg),
                         Err(e) => messages.push(format!("Password warning: {}", e)),
                     }
@@ -2032,7 +2039,7 @@ pub async fn lxc_create(
             // Set resource limits if provided
             let memory = body.memory_limit.as_deref();
             let cpus = body.cpu_cores.as_deref();
-            match containers::lxc_set_resource_limits(&body.name, memory, cpus) {
+            match containers::lxc_set_resource_limits(&unique_name, memory, cpus) {
                 Ok(Some(rl_msg)) => messages.push(rl_msg),
                 Err(e) => messages.push(format!("Resource limit warning: {}", e)),
                 _ => {}
@@ -2041,7 +2048,7 @@ pub async fn lxc_create(
             // Attach WolfNet if requested
             if let Some(ip) = &body.wolfnet_ip {
                 if !ip.is_empty() {
-                    match containers::lxc_attach_wolfnet(&body.name, ip) {
+                    match containers::lxc_attach_wolfnet(&unique_name, ip) {
                         Ok(wn_msg) => messages.push(wn_msg),
                         Err(e) => messages.push(format!("WolfNet warning: {}", e)),
                     }

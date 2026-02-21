@@ -83,9 +83,13 @@ fn default_os_bus() -> String { "virtio".to_string() }
 async fn create_vm(req: HttpRequest, state: web::Data<AppState>, body: web::Json<CreateVmRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let manager = state.vms.lock().unwrap();
+
+    // Append short UUID to ensure unique names across cluster nodes
+    let short_id = &uuid::Uuid::new_v4().to_string()[..8];
+    let unique_name = format!("{}-{}", body.name, short_id);
     
     let mut config = VmConfig::new(
-        body.name.clone(),
+        unique_name.clone(),
         body.cpus,
         body.memory_mb,
         body.disk_size_gb
@@ -100,7 +104,7 @@ async fn create_vm(req: HttpRequest, state: web::Data<AppState>, body: web::Json
     // Convert extra disks from request to StorageVolume structs
     for disk in &body.extra_disks {
         config.extra_disks.push(StorageVolume {
-            name: format!("{}-{}", body.name, disk.name),
+            name: format!("{}-{}", unique_name, disk.name),
             size_gb: disk.size_gb,
             storage_path: disk.storage_path.clone(),
             format: disk.format.clone(),
