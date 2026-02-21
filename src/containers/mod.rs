@@ -869,9 +869,10 @@ fn lxc_apply_wolfnet(container: &str) {
             let bridge_ip = assign_container_bridge_ip(container);
             info!("Container {} → bridge={}, wolfnet={}", container, bridge_ip, ip);
 
-            // Restart networking FIRST (try all methods for distro compat)
-            // Must happen before adding IPs — netplan apply / systemd-networkd
-            // would wipe IPs added before the restart.
+            // 1. Write network config files FIRST (assign_container_bridge_ip already did this)
+            //    so the restart below picks up the correct IP.
+
+            // 2. Restart networking (try all methods for distro compat)
             let _ = Command::new("lxc-attach")
                 .args(["-n", container, "--", "sh", "-c",
                     "systemctl restart systemd-networkd 2>/dev/null; \
@@ -880,17 +881,21 @@ fn lxc_apply_wolfnet(container: &str) {
                      true"])
                 .output();
 
-            // Now add bridge IP on eth0 (survives because restart already happened)
+            // 3. Flush ALL addresses on eth0 to clear stale IPs from DHCP, NetworkManager,
+            //    or old configs. Then re-add exactly the ones we want.
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "ip", "addr", "flush", "dev", "eth0"])
+                .output();
+
+            // 4. Add bridge IP + wolfnet IP + default route
             let _ = Command::new("lxc-attach")
                 .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", bridge_ip), "dev", "eth0"])
                 .output();
             let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "route", "replace", "default", "via", "10.0.3.1"])
-                .output();
-
-            // Add WolfNet IP as secondary /32 on eth0
-            let _ = Command::new("lxc-attach")
                 .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "eth0"])
+                .output();
+            let _ = Command::new("lxc-attach")
+                .args(["-n", container, "--", "ip", "route", "replace", "default", "via", "10.0.3.1"])
                 .output();
 
             // Host route — via bridge IP so ARP resolves on lxcbr0
