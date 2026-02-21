@@ -1197,34 +1197,57 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String], lb_
         return;
     }
 
-    // Assign the VIP to wolfnet0 (idempotent — ignore error if already assigned)
+    // Make the VIP locally routable so iptables PREROUTING DNAT can intercept it.
+    // Using `ip route add local` (instead of `ip addr add`) avoids making it a
+    // real interface address — the kernel accepts packets for it without binding
+    // to wolfnet0, which prevents ARP/routing conflicts.
     let cidr = format!("{}/32", vip);
+    // Remove any stale interface address first (from earlier versions)
     let _ = std::process::Command::new("ip")
-        .args(["addr", "add", &cidr, "dev", "wolfnet0"])
+        .args(["addr", "del", &cidr, "dev", "wolfnet0"])
+        .output();
+    // Add as local route (idempotent — replace if exists)
+    let _ = std::process::Command::new("ip")
+        .args(["route", "replace", "local", &cidr, "dev", "lo"])
         .output();
 
-    // One-time setup: ip_forward + FORWARD chain rules (only on first call)
+    // One-time setup: ip_forward + rp_filter + FORWARD chain rules
     use std::sync::atomic::{AtomicBool, Ordering};
     static VIP_INFRA_READY: AtomicBool = AtomicBool::new(false);
     if !VIP_INFRA_READY.load(Ordering::Relaxed) {
         let _ = std::process::Command::new("sysctl")
             .args(["-w", "net.ipv4.ip_forward=1"])
             .output();
-        for bridge in &["docker0", "lxcbr0"] {
+        // Disable reverse path filtering on wolfnet0 — required because after DNAT
+        // the source IP is a remote WolfNet peer but the reply goes via a different path
+        let _ = std::process::Command::new("sysctl")
+            .args(["-w", "net.ipv4.conf.wolfnet0.rp_filter=0"])
+            .output();
+        let _ = std::process::Command::new("sysctl")
+            .args(["-w", "net.ipv4.conf.all.rp_filter=0"])
+            .output();
+        // FORWARD rules: wolfnet0 ↔ container bridges AND wolfnet0 ↔ wolfnet0 (hairpin for remote backends)
+        for iface_pair in &[
+            ("wolfnet0", "docker0"),
+            ("wolfnet0", "lxcbr0"),
+            ("wolfnet0", "wolfnet0"),  // hairpin: backend on remote node
+        ] {
             let check = std::process::Command::new("iptables")
-                .args(["-C", "FORWARD", "-i", "wolfnet0", "-o", bridge, "-j", "ACCEPT"])
+                .args(["-C", "FORWARD", "-i", iface_pair.0, "-o", iface_pair.1, "-j", "ACCEPT"])
                 .output();
             if check.map(|o| !o.status.success()).unwrap_or(true) {
                 let _ = std::process::Command::new("iptables")
-                    .args(["-I", "FORWARD", "-i", "wolfnet0", "-o", bridge, "-j", "ACCEPT"])
+                    .args(["-I", "FORWARD", "-i", iface_pair.0, "-o", iface_pair.1, "-j", "ACCEPT"])
                     .output();
-                let _ = std::process::Command::new("iptables")
-                    .args(["-I", "FORWARD", "-i", bridge, "-o", "wolfnet0", "-j", "ACCEPT"])
-                    .output();
+                if iface_pair.0 != iface_pair.1 {
+                    let _ = std::process::Command::new("iptables")
+                        .args(["-I", "FORWARD", "-i", iface_pair.1, "-o", iface_pair.0, "-j", "ACCEPT"])
+                        .output();
+                }
             }
         }
         VIP_INFRA_READY.store(true, Ordering::Relaxed);
-        info!("WolfRun LB: one-time infra setup complete (ip_forward + FORWARD rules)");
+        info!("WolfRun LB: one-time infra setup complete (ip_forward, rp_filter=0, FORWARD rules)");
     }
 
     // Send gratuitous ARP in background (don't block the reconcile loop)
@@ -1393,8 +1416,11 @@ pub fn remove_lb_rules_for_vip(vip: &str) {
         }
     }
 
-    // Remove the VIP from wolfnet0 (best-effort)
+    // Remove the VIP local route and any stale interface address (best-effort)
     let cidr = format!("{}/32", vip);
+    let _ = std::process::Command::new("ip")
+        .args(["route", "del", "local", &cidr, "dev", "lo"])
+        .output();
     let _ = std::process::Command::new("ip")
         .args(["addr", "del", &cidr, "dev", "wolfnet0"])
         .output();
