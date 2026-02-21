@@ -438,13 +438,16 @@ pub fn schedule(
             return false;
         }
         // Must have the required runtime
+        // For self node: detect directly (flags may not be set yet after restart)
+        let node_has_lxc = n.has_lxc || (n.is_self && std::path::Path::new("/usr/bin/lxc-ls").exists());
+        let node_has_docker = n.has_docker || (n.is_self && std::path::Path::new("/usr/bin/docker").exists());
         match service.runtime {
-            Runtime::Docker => { if !n.has_docker {
+            Runtime::Docker => { if !node_has_docker {
                 debug!("WolfRun schedule: skipping {} — no Docker", n.hostname);
                 return false;
             } }
-            Runtime::Lxc => { if !n.has_lxc {
-                debug!("WolfRun schedule: skipping {} — no LXC", n.hostname);
+            Runtime::Lxc => { if !node_has_lxc {
+                debug!("WolfRun schedule: skipping {} — no LXC (has_lxc={}, is_self={})", n.hostname, n.has_lxc, n.is_self);
                 return false;
             } }
         }
