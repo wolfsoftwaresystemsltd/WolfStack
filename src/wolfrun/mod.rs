@@ -1348,24 +1348,17 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String], lb_
         return;
     }
 
-    // Bind the VIP as a secondary address on wolfnet0 so the kernel both accepts
-    // traffic for it (DNAT / ICMP echo) and routes replies back through the tunnel.
+    // Make the VIP locally routable so iptables PREROUTING DNAT can intercept it.
+    // We use `ip route replace local` (not `ip addr add` on wolfnet0) because
+    // adding addresses to the TUN device interferes with WolfNet packet processing.
     let cidr = format!("{}/32", vip);
-    // Idempotent: add if not already present
-    let check = std::process::Command::new("ip")
-        .args(["addr", "show", "dev", "wolfnet0"])
-        .output();
-    let already_has = check.as_ref().map(|o| {
-        String::from_utf8_lossy(&o.stdout).contains(&format!("{}/32", vip))
-    }).unwrap_or(false);
-    if !already_has {
-        let _ = std::process::Command::new("ip")
-            .args(["addr", "add", &cidr, "dev", "wolfnet0"])
-            .output();
-    }
-    // Remove any stale local route from earlier versions
+    // Remove any stale interface address (if left from a previous version)
     let _ = std::process::Command::new("ip")
-        .args(["route", "del", "local", &cidr, "dev", "lo"])
+        .args(["addr", "del", &cidr, "dev", "wolfnet0"])
+        .output();
+    // Add as local route (idempotent — replace if exists)
+    let _ = std::process::Command::new("ip")
+        .args(["route", "replace", "local", &cidr, "dev", "lo"])
         .output();
 
     // One-time setup: ip_forward + rp_filter + FORWARD chain rules
