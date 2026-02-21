@@ -197,6 +197,34 @@ pub fn wolfnet_allocate_ip(host_ip: &str, extra_used: &[u8]) -> String {
         used_ips.insert(ip);
     }
 
+    // Check cluster-wide route cache (populated by poll_remote_nodes)
+    // This catches container IPs from ALL nodes in the cluster
+    {
+        let cache = WOLFNET_ROUTES.lock().unwrap();
+        for ip_str in cache.keys() {
+            let ip_parts: Vec<&str> = ip_str.split('.').collect();
+            if ip_parts.len() == 4 {
+                if let Ok(last) = ip_parts[3].parse::<u8>() {
+                    used_ips.insert(last);
+                }
+            }
+        }
+    }
+
+    // Also check routes.json as fallback
+    if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json") {
+        if let Ok(routes) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
+            for ip_str in routes.keys() {
+                let ip_parts: Vec<&str> = ip_str.split('.').collect();
+                if ip_parts.len() == 4 {
+                    if let Ok(last) = ip_parts[3].parse::<u8>() {
+                        used_ips.insert(last);
+                    }
+                }
+            }
+        }
+    }
+
     // Check Docker containers with wolfnet.ip labels
     if let Ok(output) = Command::new("docker")
         .args(["ps", "-a", "--format", "{{.Names}}"])
