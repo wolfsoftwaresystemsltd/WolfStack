@@ -87,8 +87,9 @@ pub fn update_wolfnet_routes(new_routes: &std::collections::HashMap<String, Stri
 /// it ensures stale routes are removed and the file reflects current reality.
 pub fn replace_wolfnet_routes(complete_routes: std::collections::HashMap<String, String>) {
     let mut cache = WOLFNET_ROUTES.lock().unwrap();
-    if *cache == complete_routes {
-        return; // No change — skip disk write + SIGHUP
+    let file_exists = std::path::Path::new("/var/run/wolfnet/routes.json").exists();
+    if *cache == complete_routes && file_exists {
+        return; // No change and file exists — skip disk write + SIGHUP
     }
     *cache = complete_routes;
     flush_routes_to_disk(&cache);
