@@ -227,6 +227,22 @@ pub fn wolfnet_allocate_ip(host_ip: &str, extra_used: &[u8]) -> String {
         }
     }
 
+    // WolfRun service VIPs — reserve these so containers don't collide
+    if let Ok(data) = std::fs::read_to_string("/etc/wolfstack/wolfrun/services.json") {
+        if let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&data) {
+            for svc in &services {
+                if let Some(vip) = svc.get("service_ip").and_then(|v| v.as_str()) {
+                    let ip_parts: Vec<&str> = vip.split('.').collect();
+                    if ip_parts.len() == 4 {
+                        if let Ok(last) = ip_parts[3].parse::<u8>() {
+                            used_ips.insert(last);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Allocate from 100-254 range (reserving 1-99 for hosts)
     for i in 100..=254u8 {
         if !used_ips.contains(&i) {
@@ -301,6 +317,18 @@ pub fn wolfnet_used_ips() -> Vec<String> {
                         if let Some(ip_str) = vm.get("wolfnet_ip").and_then(|v| v.as_str()) {
                             ips.push(ip_str.to_string());
                         }
+                    }
+                }
+            }
+        }
+    }
+    // WolfRun service VIPs (load-balanced virtual IPs)
+    if let Ok(data) = std::fs::read_to_string("/etc/wolfstack/wolfrun/services.json") {
+        if let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&data) {
+            for svc in &services {
+                if let Some(vip) = svc.get("service_ip").and_then(|v| v.as_str()) {
+                    if !vip.is_empty() && !ips.contains(&vip.to_string()) {
+                        ips.push(vip.to_string());
                     }
                 }
             }
