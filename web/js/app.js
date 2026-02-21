@@ -5523,31 +5523,43 @@ function renderIpMappings(mappings) {
     }
     if (empty) empty.style.display = 'none';
 
-    grid.innerHTML = mappings.map(m => {
+    let html = `<table class="data-table" style="width:100%; font-size:13px;">
+        <thead><tr>
+            <th>Label</th>
+            <th>Public IP</th>
+            <th></th>
+            <th>WolfNet IP</th>
+            <th>Src Ports</th>
+            <th>Dest Ports</th>
+            <th>Protocol</th>
+            <th>Status</th>
+            <th></th>
+        </tr></thead><tbody>`;
+
+    for (const m of mappings) {
         const statusBadge = m.enabled
             ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e; font-size:10px;">Active</span>'
             : '<span class="badge" style="background:rgba(107,114,128,0.2); color:#6b7280; font-size:10px;">Disabled</span>';
 
-        const portsLabel = m.ports || '<span style="color:var(--text-muted);">all</span>';
+        const srcPorts = m.ports || '<span style="color:var(--text-muted);">all</span>';
+        const destPorts = m.dest_ports || srcPorts;
         const protoLabel = m.protocol === 'all' ? 'TCP+UDP' : m.protocol.toUpperCase();
-        const label = m.label || '';
 
-        return `<div class="card" style="padding:12px; position:relative;">
-            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                <div style="font-size:11px; font-weight:600; color:var(--text-muted);">${label || 'IP Mapping'}</div>
-                <div style="display:flex; align-items:center; gap:6px;">
-                    ${statusBadge}
-                    <button class="btn btn-sm btn-danger" style="font-size:10px; padding:1px 6px;" onclick="removeIpMapping('${m.id}', '${m.public_ip}', '${m.wolfnet_ip}')" title="Remove">🗑️</button>
-                </div>
-            </div>
-            <div style="font-family:var(--font-mono); font-size:13px; font-weight:600; margin-bottom:6px;">
-                ${m.public_ip} <span style="color:var(--accent);">→</span> ${m.wolfnet_ip}
-            </div>
-            <div style="font-size:11px; color:var(--text-muted);">
-                Ports: <span style="font-family:var(--font-mono);">${portsLabel}</span> · ${protoLabel}
-            </div>
-        </div>`;
-    }).join('');
+        html += `<tr>
+            <td>${m.label || '<span style="color:var(--text-muted);">—</span>'}</td>
+            <td style="font-family:var(--font-mono);">${m.public_ip}</td>
+            <td style="color:var(--accent); font-weight:600;">→</td>
+            <td style="font-family:var(--font-mono);">${m.wolfnet_ip}</td>
+            <td style="font-family:var(--font-mono);">${srcPorts}</td>
+            <td style="font-family:var(--font-mono);">${destPorts}</td>
+            <td>${protoLabel}</td>
+            <td>${statusBadge}</td>
+            <td><button class="btn btn-sm btn-danger" style="font-size:10px; padding:1px 6px;" onclick="removeIpMapping('${m.id}', '${m.public_ip}', '${m.wolfnet_ip}')" title="Remove">🗑️</button></td>
+        </tr>`;
+    }
+
+    html += '</tbody></table>';
+    grid.innerHTML = html;
 }
 
 let _mappingPortData = null; // cached listening + blocked ports
@@ -5557,6 +5569,7 @@ async function showCreateMappingModal() {
     document.getElementById('mapping-public-ip').value = '';
     document.getElementById('mapping-wolfnet-ip').value = '';
     document.getElementById('mapping-ports').value = '';
+    document.getElementById('mapping-dest-ports').value = '';
     document.getElementById('mapping-protocol').value = 'all';
     document.getElementById('mapping-label').value = '';
 
@@ -5716,11 +5729,13 @@ async function createIpMapping() {
         }
     }
 
+    const dest_ports = document.getElementById('mapping-dest-ports').value.trim() || null;
+
     try {
         const resp = await fetch(apiUrl('/api/networking/ip-mappings'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ public_ip, wolfnet_ip, ports, protocol, label }),
+            body: JSON.stringify({ public_ip, wolfnet_ip, ports, dest_ports, protocol, label }),
         });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Failed to create mapping');

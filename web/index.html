@@ -3783,13 +3783,19 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                             <small style="color:var(--text-muted);">Container/VM to receive traffic</small>
                         </div>
 
-                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px;">
+                        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-bottom:12px;">
                             <div class="form-group">
-                                <label>Ports <small style="color:var(--text-muted);">(optional)</small></label>
+                                <label>Source Ports <small style="color:var(--text-muted);">(optional)</small></label>
                                 <input type="text" id="mapping-ports" class="form-control" placeholder="e.g. 80,443"
                                     oninput="onMappingPortsInput()"
                                     style="font-family:var(--font-mono); font-size:13px;">
                                 <small style="color:var(--text-muted);">Blank = all</small>
+                            </div>
+                            <div class="form-group">
+                                <label>Dest Ports <small style="color:var(--text-muted);">(optional)</small></label>
+                                <input type="text" id="mapping-dest-ports" class="form-control" placeholder="e.g. 8080"
+                                    style="font-family:var(--font-mono); font-size:13px;">
+                                <small style="color:var(--text-muted);">Blank = same as source</small>
                             </div>
                             <div class="form-group">
                                 <label>Protocol</label>

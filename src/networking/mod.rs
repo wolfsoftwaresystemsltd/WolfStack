@@ -1630,6 +1630,11 @@ fn apply_mapping_rules(m: &IpMapping) -> Result<(), String> {
         "-t", "nat", "-A", "PREROUTING", "-d", &m.public_ip,
     ], &proto_args, &src_port_args, &["-j", "DNAT", "--to-destination", &dnat_dest])?;
 
+    // OUTPUT DNAT: also redirect traffic originating FROM this server (e.g. wget from localhost)
+    run_iptables(&[
+        "-t", "nat", "-A", "OUTPUT", "-d", &m.public_ip,
+    ], &proto_args, &src_port_args, &["-j", "DNAT", "--to-destination", &dnat_dest])?;
+
     // SNAT: ensure return traffic goes back through this gateway
     // After DNAT, destination port is the translated one
     run_iptables(&[
@@ -1691,6 +1696,10 @@ fn remove_mapping_rules(m: &IpMapping) {
     // Best-effort removal — ignore errors
     let _ = run_iptables(&[
         "-t", "nat", "-D", "PREROUTING", "-d", &m.public_ip,
+    ], &proto_args, &src_port_args, &["-j", "DNAT", "--to-destination", &dnat_dest]);
+
+    let _ = run_iptables(&[
+        "-t", "nat", "-D", "OUTPUT", "-d", &m.public_ip,
     ], &proto_args, &src_port_args, &["-j", "DNAT", "--to-destination", &dnat_dest]);
 
     let _ = run_iptables(&[
@@ -1887,6 +1896,17 @@ pub fn detect_wolfnet_ips() -> Vec<serde_json::Value> {
                     }
                 }
             }
+        }
+    }
+
+    // Remote container/VIP IPs from the WolfNet routes cache
+    let routes = crate::containers::WOLFNET_ROUTES.lock().unwrap().clone();
+    for (container_ip, gateway_ip) in &routes {
+        if container_ip.parse::<std::net::Ipv4Addr>().is_ok() {
+            ips.push(serde_json::json!({
+                "ip": container_ip,
+                "source": format!("remote via {}", gateway_ip)
+            }));
         }
     }
 
