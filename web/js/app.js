@@ -14061,40 +14061,70 @@ async function wolfrunScale(serviceId, newReplicas) {
 
 async function showScaleProgress(serviceId, targetReplicas) {
     let svcName = serviceId;
+    let prevInstances = [];
     try {
         const sr = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}`));
-        if (sr.ok) { const s = await sr.json(); svcName = s.name || serviceId; }
+        if (sr.ok) {
+            const s = await sr.json();
+            svcName = s.name || serviceId;
+            prevInstances = (s.instances || []).map(i => i.container_name);
+        }
     } catch (e) { }
 
     const log = document.getElementById('wolfrun-scale-log');
     document.getElementById('wolfrun-scale-name').textContent = svcName;
-    log.innerHTML = `<div>🔄 Scaling to <strong>${targetReplicas}</strong> replicas...</div>
-        <div>⏳ Waiting for containers to come up...</div>
+    log.innerHTML = `<div>🔄 Scaling <strong>${svcName}</strong> to <strong>${targetReplicas}</strong> replicas...</div>
+        <div>⏳ Provisioning containers on available nodes...</div>
+        <div id="wolfrun-scale-nodes"></div>
         <div id="wolfrun-scale-status">📊 Checking...</div>`;
     document.getElementById('wolfrun-scale-modal').classList.add('active');
 
+    const seenInstances = new Set(prevInstances);
     let attempts = 0;
-    const maxAttempts = 20;
+    const maxAttempts = 30;
     const poll = setInterval(async () => {
         attempts++;
         try {
             const r = await fetch(apiUrl(`/api/wolfrun/services/${serviceId}`));
             if (r.ok) {
                 const svc = await r.json();
-                const running = (svc.instances || []).filter(i => i.status === 'running').length;
-                const total = (svc.instances || []).length;
+                const instances = svc.instances || [];
+                const running = instances.filter(i => i.status === 'running').length;
+                const total = instances.length;
+
+                // Show new instances being deployed
+                const nodesDiv = document.getElementById('wolfrun-scale-nodes');
+                for (const inst of instances) {
+                    if (!seenInstances.has(inst.container_name)) {
+                        seenInstances.add(inst.container_name);
+                        const nodeName = (window.allNodes || []).find(n => n.id === inst.node_id);
+                        const hostname = nodeName ? nodeName.hostname : inst.node_id.substring(0, 12);
+                        const statusIcon = inst.status === 'running' ? '✅' : '🔄';
+                        const div = document.createElement('div');
+                        div.id = `scale-inst-${inst.container_name}`;
+                        div.innerHTML = `${statusIcon} <strong>DEPLOYING</strong> <code style="font-size:11px;">${inst.container_name}</code> → <span style="padding:2px 8px;border-radius:6px;font-size:11px;background:var(--bg-secondary);border:1px solid var(--border);">${hostname}</span>`;
+                        nodesDiv.appendChild(div);
+                    } else {
+                        // Update status of existing instances
+                        const el = document.getElementById(`scale-inst-${inst.container_name}`);
+                        if (el && inst.status === 'running' && el.innerHTML.includes('🔄')) {
+                            el.innerHTML = el.innerHTML.replace('🔄', '✅').replace('DEPLOYING', 'RUNNING');
+                        }
+                    }
+                }
+
                 const el = document.getElementById('wolfrun-scale-status');
-                if (el) el.innerHTML = `📊 Instances: <strong>${running}</strong> running / ${total} total (target: ${targetReplicas})`;
+                if (el) el.innerHTML = `📊 Instances: <strong>${running}/${targetReplicas}</strong> running (${total} total)`;
                 loadWolfRunServices();
 
                 if (running >= targetReplicas || attempts >= maxAttempts) {
                     clearInterval(poll);
                     if (running >= targetReplicas) {
-                        log.innerHTML += `<div><br>✅ <strong>Scaling complete!</strong> ${running} replicas running.</div>`;
+                        log.innerHTML += `<div><br>✅ <strong>Scaling complete!</strong> ${running} replicas running across ${[...new Set(instances.map(i => i.node_id))].length} node(s).</div>`;
                     } else {
-                        log.innerHTML += `<div><br>⏰ Still provisioning — check back shortly.</div>`;
+                        log.innerHTML += `<div><br>⏰ Still provisioning — ${running}/${targetReplicas} running. LXC template downloads can take a minute. Check back shortly.</div>`;
                     }
-                    setTimeout(() => { closeWolfRunScaleModal(); loadWolfRunServices(); }, 2000);
+                    setTimeout(() => { closeWolfRunScaleModal(); loadWolfRunServices(); }, 3000);
                 }
             }
         } catch (e) { }
