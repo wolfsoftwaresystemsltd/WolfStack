@@ -662,7 +662,7 @@ pub async fn reconcile(
         // set up and should NOT trigger creating yet another clone.  Only "lost" instances
         // (containers that vanished from their node) should be replaced.
         let existing = live_instances.iter()
-            .filter(|i| i.status == "running" || i.status == "stopped")
+            .filter(|i| i.status == "running" || i.status == "stopped" || i.status == "pending")
             .count() as u32;
         let running = live_instances.iter().filter(|i| i.status == "running").count() as u32;
         let desired = service.replicas;
@@ -782,20 +782,22 @@ pub async fn reconcile(
                                 ok
                             } else { false }
                         } else {
-                            // ── Cross-node clone-and-migrate (3 steps) ──
-                            // Step 1: Clone from original template on source node (new name)
-                            // Step 2: Migrate the clone to the target node
-                            // Step 3: Start on target node
+                            // ── Cross-node clone-and-migrate ──
+                            // Register instance as PENDING first to prevent duplicates
                             let src_hostname = source_node.as_ref().map(|n| n.hostname.as_str()).unwrap_or("unknown");
-                            info!("WolfRun: ── STEP 1/3 ── Cloning '{}' on {} as '{}'",
-                                template_name, src_hostname, clone_name);
-                            info!("WolfRun: ── STEP 2/3 ── Migrating '{}' → {}",
-                                clone_name, node.hostname);
-                            info!("WolfRun: ── STEP 3/3 ── Starting '{}' on {}",
-                                clone_name, node.hostname);
+                            info!("WolfRun: cloning '{}' on {} → migrating as '{}' to {}",
+                                template_name, src_hostname, clone_name, node.hostname);
 
-                            // The clone API with target_node handles all 3 steps atomically:
-                            // clone locally → export → transfer → import → start on target
+                            // Register PENDING instance NOW — before clone starts.
+                            // This prevents the next reconcile from creating another.
+                            wolfrun.add_instance(&service.id, ServiceInstance {
+                                node_id: node_id.clone(),
+                                container_name: clone_name.clone(),
+                                wolfnet_ip: None,
+                                status: "pending".to_string(),
+                                last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                            });
+
                             let clone_payload = serde_json::json!({
                                 "new_name": clone_name,
                                 "target_node": node_id,
@@ -822,7 +824,7 @@ pub async fn reconcile(
                                         .send().await
                                     {
                                         Ok(resp) if resp.status().is_success() => {
-                                            info!("WolfRun: ✅ Clone-migrate complete: '{}' running on {}", clone_name, node.hostname);
+                                            info!("WolfRun: ✅ Clone-migrate complete: '{}' on {}", clone_name, node.hostname);
                                             ok = true;
                                             break;
                                         }
@@ -832,24 +834,20 @@ pub async fn reconcile(
                                             break;
                                         }
                                         Err(e) => {
-                                            warn!("WolfRun: clone-migrate connection error: {}", e);
+                                            warn!("WolfRun: connection error: {}", e);
                                             continue;
                                         }
                                     }
                                 }
                             }
 
-                            if ok {
-                                wolfrun.add_instance(&service.id, ServiceInstance {
-                                    node_id: node_id.clone(),
-                                    container_name: clone_name,
-                                    wolfnet_ip: None,
-                                    status: "running".to_string(),
-                                    last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-                                });
-                            } else {
-                                warn!("WolfRun: failed to clone-migrate '{}' to {}", template_name, node.hostname);
+                            if !ok {
+                                // Clone failed — remove the pending instance
+                                warn!("WolfRun: removing pending instance '{}' (clone failed)", clone_name);
+                                wolfrun.remove_instance(&service.id, &clone_name);
                             }
+                            // If ok: leave the pending instance. Next reconcile will
+                            // update its status to running/stopped from live state.
                             continue;
                         };
 
