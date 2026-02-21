@@ -13738,9 +13738,14 @@ function renderWolfRunServices(services) {
             const ipHtml = inst.wolfnet_ip
                 ? `<code style="font-size:11px;padding:2px 6px;background:rgba(59,130,246,0.12);border-radius:4px;color:#60a5fa;">${inst.wolfnet_ip}</code>`
                 : '<span style="color:var(--text-muted);font-size:11px;">—</span>';
+            // Runtime-aware icon: Docker 🐳, Proxmox LXC 🖥️, standalone LXC 📦
+            const isPve = instNode && instNode.is_proxmox;
+            const instIcon = svc.runtime === 'Docker' ? '🐳' : (isPve ? '🖥️' : '📦');
+            const instType = svc.runtime === 'Docker' ? 'Docker' : (isPve ? 'Proxmox LXC' : 'LXC');
             return `<tr class="wolfrun-inst-row wolfrun-inst-${svc.id}" style="display:none; background:var(--bg-input);">
                 <td style="padding-left:32px;font-size:12px;color:var(--text-secondary);">
-                    <span style="color:var(--text-muted);">└</span> 🐳 <code style="font-size:11px;">${inst.container_name}</code>
+                    <span style="color:var(--text-muted);">└</span> ${instIcon} <code style="font-size:11px;">${inst.container_name}</code>
+                    <span style="font-size:10px;color:var(--text-muted);margin-left:4px;">${instType}</span>
                 </td>
                 <td colspan="2" style="font-size:12px;">
                     <span style="padding:2px 8px;border-radius:6px;font-size:11px;background:var(--bg-secondary);border:1px solid var(--border);">${instHostname}</span>
