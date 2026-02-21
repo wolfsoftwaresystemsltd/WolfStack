@@ -126,6 +126,52 @@ fn flush_routes_to_disk(routes: &std::collections::HashMap<String, String>) {
     }
 }
 
+/// Clean up stale /32 kernel routes for WolfNet IPs that don't belong to local containers.
+/// Stale routes (from deleted/moved containers) override the wolfnet0 /24 route and
+/// prevent cross-node container routing through the WolfNet tunnel.
+pub fn cleanup_stale_wolfnet_routes() {
+    let local_ips: std::collections::HashSet<String> = wolfnet_used_ips().into_iter().collect();
+
+    // Get all kernel routes in the 10.10.10.0/24 range
+    let output = match Command::new("ip").args(["route", "show"]).output() {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    let mut removed = 0;
+    for line in text.lines() {
+        // Match lines like: "10.10.10.X via 10.0.3.Y dev lxcbr0" or "10.10.10.X dev docker0 scope link"
+        let ip = match line.split_whitespace().next() {
+            Some(ip) if ip.starts_with("10.10.10.") && !ip.contains('/') => ip,
+            _ => continue,
+        };
+
+        // Skip the subnet route (10.10.10.0/24 dev wolfnet0)
+        if ip.contains('/') { continue; }
+
+        // If this IP is NOT in our local used IPs, it's stale — remove the kernel route
+        if !local_ips.contains(ip) {
+            let del_result = Command::new("ip")
+                .args(["route", "del", &format!("{}/32", ip)])
+                .output();
+            // Also try without /32 in case the route was added without it
+            let del_result2 = Command::new("ip")
+                .args(["route", "del", ip])
+                .output();
+            if del_result.map(|o| o.status.success()).unwrap_or(false)
+                || del_result2.map(|o| o.status.success()).unwrap_or(false)
+            {
+                info!("Removed stale kernel route for WolfNet IP {}", ip);
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        info!("Cleaned up {} stale WolfNet kernel route(s)", removed);
+    }
+}
+
 // ─── WolfNet Integration ───
 
 /// WolfNet status for container networking
