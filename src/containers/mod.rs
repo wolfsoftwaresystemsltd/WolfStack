@@ -150,8 +150,9 @@ pub fn cleanup_stale_wolfnet_routes() {
         // Skip the subnet route (10.10.10.0/24 dev wolfnet0)
         if ip.contains('/') { continue; }
 
-        // If this IP is NOT in our local used IPs, it's stale — remove the kernel route
-        if !local_ips.contains(ip) {
+        // Remove if: IP not in local used IPs, OR route has linkdown (container stopped)
+        let is_linkdown = line.contains("linkdown");
+        if !local_ips.contains(ip) || is_linkdown {
             let del_result = Command::new("ip")
                 .args(["route", "del", &format!("{}/32", ip)])
                 .output();
@@ -162,7 +163,7 @@ pub fn cleanup_stale_wolfnet_routes() {
             if del_result.map(|o| o.status.success()).unwrap_or(false)
                 || del_result2.map(|o| o.status.success()).unwrap_or(false)
             {
-                info!("Removed stale kernel route for WolfNet IP {}", ip);
+                info!("Removed {} kernel route for WolfNet IP {}", if is_linkdown { "linkdown" } else { "stale" }, ip);
                 removed += 1;
             }
         }
