@@ -9,6 +9,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WolfStack — Login</title>
     <meta name="description" content="WolfStack Server Management Platform - Login">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link
         href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
@@ -383,7 +386,7 @@
             .then(r => r.json())
             .then(data => {
                 if (data.authenticated) {
-                    window.location.href = '/index.html';
+                    window.location.href = '/index.html?_=' + Date.now();
                 }
             });
 
@@ -417,7 +420,7 @@
                     btn.innerHTML = '✓ Welcome';
                     btn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
                     setTimeout(() => {
-                        window.location.href = '/index.html';
+                        window.location.href = '/index.html?_=' + Date.now();
                     }, 500);
                 } else {
                     showError(data.error || 'Invalid username or password');

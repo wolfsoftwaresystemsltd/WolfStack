@@ -1203,6 +1203,51 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String], lb_
         .args(["addr", "add", &cidr, "dev", "wolfnet0"])
         .output();
 
+    // Ensure forwarding is enabled so DNATed traffic reaches containers
+    let _ = std::process::Command::new("sysctl")
+        .args(["-w", "net.ipv4.ip_forward=1"])
+        .output();
+
+    // FORWARD rules: allow traffic between wolfnet0 and container bridges
+    for bridge in &["docker0", "lxcbr0"] {
+        // Check if rule already exists
+        let check = std::process::Command::new("iptables")
+            .args(["-C", "FORWARD", "-i", "wolfnet0", "-o", bridge, "-j", "ACCEPT"])
+            .output();
+        if check.map(|o| !o.status.success()).unwrap_or(true) {
+            let _ = std::process::Command::new("iptables")
+                .args(["-I", "FORWARD", "-i", "wolfnet0", "-o", bridge, "-j", "ACCEPT"])
+                .output();
+            let _ = std::process::Command::new("iptables")
+                .args(["-I", "FORWARD", "-i", bridge, "-o", "wolfnet0", "-j", "ACCEPT"])
+                .output();
+        }
+    }
+
+    // Send gratuitous ARP so peers learn where the VIP lives
+    let _ = std::process::Command::new("arping")
+        .args(["-U", "-c", "2", "-I", "wolfnet0", vip])
+        .output();
+
+    // Push VIP into local WolfNet routes so peers can route to it.
+    // Map VIP → this host's wolfnet0 IP (same as container IPs).
+    if let Ok(output) = std::process::Command::new("ip")
+        .args(["addr", "show", "wolfnet0"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        if let Some(host_ip) = text.lines()
+            .find(|l| l.contains("inet ") && !l.contains(&format!("{}/", vip)))
+            .and_then(|l| l.trim().split_whitespace().nth(1))
+            .and_then(|s| s.split('/').next())
+        {
+            let mut routes = std::collections::HashMap::new();
+            routes.insert(vip.to_string(), host_ip.to_string());
+            crate::containers::update_wolfnet_routes(&routes);
+            info!("WolfRun LB: pushed VIP {} → host {} into routes.json", vip, host_ip);
+        }
+    }
+
     let n = backend_ips.len();
 
     // Parse service ports to get the container-side ports for LB rules
