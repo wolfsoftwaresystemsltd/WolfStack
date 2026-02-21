@@ -775,12 +775,78 @@ pub async fn reconcile(
                                 ok
                             } else { false }
                         } else {
-                            // Different nodes: lxc-copy is local-only, so create a fresh
-                            // container from the service template on the target node.
-                            info!("WolfRun: cross-node LXC — creating fresh container on {}", node.hostname);
-                            deploy_lxc(&client, cluster_secret, &node, &clone_name, service, wolfrun, &node_id).await;
-                            // deploy_lxc calls add_instance internally on success
-                            continue;  // skip the add_instance below
+                            // Different nodes: lxc-copy is local-only, so clone on the source node.
+                            // The clone will live on the same node as the template.
+                            // (Round-robin distribution only applies to Docker containers.)
+                            info!("WolfRun: cross-node LXC — cloning on source node (lxc-copy is local-only)");
+                            if let Some(ref sn) = source_node {
+                                if sn.is_self {
+                                    // Source is us: clone locally
+                                    let _ = crate::containers::lxc_stop(&template_name);
+                                    let result = crate::containers::lxc_clone(&template_name, &clone_name);
+                                    let _ = crate::containers::lxc_start(&template_name);
+                                    match result {
+                                        Ok(msg) => {
+                                            info!("WolfRun: local clone success: {}", msg);
+                                            let _ = std::fs::remove_dir_all(format!("/var/lib/lxc/{}/.wolfnet", clone_name));
+                                            let _ = crate::containers::lxc_start(&clone_name);
+                                            if let Some(ip) = crate::containers::next_available_wolfnet_ip() {
+                                                let _ = crate::containers::lxc_attach_wolfnet(&clone_name, &ip);
+                                            }
+                                            wolfrun.add_instance(&service.id, ServiceInstance {
+                                                node_id: source_node_id.clone(),
+                                                container_name: clone_name,
+                                                wolfnet_ip: None,
+                                                status: "running".to_string(),
+                                                last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                                            });
+                                        }
+                                        Err(e) => {
+                                            warn!("WolfRun: local clone failed: {}", e);
+                                        }
+                                    }
+                                } else {
+                                    // Source is remote: call clone API on that remote node
+                                    let clone_path = format!("/api/containers/lxc/{}/clone", template_name);
+                                    let urls = crate::api::build_node_urls(&sn.address, sn.port, &clone_path);
+                                    let clone_client = reqwest::Client::builder()
+                                        .timeout(std::time::Duration::from_secs(120))
+                                        .danger_accept_invalid_certs(true)
+                                        .build().unwrap_or_default();
+                                    let mut ok = false;
+                                    for url in &urls {
+                                        match clone_client.post(url)
+                                            .header("X-WolfStack-Secret", cluster_secret)
+                                            .json(&serde_json::json!({ "new_name": clone_name }))
+                                            .send().await
+                                        {
+                                            Ok(resp) if resp.status().is_success() => {
+                                                let sp = format!("/api/containers/lxc/{}/start", clone_name);
+                                                let su = crate::api::build_node_urls(&sn.address, sn.port, &sp);
+                                                for u in &su {
+                                                    if clone_client.post(u).header("X-WolfStack-Secret", cluster_secret).send().await.is_ok() { break; }
+                                                }
+                                                ok = true;
+                                                break;
+                                            }
+                                            Ok(_) => { continue; }
+                                            Err(_) => { continue; }
+                                        }
+                                    }
+                                    if ok {
+                                        wolfrun.add_instance(&service.id, ServiceInstance {
+                                            node_id: source_node_id.clone(),
+                                            container_name: clone_name,
+                                            wolfnet_ip: None,
+                                            status: "running".to_string(),
+                                            last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                                        });
+                                    } else {
+                                        warn!("WolfRun: remote clone failed for '{}' on {}", template_name, sn.hostname);
+                                    }
+                                }
+                            }
+                            continue;  // skip the add_instance below (handled above)
                         };
 
                         if cloned {
