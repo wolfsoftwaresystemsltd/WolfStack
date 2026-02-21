@@ -69,6 +69,7 @@ pub static WOLFNET_ROUTES: std::sync::LazyLock<Mutex<std::collections::HashMap<S
 /// Returns true if routes were updated.
 pub fn update_wolfnet_routes(new_routes: &std::collections::HashMap<String, String>) -> bool {
     let mut cache = WOLFNET_ROUTES.lock().unwrap();
+    let file_exists = std::path::Path::new("/var/run/wolfnet/routes.json").exists();
     let mut changed = false;
     for (k, v) in new_routes {
         if cache.get(k) != Some(v) {
@@ -76,7 +77,7 @@ pub fn update_wolfnet_routes(new_routes: &std::collections::HashMap<String, Stri
             changed = true;
         }
     }
-    if changed {
+    if changed || !file_exists {
         flush_routes_to_disk(&cache);
     }
     changed
@@ -98,19 +99,30 @@ pub fn replace_wolfnet_routes(complete_routes: std::collections::HashMap<String,
 /// Write the route map to /var/run/wolfnet/routes.json and signal WolfNet to reload.
 fn flush_routes_to_disk(routes: &std::collections::HashMap<String, String>) {
     let routes_path = "/var/run/wolfnet/routes.json";
-    let _ = std::fs::create_dir_all("/var/run/wolfnet");
-    if let Ok(json) = serde_json::to_string_pretty(routes) {
-        if std::fs::write(routes_path, &json).is_ok() {
-            info!("Routes changed — wrote {} route(s) to {}", routes.len(), routes_path);
-            // Signal WolfNet to reload (SIGHUP)
-            if let Ok(output) = Command::new("pidof").arg("wolfnet").output() {
-                let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !pid_str.is_empty() {
-                    let _ = Command::new("kill").args(["-HUP", &pid_str]).output();
-                    info!("Sent SIGHUP to WolfNet (pid {})", pid_str);
+    if let Err(e) = std::fs::create_dir_all("/var/run/wolfnet") {
+        warn!("Failed to create /var/run/wolfnet: {}", e);
+        return;
+    }
+    match serde_json::to_string_pretty(routes) {
+        Ok(json) => {
+            match std::fs::write(routes_path, &json) {
+                Ok(_) => {
+                    info!("Routes — wrote {} route(s) to {}", routes.len(), routes_path);
+                    // Signal WolfNet to reload (SIGHUP)
+                    if let Ok(output) = Command::new("pidof").arg("wolfnet").output() {
+                        let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if !pid_str.is_empty() {
+                            let _ = Command::new("kill").args(["-HUP", &pid_str]).output();
+                            info!("Sent SIGHUP to WolfNet (pid {})", pid_str);
+                        } else {
+                            info!("WolfNet not running — routes.json written but no SIGHUP sent");
+                        }
+                    }
                 }
+                Err(e) => warn!("Failed to write {}: {}", routes_path, e),
             }
         }
+        Err(e) => warn!("Failed to serialize routes: {}", e),
     }
 }
 
