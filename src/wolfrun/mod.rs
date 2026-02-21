@@ -779,7 +779,8 @@ pub async fn reconcile(
 
                 match service.runtime {
                     Runtime::Docker => {
-                        let container_name = format!("{}-wolfrun-{}", instance_num, service.name.to_lowercase().replace(' ', "-"));
+                        let short_id = &uuid::Uuid::new_v4().to_string()[..8];
+                        let container_name = format!("{}-wolfrun-{}", service.name.to_lowercase().replace(' ', "-"), short_id);
                         info!("WolfRun: creating Docker container {} on {} ({})", container_name, node.hostname, node_id);
 
                         let mut env = service.env.clone();
@@ -791,7 +792,8 @@ pub async fn reconcile(
                     Runtime::Lxc => {
                         // LXC: clone from template, deploy to scheduler's target node
                         let source_node_id = template_node_id.clone().unwrap_or(node_id.clone());
-                        let clone_name = format!("{}-wolfrun-{}", instance_num, template_name);
+                        let short_id = &uuid::Uuid::new_v4().to_string()[..8];
+                        let clone_name = format!("{}-wolfrun-{}", template_name, short_id);
                         let target_node_id_final = node_id.clone();
 
                         info!("WolfRun: cloning LXC '{}' → '{}' (source: {}, target: {})",

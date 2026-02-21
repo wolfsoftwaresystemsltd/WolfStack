@@ -3293,8 +3293,16 @@ pub fn next_available_wolfnet_ip() -> Option<String> {
         }
     }
 
-    // Cluster-wide: check routes.json which contains ALL container/VIP IPs
-    // from ALL nodes (populated by poll_remote_nodes)
+    // Cluster-wide: check in-memory route cache (populated by poll_remote_nodes)
+    // This is more up-to-date than routes.json since it's updated on every poll cycle
+    {
+        let cache = WOLFNET_ROUTES.lock().unwrap();
+        for ip in cache.keys() {
+            used.insert(ip.clone());
+        }
+    }
+
+    // Also check routes.json as fallback (in case cache was reset on restart)
     if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json") {
         if let Ok(routes) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
             for ip in routes.keys() {
