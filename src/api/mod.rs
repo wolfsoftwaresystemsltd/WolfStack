@@ -2123,24 +2123,28 @@ pub async fn wolfnet_network_status(req: HttpRequest, state: web::Data<AppState>
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
+        .danger_accept_invalid_certs(true)
         .build()
         .unwrap_or_default();
 
     for node in &nodes {
         if node.is_self || !node.online { continue; }
-        let url = format!("http://{}:{}/api/wolfnet/used-ips", node.address, node.port);
-        if let Ok(resp) = client.get(&url)
-            .header("X-WolfStack-Secret", state.cluster_secret.clone())
-            .send().await {
-            if let Ok(ips) = resp.json::<Vec<String>>().await {
-                for ip_str in ips {
-                    let parts: Vec<&str> = ip_str.split('.').collect();
-                    if parts.len() == 4 {
-                        if let Ok(last) = parts[3].parse::<u8>() {
-                            remote_used.push(last);
+        let urls = build_node_urls(&node.address, node.port, "/api/wolfnet/used-ips");
+        for url in &urls {
+            if let Ok(resp) = client.get(url)
+                .header("X-WolfStack-Secret", state.cluster_secret.clone())
+                .send().await {
+                if let Ok(ips) = resp.json::<Vec<String>>().await {
+                    for ip_str in ips {
+                        let parts: Vec<&str> = ip_str.split('.').collect();
+                        if parts.len() == 4 {
+                            if let Ok(last) = parts[3].parse::<u8>() {
+                                remote_used.push(last);
+                            }
                         }
                     }
                 }
+                break; // Success on this node
             }
         }
     }
@@ -3028,11 +3032,52 @@ pub async fn lxc_update_settings(
     }
 }
 
-/// GET /api/wolfnet/next-ip — find next available WolfNet IP
+/// GET /api/wolfnet/next-ip — find next available WolfNet IP (cluster-wide)
 pub async fn wolfnet_next_ip(
     req: HttpRequest, state: web::Data<AppState>,
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    // Query ALL remote cluster nodes for their used WolfNet IPs
+    // to prevent cross-node IP collisions
+    let nodes = state.cluster.get_all_nodes();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_default();
+
+    let mut remote_ips: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for node in &nodes {
+        if node.is_self || !node.online { continue; }
+        let urls = build_node_urls(&node.address, node.port, "/api/wolfnet/used-ips");
+        for url in &urls {
+            if let Ok(resp) = client.get(url)
+                .header("X-WolfStack-Secret", state.cluster_secret.clone())
+                .send().await
+            {
+                if let Ok(ips) = resp.json::<Vec<String>>().await {
+                    for ip in ips {
+                        remote_ips.insert(ip);
+                    }
+                }
+                break; // Success on this node
+            }
+        }
+    }
+
+    // Inject remote IPs into the in-memory route cache so next_available_wolfnet_ip sees them
+    if !remote_ips.is_empty() {
+        let mut cache = containers::WOLFNET_ROUTES.lock().unwrap();
+        for ip in &remote_ips {
+            if !cache.contains_key(ip) {
+                // Use "remote" as a placeholder peer — the actual peer doesn't matter for allocation
+                cache.insert(ip.clone(), "remote".to_string());
+            }
+        }
+    }
+
     match containers::next_available_wolfnet_ip() {
         Some(ip) => HttpResponse::Ok().json(serde_json::json!({ "ip": ip })),
         None => HttpResponse::Ok().json(serde_json::json!({ "ip": null, "error": "No available IPs in 10.10.10.0/24" })),
