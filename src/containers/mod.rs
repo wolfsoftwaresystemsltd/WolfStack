@@ -354,7 +354,7 @@ pub fn wolfnet_used_ips() -> Vec<String> {
         }
     }
 
-    // Docker containers on wolfnet
+    // Docker containers on a "wolfnet" Docker network (if it exists)
     if let Ok(output) = Command::new("docker")
         .args(["network", "inspect", "wolfnet", "--format",
                "{{range .Containers}}{{.IPv4Address}} {{end}}"])
@@ -363,8 +363,27 @@ pub fn wolfnet_used_ips() -> Vec<String> {
         let text = String::from_utf8_lossy(&output.stdout);
         for addr in text.split_whitespace() {
             if let Some(ip) = addr.split('/').next() {
-                if !ip.is_empty() {
+                if !ip.is_empty() && !ips.contains(&ip.to_string()) {
                     ips.push(ip.to_string());
+                }
+            }
+        }
+    }
+
+    // Docker containers with wolfnet.ip labels (host-routed WolfNet — primary method)
+    if let Ok(output) = Command::new("docker")
+        .args(["ps", "-a", "--format", "{{.Names}}"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for name in text.lines().filter(|l| !l.is_empty()) {
+            if let Ok(inspect) = Command::new("docker")
+                .args(["inspect", "--format", "{{index .Config.Labels \"wolfnet.ip\"}}", name])
+                .output()
+            {
+                let label = String::from_utf8_lossy(&inspect.stdout).trim().to_string();
+                if !label.is_empty() && label != "<no value>" && !ips.contains(&label) {
+                    ips.push(label);
                 }
             }
         }
