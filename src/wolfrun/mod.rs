@@ -579,6 +579,9 @@ pub async fn reconcile(
                             status: c.state.to_lowercase(),
                             last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
                         });
+                    } else if inst.status == "pending" {
+                        // Pending (clone in progress) — preserve
+                        live_instances.push(inst.clone());
                     } else {
                         live_instances.push(ServiceInstance {
                             node_id: inst.node_id.clone(),
@@ -627,20 +630,30 @@ pub async fn reconcile(
                         }
                     }
                     if !found {
-                        // Container not found — mark as lost for potential rescheduling
-                        live_instances.push(ServiceInstance {
-                            node_id: inst.node_id.clone(),
-                            container_name: inst.container_name.clone(),
-                            wolfnet_ip: None,
-                            status: "lost".to_string(),
-                            last_seen: inst.last_seen,
-                        });
+                        // Container not found on remote node.
+                        // If it was "pending" (clone in progress), keep it pending — don't mark lost.
+                        if inst.status == "pending" {
+                            live_instances.push(inst.clone());
+                        } else {
+                            live_instances.push(ServiceInstance {
+                                node_id: inst.node_id.clone(),
+                                container_name: inst.container_name.clone(),
+                                wolfnet_ip: None,
+                                status: "lost".to_string(),
+                                last_seen: inst.last_seen,
+                            });
+                        }
                     }
                 }
                 _ => {
-                    let mut lost = inst.clone();
-                    lost.status = "lost".to_string();
-                    live_instances.push(lost);
+                    // Node offline or unknown
+                    if inst.status == "pending" {
+                        live_instances.push(inst.clone());
+                    } else {
+                        let mut lost = inst.clone();
+                        lost.status = "lost".to_string();
+                        live_instances.push(lost);
+                    }
                 }
             }
         }
