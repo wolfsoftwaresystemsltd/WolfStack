@@ -4713,16 +4713,27 @@ pub fn lxc_clone_fixup_ip(new_name: &str) {
     if let Ok(config) = std::fs::read_to_string(&config_path) {
         let new_mac = format!("00:16:3e:{:02x}:{:02x}:{:02x}",
             rand_byte(), rand_byte(), new_last);
-        let updated = config.lines().map(|line| {
+        let mut has_hwaddr = false;
+        let mut updated: Vec<String> = config.lines().map(|line| {
             if line.starts_with("lxc.net.0.hwaddr") {
+                has_hwaddr = true;
                 format!("lxc.net.0.hwaddr = {}", new_mac)
             } else if line.starts_with("lxc.net.0.ipv4.address") {
                 format!("lxc.net.0.ipv4.address = {}/24", new_ip)
             } else {
                 line.to_string()
             }
-        }).collect::<Vec<_>>().join("\n");
-        let _ = std::fs::write(&config_path, updated);
+        }).collect();
+        // If the template had no hwaddr line, append one so the clone has a unique MAC
+        if !has_hwaddr {
+            // Insert after the first lxc.net.0 line for clean ordering
+            let insert_pos = updated.iter().position(|l| l.starts_with("lxc.net.0."))
+                .map(|p| p + 1)
+                .unwrap_or(updated.len());
+            updated.insert(insert_pos, format!("lxc.net.0.hwaddr = {}", new_mac));
+            info!("Added missing hwaddr {} to cloned container {}", new_mac, new_name);
+        }
+        let _ = std::fs::write(&config_path, updated.join("\n"));
     }
 
     // Write the setup_done marker so lxc_post_start_setup doesn't
