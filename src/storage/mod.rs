@@ -7,6 +7,7 @@
 //! Supports:
 //! - S3 storage via rust-s3 (pure Rust, native, works on IBM Power/ppc64le)
 //! - S3 storage via s3fs-fuse (fallback)
+//! - SSHFS mounts via sshfs
 //! - NFS storage via mount -t nfs
 //! - Local directory bind mounts
 //! - WolfDisk mounts via wolfdiskctl
@@ -32,6 +33,7 @@ pub enum MountType {
     Nfs,
     Directory,
     Wolfdisk,
+    Sshfs,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +178,7 @@ pub fn mount_storage(id: &str) -> Result<String, String> {
         MountType::Nfs => mount_nfs(&config.mounts[idx]),
         MountType::Directory => mount_directory(&config.mounts[idx]),
         MountType::Wolfdisk => mount_wolfdisk(&config.mounts[idx]),
+        MountType::Sshfs => mount_sshfs(&config.mounts[idx]),
     };
     
     match result {
@@ -710,12 +713,92 @@ fn mount_wolfdisk(mount: &StorageMount) -> Result<String, String> {
     }
 }
 
+fn mount_sshfs(mount: &StorageMount) -> Result<String, String> {
+    // Ensure sshfs is installed
+    if !has_sshfs() {
+        info!("Installing sshfs...");
+        install_sshfs().map_err(|e| format!("Failed to install sshfs: {}", e))?;
+        if !has_sshfs() {
+            return Err("sshfs is not installed and could not be auto-installed".to_string());
+        }
+    }
+
+    if mount.source.is_empty() {
+        return Err("SSHFS source is required (e.g. user@host:/remote/path)".to_string());
+    }
+
+    let mut args = vec![
+        mount.source.clone(),
+        mount.mount_point.clone(),
+        "-o".to_string(), "allow_other".to_string(),
+        "-o".to_string(), "reconnect".to_string(),
+        "-o".to_string(), "ServerAliveInterval=15".to_string(),
+        "-o".to_string(), "ServerAliveCountMax=3".to_string(),
+        "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
+    ];
+
+    // If nfs_options is set, treat it as the SSH key path
+    if let Some(ref key_path) = mount.nfs_options {
+        if !key_path.is_empty() {
+            args.push("-o".to_string());
+            args.push(format!("IdentityFile={}", key_path));
+        }
+    }
+
+    let output = Command::new("sshfs")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Failed to run sshfs: {}", e))?;
+
+    if output.status.success() {
+        Ok("SSHFS storage mounted".to_string())
+    } else {
+        Err(format!("SSHFS mount failed: {}", String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
 // ─── Helpers ───
 
 fn has_s3fs() -> bool {
     Command::new("s3fs").arg("--version").output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+fn has_sshfs() -> bool {
+    Command::new("which").arg("sshfs").output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn install_sshfs() -> Result<(), String> {
+    info!("Installing sshfs...");
+    let distro = crate::installer::detect_distro();
+    let (pkg_mgr, pkg_name) = match distro {
+        crate::installer::DistroFamily::Debian => ("apt-get", "sshfs"),
+        crate::installer::DistroFamily::RedHat => ("dnf", "fuse-sshfs"),
+        crate::installer::DistroFamily::Suse => ("zypper", "sshfs"),
+        crate::installer::DistroFamily::Unknown => ("apt-get", "sshfs"),
+    };
+    let output = Command::new(pkg_mgr)
+        .args(["install", "-y", pkg_name])
+        .output()
+        .map_err(|e| format!("Failed to install {}: {}", pkg_name, e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!("{} installation failed: {}", pkg_name, String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+fn has_nfs() -> bool {
+    Path::new("/sbin/mount.nfs").exists() || Path::new("/usr/sbin/mount.nfs").exists()
+}
+
+fn has_wolfdisk() -> bool {
+    Path::new("/usr/local/bin/wolfdiskctl").exists()
+        || Path::new("/opt/wolfdisk/wolfdiskctl").exists()
+        || Command::new("which").arg("wolfdiskctl").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn install_s3fs() -> Result<(), String> {
@@ -946,4 +1029,124 @@ pub fn available_mounts() -> Vec<StorageMount> {
     load_config().mounts.into_iter()
         .filter(|m| m.status == "mounted" || check_mounted(&m.mount_point))
         .collect()
+}
+
+// ─── Storage Provider Detection ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageProvider {
+    pub name: String,
+    pub label: String,
+    pub icon: String,
+    pub installed: bool,
+    pub description: String,
+    pub package: String,
+}
+
+/// List all available storage providers with their install status
+pub fn list_providers() -> Vec<StorageProvider> {
+    vec![
+        StorageProvider {
+            name: "nfs".to_string(),
+            label: "NFS".to_string(),
+            icon: "🗄️".to_string(),
+            installed: has_nfs(),
+            description: "Network File System — mount remote directories over the network".to_string(),
+            package: "nfs-common".to_string(),
+        },
+        StorageProvider {
+            name: "sshfs".to_string(),
+            label: "SSHFS".to_string(),
+            icon: "🔑".to_string(),
+            installed: has_sshfs(),
+            description: "SSH Filesystem — mount remote directories over SSH".to_string(),
+            package: "sshfs".to_string(),
+        },
+        StorageProvider {
+            name: "s3fs".to_string(),
+            label: "S3 (s3fs-fuse)".to_string(),
+            icon: "☁️".to_string(),
+            installed: has_s3fs(),
+            description: "S3-compatible object storage via FUSE".to_string(),
+            package: "s3fs".to_string(),
+        },
+        StorageProvider {
+            name: "wolfdisk".to_string(),
+            label: "WolfDisk".to_string(),
+            icon: "🐺".to_string(),
+            installed: has_wolfdisk(),
+            description: "Distributed file system with replicated and shared storage".to_string(),
+            package: "wolfdisk".to_string(),
+        },
+    ]
+}
+
+/// Install a storage provider by name
+pub fn install_provider(name: &str) -> Result<String, String> {
+    let distro = crate::installer::detect_distro();
+    let (pkg_mgr, pkg_name) = match name {
+        "nfs" => match distro {
+            crate::installer::DistroFamily::RedHat => ("dnf", "nfs-utils"),
+            crate::installer::DistroFamily::Suse => ("zypper", "nfs-client"),
+            _ => ("apt-get", "nfs-common"),
+        },
+        "sshfs" => match distro {
+            crate::installer::DistroFamily::RedHat => ("dnf", "fuse-sshfs"),
+            _ => ("apt-get", "sshfs"),
+        },
+        "s3fs" => match distro {
+            crate::installer::DistroFamily::RedHat => {
+                let _ = Command::new("dnf").args(["install", "-y", "epel-release"]).output();
+                ("dnf", "s3fs-fuse")
+            },
+            _ => ("apt-get", "s3fs"),
+        },
+        "wolfdisk" => {
+            return Err("WolfDisk must be installed separately. See https://wolf.uk.com/wolfdisk".to_string());
+        },
+        _ => return Err(format!("Unknown provider: {}", name)),
+    };
+
+    info!("Installing storage provider '{}' via {} {}", name, pkg_mgr, pkg_name);
+    let output = Command::new(pkg_mgr)
+        .args(["install", "-y", pkg_name])
+        .output()
+        .map_err(|e| format!("Failed to run {}: {}", pkg_mgr, e))?;
+
+    if output.status.success() {
+        Ok(format!("{} installed successfully", pkg_name))
+    } else {
+        Err(format!("Installation failed: {}", String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+// ─── System Logs ───
+
+/// Read system logs from journalctl
+pub fn read_system_logs(lines: usize, search: Option<&str>, unit: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "--no-pager".to_string(),
+        "-n".to_string(), lines.to_string(),
+        "--output".to_string(), "short-iso".to_string(),
+    ];
+    if let Some(u) = unit {
+        if !u.is_empty() {
+            args.push("-u".to_string());
+            args.push(u.to_string());
+        }
+    }
+    if let Some(s) = search {
+        if !s.is_empty() {
+            args.push("-g".to_string());
+            args.push(s.to_string());
+        }
+    }
+
+    match Command::new("journalctl").args(&args).output() {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            text.lines().map(|l| l.to_string()).collect()
+        }
+        Err(e) => vec![format!("Error reading logs: {}", e)],
+    }
 }

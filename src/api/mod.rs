@@ -4270,6 +4270,55 @@ pub async fn storage_import_rclone(
     }
 }
 
+/// GET /api/storage/providers — list installed storage providers
+pub async fn storage_list_providers(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(storage::list_providers())
+}
+
+/// POST /api/storage/providers/{name}/install — install a storage provider
+pub async fn storage_install_provider(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    let result = web::block(move || storage::install_provider(&name)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SystemLogsQuery {
+    pub lines: Option<usize>,
+    pub search: Option<String>,
+    pub unit: Option<String>,
+}
+
+/// GET /api/system/logs — read system journal logs
+pub async fn system_logs(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<SystemLogsQuery>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let lines = query.lines.unwrap_or(200).min(5000);
+    let search = query.search.as_deref();
+    let unit = query.unit.as_deref();
+    let logs = storage::read_system_logs(lines, search, unit);
+    HttpResponse::Ok().json(serde_json::json!({
+        "lines": logs,
+        "count": logs.len(),
+    }))
+}
+
 /// POST /api/storage/mounts/{id}/sync — sync a global mount to all cluster nodes
 pub async fn storage_sync_mount(
     req: HttpRequest,
@@ -7429,7 +7478,7 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
         })),
         None => {
             // Log available service IDs for debugging
-            let available: Vec<String> = state.wolfrun.list().iter().map(|s| format!("{} ({})", s.id, s.name)).collect();
+            let available: Vec<String> = state.wolfrun.list(None).iter().map(|s| format!("{} ({})", s.id, s.name)).collect();
             warn!("WolfRun delete: service '{}' not found. Available: {:?}", id, available);
             HttpResponse::NotFound().json(serde_json::json!({ "error": format!("Service not found: {}", id) }))
         }
@@ -7658,13 +7707,14 @@ pub struct WolfRunSettingsRequest {
     pub max_replicas: Option<u32>,
     pub desired: Option<u32>,
     pub lb_policy: Option<String>,
+    pub allowed_nodes: Option<Vec<String>>,
 }
 
 /// POST /api/wolfrun/services/{id}/settings — update service settings
 pub async fn wolfrun_settings(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<WolfRunSettingsRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
-    if state.wolfrun.update_settings(&id, body.min_replicas, body.max_replicas, body.desired, body.lb_policy.clone()) {
+    if state.wolfrun.update_settings(&id, body.min_replicas, body.max_replicas, body.desired, body.lb_policy.clone(), body.allowed_nodes.clone()) {
         let wolfrun = Arc::clone(&state.wolfrun);
         let cluster = Arc::clone(&state.cluster);
         let secret = state.cluster_secret.clone();
@@ -7678,6 +7728,7 @@ pub async fn wolfrun_settings(req: HttpRequest, state: web::Data<AppState>, path
                 "min_replicas": svc.min_replicas,
                 "max_replicas": svc.max_replicas,
                 "lb_policy": svc.lb_policy,
+                "allowed_nodes": svc.allowed_nodes,
             }))
         } else {
             HttpResponse::Ok().json(serde_json::json!({ "updated": true }))
@@ -7841,6 +7892,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/storage/mounts/{id}/unmount", web::post().to(storage_do_unmount))
         .route("/api/storage/mounts/{id}/sync", web::post().to(storage_sync_mount))
         .route("/api/storage/mounts/{id}/sync-s3", web::post().to(storage_sync_s3))
+        .route("/api/storage/providers", web::get().to(storage_list_providers))
+        .route("/api/storage/providers/{name}/install", web::post().to(storage_install_provider))
+        .route("/api/system/logs", web::get().to(system_logs))
         // Disk partition info
         .route("/api/storage/disk-info", web::get().to(storage_disk_info))
         // ZFS

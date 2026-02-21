@@ -120,6 +120,9 @@ pub struct WolfRunService {
     /// Load balancer policy: "round_robin" (default) or "ip_hash" (sticky sessions)
     #[serde(default = "default_lb_policy")]
     pub lb_policy: String,
+    /// Allowed node IDs — empty means all nodes are eligible
+    #[serde(default)]
+    pub allowed_nodes: Vec<String>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -214,6 +217,7 @@ impl WolfRunState {
             instances: Vec::new(),
             service_ip,
             lb_policy: "round_robin".to_string(),
+            allowed_nodes: Vec::new(),
             created_at: now,
             updated_at: now,
         };
@@ -260,7 +264,7 @@ impl WolfRunState {
     }
 
     /// Update service settings (min, max, desired replicas)
-    pub fn update_settings(&self, id: &str, min: Option<u32>, max: Option<u32>, desired: Option<u32>, lb_policy: Option<String>) -> bool {
+    pub fn update_settings(&self, id: &str, min: Option<u32>, max: Option<u32>, desired: Option<u32>, lb_policy: Option<String>, allowed_nodes: Option<Vec<String>>) -> bool {
         let mut svcs = self.services.write().unwrap();
         if let Some(svc) = svcs.iter_mut().find(|s| s.id == id) {
             if let Some(mn) = min { svc.min_replicas = mn; }
@@ -268,6 +272,9 @@ impl WolfRunState {
             if let Some(d) = desired { svc.replicas = d; }
             if let Some(p) = lb_policy {
                 if p == "ip_hash" || p == "round_robin" { svc.lb_policy = p; }
+            }
+            if let Some(nodes) = allowed_nodes {
+                svc.allowed_nodes = nodes;
             }
             // Enforce: min <= desired <= max
             if svc.min_replicas > svc.max_replicas { svc.min_replicas = svc.max_replicas; }
@@ -365,6 +372,7 @@ impl WolfRunState {
             instances: vec![instance],
             service_ip,
             lb_policy: "round_robin".to_string(),
+            allowed_nodes: Vec::new(),
             created_at: now,
             updated_at: now,
         };
@@ -434,7 +442,10 @@ pub fn schedule(
         // Must be in the same cluster
         let node_cluster = n.cluster_name.as_deref().unwrap_or("WolfStack");
         if node_cluster != service.cluster_name { return false; }
-        // Proxmox nodes can participate if they have the required runtime
+        // Must be in the allowed nodes list (if specified)
+        if !service.allowed_nodes.is_empty() && !service.allowed_nodes.contains(&n.id) {
+            return false;
+        }
         // Check placement constraints
         match &service.placement {
             Placement::RequireNode(nid) => n.id == *nid,

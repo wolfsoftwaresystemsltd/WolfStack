@@ -996,6 +996,16 @@
                             <option value="ip_hash">📌 IP Hash (Sticky Sessions)</option>
                         </select>
                     </div>
+                    <div style="margin-top:12px;">
+                        <label style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">🖥️ Allowed
+                            Nodes</label>
+                        <div id="wolfrun-settings-allowed-nodes"
+                            style="max-height:180px; overflow-y:auto; border:1px solid var(--border); border-radius:6px; padding:8px; background:var(--bg-secondary);">
+                            <span style="color:var(--text-muted); font-size:12px;">Loading nodes...</span>
+                        </div>
+                        <small style="color:var(--text-muted); font-size:11px;">Uncheck all = run on any node. Check
+                            specific nodes to restrict placement.</small>
+                    </div>
                     <p style="font-size:12px; color:var(--text-muted); margin:8px 0 0;">
                         ➖/➕ buttons will be disabled at min/max bounds. IP Hash keeps clients on the same backend for
                         session persistence.
@@ -1806,6 +1816,55 @@
             </div>
         </div>
 
+        <!-- ═══ System Logs ═══ -->
+        <div id="page-syslogs" class="page-view" style="display:none;">
+            <div class="card">
+                <div class="card-header"
+                    style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                    <h3>📋 System Logs</h3>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                        <input type="text" class="form-control" id="syslog-search" placeholder="Search logs..."
+                            style="width:200px; font-size:13px;" onkeydown="if(event.key==='Enter') loadSystemLogs()">
+                        <select class="form-control" id="syslog-unit" style="width:180px; font-size:13px;"
+                            onchange="loadSystemLogs()">
+                            <option value="">All Units</option>
+                            <option value="wolfstack">wolfstack</option>
+                            <option value="wolfnet">wolfnet</option>
+                            <option value="wolfdisk">wolfdisk</option>
+                            <option value="docker">docker</option>
+                            <option value="nginx">nginx</option>
+                            <option value="apache2">apache2</option>
+                            <option value="sshd">sshd</option>
+                            <option value="cron">cron</option>
+                            <option value="kernel">kernel</option>
+                        </select>
+                        <select class="form-control" id="syslog-lines" style="width:100px; font-size:13px;"
+                            onchange="loadSystemLogs()">
+                            <option value="100">100</option>
+                            <option value="200" selected>200</option>
+                            <option value="500">500</option>
+                            <option value="1000">1000</option>
+                        </select>
+                        <button class="btn btn-sm btn-primary" onclick="loadSystemLogs()" style="font-size:12px;">🔍
+                            Search</button>
+                    </div>
+                </div>
+                <div class="card-body" style="padding:0;">
+                    <div id="syslog-viewer"
+                        style="font-family:'JetBrains Mono','Fira Code',monospace; font-size:12px; line-height:1.5;
+                            background:var(--bg-primary); color:var(--text-primary); padding:16px;
+                            max-height:calc(100vh - 280px); overflow-y:auto; white-space:pre-wrap; word-break:break-all;">
+                        <span style="color:var(--text-muted);">Click 🔍 Search or press Enter to load logs...</span>
+                    </div>
+                </div>
+                <div class="card-footer"
+                    style="display:flex; justify-content:space-between; align-items:center; padding:8px 16px;">
+                    <span id="syslog-count" style="color:var(--text-muted); font-size:12px;">0 lines</span>
+                    <button class="btn btn-sm" onclick="copySystemLogs()" style="font-size:11px;">📋 Copy All</button>
+                </div>
+            </div>
+        </div>
+
         <!-- ═══ MySQL Database Editor ═══ -->
         <div id="page-mysql-editor" class="page-view" style="display:none;">
             <!-- Connection Bar -->
@@ -2612,6 +2671,23 @@
 
         <!-- ═══ Storage Manager ═══ -->
         <div id="page-storage" class="page-view" style="display:none;">
+            <!-- Installed Storage Providers -->
+            <div class="card" style="margin-bottom:20px;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>📦 Installed Storage Providers</h3>
+                    <button class="btn btn-sm" onclick="loadStorageProviders()"
+                        style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;">↻
+                        Refresh</button>
+                </div>
+                <div class="card-body">
+                    <div id="storage-providers-grid"
+                        style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:12px;">
+                        <div style="color:var(--text-muted); text-align:center; padding:20px;">Loading providers...
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="card">
                 <div class="card-header"
                     style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
@@ -3732,6 +3808,7 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                                 <option value="nfs">🗄️ NFS Share</option>
                                 <option value="directory">📁 Directory (bind mount)</option>
                                 <option value="wolfdisk">🐺 WolfDisk</option>
+                                <option value="sshfs">🔑 SSHFS (SSH Filesystem)</option>
                             </select>
                         </div>
                         <div class="form-group">
@@ -3816,6 +3893,26 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                                     placeholder="/wolfdisk/data">
                                 <small style="color:var(--text-muted); font-size:11px;">Path on the WolfDisk
                                     filesystem</small>
+                            </div>
+                        </div>
+
+                        <!-- SSHFS Fields -->
+                        <div id="sshfs-fields" style="grid-column: 1 / -1; display:none;">
+                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                                <div class="form-group" style="grid-column: 1 / -1;">
+                                    <label>SSH Source</label>
+                                    <input type="text" class="form-control" id="sshfs-source"
+                                        placeholder="user@hostname:/remote/path">
+                                    <small style="color:var(--text-muted); font-size:11px;">Format:
+                                        user@host:/remote/path</small>
+                                </div>
+                                <div class="form-group" style="grid-column: 1 / -1;">
+                                    <label>SSH Key Path (optional)</label>
+                                    <input type="text" class="form-control" id="sshfs-key"
+                                        placeholder="/root/.ssh/id_rsa">
+                                    <small style="color:var(--text-muted); font-size:11px;">Leave blank for default key
+                                        or password auth</small>
+                                </div>
                             </div>
                         </div>
 

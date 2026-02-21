@@ -149,6 +149,7 @@ function selectServerView(nodeId, view) {
         'pve-resources': 'VMs & Containers',
         'mysql-editor': 'MariaDB/MySQL',
         'terminal': 'Terminal',
+        'syslogs': 'System Logs',
         'security': 'Security',
     };
     document.getElementById('page-title').textContent = `${hostname} — ${viewTitles[view] || view}`;
@@ -213,7 +214,8 @@ function selectServerView(nodeId, view) {
         }
     }
     if (view === 'vms') loadVms().finally(() => hidePageLoadingOverlay(el));
-    if (view === 'storage') Promise.all([loadStorageMounts(), loadZfsStatus(), loadDiskInfo()]).finally(() => hidePageLoadingOverlay(el));
+    if (view === 'storage') Promise.all([loadStorageProviders(), loadStorageMounts(), loadZfsStatus(), loadDiskInfo()]).finally(() => hidePageLoadingOverlay(el));
+    if (view === 'syslogs') { loadSystemLogs(); hidePageLoadingOverlay(el); }
     if (view === 'files') { if (!window._skipFileReset) { containerFileMode = null; currentFilePath = '/'; } window._skipFileReset = false; loadFiles().finally(() => hidePageLoadingOverlay(el)); }
     if (view === 'networking') loadNetworking().finally(() => hidePageLoadingOverlay(el));
     if (view === 'backups') loadBackups().finally(() => hidePageLoadingOverlay(el));
@@ -365,6 +367,9 @@ function buildServerTree(nodes) {
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
                             <span class="icon">💻</span> Terminal
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="syslogs" onclick="selectServerView('${node.id}', 'syslogs')">
+                            <span class="icon">📋</span> System Logs
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="mysql-editor" onclick="selectServerView('${node.id}', 'mysql-editor')">
                             <span class="icon">🗄️</span> MariaDB/MySQL
@@ -2091,6 +2096,7 @@ function onMountTypeChange() {
     document.getElementById('nfs-fields').style.display = type === 'nfs' ? 'block' : 'none';
     document.getElementById('dir-fields').style.display = type === 'directory' ? 'block' : 'none';
     document.getElementById('wolfdisk-fields').style.display = type === 'wolfdisk' ? 'block' : 'none';
+    document.getElementById('sshfs-fields').style.display = type === 'sshfs' ? 'block' : 'none';
 }
 
 // ─── CRUD Operations ───
@@ -2132,6 +2138,11 @@ async function createStorageMount() {
     } else if (type === 'wolfdisk') {
         source = document.getElementById('wolfdisk-source').value.trim();
         if (!source) return showModal('WolfDisk path is required');
+    } else if (type === 'sshfs') {
+        source = document.getElementById('sshfs-source').value.trim();
+        const sshKey = document.getElementById('sshfs-key').value.trim();
+        if (!source) return showModal('SSHFS source is required (e.g. user@host:/path)');
+        if (sshKey) nfs_options = sshKey; // reuse nfs_options field for SSH key path
     }
 
     const payload = { name, type, source, mount_point, global, auto_mount, s3_config, nfs_options, do_mount: true };
@@ -13733,7 +13744,7 @@ function renderWolfRunServices(services) {
                 <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'restart')" title="Restart All" style="padding:4px 8px; font-size:12px; color:#3b82f6;">🔄</button>
                 <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired - 1})" ${desired <= minR ? 'disabled' : ''} title="Scale down" style="padding:4px 8px; font-size:12px;">➖</button>
                 <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired + 1})" ${desired >= maxR ? 'disabled' : ''} title="Scale up" style="padding:4px 8px; font-size:12px;">➕</button>
-                <button class="btn btn-sm" onclick="wolfrunSettings('${svc.id}', '${svc.name}', ${desired}, ${minR}, ${maxR}, '${svc.lb_policy || 'round_robin'}')" title="Settings" style="padding:4px 8px; font-size:12px; color:#a78bfa;">⚙️</button>
+                <button class="btn btn-sm" onclick="wolfrunSettings('${svc.id}', '${svc.name}', ${desired}, ${minR}, ${maxR}, '${svc.lb_policy || 'round_robin'}', ${JSON.stringify(svc.allowed_nodes || [])})" title="Settings" style="padding:4px 8px; font-size:12px; color:#a78bfa;">⚙️</button>
                 <button class="btn btn-sm" onclick="openWolfRunPortForward('${svc.id}', '${svc.name}', '${vip || ''}')" title="Port Forward" style="padding:4px 8px; font-size:12px; color:#818cf8;" ${!vip ? 'disabled' : ''}>🔀</button>
                 <button class="btn btn-sm" onclick="wolfrunDelete('${svc.id}', '${svc.name}')" title="Remove" style="padding:4px 8px; font-size:12px; color:#ef4444;">🗑️</button>
             </td>
@@ -13820,13 +13831,31 @@ async function executeWolfRunDeploy() {
 
 let wolfrunSettingsServiceId = null;
 
-function wolfrunSettings(serviceId, name, currentDesired, currentMin, currentMax, lbPolicy) {
+function wolfrunSettings(serviceId, name, currentDesired, currentMin, currentMax, lbPolicy, allowedNodes) {
     wolfrunSettingsServiceId = serviceId;
     document.getElementById('wolfrun-settings-name').textContent = name;
     document.getElementById('wolfrun-settings-desired').value = currentDesired;
     document.getElementById('wolfrun-settings-min').value = currentMin;
     document.getElementById('wolfrun-settings-max').value = currentMax;
     document.getElementById('wolfrun-settings-lb-policy').value = lbPolicy || 'round_robin';
+
+    // Render allowed nodes checkboxes from allNodes
+    const container = document.getElementById('wolfrun-settings-allowed-nodes');
+    const allowed = allowedNodes || [];
+    if (allNodes && allNodes.length > 0) {
+        container.innerHTML = allNodes.map(n => {
+            const checked = allowed.length === 0 ? '' : (allowed.includes(n.id) ? 'checked' : '');
+            const statusDot = n.online ? '🟢' : '🔴';
+            return `<label style="display:flex; align-items:center; gap:6px; padding:4px 0; cursor:pointer; font-size:13px; border-bottom:1px solid var(--bg-tertiary);">
+                <input type="checkbox" value="${n.id}" class="wolfrun-node-check" ${checked}>
+                ${statusDot} ${n.hostname || n.id}
+                <span style="color:var(--text-muted); font-size:11px; margin-left:auto;">${n.id.substring(0, 8)}...</span>
+            </label>`;
+        }).join('');
+    } else {
+        container.innerHTML = '<span style="color:var(--text-muted); font-size:12px;">No nodes available</span>';
+    }
+
     document.getElementById('wolfrun-settings-modal').classList.add('active');
 }
 
@@ -13842,6 +13871,12 @@ async function saveWolfRunSettings() {
     const max = parseInt(document.getElementById('wolfrun-settings-max').value, 10);
     const lb_policy = document.getElementById('wolfrun-settings-lb-policy').value;
 
+    // Collect checked nodes
+    const nodeChecks = document.querySelectorAll('.wolfrun-node-check');
+    const checkedNodes = Array.from(nodeChecks).filter(cb => cb.checked).map(cb => cb.value);
+    // If all are checked or none are checked, send empty array (= all nodes allowed)
+    const allowed_nodes = (checkedNodes.length === 0 || checkedNodes.length === nodeChecks.length) ? [] : checkedNodes;
+
     // Get current running count before saving
     let currentRunning = 0;
     try {
@@ -13853,7 +13888,7 @@ async function saveWolfRunSettings() {
         const resp = await fetch(apiUrl(`/api/wolfrun/services/${wolfrunSettingsServiceId}/settings`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ desired, min_replicas: min, max_replicas: max, lb_policy }),
+            body: JSON.stringify({ desired, min_replicas: min, max_replicas: max, lb_policy, allowed_nodes }),
         });
         const data = await resp.json();
         if (resp.ok) {
@@ -14350,4 +14385,99 @@ async function deleteWolfRunPortForward(serviceId, ruleId) {
 // Apply saved theme immediately on load
 initTheme();
 
+// ─── Storage Providers ───
+
+async function loadStorageProviders() {
+    try {
+        const resp = await fetch(apiUrl('/api/storage/providers'));
+        if (!resp.ok) return;
+        const providers = await resp.json();
+        const grid = document.getElementById('storage-providers-grid');
+        grid.innerHTML = providers.map(p => `
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:14px; display:flex; align-items:center; gap:12px;">
+                <span style="font-size:24px;">${p.icon}</span>
+                <div style="flex:1; min-width:0;">
+                    <div style="font-weight:600; font-size:14px;">${p.label}</div>
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">${p.description}</div>
+                </div>
+                <div style="flex-shrink:0;">
+                    ${p.installed
+                ? '<span style="color:#10b981; font-size:12px; font-weight:600;">✅ Installed</span>'
+                : `<button class="btn btn-sm btn-primary" style="font-size:11px;" onclick="installProvider('${p.name}')">Install</button>`
+            }
+                </div>
+            </div>
+        `).join('');
+    } catch (e) {
+        console.error('Failed to load providers:', e);
+    }
+}
+
+async function installProvider(name) {
+    if (!confirm(`Install storage provider "${name}"? This may take a moment.`)) return;
+    showToast(`Installing ${name}...`, 'info');
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/providers/${name}/install`), { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || `${name} installed`, 'success');
+        } else {
+            showToast(data.error || 'Install failed', 'error');
+        }
+        loadStorageProviders();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+// ─── System Logs ───
+
+async function loadSystemLogs() {
+    const viewer = document.getElementById('syslog-viewer');
+    const countEl = document.getElementById('syslog-count');
+    const search = document.getElementById('syslog-search').value.trim();
+    const unit = document.getElementById('syslog-unit').value;
+    const lines = document.getElementById('syslog-lines').value;
+
+    viewer.innerHTML = '<span style="color:var(--text-muted);">Loading logs...</span>';
+
+    try {
+        const params = new URLSearchParams({ lines });
+        if (search) params.set('search', search);
+        if (unit) params.set('unit', unit);
+
+        const resp = await fetch(apiUrl(`/api/system/logs?${params}`));
+        if (!resp.ok) throw new Error('Failed to fetch logs');
+        const data = await resp.json();
+
+        if (data.lines && data.lines.length > 0) {
+            // Color-code log lines
+            viewer.innerHTML = data.lines.map(line => {
+                let color = 'var(--text-primary)';
+                const lower = line.toLowerCase();
+                if (lower.includes('error') || lower.includes('failed') || lower.includes('fatal')) color = '#ef4444';
+                else if (lower.includes('warning') || lower.includes('warn')) color = '#f59e0b';
+                else if (lower.includes('notice') || lower.includes('info:')) color = '#3b82f6';
+                return `<div style="color:${color}; border-bottom:1px solid var(--bg-tertiary); padding:1px 0;">${escapeHtml(line)}</div>`;
+            }).join('');
+            countEl.textContent = `${data.lines.length} lines`;
+            viewer.scrollTop = viewer.scrollHeight;
+        } else {
+            viewer.innerHTML = '<span style="color:var(--text-muted);">No log entries found.</span>';
+            countEl.textContent = '0 lines';
+        }
+    } catch (e) {
+        viewer.innerHTML = `<span style="color:#ef4444;">Error: ${e.message}</span>`;
+    }
+}
+
+function copySystemLogs() {
+    const viewer = document.getElementById('syslog-viewer');
+    const text = viewer.innerText;
+    navigator.clipboard.writeText(text).then(() => {
+        showToast('Logs copied to clipboard', 'success');
+    }).catch(() => {
+        showToast('Failed to copy logs', 'error');
+    });
+}
 
