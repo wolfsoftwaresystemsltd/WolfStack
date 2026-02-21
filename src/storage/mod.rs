@@ -1041,44 +1041,150 @@ pub struct StorageProvider {
     pub installed: bool,
     pub description: String,
     pub package: String,
+    /// systemd service name (if applicable)
+    pub service: Option<String>,
+    /// Service status: "running", "stopped", "not-installed", "no-service"
+    pub status: String,
+    /// Path to config file (if applicable)
+    pub config_path: Option<String>,
+}
+
+fn service_status(service_name: &str) -> String {
+    match Command::new("systemctl").args(["is-active", service_name]).output() {
+        Ok(o) => {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            match s.as_str() {
+                "active" => "running".to_string(),
+                "inactive" => "stopped".to_string(),
+                "failed" => "failed".to_string(),
+                _ => s,
+            }
+        }
+        Err(_) => "unknown".to_string(),
+    }
 }
 
 /// List all available storage providers with their install status
 pub fn list_providers() -> Vec<StorageProvider> {
     vec![
-        StorageProvider {
-            name: "nfs".to_string(),
-            label: "NFS".to_string(),
-            icon: "🗄️".to_string(),
-            installed: has_nfs(),
-            description: "Network File System — mount remote directories over the network".to_string(),
-            package: "nfs-common".to_string(),
+        {
+            let installed = has_nfs();
+            let svc = if installed { Some("nfs-server".to_string()) } else { None };
+            let status = if !installed { "not-installed".to_string() }
+                else { service_status("nfs-server") };
+            StorageProvider {
+                name: "nfs".to_string(),
+                label: "NFS".to_string(),
+                icon: "\u{1f5c4}\u{fe0f}".to_string(),
+                installed,
+                description: "Network File System \u{2014} mount remote directories over the network".to_string(),
+                package: "nfs-common".to_string(),
+                service: svc,
+                status,
+                config_path: Some("/etc/exports".to_string()),
+            }
         },
-        StorageProvider {
-            name: "sshfs".to_string(),
-            label: "SSHFS".to_string(),
-            icon: "🔑".to_string(),
-            installed: has_sshfs(),
-            description: "SSH Filesystem — mount remote directories over SSH".to_string(),
-            package: "sshfs".to_string(),
+        {
+            let installed = has_sshfs();
+            StorageProvider {
+                name: "sshfs".to_string(),
+                label: "SSHFS".to_string(),
+                icon: "\u{1f511}".to_string(),
+                installed,
+                description: "SSH Filesystem \u{2014} mount remote directories over SSH".to_string(),
+                package: "sshfs".to_string(),
+                service: None,
+                status: if installed { "no-service".to_string() } else { "not-installed".to_string() },
+                config_path: Some("/etc/fuse.conf".to_string()),
+            }
         },
-        StorageProvider {
-            name: "s3fs".to_string(),
-            label: "S3 (s3fs-fuse)".to_string(),
-            icon: "☁️".to_string(),
-            installed: has_s3fs(),
-            description: "S3-compatible object storage via FUSE".to_string(),
-            package: "s3fs".to_string(),
+        {
+            let installed = has_s3fs();
+            StorageProvider {
+                name: "s3fs".to_string(),
+                label: "S3 (s3fs-fuse)".to_string(),
+                icon: "\u{2601}\u{fe0f}".to_string(),
+                installed,
+                description: "S3-compatible object storage via FUSE".to_string(),
+                package: "s3fs".to_string(),
+                service: None,
+                status: if installed { "no-service".to_string() } else { "not-installed".to_string() },
+                config_path: Some("/etc/passwd-s3fs".to_string()),
+            }
         },
-        StorageProvider {
-            name: "wolfdisk".to_string(),
-            label: "WolfDisk".to_string(),
-            icon: "🐺".to_string(),
-            installed: has_wolfdisk(),
-            description: "Distributed file system with replicated and shared storage".to_string(),
-            package: "wolfdisk".to_string(),
+        {
+            let installed = has_wolfdisk();
+            let svc = if installed { Some("wolfdisk".to_string()) } else { None };
+            let status = if !installed { "not-installed".to_string() }
+                else { service_status("wolfdisk") };
+            StorageProvider {
+                name: "wolfdisk".to_string(),
+                label: "WolfDisk".to_string(),
+                icon: "\u{1f43a}".to_string(),
+                installed,
+                description: "Distributed file system with replicated and shared storage".to_string(),
+                package: "wolfdisk".to_string(),
+                service: svc,
+                status,
+                config_path: Some("/etc/wolfdisk/config.toml".to_string()),
+            }
         },
     ]
+}
+
+/// Perform an action on a storage provider service (start/stop/restart)
+pub fn provider_action(name: &str, action: &str) -> Result<String, String> {
+    let service_name = match name {
+        "nfs" => "nfs-server",
+        "wolfdisk" => "wolfdisk",
+        _ => return Err(format!("Provider '{}' has no manageable service", name)),
+    };
+
+    match action {
+        "start" | "stop" | "restart" | "enable" | "disable" => {
+            let output = Command::new("systemctl")
+                .args([action, service_name])
+                .output()
+                .map_err(|e| format!("Failed to {} {}: {}", action, service_name, e))?;
+            if output.status.success() {
+                Ok(format!("{} {} successful", service_name, action))
+            } else {
+                Err(format!("{} failed: {}", action, String::from_utf8_lossy(&output.stderr)))
+            }
+        }
+        _ => Err(format!("Unknown action: {}", action)),
+    }
+}
+
+/// Read a provider's config file contents
+pub fn provider_config(name: &str) -> Result<String, String> {
+    let path = match name {
+        "nfs" => "/etc/exports",
+        "sshfs" => "/etc/fuse.conf",
+        "s3fs" => "/etc/passwd-s3fs",
+        "wolfdisk" => "/etc/wolfdisk/config.toml",
+        _ => return Err(format!("Unknown provider: {}", name)),
+    };
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("Cannot read {}: {}", path, e))
+}
+
+/// Write a provider's config file contents
+pub fn save_provider_config(name: &str, content: &str) -> Result<String, String> {
+    let path = match name {
+        "nfs" => "/etc/exports",
+        "sshfs" => "/etc/fuse.conf",
+        "s3fs" => "/etc/passwd-s3fs",
+        "wolfdisk" => "/etc/wolfdisk/config.toml",
+        _ => return Err(format!("Unknown provider: {}", name)),
+    };
+    std::fs::write(path, content)
+        .map_err(|e| format!("Cannot write {}: {}", path, e))?;
+    // If NFS, reload exports
+    if name == "nfs" {
+        let _ = Command::new("exportfs").arg("-ra").output();
+    }
+    Ok(format!("Config saved to {}", path))
 }
 
 /// Install a storage provider by name

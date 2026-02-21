@@ -2688,6 +2688,33 @@
                 </div>
             </div>
 
+            <!-- Provider Settings Modal -->
+            <div id="provider-settings-modal" class="modal-overlay">
+                <div class="modal" style="max-width:600px; width:90%;">
+                    <div class="modal-header">
+                        <h3><span id="provider-settings-icon"></span> <span id="provider-settings-label"></span>
+                            Settings</h3>
+                        <button class="modal-close" onclick="closeProviderSettings()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div id="provider-settings-status" style="margin-bottom:12px;"></div>
+                        <div id="provider-settings-actions"
+                            style="display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap;"></div>
+                        <div style="margin-bottom:8px;">
+                            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">📄
+                                Configuration — <span id="provider-config-path"
+                                    style="font-weight:400; color:var(--text-muted);"></span></label>
+                            <textarea id="provider-config-editor" class="form-control"
+                                style="font-family:monospace; font-size:12px; min-height:220px; width:100%; resize:vertical; background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border);"></textarea>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" onclick="closeProviderSettings()">Close</button>
+                        <button class="btn btn-primary" onclick="saveProviderConfig()">💾 Save Config</button>
+                    </div>
+                </div>
+            </div>
+
             <div class="card">
                 <div class="card-header"
                     style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">

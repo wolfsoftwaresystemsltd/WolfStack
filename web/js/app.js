@@ -13744,7 +13744,7 @@ function renderWolfRunServices(services) {
                 <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'restart')" title="Restart All" style="padding:4px 8px; font-size:12px; color:#3b82f6;">🔄</button>
                 <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired - 1})" ${desired <= minR ? 'disabled' : ''} title="Scale down" style="padding:4px 8px; font-size:12px;">➖</button>
                 <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired + 1})" ${desired >= maxR ? 'disabled' : ''} title="Scale up" style="padding:4px 8px; font-size:12px;">➕</button>
-                <button class="btn btn-sm" onclick="wolfrunSettings('${svc.id}', '${svc.name}', ${desired}, ${minR}, ${maxR}, '${svc.lb_policy || 'round_robin'}', ${JSON.stringify(svc.allowed_nodes || [])})" title="Settings" style="padding:4px 8px; font-size:12px; color:#a78bfa;">⚙️</button>
+                <button class="btn btn-sm" onclick="wolfrunSettings('${svc.id}', '${svc.name}', ${desired}, ${minR}, ${maxR}, '${svc.lb_policy || 'round_robin'}', ${JSON.stringify(svc.allowed_nodes || [])}, '${svc.cluster_name || ''}')" title="Settings" style="padding:4px 8px; font-size:12px; color:#a78bfa;">⚙️</button>
                 <button class="btn btn-sm" onclick="openWolfRunPortForward('${svc.id}', '${svc.name}', '${vip || ''}')" title="Port Forward" style="padding:4px 8px; font-size:12px; color:#818cf8;" ${!vip ? 'disabled' : ''}>🔀</button>
                 <button class="btn btn-sm" onclick="wolfrunDelete('${svc.id}', '${svc.name}')" title="Remove" style="padding:4px 8px; font-size:12px; color:#ef4444;">🗑️</button>
             </td>
@@ -13831,7 +13831,7 @@ async function executeWolfRunDeploy() {
 
 let wolfrunSettingsServiceId = null;
 
-function wolfrunSettings(serviceId, name, currentDesired, currentMin, currentMax, lbPolicy, allowedNodes) {
+function wolfrunSettings(serviceId, name, currentDesired, currentMin, currentMax, lbPolicy, allowedNodes, clusterName) {
     wolfrunSettingsServiceId = serviceId;
     document.getElementById('wolfrun-settings-name').textContent = name;
     document.getElementById('wolfrun-settings-desired').value = currentDesired;
@@ -13839,11 +13839,15 @@ function wolfrunSettings(serviceId, name, currentDesired, currentMin, currentMax
     document.getElementById('wolfrun-settings-max').value = currentMax;
     document.getElementById('wolfrun-settings-lb-policy').value = lbPolicy || 'round_robin';
 
-    // Render allowed nodes checkboxes from allNodes
+    // Render allowed nodes checkboxes — only nodes from this service's cluster
     const container = document.getElementById('wolfrun-settings-allowed-nodes');
     const allowed = allowedNodes || [];
-    if (allNodes && allNodes.length > 0) {
-        container.innerHTML = allNodes.map(n => {
+    const clusterNodes = (allNodes || []).filter(n => {
+        const nodeCluster = n.cluster_name || 'WolfStack';
+        return nodeCluster === (clusterName || 'WolfStack');
+    });
+    if (clusterNodes.length > 0) {
+        container.innerHTML = clusterNodes.map(n => {
             const checked = allowed.length === 0 ? '' : (allowed.includes(n.id) ? 'checked' : '');
             const statusDot = n.online ? '🟢' : '🔴';
             return `<label style="display:flex; align-items:center; gap:6px; padding:4px 0; cursor:pointer; font-size:13px; border-bottom:1px solid var(--bg-tertiary);">
@@ -13853,7 +13857,7 @@ function wolfrunSettings(serviceId, name, currentDesired, currentMin, currentMax
             </label>`;
         }).join('');
     } else {
-        container.innerHTML = '<span style="color:var(--text-muted); font-size:12px;">No nodes available</span>';
+        container.innerHTML = '<span style="color:var(--text-muted); font-size:12px;">No nodes in this cluster</span>';
     }
 
     document.getElementById('wolfrun-settings-modal').classList.add('active');
@@ -14387,27 +14391,39 @@ initTheme();
 
 // ─── Storage Providers ───
 
+let _currentProviderName = null;
+
 async function loadStorageProviders() {
     try {
         const resp = await fetch(apiUrl('/api/storage/providers'));
         if (!resp.ok) return;
         const providers = await resp.json();
         const grid = document.getElementById('storage-providers-grid');
-        grid.innerHTML = providers.map(p => `
-            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:14px; display:flex; align-items:center; gap:12px;">
-                <span style="font-size:24px;">${p.icon}</span>
-                <div style="flex:1; min-width:0;">
-                    <div style="font-weight:600; font-size:14px;">${p.label}</div>
-                    <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">${p.description}</div>
+        grid.innerHTML = providers.map(p => {
+            const statusColor = p.status === 'running' ? '#10b981' : p.status === 'stopped' ? '#ef4444' : p.status === 'failed' ? '#ef4444' : '#6b7280';
+            const statusLabel = p.status === 'running' ? '🟢 Running' : p.status === 'stopped' ? '🔴 Stopped' : p.status === 'failed' ? '⚠️ Failed' : p.status === 'no-service' ? '✅ Installed' : '⭕ Not Installed';
+            const hasService = p.service && p.status !== 'not-installed' && p.status !== 'no-service';
+            return `
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:14px;">
+                <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px;">
+                    <span style="font-size:24px;">${p.icon}</span>
+                    <div style="flex:1; min-width:0;">
+                        <div style="font-weight:600; font-size:14px;">${p.label}</div>
+                        <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">${p.description}</div>
+                    </div>
                 </div>
-                <div style="flex-shrink:0;">
-                    ${p.installed
-                ? '<span style="color:#10b981; font-size:12px; font-weight:600;">✅ Installed</span>'
-                : `<button class="btn btn-sm btn-primary" style="font-size:11px;" onclick="installProvider('${p.name}')">Install</button>`
-            }
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+                    <span style="font-size:12px; font-weight:600; color:${statusColor};">${statusLabel}</span>
+                    <div style="display:flex; gap:4px; flex-wrap:wrap;">
+                        ${!p.installed ? `<button class="btn btn-sm btn-primary" style="font-size:11px;" onclick="installProvider('${p.name}')">Install</button>` : ''}
+                        ${hasService && p.status !== 'running' ? `<button class="btn btn-sm" style="font-size:11px; color:#10b981;" onclick="providerAction('${p.name}','start')">▶ Start</button>` : ''}
+                        ${hasService && p.status === 'running' ? `<button class="btn btn-sm" style="font-size:11px; color:#ef4444;" onclick="providerAction('${p.name}','stop')">⏹ Stop</button>` : ''}
+                        ${hasService && p.status === 'running' ? `<button class="btn btn-sm" style="font-size:11px; color:#3b82f6;" onclick="providerAction('${p.name}','restart')">🔄 Restart</button>` : ''}
+                        ${p.installed ? `<button class="btn btn-sm" style="font-size:11px; color:#a78bfa;" onclick="openProviderSettings('${p.name}','${p.icon}','${p.label}','${p.config_path || ''}')">⚙️ Settings</button>` : ''}
+                    </div>
                 </div>
-            </div>
-        `).join('');
+            </div>`;
+        }).join('');
     } catch (e) {
         console.error('Failed to load providers:', e);
     }
@@ -14425,6 +14441,74 @@ async function installProvider(name) {
             showToast(data.error || 'Install failed', 'error');
         }
         loadStorageProviders();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function providerAction(name, action) {
+    showToast(`${action}ing ${name}...`, 'info');
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/providers/${name}/action`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || `${action} successful`, 'success');
+        } else {
+            showToast(data.error || `${action} failed`, 'error');
+        }
+        loadStorageProviders();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function openProviderSettings(name, icon, label, configPath) {
+    _currentProviderName = name;
+    document.getElementById('provider-settings-icon').textContent = icon;
+    document.getElementById('provider-settings-label').textContent = label;
+    document.getElementById('provider-config-path').textContent = configPath || 'N/A';
+
+    // Load config
+    const editor = document.getElementById('provider-config-editor');
+    editor.value = 'Loading...';
+    document.getElementById('provider-settings-modal').classList.add('active');
+
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/providers/${name}/config`));
+        const data = await resp.json();
+        editor.value = data.content || '';
+        if (data.error) {
+            editor.value = `# ${data.error}\n# You can create this file by entering content below and saving.`;
+        }
+    } catch (e) {
+        editor.value = `# Error loading config: ${e.message}`;
+    }
+}
+
+function closeProviderSettings() {
+    document.getElementById('provider-settings-modal').classList.remove('active');
+    _currentProviderName = null;
+}
+
+async function saveProviderConfig() {
+    if (!_currentProviderName) return;
+    const content = document.getElementById('provider-config-editor').value;
+    try {
+        const resp = await fetch(apiUrl(`/api/storage/providers/${_currentProviderName}/config`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Config saved', 'success');
+        } else {
+            showToast(data.error || 'Save failed', 'error');
+        }
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
     }

@@ -4295,6 +4295,56 @@ pub async fn storage_install_provider(
     }
 }
 
+/// POST /api/storage/providers/{name}/action — start/stop/restart a provider service
+pub async fn storage_provider_action(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let result = web::block(move || storage::provider_action(&name, &action)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/storage/providers/{name}/config — read a provider's config file
+pub async fn storage_provider_config(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    match storage::provider_config(&name) {
+        Ok(content) => HttpResponse::Ok().json(serde_json::json!({ "content": content, "name": name })),
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({ "content": "", "error": e, "name": name })),
+    }
+}
+
+/// POST /api/storage/providers/{name}/config — save a provider's config file
+pub async fn storage_provider_config_save(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let result = web::block(move || storage::save_provider_config(&name, &content)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct SystemLogsQuery {
     pub lines: Option<usize>,
@@ -7894,6 +7944,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/storage/mounts/{id}/sync-s3", web::post().to(storage_sync_s3))
         .route("/api/storage/providers", web::get().to(storage_list_providers))
         .route("/api/storage/providers/{name}/install", web::post().to(storage_install_provider))
+        .route("/api/storage/providers/{name}/action", web::post().to(storage_provider_action))
+        .route("/api/storage/providers/{name}/config", web::get().to(storage_provider_config))
+        .route("/api/storage/providers/{name}/config", web::post().to(storage_provider_config_save))
         .route("/api/system/logs", web::get().to(system_logs))
         // Disk partition info
         .route("/api/storage/disk-info", web::get().to(storage_disk_info))
