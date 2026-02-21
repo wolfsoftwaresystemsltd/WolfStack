@@ -13425,7 +13425,7 @@ async function saveFail2banConfig(nodePrefix, btn) {
 
 // ─── Theme System ───
 function applyTheme(themeId) {
-    const validThemes = ['dark', 'light', 'midnight', 'datacenter', 'forest', 'amber', 'glass'];
+    const validThemes = ['dark', 'light', 'midnight', 'datacenter', 'forest', 'amber', 'glass', 'deepred'];
     if (!validThemes.includes(themeId)) themeId = 'dark';
 
     // Apply to root element
