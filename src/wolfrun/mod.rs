@@ -699,53 +699,72 @@ pub async fn reconcile(
         // Update instances with live state
         wolfrun.update_instances(&service.id, live_instances.clone());
 
-        // Rebuild load balancer rules for this service's VIP
+        // Rebuild load balancer rules for this service's VIP (only if backends changed)
         if let Some(ref vip) = service.service_ip {
             let backend_ips: Vec<String> = live_instances.iter()
                 .filter(|i| i.status == "running")
                 .filter_map(|i| i.wolfnet_ip.clone())
                 .collect();
-            rebuild_lb_rules(vip, &backend_ips, &service.ports, &service.lb_policy);
 
-            // Push VIP route to all remote nodes so they can reach the VIP
-            // via the orchestrator's WolfNet address
-            let vip_c = vip.clone();
-            let client_c = client.clone();
-            let secret_c = cluster_secret.to_string();
-            let nodes: Vec<_> = cluster.get_all_nodes().into_iter()
-                .filter(|n| !n.is_self && n.online)
-                .collect();
-            if !nodes.is_empty() {
-                // Get local WolfNet IP (cached in rebuild_lb_rules)
-                let host_ip = std::process::Command::new("ip")
-                    .args(["addr", "show", "wolfnet0"])
-                    .output().ok()
-                    .and_then(|o| {
-                        String::from_utf8_lossy(&o.stdout).lines()
-                            .find(|l| l.contains("inet "))
-                            .and_then(|l| l.trim().split_whitespace().nth(1))
-                            .and_then(|s| s.split('/').next())
-                            .map(|s| s.to_string())
-                    });
-                if let Some(host_ip) = host_ip {
-                    tokio::spawn(async move {
-                        let payload = serde_json::json!({
-                            "routes": { vip_c: host_ip }
+            // Skip rebuild if backends haven't changed since last cycle
+            use std::sync::Mutex;
+            static LB_CACHE: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Vec<String>>>> =
+                std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+            let changed = {
+                let mut cache = LB_CACHE.lock().unwrap();
+                let prev = cache.get(vip);
+                if prev == Some(&backend_ips) {
+                    false
+                } else {
+                    cache.insert(vip.clone(), backend_ips.clone());
+                    true
+                }
+            };
+
+            if changed {
+                info!("WolfRun LB: backends changed for VIP {} → {:?}", vip, backend_ips);
+                rebuild_lb_rules(vip, &backend_ips, &service.ports, &service.lb_policy);
+
+                // Push VIP route to all remote nodes so they can reach the VIP
+                // via the orchestrator's WolfNet address
+                let vip_c = vip.clone();
+                let client_c = client.clone();
+                let secret_c = cluster_secret.to_string();
+                let nodes: Vec<_> = cluster.get_all_nodes().into_iter()
+                    .filter(|n| !n.is_self && n.online)
+                    .collect();
+                if !nodes.is_empty() {
+                    let host_ip = std::process::Command::new("ip")
+                        .args(["addr", "show", "wolfnet0"])
+                        .output().ok()
+                        .and_then(|o| {
+                            String::from_utf8_lossy(&o.stdout).lines()
+                                .find(|l| l.contains("inet "))
+                                .and_then(|l| l.trim().split_whitespace().nth(1))
+                                .and_then(|s| s.split('/').next())
+                                .map(|s| s.to_string())
                         });
-                        for node in &nodes {
-                            let urls = crate::api::build_node_urls(&node.address, node.port, "/api/agent/wolfnet-routes");
-                            for url in &urls {
-                                if client_c.post(url)
-                                    .header("X-WolfStack-Secret", &secret_c)
-                                    .json(&payload)
-                                    .send().await
-                                    .is_ok()
-                                {
-                                    break;
+                    if let Some(host_ip) = host_ip {
+                        tokio::spawn(async move {
+                            let payload = serde_json::json!({
+                                "routes": { vip_c: host_ip }
+                            });
+                            for node in &nodes {
+                                let urls = crate::api::build_node_urls(&node.address, node.port, "/api/agent/wolfnet-routes");
+                                for url in &urls {
+                                    if client_c.post(url)
+                                        .header("X-WolfStack-Secret", &secret_c)
+                                        .json(&payload)
+                                        .send().await
+                                        .is_ok()
+                                    {
+                                        break;
+                                    }
                                 }
                             }
-                        }
-                    });
+                        });
+                    }
                 }
             }
         }
