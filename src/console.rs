@@ -281,7 +281,7 @@ async fn remote_console_bridge(
                 remote_stream = Some(stream);
                 break;
             }
-            Ok(Err(e)) => {
+            Ok(Err(_e)) => {
 
             }
             Err(_) => {

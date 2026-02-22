@@ -576,13 +576,9 @@ async fn main() -> std::io::Result<()> {
             tokio::time::sleep(Duration::from_secs(90)).await;
 
             let mut cooldowns: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
-            let mut cycle_count: u64 = 0;
             loop {
                 let config = alerting::AlertConfig::load();
 
-
-
-                cycle_count += 1;
 
                 if config.enabled && config.has_channels() {
                     let all_nodes = alert_cluster.get_all_nodes();

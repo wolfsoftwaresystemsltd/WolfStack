@@ -579,6 +579,7 @@ pub fn wolfnet_used_ips() -> Vec<String> {
 /// Reads /etc/wolfnet/config.toml to discover peers, calls each peer's
 /// WolfStack API for their container IPs, builds routes.json, and
 /// signals WolfNet to reload. Works without WolfStack cluster membership.
+#[allow(dead_code)]
 pub async fn sync_wolfnet_peer_routes() {
     // Load cluster secret for authenticating API requests
     let cluster_secret = crate::auth::load_cluster_secret();
@@ -820,7 +821,7 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
 
         }
         Ok(o) => {
-            let err = String::from_utf8_lossy(&o.stderr);
+            let _err = String::from_utf8_lossy(&o.stderr);
 
         }
         Err(e) => {
@@ -967,7 +968,7 @@ pub fn reapply_wolfnet_routes() {
 
         // Check if this container has a WolfNet IP
         let ip_file = entry.path().join(".wolfnet/ip");
-        let ip = match std::fs::read_to_string(&ip_file) {
+        let _ip = match std::fs::read_to_string(&ip_file) {
             Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
             _ => continue,
         };
@@ -1008,7 +1009,7 @@ fn lxc_apply_wolfnet(container: &str) {
         // On Proxmox, WolfNet uses wn0 on lxcbr0 (eth0 stays on vmbr0).
         // On standalone LXC, WolfNet uses a secondary IP on eth0 via lxcbr0.
         let is_pve = is_proxmox();
-        let wolfnet_iface = if is_pve { "wn0" } else { "eth0" };
+        let _wolfnet_iface = if is_pve { "wn0" } else { "eth0" };
 
         if is_pve {
             // Proxmox: wn0 is on lxcbr0 with NO IP/gateway in pct config.
@@ -1697,7 +1698,7 @@ pub fn docker_start(container: &str) -> Result<String, String> {
         if !ip.is_empty() && ip != "<no value>" {
 
             std::thread::sleep(std::time::Duration::from_secs(1));
-            if let Err(e) = docker_connect_wolfnet(container, &ip) {
+            if let Err(_e) = docker_connect_wolfnet(container, &ip) {
 
             }
         }

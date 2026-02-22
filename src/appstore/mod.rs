@@ -341,7 +341,7 @@ fn install_lxc(
             .map_err(|e| format!("Failed to run setup command: {}", e))?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let _stderr = String::from_utf8_lossy(&output.stderr);
 
         }
     }
@@ -396,7 +396,7 @@ fn install_bare_metal(
             .map_err(|e| format!("Package install failed: {}", e))?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let _stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("Package install failed: {}", stderr));
         }
     }
@@ -411,7 +411,7 @@ fn install_bare_metal(
             .map_err(|e| format!("Post-install command failed: {}", e))?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let _stderr = String::from_utf8_lossy(&output.stderr);
 
         }
     }

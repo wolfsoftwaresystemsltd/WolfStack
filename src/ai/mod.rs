@@ -192,7 +192,7 @@ impl AiAgent {
         let mut final_response = String::new();
 
         // Multi-turn loop: AI can request commands, we execute and feed back
-        for round in 0..3 {
+        for _round in 0..3 {
             let response = match config.provider.as_str() {
                 "gemini" => {
                     call_gemini(&self.client, &config.gemini_api_key, &config.model, &system_prompt, &history, &current_msg).await?

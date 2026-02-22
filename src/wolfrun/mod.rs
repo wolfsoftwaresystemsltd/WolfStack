@@ -752,7 +752,7 @@ pub async fn reconcile(
                     }
                 };
 
-                let instance_num = current.instances.len() + 1 + i as usize;
+                let _instance_num = current.instances.len() + 1 + i as usize;
                 let node = match cluster.get_node(&node_id) {
                     Some(n) => n,
                     None => continue,
@@ -804,7 +804,7 @@ pub async fn reconcile(
                                 let result = crate::containers::lxc_clone(&template_name, &clone_name);
                                 let _ = crate::containers::lxc_start(&template_name);
                                 match result {
-                                    Ok(msg) => {
+                                    Ok(_msg) => {
 
                                         // lxc_clone_local already called lxc_clone_fixup_ip
                                         // (unique bridge IP + MAC + wolfnet marker removal)
@@ -863,7 +863,7 @@ pub async fn reconcile(
                         } else {
                             // ── Cross-node clone-and-migrate ──
                             // Register instance as PENDING first to prevent duplicates
-                            let src_hostname = source_node.as_ref().map(|n| n.hostname.as_str()).unwrap_or("unknown");
+                            let _src_hostname = source_node.as_ref().map(|n| n.hostname.as_str()).unwrap_or("unknown");
 
 
                             // Register PENDING instance NOW — before clone starts.

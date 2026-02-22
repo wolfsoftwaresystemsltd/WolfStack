@@ -89,7 +89,7 @@ impl SessionManager {
     /// Destroy a session
     pub fn destroy(&self, token: &str) {
         let mut sessions = self.sessions.write().unwrap();
-        if let Some(session) = sessions.remove(token) {
+        if let Some(_session) = sessions.remove(token) {
 
         }
     }

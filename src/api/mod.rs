@@ -5839,7 +5839,7 @@ pub async fn files_lxc_browse(
         }
         Ok(out) => {
             let err = String::from_utf8_lossy(&out.stderr).to_string();
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let _stdout = String::from_utf8_lossy(&out.stdout).to_string();
 
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Failed to list directory: {}", err.trim())

@@ -127,7 +127,7 @@ async fn get_conn_with_timeout(
 
                     return Ok((pool, c));
                 }
-                Ok(Err(e)) => {
+                Ok(Err(_e)) => {
 
                     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), pool.disconnect()).await;
                 }

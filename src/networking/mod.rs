@@ -806,8 +806,8 @@ pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option
     if let Some(idx) = existing_idx {
         let peers_arr = doc.get_mut("peers").unwrap().as_array_mut().unwrap();
         let peer = &mut peers_arr[idx];
-        let old_name = peer.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let old_endpoint = peer.get("endpoint").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let _old_name = peer.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let _old_endpoint = peer.get("endpoint").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
         let mut changed = false;
         if peer.get("name").and_then(|v| v.as_str()) != Some(name) {
@@ -1801,7 +1801,7 @@ fn remove_mapping_rules(m: &IpMapping) {
 
     // Try VIP comment-based cleanup first (handles round-robin/ip_hash rules)
     let vip_comment = format!("wolfstack-vip-map-{}", m.id);
-    let removed_vip = remove_rules_by_comment(&vip_comment);
+    let _removed_vip = remove_rules_by_comment(&vip_comment);
 
     // Also remove standard (non-VIP) rules
     let proto_args: Vec<String> = if m.protocol != "all" {
