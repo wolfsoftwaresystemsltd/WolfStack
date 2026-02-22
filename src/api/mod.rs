@@ -8,7 +8,7 @@ use actix_web::{web, HttpResponse, HttpRequest, cookie::Cookie};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::process::Command;
-use tracing::{info, warn, error};
+use tracing::{warn, error};
 
 use crate::monitoring::{SystemMonitor, MetricsHistory};
 use crate::installer;
@@ -71,7 +71,7 @@ pub fn load_join_token() -> String {
     if let Ok(token) = std::fs::read_to_string(path) {
         let token = token.trim().to_string();
         if !token.is_empty() {
-            info!("Loaded join token from {}", path.display());
+
             return token;
         }
     }
@@ -102,7 +102,7 @@ pub fn load_join_token() -> String {
     if let Err(e) = std::fs::write(path, &token) {
         warn!("Could not save join token to {}: {}", path.display(), e);
     } else {
-        info!("Generated new join token and saved to {}", path.display());
+
     }
     token
 }
@@ -228,7 +228,7 @@ pub async fn set_login_disabled(req: HttpRequest, state: web::Data<AppState>, bo
     }
     // Persist to disk
     crate::agent::ClusterState::save_login_disabled_file(disabled);
-    info!("Login disabled set to {} via API", disabled);
+
     HttpResponse::Ok().json(serde_json::json!({ "login_disabled": disabled }))
 }
 
@@ -378,7 +378,7 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
                     body.address.clone(), port, token.clone(),
                     fingerprint.clone(), node_name.clone(), cluster_name.clone(),
                 );
-                info!("Added Proxmox cluster node {} at {}:{} (node: {})", id, body.address, port, node_name);
+
                 added_ids.push(id);
                 added_nodes.push(node_name.clone());
             }
@@ -388,7 +388,7 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
                 body.address.clone(), port, token, fingerprint,
                 pve_node_name.clone(), cluster_name.clone(),
             );
-            info!("Added Proxmox node {} at {}:{} (node: {})", id, body.address, port, pve_node_name);
+
             added_ids.push(id);
             added_nodes.push(pve_node_name.clone());
         }
@@ -441,7 +441,7 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
                 Ok(resp) => {
                     if let Ok(data) = resp.json::<serde_json::Value>().await {
                         if data.get("valid").and_then(|v| v.as_bool()) == Some(true) {
-                            info!("Join token verified for {}:{} via {}", body.address, port, url);
+
                             verified = true;
                             break;
                         } else {
@@ -468,7 +468,7 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
         }
 
         let id = state.cluster.add_server(body.address.clone(), port, cluster_name.clone());
-        info!("Added server {} at {}:{} (cluster: {:?})", id, body.address, port, cluster_name);
+
         HttpResponse::Ok().json(serde_json::json!({
             "id": id,
             "address": body.address,
@@ -574,7 +574,7 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                                 .send()
                                 .await
                             {
-                                tracing::info!("Propagated login_disabled={} to {}:{}", disabled, address, port);
+
                                 break;
                             }
                         }
@@ -608,7 +608,7 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                                 .await
                                 .is_ok()
                             {
-                                tracing::info!("Propagated cluster_name='{}' to {}:{}", cluster_name_val, address, port);
+
                                 break;
                             }
                         }
@@ -626,7 +626,7 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
 pub async fn agent_set_cluster_name(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
     if let Err(e) = require_cluster_auth(&req, &state) { return e; }
     if let Some(name) = body.get("cluster_name").and_then(|v| v.as_str()) {
-        tracing::info!("Received cluster_name update from admin node: '{}'", name);
+
         let mut nodes = state.cluster.nodes.write().unwrap();
         if let Some(n) = nodes.get_mut(&state.cluster.self_id) {
             n.cluster_name = Some(name.to_string());
@@ -657,7 +657,7 @@ pub async fn agent_set_wolfnet_routes(req: HttpRequest, state: web::Data<AppStat
                 .args(["route", "replace", &format!("{}/32", vip), "dev", "wolfnet0"])
                 .output();
         }
-        tracing::info!("Received {} WolfNet route(s) from orchestrator (changed={})", route_map.len(), changed);
+
         HttpResponse::Ok().json(serde_json::json!({ "updated": changed, "routes": route_map.len() }))
     } else {
         HttpResponse::BadRequest().json(serde_json::json!({ "error": "routes object required" }))
@@ -866,7 +866,7 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
         }
     }
 
-    info!("WolfNet sync: {} peers added, {} already existed, {} errors", synced, skipped, errors.len());
+
 
     HttpResponse::Ok().json(serde_json::json!({
         "status": "ok",
@@ -1245,7 +1245,7 @@ pub async fn save_component_config(
 
     match std::fs::write(config_path, &body.content) {
         Ok(_) => {
-            info!("Config saved for {} at {}", component.name(), config_path);
+
             HttpResponse::Ok().json(serde_json::json!({
                 "message": format!("Config saved. Restart {} to apply changes.", component.service_name())
             }))
@@ -2635,7 +2635,7 @@ pub async fn lxc_migrate(
         let _ = containers::lxc_stop(&name);
         match containers::lxc_destroy(&name) {
             Ok(_) => {
-                info!("Migrated '{}' to node '{}' and destroyed source", name, body.target_node);
+
             }
             Err(e) => {
                 tracing::warn!("Migration: clone succeeded but failed to destroy source '{}': {}", name, e);
@@ -2708,7 +2708,7 @@ pub async fn lxc_import_external(
         return HttpResponse::Forbidden().json(serde_json::json!({"error": "Invalid or expired transfer token"}));
     }
 
-    info!("External import authorized with transfer token");
+
     // Delegate to the standard import logic (re-auth not needed — token was validated)
     lxc_import_endpoint_inner(&mut payload).await
 }
@@ -2807,7 +2807,7 @@ async fn lxc_import_endpoint_inner(
             let ip_to_use = wolfnet_ip.clone().or_else(|| containers::next_available_wolfnet_ip());
             if let Some(ip) = ip_to_use {
                 let _ = containers::lxc_attach_wolfnet(&new_name, &ip);
-                info!("Imported '{}': started + wolfnet IP {}", new_name, ip);
+
             }
 
             HttpResponse::Ok().json(serde_json::json!({"message": msg}))
@@ -2882,7 +2882,7 @@ pub async fn lxc_migrate_external(
                 // Optionally destroy source
                 if body.delete_source.unwrap_or(false) {
                     let _ = containers::lxc_destroy(&name);
-                    info!("Migrated '{}' to external cluster and destroyed source", name);
+
                 } else {
                     let _ = containers::lxc_start(&name);
                 }
@@ -3182,7 +3182,7 @@ pub async fn docker_import(
         Ok(msg) => {
             // Start the imported container
             let _ = containers::docker_start(&container_name);
-            info!("Docker import '{}': container started", container_name);
+
 
             HttpResponse::Ok().json(serde_json::json!({ "message": msg }))
         },
@@ -3377,7 +3377,7 @@ pub async fn ai_sync_config(
     let mut config = state.ai_agent.config.lock().unwrap();
     *config = new_config;
 
-    info!("AI config synced from cluster node");
+
     HttpResponse::Ok().json(serde_json::json!({"status": "synced"}))
 }
 
@@ -5840,7 +5840,7 @@ pub async fn files_lxc_browse(
         Ok(out) => {
             let err = String::from_utf8_lossy(&out.stderr).to_string();
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            info!("LXC browse failed for container={} path={}: stderr={} stdout={}", container, path, err.trim(), stdout.trim());
+
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Failed to list directory: {}", err.trim())
             }))
@@ -6024,7 +6024,7 @@ pub async fn config_export(
     req: HttpRequest, state: web::Data<AppState>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    info!("Config export requested");
+
 
     let mut bundle = serde_json::Map::new();
 
@@ -6088,7 +6088,7 @@ pub async fn config_import(
     req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    info!("Config import requested");
+
 
     let bundle = body.into_inner();
     let obj = match bundle.as_object() {
@@ -6133,7 +6133,7 @@ pub async fn config_import(
         let reloaded = crate::ai::AiConfig::load();
         let mut cfg = state.ai_agent.config.lock().unwrap();
         *cfg = reloaded;
-        info!("AI config reloaded from imported file");
+
     }
 
     // Backup config (schedules only)
@@ -6177,7 +6177,7 @@ pub async fn config_import(
         format!("Imported: {}. Errors: {}", imported.join(", "), errors.join(", "))
     };
 
-    info!("Config import result: {}", summary);
+
     HttpResponse::Ok().json(serde_json::json!({
         "message": summary,
         "imported": imported,
@@ -6241,7 +6241,7 @@ pub async fn system_upgrade(
 
     let channel = query.get("channel").map(|s| s.as_str()).unwrap_or("master");
     let (branch, flag) = if channel == "beta" { ("beta", " --beta") } else { ("master", "") };
-    info!("System upgrade triggered via API (channel: {})", branch);
+
 
     let cmd = format!(
         "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/{}/setup.sh | sudo bash -s --{}",
@@ -6306,7 +6306,7 @@ pub async fn mysql_connect(
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
 
-    info!("MySQL connect request: host={}, port={}, user={}", body.host, body.port, body.user);
+
 
     let params = crate::mysql_editor::ConnParams {
         host: body.host.clone(),
@@ -6325,7 +6325,7 @@ pub async fn mysql_connect(
 
     match result {
         Ok(Ok(version)) => {
-            info!("MySQL connection successful: version={}", version);
+
             HttpResponse::Ok().json(serde_json::json!({
                 "connected": true,
                 "version": version,

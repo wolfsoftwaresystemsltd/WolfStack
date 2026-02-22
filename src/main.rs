@@ -449,7 +449,7 @@ async fn main() -> std::io::Result<()> {
                             if let Err(e) = ai::send_alert_email(&config, &subject, &body) {
                                 tracing::warn!("Failed to send critical issues email: {}", e);
                             } else {
-                                tracing::info!("Sent critical issues alert email ({} issues)", critical_count);
+
                             }
                         }
 
@@ -478,7 +478,7 @@ async fn main() -> std::io::Result<()> {
                             if let Err(e) = ai::send_alert_email(&config, &subject, &body) {
                                 tracing::warn!("Failed to send daily issues email: {}", e);
                             } else {
-                                tracing::info!("Sent daily issues summary email");
+
                             }
                         }
                     }
@@ -574,21 +574,14 @@ async fn main() -> std::io::Result<()> {
         tokio::spawn(async move {
             // Wait 90 seconds after startup before first check (let metrics stabilise)
             tokio::time::sleep(Duration::from_secs(90)).await;
-            info!("Alerting monitor started (90s warmup complete)");
+
             let mut cooldowns: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
             let mut cycle_count: u64 = 0;
             loop {
                 let config = alerting::AlertConfig::load();
 
-                // Log status on first cycle and every 10 cycles
-                if cycle_count % 10 == 0 {
-                    tracing::info!(
-                        "Alerting status: enabled={}, has_channels={}, thresholds=CPU:{:.0}%/Mem:{:.0}%/Disk:{:.0}%, interval={}s",
-                        config.enabled, config.has_channels(),
-                        config.cpu_threshold, config.memory_threshold, config.disk_threshold,
-                        config.check_interval_secs,
-                    );
-                }
+
+
                 cycle_count += 1;
 
                 if config.enabled && config.has_channels() {
@@ -607,12 +600,8 @@ async fn main() -> std::io::Result<()> {
                                 .map(|d| d.usage_percent)
                                 .fold(0.0_f32, f32::max);
 
-                            tracing::debug!(
-                                "Alert check: {} — CPU {:.1}%/{:.0}%, Mem {:.1}%/{:.0}%, Disk {:.1}%/{:.0}%",
-                                node.hostname, cpu_pct, config.cpu_threshold,
-                                mem_pct, config.memory_threshold,
-                                disk_pct, config.disk_threshold,
-                            );
+
+
 
                             let display_name = if node.hostname.is_empty() { &node.address } else { &node.hostname };
 
@@ -643,7 +632,7 @@ async fn main() -> std::io::Result<()> {
                                         alert.current, alert.threshold,
                                         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
                                     );
-                                    tracing::info!("Threshold alert: {} {:.1}% >= {:.0}% on {}", alert.alert_type, alert.current, alert.threshold, display_name);
+
                                     let cfg = config.clone();
                                     let t = title.clone();
                                     let b = body.clone();
@@ -688,7 +677,7 @@ async fn main() -> std::io::Result<()> {
                                         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
                                         type_label,
                                     );
-                                    tracing::info!("Recovery alert: {} {:.1}% on {} (was previously over threshold)", check_type, current_val, display_name);
+
                                     let cfg = config.clone();
                                     let t = title.clone();
                                     let b = body.clone();

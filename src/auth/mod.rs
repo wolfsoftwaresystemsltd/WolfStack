@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::warn;
 
 /// Session token lifetime (8 hours)
 const SESSION_LIFETIME: Duration = Duration::from_secs(8 * 3600);
@@ -71,7 +71,7 @@ impl SessionManager {
             username: username.to_string(),
             created: Instant::now(),
         });
-        info!("Session created for user '{}'", username);
+
         token
     }
 
@@ -90,7 +90,7 @@ impl SessionManager {
     pub fn destroy(&self, token: &str) {
         let mut sessions = self.sessions.write().unwrap();
         if let Some(session) = sessions.remove(token) {
-            info!("Session destroyed for user '{}'", session.username);
+
         }
     }
 
@@ -146,7 +146,7 @@ pub fn authenticate_user(username: &str, password: &str) -> bool {
         // Use crypt() to verify password
         match verify_password(password, stored_hash) {
             true => {
-                info!("Successful login for user '{}'", username);
+
                 return true;
             }
             false => {

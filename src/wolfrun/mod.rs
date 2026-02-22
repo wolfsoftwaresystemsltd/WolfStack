@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{info, warn, debug};
+use tracing::warn;
 
 use crate::agent::ClusterState;
 
@@ -155,7 +155,7 @@ impl WolfRunState {
             if let Ok(services) = serde_json::from_str::<Vec<WolfRunService>>(&data) {
                 let mut svcs = self.services.write().unwrap();
                 *svcs = services;
-                debug!("WolfRun: loaded {} services from {}", svcs.len(), SERVICES_FILE);
+
             }
         }
     }
@@ -196,9 +196,7 @@ impl WolfRunState {
         let id = format!("svc-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         // Allocate a Service VIP on WolfNet for load balancing
         let service_ip = crate::containers::next_available_wolfnet_ip();
-        if let Some(ref vip) = service_ip {
-            info!("WolfRun: allocated Service VIP {} for {}", vip, name);
-        }
+
         let svc = WolfRunService {
             id: id.clone(),
             name,
@@ -226,7 +224,7 @@ impl WolfRunState {
             svcs.push(svc.clone());
         }
         self.save();
-        info!("WolfRun: created service {} ({})", svc.name, id);
+
         svc
     }
 
@@ -238,7 +236,7 @@ impl WolfRunState {
         drop(svcs);
         if removed.is_some() {
             self.save();
-            info!("WolfRun: deleted service {}", id);
+
         }
         removed
     }
@@ -256,7 +254,7 @@ impl WolfRunState {
             svc.updated_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
             drop(svcs);
             self.save();
-            info!("WolfRun: scaled {} to {} replicas (requested {}, bounds {}-{})", id, clamped, replicas, 0, 10);
+
             true
         } else {
             false
@@ -296,7 +294,7 @@ impl WolfRunState {
             svc.updated_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
             drop(svcs);
             self.save();
-            info!("WolfRun: updated {} image to {}", id, image);
+
             true
         } else {
             false
@@ -340,9 +338,7 @@ impl WolfRunState {
 
         // Allocate a Service VIP on WolfNet for load balancing
         let service_ip = crate::containers::next_available_wolfnet_ip();
-        if let Some(ref vip) = service_ip {
-            info!("WolfRun: allocated Service VIP {} for adopted container {}", vip, container_name);
-        }
+
         let svc = WolfRunService {
             id: id.clone(),
             name,
@@ -381,7 +377,7 @@ impl WolfRunState {
             svcs.push(svc.clone());
         }
         self.save();
-        info!("WolfRun: adopted container '{}' as service {} ({})", container_name, svc.name, id);
+
         svc
     }
 
@@ -434,7 +430,7 @@ pub fn schedule(
     let eligible: Vec<_> = nodes.iter().filter(|n| {
         // Must be online
         if !n.online {
-            debug!("WolfRun schedule: skipping {} — offline", n.hostname);
+
             return false;
         }
         // Must have the required runtime
@@ -443,23 +439,23 @@ pub fn schedule(
         let node_has_docker = n.has_docker || (n.is_self && std::path::Path::new("/usr/bin/docker").exists());
         match service.runtime {
             Runtime::Docker => { if !node_has_docker {
-                debug!("WolfRun schedule: skipping {} — no Docker", n.hostname);
+
                 return false;
             } }
             Runtime::Lxc => { if !node_has_lxc {
-                debug!("WolfRun schedule: skipping {} — no LXC (has_lxc={}, is_self={})", n.hostname, n.has_lxc, n.is_self);
+
                 return false;
             } }
         }
         // Must be in the same cluster
         let node_cluster = n.cluster_name.as_deref().unwrap_or("WolfStack");
         if node_cluster != service.cluster_name {
-            debug!("WolfRun schedule: skipping {} — cluster '{}' != service '{}'", n.hostname, node_cluster, service.cluster_name);
+
             return false;
         }
         // Must be in the allowed nodes list (if specified)
         if !service.allowed_nodes.is_empty() && !service.allowed_nodes.contains(&n.id) {
-            debug!("WolfRun schedule: skipping {} — not in allowed_nodes", n.hostname);
+
             return false;
         }
         // Check placement constraints
@@ -545,7 +541,7 @@ pub async fn reconcile(
     // Prevent concurrent reconcile runs (race condition causes duplicate creates then scale-down)
     static RECONCILING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if RECONCILING.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_err() {
-        debug!("WolfRun: reconcile already in progress, skipping");
+
         return;
     }
     // Ensure we release the lock on exit
@@ -726,7 +722,7 @@ pub async fn reconcile(
             };
 
             if changed {
-                info!("WolfRun LB: backends changed for VIP {} → {:?}", vip, backend_ips);
+
                 rebuild_lb_rules(vip, &backend_ips, &service.ports, &service.lb_policy);
             }
         }
@@ -744,8 +740,7 @@ pub async fn reconcile(
         // 3. Scale up if under-provisioned (based on EXISTING count, not running)
         if existing < desired {
             let needed = desired - existing;
-            info!("WolfRun: service {} ({:?}) needs {} more instances (existing: {}, running: {}, desired: {})",
-                service.name, service.runtime, needed, existing, running, desired);
+
 
             for i in 0..needed {
                 let current = wolfrun.get(&service.id).unwrap_or(service.clone());
@@ -781,7 +776,7 @@ pub async fn reconcile(
                     Runtime::Docker => {
                         let short_id = &uuid::Uuid::new_v4().to_string()[..8];
                         let container_name = format!("{}-wolfrun-{}", service.name.to_lowercase().replace(' ', "-"), short_id);
-                        info!("WolfRun: creating Docker container {} on {} ({})", container_name, node.hostname, node_id);
+
 
                         let mut env = service.env.clone();
                         env.push(format!("WOLFRUN_SERVICE={}", service.id));
@@ -796,10 +791,7 @@ pub async fn reconcile(
                         let clone_name = format!("{}-wolfrun-{}", template_name, short_id);
                         let target_node_id_final = node_id.clone();
 
-                        info!("WolfRun: cloning LXC '{}' → '{}' (source: {}, target: {})",
-                            template_name, clone_name,
-                            cluster.get_node(&source_node_id).map(|n| n.hostname.clone()).unwrap_or_default(),
-                            node.hostname);
+
 
                         let source_node = cluster.get_node(&source_node_id);
                         let same_node = source_node_id == target_node_id_final;
@@ -813,12 +805,12 @@ pub async fn reconcile(
                                 let _ = crate::containers::lxc_start(&template_name);
                                 match result {
                                     Ok(msg) => {
-                                        info!("WolfRun: local clone success: {}", msg);
+
                                         // lxc_clone_local already called lxc_clone_fixup_ip
                                         // (unique bridge IP + MAC + wolfnet marker removal)
                                         // Start the clone
                                         match crate::containers::lxc_start(&clone_name) {
-                                            Ok(_) => info!("WolfRun: started clone {}", clone_name),
+                                            Ok(_) => {}
                                             Err(ref e) => {
                                                 warn!("WolfRun: lxc_start failed for {}: {}", clone_name, e);
                                                 // Retry once after delay
@@ -872,8 +864,7 @@ pub async fn reconcile(
                             // ── Cross-node clone-and-migrate ──
                             // Register instance as PENDING first to prevent duplicates
                             let src_hostname = source_node.as_ref().map(|n| n.hostname.as_str()).unwrap_or("unknown");
-                            info!("WolfRun: cloning '{}' on {} → migrating as '{}' to {}",
-                                template_name, src_hostname, clone_name, node.hostname);
+
 
                             // Register PENDING instance NOW — before clone starts.
                             // This prevents the next reconcile from creating another.
@@ -918,7 +909,7 @@ pub async fn reconcile(
                                         .send().await
                                     {
                                         Ok(resp) if resp.status().is_success() => {
-                                            info!("WolfRun: ✅ Clone-migrate complete: '{}' on {}", clone_name, node.hostname);
+
                                             ok = true;
                                             break;
                                         }
@@ -964,7 +955,7 @@ pub async fn reconcile(
         // 4. Scale down if over-provisioned
         if running > desired {
             let excess = running - desired;
-            debug!("WolfRun: service {} has {} excess instances (has {}/{})", service.name, excess, running, desired);
+
 
             let mut instance_counts: HashMap<String, usize> = HashMap::new();
             for inst in &live_instances {
@@ -984,7 +975,7 @@ pub async fn reconcile(
 
             for inst in running_instances.iter().take(excess as usize) {
                 // Just un-manage — don't destroy the container. User can always stop it manually.
-                info!("WolfRun: removing excess instance {} from orchestration (container kept running)", inst.container_name);
+
                 wolfrun.remove_instance(&service.id, &inst.container_name);
             }
         }
@@ -998,7 +989,7 @@ pub async fn reconcile(
                         None => continue,
                     };
 
-                    info!("WolfRun: restarting stopped container {} on {}", inst.container_name, node.hostname);
+
 
                     if node.is_self {
                         match service.runtime {
@@ -1034,7 +1025,7 @@ pub async fn reconcile(
             .cloned()
             .collect();
         for inst in &lost {
-            info!("WolfRun: removing lost instance {} (offline >5min)", inst.container_name);
+
             wolfrun.remove_instance(&service.id, &inst.container_name);
             // The next reconciliation cycle will detect under-provisioning and schedule a replacement
         }
@@ -1070,7 +1061,7 @@ async fn deploy_docker(
         ) {
             Ok(_) => {
                 let _ = crate::containers::docker_start(container_name);
-                info!("WolfRun: deployed {} locally", container_name);
+
                 wolfrun.add_instance(&service.id, ServiceInstance {
                     node_id: node_id.to_string(),
                     container_name: container_name.to_string(),
@@ -1131,7 +1122,7 @@ async fn deploy_docker(
                 .send().await
             {
                 if resp.status().is_success() {
-                    info!("WolfRun: deployed {} on {}", container_name, node.hostname);
+
                     break;
                 }
             }
@@ -1166,7 +1157,7 @@ async fn deploy_lxc(
         ) {
             Ok(_) => {
                 let _ = crate::containers::lxc_start(container_name);
-                info!("WolfRun: deployed LXC {} locally", container_name);
+
                 wolfrun.add_instance(&service.id, ServiceInstance {
                     node_id: node_id.to_string(),
                     container_name: container_name.to_string(),
@@ -1214,7 +1205,7 @@ async fn deploy_lxc(
                 .send().await
             {
                 if resp.status().is_success() {
-                    info!("WolfRun: deployed LXC {} on {}", container_name, node.hostname);
+
                     break;
                 }
             }
@@ -1305,7 +1296,7 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String], lb_
     remove_lb_rules_for_vip(vip);
 
     if backend_ips.is_empty() {
-        debug!("WolfRun LB: no backends for VIP {} — skipping", vip);
+
         return;
     }
 
@@ -1358,7 +1349,7 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String], lb_
             }
         }
         VIP_INFRA_READY.store(true, Ordering::Relaxed);
-        info!("WolfRun LB: one-time infra setup complete (ip_forward, rp_filter=0, FORWARD rules)");
+
     }
 
     // Send gratuitous ARP in background (don't block the reconcile loop)
@@ -1390,7 +1381,7 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String], lb_
         let mut routes = std::collections::HashMap::new();
         routes.insert(vip.to_string(), host_ip.clone());
         crate::containers::update_wolfnet_routes(&routes);
-        debug!("WolfRun LB: VIP {} → host {} in routes", vip, host_ip);
+
     }
 
     let n = backend_ips.len();
@@ -1481,9 +1472,7 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String], lb_
             .output();
     }
 
-    info!("WolfRun LB: {} VIP {} → {} backend(s): {}",
-        if n == 1 { "direct" } else { "round-robin" },
-        vip, n, backend_ips.join(", "));
+
 }
 
 /// Remove all iptables rules tagged with a WolfRun LB comment for a given VIP

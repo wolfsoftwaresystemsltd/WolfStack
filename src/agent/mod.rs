@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::{warn, debug};
+use tracing::warn;
 
 use crate::monitoring::SystemMetrics;
 use crate::installer::ComponentStatus;
@@ -150,7 +150,7 @@ impl ClusterState {
         }
 
         if !ghost_ids.is_empty() {
-            tracing::info!("Cleaned up {} ghost node(s) (hostname={}, port={})", ghost_ids.len(), hostname, self.port);
+
             // Persist the cleaned-up state
             drop(nodes);
             self.save_nodes();
@@ -190,7 +190,7 @@ impl ClusterState {
                     }
                     nodes.insert(node.id.clone(), node);
                 }
-                debug!("Loaded {} saved nodes from {}", nodes.len(), Self::NODES_FILE);
+
             }
         }
     }
@@ -319,7 +319,7 @@ impl ClusterState {
                 && n.pve_node_name == pve_node_name
         }) {
             let existing_id = existing.id.clone();
-            debug!("Node already exists at {}:{} (type={}, id={}), skipping add", address, port, node_type, existing_id);
+
             return existing_id;
         }
         
@@ -406,7 +406,7 @@ impl ClusterState {
             self.save_deleted_ids();
             if !to_remove.is_empty() {
                 self.save_nodes();
-                tracing::info!("Removed {} node(s) via gossip tombstone", to_remove.len());
+
             }
         }
     }
@@ -424,7 +424,7 @@ impl ClusterState {
                 for id in ids {
                     deleted.insert(id);
                 }
-                debug!("Loaded {} tombstoned node IDs from {}", deleted.len(), Self::DELETED_FILE);
+
             }
         }
     }
@@ -586,7 +586,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
             // ── Poll Proxmox node via PVE API ──
             let token = match &node.pve_token {
                 Some(t) if !t.is_empty() => t.clone(),
-                _ => { debug!("Skipping PVE node {} — no token", node.id); continue; }
+                _ => { continue; }
             };
             let pve_name = node.pve_node_name.clone().unwrap_or_else(|| node.hostname.clone());
             let fp = node.pve_fingerprint.as_deref();
@@ -690,7 +690,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
             format!("https://{}:{}/api/agent/status", node.address, node.port),
             format!("http://{}:{}/api/agent/status", node.address, node.port),
         ];
-        debug!("Polling remote node {} (trying port+1 HTTP, port HTTPS, port HTTP)", node.id);
+
 
         let client = match reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
@@ -761,7 +761,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                             nodes_r.get(&cluster.self_id).and_then(|n| n.cluster_name.clone())
                                         };
                                         if current_cluster.as_deref() != Some(gossiped_cluster) {
-                                            tracing::info!("Gossip: updating self cluster_name to '{}' (was {:?})", gossiped_cluster, current_cluster);
+
                                             let mut nodes_w = cluster.nodes.write().unwrap();
                                             if let Some(n) = nodes_w.get_mut(&cluster.self_id) {
                                                 n.cluster_name = Some(gossiped_cluster.clone());
@@ -794,9 +794,8 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                         || existing.pve_fingerprint != known.pve_fingerprint
                                         || existing.cluster_name != known.cluster_name
                                     {
-                                        debug!("Gossip updating node {} settings: {}:{} -> {}:{}",
-                                            known.id, existing.address, existing.port,
-                                            known.address, known.port);
+
+
                                         cluster.update_node_settings(
                                             &known.id,
                                             Some(known.hostname.clone()),
@@ -823,12 +822,10 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                         // Public-IP nodes must be added manually to prevent
                                         // machines from accidentally switching hosts
                                         if !is_private_address(&known.address) {
-                                            debug!("Skipping gossip auto-add for {} ({}) — public address {} (must be added manually)",
-                                                known.id, known.hostname, known.address);
+
                                             continue;
                                         }
-                                        debug!("Discovered new node via gossip from {}: {} ({}) at {}:{}",
-                                            node.id, known.id, known.node_type, known.address, known.port);
+
                                         let mut new_node = known.clone();
                                         new_node.online = false;
                                         new_node.is_self = false;
@@ -841,14 +838,14 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             // First IP = host WolfNet address, remaining = container/VM IPs
                             if wolfnet_ips.len() > 1 {
                                 let host_wn_ip = &wolfnet_ips[0];
-                                tracing::debug!("Node {} wolfnet_ips: {:?} (host={}, {} container(s))", node.id, wolfnet_ips, host_wn_ip, wolfnet_ips.len() - 1);
+
                                 for container_ip in &wolfnet_ips[1..] {
                                     if !container_ip.is_empty() {
                                         subnet_routes.insert(container_ip.clone(), host_wn_ip.clone());
                                     }
                                 }
                             } else if !wolfnet_ips.is_empty() {
-                                tracing::debug!("Node {} wolfnet_ips: {:?} (host only, no containers)", node.id, wolfnet_ips);
+
                             }
                         }
                     }
@@ -862,7 +859,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
         }
 
         if !poll_ok {
-            debug!("Failed to poll {} on both ports", node.id);
+
             // Increment fail count; keep node online until 2 consecutive failures
             let mut fails = POLL_FAIL_COUNTS.lock().unwrap();
             let count = fails.entry(node.id.clone()).or_insert(0);
@@ -970,7 +967,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         if let Err(e) = crate::ai::send_alert_email(&config, &subject, &body) {
                             warn!("Failed to send node-offline email for {}: {}", display_name, e);
                         } else {
-                            tracing::info!("Sent node-offline alert email for {}", display_name);
+
                         }
                         // Send to webhook channels
                         if alert_config.enabled && alert_config.alert_node_offline {
@@ -997,7 +994,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         if let Err(e) = crate::ai::send_alert_email(&config, &subject, &body) {
                             warn!("Failed to send node-restored email for {}: {}", display_name, e);
                         } else {
-                            tracing::info!("Sent node-restored alert email for {}", display_name);
+
                         }
                         // Send to webhook channels
                         if alert_config.enabled && alert_config.alert_node_restored {

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::warn;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -259,7 +259,6 @@ async fn send_discord(webhook_url: &str, title: &str, message: &str) -> Result<(
         .map_err(|e| e.to_string())?;
 
     if resp.status().is_success() || resp.status().as_u16() == 204 {
-        info!("Discord alert sent: {}", title);
         Ok(())
     } else {
         Err(format!("Discord HTTP {}", resp.status()))
@@ -288,7 +287,6 @@ async fn send_slack(webhook_url: &str, title: &str, message: &str) -> Result<(),
         .map_err(|e| e.to_string())?;
 
     if resp.status().is_success() {
-        info!("Slack alert sent: {}", title);
         Ok(())
     } else {
         Err(format!("Slack HTTP {}", resp.status()))
@@ -319,7 +317,6 @@ async fn send_telegram(bot_token: &str, chat_id: &str, title: &str, message: &st
         .map_err(|e| e.to_string())?;
 
     if resp.status().is_success() {
-        info!("Telegram alert sent: {}", title);
         Ok(())
     } else {
         let body = resp.text().await.unwrap_or_default();

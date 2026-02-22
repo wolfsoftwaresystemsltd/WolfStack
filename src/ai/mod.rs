@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use tracing::{info, warn};
+use tracing::warn;
 use std::process::Command as StdCommand;
 use std::time::Duration;
 
@@ -153,7 +153,7 @@ impl AiAgent {
     pub fn new() -> Self {
         let config = AiConfig::load();
         let knowledge_base = load_knowledge_base();
-        info!("  AI Agent: Knowledge base loaded ({} chars)", knowledge_base.len());
+
 
         Self {
             config: Mutex::new(config),
@@ -224,7 +224,7 @@ impl AiAgent {
                 let abs_start = search_from + start + 6;
                 if let Some(end) = response[abs_start..].find("[/EXEC]") {
                     let cmd = response[abs_start..abs_start + end].trim();
-                    info!("AI executing local command (round {}): {}", round + 1, cmd);
+
                     let result = execute_safe_command(cmd);
                     command_results.push_str(&format!(
                         "\n=== Command on {} ===\n$ {}\n{}\n",
@@ -246,7 +246,7 @@ impl AiAgent {
                 let abs_start = search_from + start + 10;
                 if let Some(end) = response[abs_start..].find("[/EXEC_ALL]") {
                     let cmd = response[abs_start..abs_start + end].trim();
-                    info!("AI executing cluster-wide command (round {}): {}", round + 1, cmd);
+
 
                     // Run locally first
                     let local_result = execute_safe_command(cmd);
@@ -457,7 +457,7 @@ impl AiAgent {
 
                     Some(response)
                 } else {
-                    info!("AI health check: all OK");
+
                     None
                 }
             }
@@ -956,7 +956,7 @@ pub fn send_alert_email(config: &AiConfig, subject: &str, body: &str) -> Result<
     };
 
     mailer.send(&email).map_err(|e| format!("SMTP send: {}", e))?;
-    info!("Alert email sent to {}", config.email_to);
+
     Ok(())
 }
 

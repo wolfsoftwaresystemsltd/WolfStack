@@ -9,7 +9,7 @@ use actix_web::{web, HttpRequest, HttpResponse, Error};
 use actix_ws::Message;
 use futures::StreamExt;
 use tokio_tungstenite::tungstenite;
-use tracing::{info, error, debug};
+use tracing::error;
 
 use super::AppState;
 
@@ -55,7 +55,7 @@ pub async fn pve_console_ws(
                 return Ok(HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })));
             }
         };
-        info!("PVE node console on {}:{} -> termproxy port {}", address, port, tp);
+
         (tp, tk, "node".to_string())
     } else {
         // Guest terminal — determine type
@@ -72,7 +72,7 @@ pub async fn pve_console_ws(
                 return Ok(HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })));
             }
         };
-        info!("PVE console: {} VMID {} on {}:{} -> termproxy port {}", gt, vmid, address, port, tp);
+
         (tp, tk, gt)
     };
 
@@ -119,7 +119,7 @@ async fn pve_bridge(
             pve_host, pve_port, pve_node, guest_type, vmid, term_port, vncticket
         )
     };
-    debug!("Connecting to PVE WebSocket: {}", pve_ws_url);
+
 
     // Build TLS connector that accepts self-signed certs (PVE default)
     let tls_connector = {
@@ -184,7 +184,7 @@ async fn pve_bridge(
         return;
     }
 
-    info!("PVE console bridge established for VMID {}", vmid);
+
 
     // Bridge loop
     loop {
@@ -254,7 +254,7 @@ async fn pve_bridge(
     // Cleanup
     let _ = futures::SinkExt::close(&mut pve_sink).await;
     let _ = session.close(None).await;
-    info!("PVE console session ended for VMID {}", vmid);
+
 }
 
 /// Extract username from PVE API token

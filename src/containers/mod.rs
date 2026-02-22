@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::sync::Mutex;
-use tracing::{info, error, warn};
+use tracing::{error, warn};
 
 /// One-time WolfNet networking initialization — called at WolfStack startup.
 /// Sets kernel parameters needed for container traffic to flow through wolfnet0.
@@ -20,11 +20,10 @@ pub fn wolfnet_init() {
     let exists = Command::new("ip").args(["link", "show", "wolfnet0"]).output()
         .map(|o| o.status.success()).unwrap_or(false);
     if !exists {
-        info!("wolfnet0 not found — skipping WolfNet init");
         return;
     }
 
-    info!("WolfNet init: setting up kernel networking for container routing");
+
 
     // Enable IP forwarding (required for routing between wolfnet0 and lxcbr0)
     let _ = Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]).output();
@@ -45,10 +44,10 @@ pub fn wolfnet_init() {
     if check.map(|o| !o.status.success()).unwrap_or(true) {
         let _ = Command::new("iptables").args(["-I", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output();
         let _ = Command::new("iptables").args(["-I", "FORWARD", "-i", "lxcbr0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
-        info!("WolfNet init: added FORWARD rules for wolfnet0 ↔ lxcbr0");
+
     }
 
-    info!("WolfNet init: kernel networking ready");
+
 }
 
 // ─── WolfNet Route Cache ───
@@ -107,15 +106,15 @@ fn flush_routes_to_disk(routes: &std::collections::HashMap<String, String>) {
         Ok(json) => {
             match std::fs::write(routes_path, &json) {
                 Ok(_) => {
-                    info!("Routes — wrote {} route(s) to {}", routes.len(), routes_path);
+
                     // Signal WolfNet to reload (SIGHUP)
                     if let Ok(output) = Command::new("pidof").arg("wolfnet").output() {
                         let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
                         if !pid_str.is_empty() {
                             let _ = Command::new("kill").args(["-HUP", &pid_str]).output();
-                            info!("Sent SIGHUP to WolfNet (pid {})", pid_str);
+
                         } else {
-                            info!("WolfNet not running — routes.json written but no SIGHUP sent");
+
                         }
                     }
                 }
@@ -163,13 +162,13 @@ pub fn cleanup_stale_wolfnet_routes() {
             if del_result.map(|o| o.status.success()).unwrap_or(false)
                 || del_result2.map(|o| o.status.success()).unwrap_or(false)
             {
-                info!("Removed {} kernel route for WolfNet IP {}", if is_linkdown { "linkdown" } else { "stale" }, ip);
+
                 removed += 1;
             }
         }
     }
     if removed > 0 {
-        info!("Cleaned up {} stale WolfNet kernel route(s)", removed);
+
     }
 
     // Ensure Docker containers with wolfnet.ip labels have correct host routes
@@ -694,7 +693,7 @@ pub fn ensure_docker_wolfnet_network() -> Result<(), String> {
 pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, String> {
     ensure_docker_wolfnet_network()?;
 
-    info!("Configuring Docker container {} for WolfNet routing with IP {}", container, ip);
+
 
     // 1. Get Docker Bridge Gateway IP (usually 172.17.0.1)
     let gateway = Command::new("docker")
@@ -723,7 +722,7 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
 
-    info!("Container {} bridge IP: {}, MAC: {:?}, WolfNet IP: {}", container, container_bridge_ip, container_mac, ip);
+
 
     // 4. Configure Container Side — use nsenter to avoid requiring 'ip' inside the container.
     //    Many images (e.g. official nginx) don't ship iproute2, so `docker exec ip ...` silently fails.
@@ -735,9 +734,9 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
         .unwrap_or_default();
 
     if container_pid.is_empty() || container_pid == "0" {
-        info!("Cannot get PID for container {} — is it running?", container);
+
     } else {
-        info!("Container {} PID: {} — using nsenter for network config", container, container_pid);
+
 
         // Add IP alias /32 (idempotent — ignore EEXIST)
         let alias_result = Command::new("nsenter")
@@ -747,14 +746,14 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 if o.status.success() {
-                    info!("Added {}/32 to container {} eth0 (via nsenter)", ip, container);
+
                 } else if stderr.contains("EEXIST") || stderr.contains("File exists") {
-                    info!("{}/32 already on container {} eth0", ip, container);
+
                 } else {
-                    info!("ip addr add warning: {}", stderr.trim());
+
                 }
             }
-            Err(e) => info!("ip addr add (nsenter) failed: {}", e),
+            Err(_e) => {},
         }
 
         // Add route to WolfNet subnet via gateway so container can reach other WolfNet hosts
@@ -783,14 +782,14 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
             .args(["neigh", "replace", ip, "lladdr", &container_mac, "dev", "docker0", "nud", "permanent"])
             .output();
         match &neigh_result {
-            Ok(o) if o.status.success() => info!("Static ARP: {} -> {} on docker0", ip, container_mac),
-            Ok(o) => info!("neigh replace warning: {}", String::from_utf8_lossy(&o.stderr).trim()),
-            Err(e) => info!("neigh replace failed: {}", e),
+            Ok(_o) if _o.status.success() => {}
+            Ok(_o) => {}
+            Err(_e) => {}
         }
     } else {
         // Fallback: if we can't get the MAC, look up the container's bridge IP in the ARP table
         // and use that MAC for the WolfNet IP
-        info!("MAC not found via inspect, trying ARP table for {}", container_bridge_ip);
+
         // Ping the bridge IP to populate ARP table
         let _ = Command::new("ping").args(["-c", "1", "-W", "1", &container_bridge_ip]).output();
         if let Ok(output) = Command::new("ip").args(["neigh", "show", &container_bridge_ip, "dev", "docker0"]).output() {
@@ -799,13 +798,13 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
             let parts: Vec<&str> = line.trim().split_whitespace().collect();
             if parts.len() >= 3 && parts[1] == "lladdr" {
                 let mac = parts[2];
-                info!("Found MAC via ARP: {} -> {}", container_bridge_ip, mac);
+
                 let _ = Command::new("ip")
                     .args(["neigh", "replace", ip, "lladdr", mac, "dev", "docker0", "nud", "permanent"])
                     .output();
-                info!("Static ARP (via fallback): {} -> {} on docker0", ip, mac);
+
             } else {
-                info!("Could not find MAC for {} in ARP table: {:?}", container_bridge_ip, line.trim());
+
             }
         }
     }
@@ -818,11 +817,11 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
 
     match route_result {
         Ok(o) if o.status.success() => {
-            info!("Host route added: {}/32 dev docker0", ip);
+
         }
         Ok(o) => {
             let err = String::from_utf8_lossy(&o.stderr);
-            info!("Route add note: {}", err.trim());
+
         }
         Err(e) => {
             return Err(format!("Failed to add host route: {}", e));
@@ -850,7 +849,7 @@ pub fn ensure_lxc_bridge() {
     } else { false };
 
     if !bridge_ok {
-        info!("Manually configuring lxcbr0 bridge and DHCP");
+
 
         // Create bridge (idempotent)
         let _ = Command::new("ip").args(["link", "add", "lxcbr0", "type", "bridge"]).output();
@@ -884,7 +883,7 @@ pub fn ensure_lxc_bridge() {
         .args(["-t", "nat", "-C", "POSTROUTING", "-s", "10.0.3.0/24", "!", "-d", "10.0.3.0/24", "-j", "MASQUERADE"])
         .output();
     if nat_check.map(|o| !o.status.success()).unwrap_or(true) {
-        info!("Adding NAT masquerade for lxcbr0 -> internet");
+
         let _ = Command::new("iptables").args(["-t", "nat", "-A", "POSTROUTING", "-s", "10.0.3.0/24", "!", "-d", "10.0.3.0/24", "-j", "MASQUERADE"]).output();
     }
     let fwd_check = Command::new("iptables")
@@ -898,7 +897,7 @@ pub fn ensure_lxc_bridge() {
 
 /// Configure an LXC container's network to use WolfNet
 pub fn lxc_attach_wolfnet(container: &str, ip: &str) -> Result<String, String> {
-    info!("Configuring LXC container {} for wolfnet with IP {}", container, ip);
+
 
     // wolfnet0 is a TUN device — can't be bridged.
     // Instead, save the WolfNet IP as a marker; it will be applied inside the
@@ -917,7 +916,7 @@ pub fn lxc_attach_wolfnet(container: &str, ip: &str) -> Result<String, String> {
         .unwrap_or(false);
 
     if running {
-        info!("Container {} is running — applying WolfNet IP {} immediately", container, ip);
+
         lxc_apply_wolfnet(container);
         Ok(format!("LXC container '{}' now using WolfNet IP {} (applied live)", container, ip))
     } else {
@@ -981,7 +980,7 @@ pub fn reapply_wolfnet_routes() {
             .unwrap_or(false);
         if !running { continue; }
 
-        info!("Re-applying WolfNet config for running container {} (ip={})", container, ip);
+
 
         // Re-apply the WolfNet IP and routes INSIDE the container.
         // This is critical: lxc-autostart and host reboots don't call lxc_apply_wolfnet(),
@@ -1001,7 +1000,7 @@ fn lxc_apply_wolfnet(container: &str) {
     if let Ok(ip) = std::fs::read_to_string(&ip_file) {
         let ip = ip.trim();
         if ip.is_empty() { return; }
-        info!("Applying WolfNet IP {} to container {}", ip, container);
+
 
         // Wait for container to be ready
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -1017,7 +1016,7 @@ fn lxc_apply_wolfnet(container: &str) {
             // as a secondary /32. No gateway is set on wn0, so eth0's default
             // route via vmbr0 stays intact.
             let bridge_ip = get_container_bridge_ip(container, "wn0");
-            info!("Container {} → wn0 bridge={}, wolfnet={}", container, bridge_ip, ip);
+
 
             // Bring wn0 up
             let _ = Command::new("lxc-attach")
@@ -1047,7 +1046,7 @@ fn lxc_apply_wolfnet(container: &str) {
                 .output();
             if let Ok(ref o) = out {
                 if o.status.success() {
-                    info!("Host route: {}/32 via {} dev lxcbr0", ip, bridge_ip);
+
                 } else {
                     error!("Host route failed: {}", String::from_utf8_lossy(&o.stderr));
                 }
@@ -1055,7 +1054,7 @@ fn lxc_apply_wolfnet(container: &str) {
         } else {
             // Standalone LXC: original approach — bridge IP on eth0, WolfNet IP as secondary
             let bridge_ip = assign_container_bridge_ip(container);
-            info!("Container {} → bridge={}, wolfnet={}", container, bridge_ip, ip);
+
 
             // 1. Write network config files FIRST (assign_container_bridge_ip already did this)
             //    so the restart below picks up the correct IP.
@@ -1093,7 +1092,7 @@ fn lxc_apply_wolfnet(container: &str) {
                 .output();
             if let Ok(ref o) = out {
                 if o.status.success() {
-                    info!("Host route: {}/32 via {} dev lxcbr0", ip, bridge_ip);
+
                 } else {
                     error!("Host route failed: {}", String::from_utf8_lossy(&o.stderr));
                 }
@@ -1110,7 +1109,7 @@ fn lxc_apply_wolfnet(container: &str) {
             let _ = Command::new("iptables").args(["-I", "FORWARD", "-i", "lxcbr0", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
         }
 
-        info!("WolfNet ready: {} → wolfnet={}, iface={}", container, ip, wolfnet_iface);
+
     }
 }
 
@@ -1696,10 +1695,10 @@ pub fn docker_start(container: &str) -> Result<String, String> {
     {
         let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !ip.is_empty() && ip != "<no value>" {
-            info!("Re-applying WolfNet IP {} to Docker container {}", ip, container);
+
             std::thread::sleep(std::time::Duration::from_secs(1));
             if let Err(e) = docker_connect_wolfnet(container, &ip) {
-                info!("WolfNet re-apply warning: {}", e);
+
             }
         }
     }
@@ -1820,7 +1819,7 @@ pub fn docker_inspect(container: &str) -> Result<serde_json::Value, String> {
 
 /// Remove a Docker image by ID or name
 pub fn docker_remove_image(image: &str) -> Result<String, String> {
-    info!("Removing Docker image: {}", image);
+
     run_docker_cmd(&["rmi", image])
 }
 
@@ -2299,7 +2298,7 @@ pub fn lxc_logs(container: &str, lines: u32) -> Vec<String> {
 /// Set the root password on an LXC container
 /// Writes password hash directly to rootfs /etc/shadow (no need to start container)
 pub fn lxc_set_root_password(container: &str, password: &str) -> Result<String, String> {
-    info!("Setting root password for LXC container {}", container);
+
 
     // Generate password hash using openssl
     let hash_output = Command::new("openssl")
@@ -2369,13 +2368,13 @@ fn lxc_post_start_setup(container: &str) {
     let marker = format!("/var/lib/lxc/{}/.wolfstack_setup_done", container);
     if std::path::Path::new(&marker).exists() { return; }
 
-    info!("Running first-boot setup for container {}", container);
+
 
     // Assign a unique bridge IP if not already configured by WolfNet
     let wolfnet_file = format!("/var/lib/lxc/{}/.wolfnet/ip", container);
     if !std::path::Path::new(&wolfnet_file).exists() {
         let bridge_ip = assign_container_bridge_ip(container);
-        info!("Assigned bridge IP {} to container {}", bridge_ip, container);
+
         // Apply immediately
         let _ = Command::new("lxc-attach")
             .args(["-n", container, "--", "ip", "addr", "flush", "dev", "eth0"])
@@ -2419,9 +2418,9 @@ fn lxc_post_start_setup(container: &str) {
                  systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || /usr/sbin/sshd 2>/dev/null || true; \
                  systemctl enable sshd 2>/dev/null || update-rc.d ssh enable 2>/dev/null || true"])
             .output();
-        info!("SSH installed and configured for container {}", container);
+
     } else {
-        info!("SSH install failed for {} (no network?), will retry next boot", container);
+
     }
 
     // Create WolfStack MOTD — write directly to rootfs (avoids shell escaping issues)
@@ -2441,7 +2440,7 @@ fn lxc_post_start_setup(container: &str) {
     // Only mark done if SSH was installed successfully
     if ssh_ok {
         let _ = std::fs::write(&marker, "done");
-        info!("First-boot setup complete for container {}", container);
+
     }
 }
 
@@ -2990,7 +2989,7 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
                 let _ = Command::new("pct")
                     .args(["set", container, &format!("--delete"), &format!("net{}", wn_nic.index)])
                     .output();
-                info!("Removed WolfNet NIC (net{}) from VMID {}", wn_nic.index, container);
+
             }
         } else {
             let _ = std::fs::create_dir_all(&wolfnet_dir);
@@ -3020,7 +3019,7 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
                 .output();
             match set_out {
                 Ok(ref o) if o.status.success() => {
-                    info!("Updated WolfNet NIC (net{}) on lxcbr0 for VMID {} (IP applied at runtime)", wn_index, container);
+
                 }
                 Ok(ref o) => {
                     error!("Failed to set WolfNet NIC on VMID {}: {}", container, String::from_utf8_lossy(&o.stderr));
@@ -3037,7 +3036,6 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
                 .map(|o| String::from_utf8_lossy(&o.stdout).contains("running"))
                 .unwrap_or(false);
             if running {
-                info!("Container {} is running — applying WolfNet IP {} live", container, ip_trimmed);
                 lxc_apply_wolfnet(container);
             }
         }
@@ -3296,7 +3294,6 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_uppercase().contains("RUNNING"))
                 .unwrap_or(false);
             if running {
-                info!("Container {} is running — applying WolfNet IP {} live", container, ip_trimmed);
                 lxc_apply_wolfnet(container);
             }
         }
@@ -3717,7 +3714,7 @@ fn lxc_list_templates_proxmox() -> Vec<LxcTemplate> {
     let output = match output {
         Ok(o) if o.status.success() => o,
         _ => {
-            info!("Failed to run pveam available, falling back to curated Proxmox templates");
+
             return vec![
                 LxcTemplate { distribution: "debian".into(), release: "12".into(), architecture: "amd64".into(), variant: "standard".into() },
                 LxcTemplate { distribution: "ubuntu".into(), release: "24.04".into(), architecture: "amd64".into(), variant: "standard".into() },
@@ -3817,7 +3814,7 @@ fn lxc_list_templates_proxmox() -> Vec<LxcTemplate> {
         ];
     }
 
-    info!("Listed {} Proxmox templates via pveam", templates.len());
+
     templates
 }
 
@@ -3972,14 +3969,14 @@ fn pct_ensure_template(storage: &str, distribution: &str, release: &str, archite
             // Already have this template — extract the volid
             let volid = line.split_whitespace().next().unwrap_or("").to_string();
             if !volid.is_empty() {
-                info!("Template already cached: {}", volid);
+
                 return Ok(volid);
             }
         }
     }
 
     // Update available template list
-    info!("Updating Proxmox template list...");
+
     let _ = Command::new("pveam").arg("update").output();
 
     // Search available templates
@@ -4007,7 +4004,7 @@ fn pct_ensure_template(storage: &str, distribution: &str, release: &str, archite
     }
 
     // Download the template
-    info!("Downloading template: {} to {}", best_template, storage);
+
     let dl_output = Command::new("pveam").args(["download", storage, &best_template]).output()
         .map_err(|e| format!("Failed to download template: {}", e))?;
 
@@ -4017,7 +4014,7 @@ fn pct_ensure_template(storage: &str, distribution: &str, release: &str, archite
         return Err(format!("Template download failed for '{}' on storage '{}': {} {}", best_template, storage, stderr.trim(), stdout.trim()));
     }
 
-    info!("Template downloaded: {} to {}", best_template, storage);
+
 
     // Return the volid
     Ok(format!("{}:vztmpl/{}", storage, best_template))
@@ -4041,7 +4038,7 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
     // Ensure the template is downloaded
     let template_volid = pct_ensure_template(template_storage, distribution, release, architecture)?;
 
-    info!("Creating Proxmox container {} (VMID {}) from {}", name, vmid, template_volid);
+
 
     let mut args = vec![
         "create".to_string(),
@@ -4076,7 +4073,7 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
         }
     }
 
-    info!("pct {}", args.join(" "));
+
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let output = Command::new("pct")
         .args(&args_ref)
@@ -4084,7 +4081,7 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
         .map_err(|e| format!("Failed to run pct create: {}", e))?;
 
     if output.status.success() {
-        info!("Proxmox container {} (VMID {}) created successfully", name, vmid);
+
 
         // Attach WolfNet: add wn0 on lxcbr0 with the WolfNet IP
         if let Some(ip) = wolfnet_ip {
@@ -4100,7 +4097,7 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
                 .output();
             match set_out {
                 Ok(ref o) if o.status.success() => {
-                    info!("Added WolfNet NIC (wn0) on lxcbr0 with IP {} to VMID {}", ip, vmid);
+
                 }
                 Ok(ref o) => {
                     error!("Failed to add WolfNet NIC to VMID {}: {}", vmid, String::from_utf8_lossy(&o.stderr));
@@ -4129,7 +4126,8 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
 
 /// Clone an LXC container on the same node
 pub fn lxc_clone_local(source: &str, new_name: &str, storage: Option<&str>) -> Result<String, String> {
-    info!("Cloning container {} → {}", source, new_name);
+
+
 
     if is_proxmox() {
         let new_vmid = pct_next_vmid()?;
@@ -4146,13 +4144,13 @@ pub fn lxc_clone_local(source: &str, new_name: &str, storage: Option<&str>) -> R
                 args.push(s.to_string());
             }
         }
-        info!("pct {}", args.join(" "));
+    
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let output = Command::new("pct").args(&args_ref).output()
             .map_err(|e| format!("Failed to run pct clone: {}", e))?;
 
         if output.status.success() {
-            info!("Cloned {} → {} (VMID {})", source, new_name, new_vmid);
+
             lxc_clone_fixup_ip(new_name);
             Ok(format!("Container '{}' cloned to '{}' (VMID {})", source, new_name, new_vmid))
         } else {
@@ -4175,7 +4173,7 @@ pub fn lxc_clone_local(source: &str, new_name: &str, storage: Option<&str>) -> R
             .map_err(|e| format!("Failed to run lxc-copy: {}", e))?;
 
         if output.status.success() {
-            info!("Cloned {} → {} via lxc-copy", source, new_name);
+
             lxc_clone_fixup_ip(new_name);
             Ok(format!("Container '{}' cloned to '{}'", source, new_name))
         } else {
@@ -4206,7 +4204,7 @@ pub fn lxc_export(container: &str) -> Result<(std::path::PathBuf, ContainerExpor
 
     if is_proxmox() {
         // Use vzdump for Proxmox containers
-        info!("Exporting Proxmox container {} via vzdump", container);
+
         let output = Command::new("vzdump")
             .args([container, "--dumpdir", "/tmp/wolfstack-exports", "--mode", "stop", "--compress", "zstd"])
             .output()
@@ -4227,7 +4225,7 @@ pub fn lxc_export(container: &str) -> Result<(std::path::PathBuf, ContainerExpor
         Ok((archive_path, meta))
     } else {
         // Standalone: tar the rootfs + config
-        info!("Exporting standalone container {} via tar", container);
+
         let container_dir = format!("/var/lib/lxc/{}", container);
         if !std::path::Path::new(&container_dir).exists() {
             return Err(format!("Container directory not found: {}", container_dir));
@@ -4257,7 +4255,7 @@ pub fn lxc_export(container: &str) -> Result<(std::path::PathBuf, ContainerExpor
             archive_format: "tar.gz".to_string(),
         };
 
-        info!("Exported {} to {}", container, archive_path.display());
+
         Ok((archive_path, meta))
     }
 }
@@ -4345,7 +4343,7 @@ pub fn lxc_import(archive_path: &str, new_name: &str, storage: Option<&str>) -> 
         return Err(format!("Archive not found: {}", archive_path));
     }
 
-    info!("Importing container '{}' from {}", new_name, archive_path);
+
 
     if is_proxmox() {
         let new_vmid = pct_next_vmid()?;
@@ -4366,13 +4364,13 @@ pub fn lxc_import(archive_path: &str, new_name: &str, storage: Option<&str>) -> 
             args.push("1".to_string());
         }
 
-        info!("pct {}", args.join(" "));
+    
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let output = Command::new("pct").args(&args_ref).output()
             .map_err(|e| format!("pct restore failed: {}", e))?;
 
         if output.status.success() {
-            info!("Imported '{}' as VMID {}", new_name, new_vmid);
+
             Ok(format!("Container '{}' imported (VMID {}, storage: {})", new_name, new_vmid, storage_id))
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -4395,7 +4393,7 @@ pub fn lxc_import(archive_path: &str, new_name: &str, storage: Option<&str>) -> 
             .map_err(|e| format!("tar extract failed: {}", e))?;
 
         if output.status.success() {
-            info!("Imported standalone container '{}'", new_name);
+
             Ok(format!("Container '{}' imported from archive", new_name))
         } else {
             // Cleanup on failure
@@ -4412,17 +4410,17 @@ pub fn lxc_export_cleanup(archive_path: &str) {
     // Also remove .meta.json if present
     let meta_path = format!("{}.meta.json", archive_path.trim_end_matches(".tar.gz").trim_end_matches(".tar.zst"));
     let _ = std::fs::remove_file(&meta_path);
-    info!("Cleaned up export: {}", archive_path);
+
 }
 
 /// Create an LXC container from a download template
 /// On Proxmox nodes, automatically uses `pct create` instead of `lxc-create`
 pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &str, storage_path: Option<&str>) -> Result<String, String> {
-    info!("Creating LXC container {} ({} {} {})", name, distribution, release, architecture);
+
 
     // On Proxmox, delegate to pct create
     if is_proxmox() {
-        info!("Proxmox detected — using pct create");
+
         return pct_create_api(name, distribution, release, architecture, storage_path, None, None, None, None);
     }
 
@@ -4450,7 +4448,7 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
         .map_err(|e| format!("Failed to create LXC container: {}", e))?;
 
     if output.status.success() {
-        info!("LXC container {} created successfully", name);
+
 
         // Ensure LXC config has proper networking (the download template often
         // omits hwaddr, bridge, etc., leaving the container without networking)
@@ -4507,7 +4505,7 @@ pub fn docker_search(query: &str) -> Vec<DockerSearchResult> {
     }
 
     // Fallback: Docker Hub REST API (no Docker required)
-    info!("docker search CLI failed or returned empty — trying Docker Hub REST API for '{}'", query);
+
     docker_search_hub_api(query)
 }
 
@@ -4553,7 +4551,7 @@ fn docker_search_hub_api(query: &str) -> Vec<DockerSearchResult> {
             vec![]
         }
         _ => {
-            info!("Docker Hub API fallback also failed");
+
             vec![]
         }
     }
@@ -4561,7 +4559,7 @@ fn docker_search_hub_api(query: &str) -> Vec<DockerSearchResult> {
 
 /// Pull a Docker image
 pub fn docker_pull(image: &str) -> Result<String, String> {
-    info!("Pulling Docker image: {}", image);
+
 
     let output = Command::new("docker")
         .args(["pull", image])
@@ -4570,7 +4568,7 @@ pub fn docker_pull(image: &str) -> Result<String, String> {
 
     if output.status.success() {
         let out = String::from_utf8_lossy(&output.stdout);
-        info!("Docker image {} pulled", image);
+
         Ok(format!("Image '{}' pulled successfully. {}", image, out.lines().last().unwrap_or("")))
     } else {
         Err(format!(
@@ -4586,7 +4584,7 @@ pub fn docker_pull(image: &str) -> Result<String, String> {
 pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], wolfnet_ip: Option<&str>, 
                      memory: Option<&str>, cpus: Option<&str>, _storage: Option<&str>,
                      volumes: &[String]) -> Result<String, String> {
-    info!("Creating Docker container {} from image {}", name, image);
+
 
     let mut args = vec![
         "create".to_string(),
@@ -4650,7 +4648,7 @@ pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], 
 
     args.push(image.to_string());
 
-    info!("Docker create command: docker {}", args.join(" "));
+
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let output = Command::new("docker")
         .args(&args_ref)
@@ -4659,7 +4657,7 @@ pub fn docker_create(name: &str, image: &str, ports: &[String], env: &[String], 
 
     if output.status.success() {
         let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        info!("Docker container {} created ({})", name, &id[..12.min(id.len())]);
+
 
         // WolfNet is applied on docker_start (reads wolfnet.ip label) — not here,
         // because the container isn't running yet and docker exec would fail.
@@ -4739,7 +4737,7 @@ pub fn lxc_set_resource_limits(container: &str, memory: Option<&str>, cpus: Opti
 
 /// Clone a Docker container — commits it as an image, then creates a new container
 pub fn docker_clone(container: &str, new_name: &str) -> Result<String, String> {
-    info!("Cloning Docker container {} as {}", container, new_name);
+
 
     // Step 1: Commit the container to a new image
     let image_name = format!("wolfstack-clone/{}", new_name);
@@ -4769,14 +4767,14 @@ pub fn docker_clone(container: &str, new_name: &str) -> Result<String, String> {
     }
 
     let new_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    info!("Docker container cloned: {} -> {} ({})", container, new_name, &new_id[..12]);
+
     Ok(format!("Container cloned as '{}' ({})", new_name, &new_id[..12.min(new_id.len())]))
 }
 
 /// Migrate a Docker container to a remote WolfStack node
 /// Exports the container, sends it to the target, imports and optionally starts it
 pub fn docker_migrate(container: &str, target_url: &str, remove_source: bool) -> Result<String, String> {
-    info!("Migrating Docker container {} to {}", container, target_url);
+
 
     // Step 1: Stop the container if running
     let _ = docker_stop(container);
@@ -4811,7 +4809,7 @@ pub fn docker_migrate(container: &str, target_url: &str, remove_source: bool) ->
 
     // Step 4: Send the tar to the remote WolfStack node
     let import_url = format!("{}/api/containers/docker/import?name={}", target_url.trim_end_matches('/'), container);
-    info!("Sending container image to {}", import_url);
+
     let output = Command::new("curl")
         .args([
             "-s", "-f",          // --fail: return error on HTTP errors (4xx, 5xx)
@@ -4852,16 +4850,16 @@ pub fn docker_migrate(container: &str, target_url: &str, remove_source: bool) ->
         ));
     }
 
-    info!("Container {} successfully transferred to {}", container, target_url);
+
     
     // Step 5: Optionally remove the source container (only after confirmed success)
     if remove_source {
         let _ = docker_remove(container);
-        info!("Source container {} removed after successful migration", container);
+
     } else {
         // Restart the source container since we're keeping it
         let _ = docker_start(container);
-        info!("Container {} copied to {} (source preserved)", container, target_url);
+
     }
 
     Ok(format!("Container migrated to {} successfully. {}", target_url, response))
@@ -4869,7 +4867,7 @@ pub fn docker_migrate(container: &str, target_url: &str, remove_source: bool) ->
 
 /// Import a Docker container image from a tar file
 pub fn docker_import_image(tar_path: &str, container_name: &str) -> Result<String, String> {
-    info!("Importing Docker image from {} as {}", tar_path, container_name);
+
 
     // Load the image
     let output = Command::new("docker")
@@ -4915,7 +4913,7 @@ pub fn docker_import_image(tar_path: &str, container_name: &str) -> Result<Strin
 /// Clone an LXC container (Proxmox-aware)
 #[allow(dead_code)]
 pub fn lxc_clone(container: &str, new_name: &str) -> Result<String, String> {
-    info!("Cloning LXC container {} as {}", container, new_name);
+
 
     if is_proxmox() {
         return lxc_clone_local(container, new_name, None);
@@ -4940,7 +4938,7 @@ pub fn lxc_clone(container: &str, new_name: &str) -> Result<String, String> {
 /// Clone an LXC container as a snapshot (faster, copy-on-write)
 /// On Proxmox, uses linked clone (not full)
 pub fn lxc_clone_snapshot(container: &str, new_name: &str) -> Result<String, String> {
-    info!("Snapshot-cloning LXC container {} as {}", container, new_name);
+
 
     if is_proxmox() {
         // Proxmox linked clone (--full 0)
@@ -4950,7 +4948,7 @@ pub fn lxc_clone_snapshot(container: &str, new_name: &str) -> Result<String, Str
             "clone", container, &vmid_str,
             "--hostname", new_name,
         ];
-        info!("pct {}", args.join(" "));
+
         let output = Command::new("pct").args(&args).output()
             .map_err(|e| format!("pct clone failed: {}", e))?;
 
@@ -4982,7 +4980,7 @@ pub fn lxc_clone_snapshot(container: &str, new_name: &str) -> Result<String, Str
 pub fn lxc_clone_fixup_ip(new_name: &str) {
     let new_last = find_free_bridge_ip();
     let new_ip = format!("10.0.3.{}", new_last);
-    info!("Assigning new bridge IP {} to cloned container {}", new_ip, new_name);
+
 
     // Write multi-distro network config inside rootfs
     write_container_network_config(new_name, &new_ip);
@@ -5044,7 +5042,7 @@ pub fn lxc_clone_fixup_ip(new_name: &str) {
             for (i, line) in net_additions.iter().enumerate() {
                 updated.insert(insert_pos + i, line.clone());
             }
-            info!("Added missing network config to cloned container {}: {:?}", new_name, net_additions);
+
         }
 
         let _ = std::fs::write(&config_path, updated.join("\n"));
@@ -5102,7 +5100,7 @@ pub fn lxc_ensure_network_config(name: &str) {
         lines.insert(insert_pos + i, line.clone());
     }
     let _ = std::fs::write(&config_path, lines.join("\n"));
-    info!("Ensured network config for container {}: {:?}", name, additions);
+
 }
 
 fn rand_byte() -> u8 {
@@ -5119,7 +5117,7 @@ fn rand_byte() -> u8 {
 
 /// Install Docker
 pub fn install_docker() -> Result<String, String> {
-    info!("Installing Docker...");
+
 
     // Use Docker's official convenience script
     let output = Command::new("bash")
@@ -5139,13 +5137,13 @@ pub fn install_docker() -> Result<String, String> {
         .args(["enable", "--now", "docker"])
         .output();
 
-    info!("Docker installed successfully");
+
     Ok("Docker installed and started successfully".to_string())
 }
 
 /// Install LXC
 pub fn install_lxc() -> Result<String, String> {
-    info!("Installing LXC...");
+
 
     // Detect package manager
     let (pkg_mgr, install_flag) = if std::path::Path::new("/usr/bin/apt-get").exists() {
@@ -5189,7 +5187,7 @@ pub fn install_lxc() -> Result<String, String> {
         .args(["enable", "--now", "lxcfs"])
         .output();
 
-    info!("LXC installed successfully");
+
     Ok("LXC installed successfully".to_string())
 }
 
@@ -5319,7 +5317,7 @@ pub fn install_component_in_container(
     container: &str,
     component: &str,
 ) -> Result<String, String> {
-    info!("Installing component '{}' into {} container '{}'", component, runtime, container);
+
 
     // Validate the component name
     let install_script = match component {
@@ -5386,7 +5384,7 @@ pub fn install_component_in_container(
 
     if exec_cmd.status.success() {
         let stdout = String::from_utf8_lossy(&exec_cmd.stdout);
-        info!("Successfully installed {} in {} container {}", component, runtime, container);
+
         Ok(format!("{} installed in {} container '{}'. {}", 
             component, runtime, container, 
             stdout.lines().last().unwrap_or("Done")))
@@ -5470,7 +5468,7 @@ pub fn lxc_add_mount(container: &str, host_path: &str, container_path: &str, rea
     std::fs::write(&config_path, config)
         .map_err(|e| format!("Failed to write config: {}", e))?;
 
-    info!("Added mount {} -> {} to LXC container {}", host_path, container_path, container);
+
     Ok(format!("Mount added: {} → {}", host_path, container_path))
 }
 
@@ -5494,7 +5492,7 @@ pub fn lxc_remove_mount(container: &str, host_path: &str) -> Result<String, Stri
     std::fs::write(&config_path, &new_config)
         .map_err(|e| format!("Failed to write config: {}", e))?;
 
-    info!("Removed mount for {} from LXC container {}", host_path, container);
+
     Ok(format!("Mount removed: {}", host_path))
 }
 
@@ -5562,7 +5560,7 @@ pub fn docker_list_volumes(container: &str) -> Vec<ContainerMount> {
 pub fn docker_export(container_name: &str) -> Result<String, String> {
     let image_tag = format!("wolfrun-migrate:{}", container_name);
     let tar_path = format!("/tmp/wolfrun-migrate-{}.tar", container_name);
-    info!("Exporting Docker container '{}' to {}", container_name, tar_path);
+
 
     // Commit the container to an image
     let output = Command::new("docker")
@@ -5584,8 +5582,7 @@ pub fn docker_export(container_name: &str) -> Result<String, String> {
     let _ = Command::new("docker").args(["rmi", &image_tag]).output();
 
     if output.status.success() {
-        info!("Exported Docker '{}' to {} ({})", container_name, tar_path,
-            std::fs::metadata(&tar_path).map(|m| format!("{} MB", m.len() / 1_048_576)).unwrap_or_default());
+
         Ok(tar_path)
     } else {
         Err(format!("docker save failed: {}", String::from_utf8_lossy(&output.stderr)))
@@ -5601,7 +5598,7 @@ pub fn docker_import(
     env: &[String],
     volumes: &[String],
 ) -> Result<String, String> {
-    info!("Importing Docker container '{}' from {}", container_name, tar_path);
+
 
     // Load the image
     let output = Command::new("docker")
@@ -5634,7 +5631,7 @@ pub fn docker_import(
     // Clean up the migration image
     let _ = Command::new("docker").args(["rmi", &image_name]).output();
 
-    info!("Imported Docker '{}' and started", container_name);
+
     Ok(format!("Container '{}' imported and running", container_name))
 }
 

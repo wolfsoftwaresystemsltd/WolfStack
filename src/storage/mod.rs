@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use tracing::{info, warn, error};
+use tracing::{warn, error};
 use chrono::Utc;
 
 const CONFIG_PATH: &str = "/etc/wolfstack/storage.json";
@@ -187,7 +187,7 @@ pub fn mount_storage(id: &str) -> Result<String, String> {
             config.mounts[idx].error_message = None;
             config.mounts[idx].enabled = true;
             save_config(&config)?;
-            info!("Mounted storage '{}' at {}", config.mounts[idx].name, config.mounts[idx].mount_point);
+
             Ok(msg)
         }
         Err(e) => {
@@ -234,7 +234,7 @@ pub fn unmount_storage(id: &str) -> Result<String, String> {
             config.mounts[idx].status = "unmounted".to_string();
             config.mounts[idx].error_message = None;
             save_config(&config)?;
-            info!("Unmounted storage '{}' from {}", config.mounts[idx].name, config.mounts[idx].mount_point);
+
             Ok("Unmounted successfully".to_string())
         }
         Ok(o) => {
@@ -536,7 +536,7 @@ fn mount_s3_via_rust_s3(mount: &StorageMount, s3: &S3Config) -> Result<String, S
         } else {
             s3.endpoint.clone()
         };
-        info!("S3 connecting to endpoint: {} bucket: {}", endpoint, s3.bucket);
+
         Region::Custom {
             region: if s3.region.is_empty() { "us-east-1".to_string() } else { s3.region.clone() },
             endpoint,
@@ -544,7 +544,7 @@ fn mount_s3_via_rust_s3(mount: &StorageMount, s3: &S3Config) -> Result<String, S
     } else {
         let region = s3.region.parse::<Region>()
             .unwrap_or(Region::UsEast1);
-        info!("S3 connecting to region: {:?} bucket: {}", region, s3.bucket);
+
         region
     };
 
@@ -633,8 +633,7 @@ fn mount_s3_via_rust_s3(mount: &StorageMount, s3: &S3Config) -> Result<String, S
         .map_err(|e| format!("Failed to bind mount: {}", e))?;
 
     if output.status.success() {
-        info!("S3 bucket '{}' synced ({} objects) and mounted at {}",
-            s3.bucket, sync_result, mount.mount_point);
+
         Ok(format!("S3 storage mounted via rust-s3 ({} objects synced)", sync_result))
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -645,7 +644,7 @@ fn mount_s3_via_rust_s3(mount: &StorageMount, s3: &S3Config) -> Result<String, S
 fn mount_nfs(mount: &StorageMount) -> Result<String, String> {
     // Ensure nfs-common is installed
     if !Path::new("/sbin/mount.nfs").exists() && !Path::new("/usr/sbin/mount.nfs").exists() {
-        info!("Installing NFS client packages...");
+
         let distro = crate::installer::detect_distro();
         let (pkg_mgr, pkg_name) = match distro {
             crate::installer::DistroFamily::Debian => ("apt-get", "nfs-common"),
@@ -716,7 +715,7 @@ fn mount_wolfdisk(mount: &StorageMount) -> Result<String, String> {
 fn mount_sshfs(mount: &StorageMount) -> Result<String, String> {
     // Ensure sshfs is installed
     if !has_sshfs() {
-        info!("Installing sshfs...");
+
         install_sshfs().map_err(|e| format!("Failed to install sshfs: {}", e))?;
         if !has_sshfs() {
             return Err("sshfs is not installed and could not be auto-installed".to_string());
@@ -772,7 +771,7 @@ fn has_sshfs() -> bool {
 }
 
 fn install_sshfs() -> Result<(), String> {
-    info!("Installing sshfs...");
+
     let distro = crate::installer::detect_distro();
     let (pkg_mgr, pkg_name) = match distro {
         crate::installer::DistroFamily::Debian => ("apt-get", "sshfs"),
@@ -802,7 +801,7 @@ fn has_wolfdisk() -> bool {
 }
 
 fn install_s3fs() -> Result<(), String> {
-    info!("Installing s3fs-fuse...");
+
     let distro = crate::installer::detect_distro();
     let (pkg_mgr, pkg_name) = match distro {
         crate::installer::DistroFamily::Debian => ("apt-get", "s3fs"),
@@ -1011,11 +1010,11 @@ pub fn auto_mount_all() {
         return;
     }
     
-    info!("Auto-mounting {} storage entries in background...", auto_mounts.len());
+
     for (id, name) in auto_mounts {
         std::thread::spawn(move || {
             match mount_storage(&id) {
-                Ok(msg) => info!("  ✓ Auto-mounted {}: {}", name, msg),
+                Ok(_msg) => {}
                 Err(e) => error!("  ✗ Failed to auto-mount {}: {}", name, e),
             }
         });
@@ -1213,7 +1212,7 @@ pub fn install_provider(name: &str) -> Result<String, String> {
         _ => return Err(format!("Unknown provider: {}", name)),
     };
 
-    info!("Installing storage provider '{}' via {} {}", name, pkg_mgr, pkg_name);
+
     let output = Command::new(pkg_mgr)
         .args(["install", "-y", pkg_name])
         .output()

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{info, error, warn};
+use tracing::{error, warn};
 use chrono::{Utc, Datelike};
 use uuid::Uuid;
 
@@ -295,7 +295,7 @@ fn ensure_staging_dir() -> Result<PathBuf, String> {
 
 /// Backup a Docker container — commit + save + gzip
 pub fn backup_docker(name: &str) -> Result<(PathBuf, u64), String> {
-    info!("Backing up Docker container: {}", name);
+
     let staging = ensure_staging_dir()?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let filename = format!("docker-{}-{}.tar.gz", name, timestamp);
@@ -326,13 +326,13 @@ pub fn backup_docker(name: &str) -> Result<(PathBuf, u64), String> {
     }
 
     let size = fs::metadata(&tar_path).map(|m| m.len()).unwrap_or(0);
-    info!("Docker backup complete: {} ({} bytes)", filename, size);
+
     Ok((tar_path, size))
 }
 
 /// Backup an LXC container — tar rootfs + config
 pub fn backup_lxc(name: &str) -> Result<(PathBuf, u64), String> {
-    info!("Backing up LXC container: {}", name);
+
     let staging = ensure_staging_dir()?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let filename = format!("lxc-{}-{}.tar.gz", name, timestamp);
@@ -341,7 +341,7 @@ pub fn backup_lxc(name: &str) -> Result<(PathBuf, u64), String> {
     // Check if container is running — stop it for consistent backup
     let was_running = is_lxc_running(name);
     if was_running {
-        info!("Stopping LXC container {} for backup", name);
+
         let _ = Command::new("lxc-stop").args(["-n", name]).output();
         // Wait briefly for clean stop
         std::thread::sleep(std::time::Duration::from_secs(3));
@@ -364,7 +364,7 @@ pub fn backup_lxc(name: &str) -> Result<(PathBuf, u64), String> {
 
     // Restart if it was running
     if was_running {
-        info!("Restarting LXC container {} after backup", name);
+
         let _ = Command::new("lxc-start").args(["-n", name]).output();
     }
 
@@ -373,7 +373,7 @@ pub fn backup_lxc(name: &str) -> Result<(PathBuf, u64), String> {
     }
 
     let size = fs::metadata(&tar_path).map(|m| m.len()).unwrap_or(0);
-    info!("LXC backup complete: {} ({} bytes)", filename, size);
+
     Ok((tar_path, size))
 }
 
@@ -389,7 +389,7 @@ fn is_lxc_running(name: &str) -> bool {
 
 /// Backup a KVM/QEMU VM — copy disk images + JSON config
 pub fn backup_vm(name: &str) -> Result<(PathBuf, u64), String> {
-    info!("Backing up VM: {}", name);
+
     let staging = ensure_staging_dir()?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let filename = format!("vm-{}-{}.tar.gz", name, timestamp);
@@ -405,7 +405,7 @@ pub fn backup_vm(name: &str) -> Result<(PathBuf, u64), String> {
     // Check if VM is running (check for QEMU process)
     let was_running = is_vm_running(name);
     if was_running {
-        info!("Stopping VM {} for backup", name);
+
         // Send ACPI shutdown
         let _ = Command::new("sh")
             .args(["-c", &format!(
@@ -463,11 +463,11 @@ pub fn backup_vm(name: &str) -> Result<(PathBuf, u64), String> {
 
     // Restart if it was running
     if was_running {
-        info!("VM {} was running before backup — you may need to restart it manually", name);
+
     }
 
     let size = fs::metadata(&tar_path).map(|m| m.len()).unwrap_or(0);
-    info!("VM backup complete: {} ({} bytes)", filename, size);
+
     Ok((tar_path, size))
 }
 
@@ -483,7 +483,7 @@ fn is_vm_running(name: &str) -> bool {
 
 /// Backup WolfStack configuration files
 pub fn backup_config() -> Result<(PathBuf, u64), String> {
-    info!("Backing up WolfStack configuration");
+
     let staging = ensure_staging_dir()?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let filename = format!("config-wolfstack-{}.tar.gz", timestamp);
@@ -548,7 +548,7 @@ pub fn backup_config() -> Result<(PathBuf, u64), String> {
     }
 
     let size = fs::metadata(&tar_path).map(|m| m.len()).unwrap_or(0);
-    info!("Config backup complete: {} ({} bytes)", filename, size);
+
     Ok((tar_path, size))
 }
 
@@ -703,13 +703,13 @@ fn store_local(local_path: &Path, dest_dir: &str, filename: &str) -> Result<(), 
     let dest = Path::new(dest_dir).join(filename);
     fs::copy(local_path, &dest)
         .map_err(|e| format!("Failed to copy backup to {}: {}", dest.display(), e))?;
-    info!("Backup stored locally: {}", dest.display());
+
     Ok(())
 }
 
 /// Store backup to S3
 fn store_s3(local_path: &Path, storage: &BackupStorage, filename: &str) -> Result<(), String> {
-    info!("Uploading backup to S3: {}/{}", storage.bucket, filename);
+
 
     // Use tokio runtime for the async S3 upload
     let _rt = tokio::runtime::Handle::try_current()
@@ -753,7 +753,7 @@ fn store_s3(local_path: &Path, storage: &BackupStorage, filename: &str) -> Resul
             bucket.put_object(&key, &data).await
                 .map_err(|e| format!("S3 upload error: {}", e))?;
 
-            info!("Backup uploaded to S3: {}/{}", bucket_name, key);
+
             Ok::<(), String>(())
         })
     }).join().map_err(|_| "S3 upload thread panicked".to_string())?
@@ -761,7 +761,7 @@ fn store_s3(local_path: &Path, storage: &BackupStorage, filename: &str) -> Resul
 
 /// Store backup to remote WolfStack node
 fn store_remote(local_path: &Path, remote_url: &str, filename: &str) -> Result<(), String> {
-    info!("Sending backup to remote node: {}", remote_url);
+
     let import_url = format!("{}/api/backups/import?filename={}", 
         remote_url.trim_end_matches('/'), filename);
 
@@ -782,7 +782,7 @@ fn store_remote(local_path: &Path, remote_url: &str, filename: &str) -> Result<(
             String::from_utf8_lossy(&output.stderr)));
     }
 
-    info!("Backup sent to remote node: {}", remote_url);
+
     Ok(())
 }
 
@@ -799,7 +799,7 @@ fn pbs_repo_string(storage: &BackupStorage) -> String {
 /// Store backup to Proxmox Backup Server
 fn store_pbs(local_path: &Path, storage: &BackupStorage, filename: &str) -> Result<(), String> {
     let repo = pbs_repo_string(storage);
-    info!("Uploading backup to PBS: {} ({})", repo, filename);
+
 
     // Extract container/VM name from filename (e.g. "mycontainer-2026-02-12.tar.gz" -> "mycontainer")
     let backup_id = filename.split('-').next().unwrap_or(filename.split('.').next().unwrap_or(filename));
@@ -833,7 +833,7 @@ fn store_pbs(local_path: &Path, storage: &BackupStorage, filename: &str) -> Resu
             String::from_utf8_lossy(&output.stderr)));
     }
 
-    info!("Backup uploaded to PBS: {} (container: {})", repo, backup_id);
+
     Ok(())
 }
 
@@ -913,7 +913,7 @@ fn retrieve_from_s3(entry: &BackupEntry, dest: &Path) -> Result<(), String> {
 
 /// Restore a Docker container from backup
 pub fn restore_docker(entry: &BackupEntry) -> Result<String, String> {
-    info!("Restoring Docker container from backup: {}", entry.filename);
+
     let local_path = retrieve_backup(entry)?;
 
     // Load the image from the tar.gz
@@ -929,13 +929,13 @@ pub fn restore_docker(entry: &BackupEntry) -> Result<String, String> {
     }
 
     let result = String::from_utf8_lossy(&output.stdout).to_string();
-    info!("Docker restore complete: {}", result.trim());
+
     Ok(format!("Docker image restored: {}", result.trim()))
 }
 
 /// Restore an LXC container from backup
 pub fn restore_lxc(entry: &BackupEntry) -> Result<String, String> {
-    info!("Restoring LXC container from backup: {}", entry.filename);
+
     let local_path = retrieve_backup(entry)?;
 
     // Extract to /var/lib/lxc/
@@ -988,13 +988,13 @@ pub fn restore_lxc(entry: &BackupEntry) -> Result<String, String> {
         .args(["755", &container_dir])
         .output();
 
-    info!("LXC restore complete: {}", container_name);
+
     Ok(format!("LXC container '{}' restored — you can now start it from the Containers page", container_name))
 }
 
 /// Restore a VM from backup
 pub fn restore_vm(entry: &BackupEntry) -> Result<String, String> {
-    info!("Restoring VM from backup: {}", entry.filename);
+
     let local_path = retrieve_backup(entry)?;
 
     let vm_base = "/var/lib/wolfstack/vms";
@@ -1021,19 +1021,19 @@ pub fn restore_vm(entry: &BackupEntry) -> Result<String, String> {
         if Path::new(&legacy_config).exists() {
             // Move it to the expected flat location
             let _ = fs::copy(&legacy_config, &config_path);
-            info!("Migrated legacy VM config to {}", config_path);
+
         } else {
             warn!("VM config not found after restore: {} — VM may not appear in list until config is recreated", config_path);
         }
     }
 
-    info!("VM restore complete: {}", entry.target.name);
+
     Ok(format!("VM '{}' restored", entry.target.name))
 }
 
 /// Restore WolfStack configuration from backup
 pub fn restore_config_backup(entry: &BackupEntry) -> Result<String, String> {
-    info!("Restoring WolfStack config from backup: {}", entry.filename);
+
     let local_path = retrieve_backup(entry)?;
 
     // Extract to root (files are stored with their relative paths)
@@ -1048,7 +1048,7 @@ pub fn restore_config_backup(entry: &BackupEntry) -> Result<String, String> {
         return Err(format!("Config extract failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
-    info!("Config restore complete");
+
     Ok("WolfStack configuration restored. Restart services to apply changes.".to_string())
 }
 
@@ -1259,7 +1259,7 @@ pub fn check_schedules() {
         }
 
         // Time to run this schedule!
-        info!("Running scheduled backup: {} ({})", schedule.name, schedule.id);
+
         
         let new_entries = if schedule.backup_all {
             backup_all(&schedule.storage)
@@ -1310,7 +1310,7 @@ pub fn check_schedules() {
                     }
                     config.entries.remove(idx);
                 }
-                info!("Pruned {} old backups for schedule {}", to_remove.len(), schedule_id);
+
             }
         }
     }
@@ -1331,7 +1331,7 @@ pub fn import_backup(data: &[u8], filename: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to write imported backup: {}", e))?;
 
     let size = data.len();
-    info!("Received backup import: {} ({} bytes)", filename, size);
+
 
     // Add to config as an entry
     let mut config = load_config();
@@ -1493,8 +1493,7 @@ where
         .map_err(|e| format!("Failed to create target dir: {}", e))?;
 
     let snapshot_fixed = fix_pbs_snapshot_timestamp(snapshot);
-    info!("PBS restore (with progress): snapshot='{}' (fixed='{}'), archive='{}', target='{}'",
-          snapshot, snapshot_fixed, archive, &effective_target);
+
 
     on_progress("Detecting archive...".to_string(), Some(1.0));
 
@@ -1503,7 +1502,7 @@ where
     } else {
         archive.to_string()
     };
-    info!("Using archive: {}", actual_archive);
+
     on_progress(format!("Downloading {}...", actual_archive), Some(2.0));
 
     let pbs_pw = if !storage.pbs_token_secret.is_empty() { &storage.pbs_token_secret }
@@ -1599,14 +1598,14 @@ where
                 snap_id, snapshot, cname, container_dir,
             );
             let _ = fs::write(&config_path, lxc_config);
-            info!("Created LXC config at {}", config_path);
+
         }
 
-        info!("Restored PBS container {} to {}", snap_id, container_dir);
+
         return Ok(format!("Container {} restored to {}", cname, container_dir));
     }
 
-    info!("Restored PBS snapshot {} archive {} to {}", snapshot_fixed, actual_archive, effective_target);
+
     Ok(format!("Restored {} to {}", actual_archive, effective_target))
 }
 
@@ -1701,7 +1700,7 @@ fn detect_pbs_archive(storage: &BackupStorage, snapshot: &str) -> Option<String>
             // Prefer .pxar (filesystem backup), then .img (disk image)
             if filename.ends_with(".pxar.didx") || filename.ends_with(".pxar") {
                 let name = filename.trim_end_matches(".didx");
-                info!("Auto-detected PBS archive: {}", name);
+
                 return Some(name.to_string());
             }
         }
@@ -1710,7 +1709,7 @@ fn detect_pbs_archive(storage: &BackupStorage, snapshot: &str) -> Option<String>
             let filename = f.get("filename").and_then(|v| v.as_str()).unwrap_or("");
             if filename.ends_with(".img.fidx") || filename.ends_with(".img") {
                 let name = filename.trim_end_matches(".fidx");
-                info!("Auto-detected PBS archive (img): {}", name);
+
                 return Some(name.to_string());
             }
         }

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{info, error, warn};
+use tracing::{error, warn};
 use rand::Rng;
 use crate::containers;
 
@@ -230,8 +230,7 @@ impl VmManager {
         let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
         fs::write(self.vm_config_path(&config.name), json).map_err(|e| e.to_string())?;
         
-        info!("Created VM: {} (WolfNet: {:?}, disks: {})", 
-              config.name, config.wolfnet_ip, 1 + config.extra_disks.len());
+
         Ok(())
     }
 
@@ -249,7 +248,7 @@ impl VmManager {
         // Determine storage ID (use Proxmox storage name, default to "local-lvm")
         let storage = config.storage_path.as_deref().unwrap_or("local-lvm");
 
-        info!("Creating Proxmox VM {} (VMID {}) on storage {}", config.name, vmid, storage);
+
 
         let mut args = vec![
             "create".to_string(),
@@ -274,7 +273,7 @@ impl VmManager {
             }
         }
 
-        info!("qm {}", args.join(" "));
+
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let output = Command::new("qm")
             .args(&args_ref)
@@ -282,7 +281,7 @@ impl VmManager {
             .map_err(|e| format!("Failed to run qm create: {}", e))?;
 
         if output.status.success() {
-            info!("Proxmox VM {} (VMID {}) created successfully", config.name, vmid);
+
 
             // Also save a WolfStack config for tracking
             let mut tracked = config.clone();
@@ -317,7 +316,7 @@ impl VmManager {
             return Err(format!("Failed to create volume: {}", String::from_utf8_lossy(&output.stderr)));
         }
 
-        info!("Created volume: {} ({}G, {})", vol.name, vol.size_gb, path.display());
+
         Ok(())
     }
 
@@ -359,7 +358,7 @@ impl VmManager {
         let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
         fs::write(&config_path, json).map_err(|e| e.to_string())?;
 
-        info!("Added volume '{}' ({}G) to VM '{}'", vol_name, size_gb, vm_name);
+
         Ok(())
     }
 
@@ -386,14 +385,14 @@ impl VmManager {
             if path.exists() {
                 fs::remove_file(&path)
                     .map_err(|e| format!("Failed to delete volume file: {}", e))?;
-                info!("Deleted volume file: {}", path.display());
+
             }
         }
 
         let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
         fs::write(&config_path, json).map_err(|e| e.to_string())?;
 
-        info!("Removed volume '{}' from VM '{}'", vol_name, vm_name);
+
         Ok(())
     }
 
@@ -433,7 +432,7 @@ impl VmManager {
         let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
         fs::write(&config_path, json).map_err(|e| e.to_string())?;
 
-        info!("Resized volume '{}' on VM '{}' to {}G", vol_name, vm_name, new_size_gb);
+
         Ok(())
     }
 
@@ -553,14 +552,14 @@ impl VmManager {
                     return Err(format!("Disk resize failed: {}", String::from_utf8_lossy(&output.stderr)));
                 }
                 config.disk_size_gb = new_size;
-                info!("Resized VM {} disk to {}G", name, new_size);
+
             }
         }
 
         let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
         fs::write(&config_path, json).map_err(|e| e.to_string())?;
         
-        info!("Updated VM: {}", name);
+
         Ok(())
     }
 
@@ -620,7 +619,7 @@ impl VmManager {
         let kvm_available = std::path::Path::new("/dev/kvm").exists();
         write_log(&format!("KVM available: {}", kvm_available));
         if !kvm_available {
-            info!("KVM not available for VM {} — using software emulation (slower)", name);
+
         }
 
         let disk_path = self.vm_os_disk_path(&config);
@@ -711,12 +710,12 @@ impl VmManager {
                         write_log(&format!("WolfNet routing configured for {} via {}", wolfnet_ip, tap));
                     }
                     using_tap = true;
-                    info!("VM {} using TAP {} with WolfNet IP {}", name, tap, wolfnet_ip);
+
                 }
                 Err(e) => {
                     write_log(&format!("TAP setup failed: {} — falling back to user-mode networking", e));
                     write_log("Note: You can still configure the WolfNet IP inside the guest OS manually");
-                    info!("TAP setup failed for VM {}: {} — using user-mode", name, e);
+
                 }
             }
         }
@@ -760,8 +759,7 @@ impl VmManager {
         }
 
         write_log(&format!("Launching QEMU: VNC :{} (port {}), KVM: {}", vnc_num, vnc_port, kvm_available));
-        info!("Starting VM {}: qemu-system-x86_64 (KVM: {}, VNC :{})", 
-              name, kvm_available, vnc_num);
+
 
         // Redirect QEMU stderr to log file (append mode, don't overwrite diagnostics)
         if let Ok(log_file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
@@ -814,15 +812,15 @@ impl VmManager {
         let runtime_path = self.base_dir.join(format!("{}.runtime.json", name));
         let _ = fs::write(&runtime_path, runtime.to_string());
         
-        info!("Started VM {} on VNC :{} (port {}), noVNC WS :{}", name, vnc_num, vnc_port, ws_port);
+
         Ok(())
     }
 
     pub fn autostart_vms(&self) {
-        info!("Autostating VMs...");
+
         for vm in self.list_vms() {
             if vm.auto_start && !vm.running {
-                info!("Autostarting VM: {}", vm.name);
+
                 if let Err(e) = self.start_vm(&vm.name) {
                     error!("Failed to autostart VM {}: {}", vm.name, e);
                 }
@@ -856,7 +854,7 @@ impl VmManager {
             return Err(format!("TAP up failed: {}", String::from_utf8_lossy(&output.stderr)));
         }
 
-        info!("TAP interface {} created and up", tap);
+
         Ok(())
     }
 
@@ -876,7 +874,7 @@ impl VmManager {
         if !route_result.status.success() {
             let err = String::from_utf8_lossy(&route_result.stderr);
             if !err.contains("File exists") {
-                info!("Route add note: {}", err.trim());
+
             }
         }
 
@@ -898,7 +896,7 @@ impl VmManager {
                 .args(["-t", "nat", "-A", "POSTROUTING", "-s", &format!("{}/32", wolfnet_ip), "-j", "MASQUERADE"]).output();
         }
 
-        info!("WolfNet routing set up for {} via {}", wolfnet_ip, tap);
+
         Ok(())
     }
 
@@ -911,7 +909,7 @@ impl VmManager {
             .args(["-D", "FORWARD", "-i", "wolfnet0", "-o", tap, "-j", "ACCEPT"]).output();
         let _ = Command::new("iptables")
             .args(["-D", "FORWARD", "-i", tap, "-o", "wolfnet0", "-j", "ACCEPT"]).output();
-        info!("Cleaned up TAP interface {}", tap);
+
         Ok(())
     }
 
@@ -950,7 +948,7 @@ impl VmManager {
         // Clean up runtime file
         let _ = fs::remove_file(self.base_dir.join(format!("{}.runtime.json", name)));
 
-        info!("Stopped VM: {}", name);
+
         Ok(())
     }
 
@@ -982,7 +980,7 @@ impl VmManager {
                 let path = vol.file_path();
                 if path.exists() {
                     let _ = fs::remove_file(&path);
-                    info!("Deleted volume file: {}", path.display());
+
                 }
             }
         }
@@ -992,7 +990,7 @@ impl VmManager {
         let _ = fs::remove_file(self.base_dir.join(format!("{}.runtime.json", name)));
         let _ = fs::remove_file(self.base_dir.join(format!("{}.log", name)));
         
-        info!("Deleted VM: {}", name);
+
         Ok(())
     }
 

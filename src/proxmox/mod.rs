@@ -3,7 +3,6 @@
 // https://wolf.uk.com
 
 #![allow(dead_code)]
-use tracing::{info, debug};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -79,7 +78,7 @@ impl PveClient {
     /// GET request to PVE API
     async fn get(&self, path: &str) -> Result<serde_json::Value, String> {
         let url = format!("{}/api2/json{}", self.base_url, path);
-        debug!("PVE GET {}", url);
+
 
         let resp = self.client.get(&url)
             .header("Authorization", self.auth_header())
@@ -102,7 +101,7 @@ impl PveClient {
     /// POST request to PVE API
     async fn post(&self, path: &str) -> Result<serde_json::Value, String> {
         let url = format!("{}/api2/json{}", self.base_url, path);
-        debug!("PVE POST {}", url);
+
 
         let resp = self.client.post(&url)
             .header("Authorization", self.auth_header())
@@ -130,7 +129,7 @@ impl PveClient {
             Ok(data) => return self.parse_node_status_direct(&data),
             Err(e) => {
                 if e.contains("403") || e.contains("Permission") {
-                    debug!("Direct node status failed (403), trying /cluster/resources fallback for {}", self.node_name);
+
                 } else {
                     return Err(e); // Non-permission error, don't fallback
                 }
@@ -286,7 +285,7 @@ impl PveClient {
         let path = format!("/nodes/{}/{}/{}/status/{}", self.node_name, guest_type, vmid, action);
         let data = self.post(&path).await?;
         let upid = data.as_str().unwrap_or("ok").to_string();
-        info!("PVE action {}/{} on {} VMID {}: {}", guest_type, action, self.node_name, vmid, upid);
+
         Ok(upid)
     }
 
@@ -300,7 +299,7 @@ impl PveClient {
         let ticket = data.get("ticket").and_then(|v| v.as_str())
             .ok_or("Missing ticket in termproxy response")?.to_string();
         let user = data.get("user").and_then(|v| v.as_str()).unwrap_or("root@pam").to_string();
-        info!("PVE termproxy for {}/{} VMID {}: port={}", guest_type, self.node_name, vmid, port);
+
         Ok((port, ticket, user))
     }
 
@@ -314,7 +313,7 @@ impl PveClient {
         let ticket = data.get("ticket").and_then(|v| v.as_str())
             .ok_or("Missing ticket in node termproxy response")?.to_string();
         let user = data.get("user").and_then(|v| v.as_str()).unwrap_or("root@pam").to_string();
-        info!("PVE node termproxy for {}: port={}", self.node_name, port);
+
         Ok((port, ticket, user))
     }
 
@@ -370,7 +369,7 @@ impl PveClient {
             "{}/api2/json/nodes/{}/storage/{}/upload",
             self.base_url, self.node_name, storage_id
         );
-        info!("PVE: Uploading {} ({} bytes) to {}", file_name, archive_bytes.len(), upload_url);
+
 
         let part = reqwest::multipart::Part::bytes(archive_bytes)
             .file_name(file_name.to_string())
@@ -393,7 +392,7 @@ impl PveClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(format!("PVE upload failed ({}): {}", status.as_u16(), body));
         }
-        info!("PVE: Upload complete to {}:{}", storage_id, file_name);
+
 
         // Step 2: Get the next available VMID
         let vmid_data = self.get("/cluster/nextid").await
@@ -415,7 +414,7 @@ impl PveClient {
         let ostemplate = format!("{}:vztmpl/{}", storage_id, file_name);
         let restore_storage = storage.unwrap_or("local-lvm");
 
-        info!("PVE: Restoring VMID {} from {} as '{}' on storage {}", new_vmid, ostemplate, new_name, restore_storage);
+
 
         let resp = upload_client.post(&restore_url)
             .header("Authorization", self.auth_header())
@@ -439,7 +438,7 @@ impl PveClient {
 
         let msg = format!("Container '{}' restored as VMID {} on {} (storage: {})",
             new_name, new_vmid, self.node_name, restore_storage);
-        info!("PVE: {}", msg);
+
         Ok((new_vmid, msg))
     }
 

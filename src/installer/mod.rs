@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use tracing::info;
+
 
 /// All available Wolf suite components
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -220,7 +220,7 @@ pub fn get_all_status() -> Vec<ComponentStatus> {
 /// Install a component
 pub fn install_component(component: Component) -> Result<String, String> {
     let distro = detect_distro();
-    info!("Installing {} on {:?}", component.name(), distro);
+
 
     match component {
         Component::MariaDB => install_mariadb(distro),
@@ -281,7 +281,7 @@ fn install_wolf_component(component: Component, _distro: DistroFamily) -> Result
         _ => return Err("Unknown component".to_string()),
     };
 
-    info!("Would install {} from github.com/{}", component.name(), repo);
+
     // TODO: Download and install from GitHub releases
     Ok(format!("{} installation queued from {}", component.name(), repo))
 }
@@ -331,7 +331,7 @@ pub fn restart_service(service: &str) -> Result<String, String> {
 /// Request a certificate via certbot
 pub fn request_certificate(domain: &str, email: &str) -> Result<String, String> {
     if !binary_exists("certbot") {
-        info!("Certbot not found, installing automatically...");
+
         install_certbot(detect_distro())?;
     }
 
@@ -365,7 +365,7 @@ fn parse_certbot_certificates() -> Vec<(String, String, String, String)> {
         Some(ref o) => {
             // certbot might output to stderr too
             let stderr = String::from_utf8_lossy(&o.stderr);
-            tracing::debug!("certbot certificates failed (exit {}): {}", o.status, stderr);
+
             let combined = format!(
                 "{}\n{}",
                 String::from_utf8_lossy(&o.stdout),
@@ -374,7 +374,7 @@ fn parse_certbot_certificates() -> Vec<(String, String, String, String)> {
             combined
         }
         _ => {
-            tracing::debug!("Failed to execute 'sudo certbot certificates'");
+
             return Vec::new();
         }
     };
@@ -533,14 +533,14 @@ pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
         }
     }
     if let Some((_dom, cert, key)) = live_certs.first() {
-        info!("Found Let's Encrypt certificate via filesystem scan: {}", cert);
+
         return Some((cert.clone(), key.clone()));
     }
 
     // Fallback: Proxmox VE certs
     let pve_certs = scan_pve_certificates();
     if let Some((_label, cert, key)) = pve_certs.first() {
-        info!("Found Proxmox VE certificate: {}", cert);
+
         return Some((cert.clone(), key.clone()));
     }
 

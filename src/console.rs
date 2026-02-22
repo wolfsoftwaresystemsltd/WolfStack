@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use futures::StreamExt;
 use tokio_tungstenite::tungstenite;
-use tracing::{info, error};
+use tracing::error;
 
 
 /// WebSocket console endpoint: /ws/console/{type}/{name}
@@ -21,7 +21,7 @@ pub async fn console_ws(
     body: web::Payload,
 ) -> Result<HttpResponse, actix_web::Error> {
     let (container_type, container_name) = path.into_inner();
-    info!("Console WebSocket request: {} {}", container_type, container_name);
+
 
     let (response, session, msg_stream) = actix_ws::handle(&req, body)?;
 
@@ -187,7 +187,7 @@ async fn console_session(
     let _ = child.kill();
     read_handle.abort();
     let _ = session.close(None).await;
-    info!("Console session ended for {} {}", ctype, name);
+
 }
 
 /// WebSocket proxy endpoint: /ws/remote-console/{node_id}/{type}/{name}
@@ -199,7 +199,7 @@ pub async fn remote_console_ws(
     state: web::Data<crate::api::AppState>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let (node_id, ctype, name) = path.into_inner();
-    info!("Remote console proxy: node={} type={} name={}", node_id, ctype, name);
+
 
     // Look up the node
     let node = match state.cluster.get_node(&node_id) {
@@ -277,15 +277,15 @@ async fn remote_console_bridge(
             ),
         ).await {
             Ok(Ok((stream, _))) => {
-                info!("Remote console connected via {}", url);
+
                 remote_stream = Some(stream);
                 break;
             }
             Ok(Err(e)) => {
-                info!("Remote console {} failed: {}", url, e);
+
             }
             Err(_) => {
-                info!("Remote console {} timed out", url);
+
             }
         }
     }
@@ -349,6 +349,6 @@ async fn remote_console_bridge(
     // Cleanup
     let _ = futures::SinkExt::close(&mut remote_sink).await;
     let _ = session.close(None).await;
-    info!("Remote console session ended for {} {} on {}", ctype, name, remote_host);
+
 }
 

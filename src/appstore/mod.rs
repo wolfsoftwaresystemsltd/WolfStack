@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::info;
+
 
 // ─── Manifest types ───
 
@@ -157,7 +157,7 @@ pub fn install_app(
     user_inputs: &HashMap<String, String>,
 ) -> Result<String, String> {
     let app = get_app(app_id).ok_or_else(|| format!("App '{}' not found", app_id))?;
-    info!("📦 App Store: installing {} via {} as '{}'", app.name, target, container_name);
+
 
     let mut sidecar_names: Vec<String> = Vec::new();
 
@@ -182,7 +182,7 @@ pub fn install_app(
     });
     save_installed(&installed);
 
-    info!("✅ App Store: {} installed successfully ({})", app.name, install_id);
+
     Ok(result)
 }
 
@@ -193,7 +193,7 @@ pub fn uninstall_app(install_id: &str) -> Result<String, String> {
         .ok_or_else(|| format!("Install ID '{}' not found", install_id))?;
 
     let app = installed.remove(idx);
-    info!("🗑️ App Store: uninstalling {} ({})", app.app_name, app.target);
+
 
     // Remove the container/packages
     match app.target.as_str() {
@@ -238,19 +238,17 @@ fn install_docker(
 
     // Auto-allocate a WolfNet IP for this container
     let wolfnet_ip = crate::containers::next_available_wolfnet_ip();
-    if let Some(ref ip) = wolfnet_ip {
-        info!("📦 App Store: allocated WolfNet IP {} for {}", ip, container_name);
-    }
+
 
     // Install sidecars first (e.g. database)
     for sidecar in &docker.sidecars {
         let sidecar_name = format!("{}-{}", container_name, sidecar.name_suffix);
         let env = substitute_inputs(&sidecar.env, user_inputs);
 
-        info!("📦 App Store: pulling sidecar image {}", sidecar.image);
+
         crate::containers::docker_pull(&sidecar.image)?;
 
-        info!("📦 App Store: creating sidecar container {}", sidecar_name);
+
         crate::containers::docker_create(
             &sidecar_name,
             &sidecar.image,
@@ -267,14 +265,14 @@ fn install_docker(
     }
 
     // Pull the main image
-    info!("📦 App Store: pulling image {}", docker.image);
+
     crate::containers::docker_pull(&docker.image)?;
 
     // Substitute user inputs into env vars
     let env = substitute_inputs(&docker.env, user_inputs);
 
     // Create the container (not started)
-    info!("📦 App Store: creating container {}", container_name);
+
     crate::containers::docker_create(
         container_name,
         &docker.image,
@@ -307,12 +305,10 @@ fn install_lxc(
 
     // Auto-allocate a WolfNet IP
     let wolfnet_ip = crate::containers::next_available_wolfnet_ip();
-    if let Some(ref ip) = wolfnet_ip {
-        info!("📦 App Store: allocated WolfNet IP {} for LXC {}", ip, container_name);
-    }
+
 
     // Create the container
-    info!("📦 App Store: creating LXC container {}", container_name);
+
     crate::containers::lxc_create(
         container_name,
         &lxc.distribution,
@@ -329,7 +325,7 @@ fn install_lxc(
     }
 
     // Start the container temporarily to run setup commands
-    info!("📦 App Store: starting container to run setup...");
+
     crate::containers::lxc_start(container_name)?;
 
     // Wait for the container to boot
@@ -338,7 +334,7 @@ fn install_lxc(
     // Run setup commands inside the container
     let commands = substitute_inputs(&lxc.setup_commands, user_inputs);
     for cmd in &commands {
-        info!("📦 App Store: running in container: {}", cmd);
+
         let output = std::process::Command::new("lxc-attach")
             .args(["-n", container_name, "--", "sh", "-c", cmd])
             .output()
@@ -346,12 +342,12 @@ fn install_lxc(
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            info!("⚠️ App Store: command exited with {}: {}", output.status, stderr);
+
         }
     }
 
     // Stop the container — it's configured but not running
-    info!("📦 App Store: setup complete, stopping container");
+
     let _ = crate::containers::lxc_stop(container_name);
 
     let mut msg = format!("{} configured as LXC container '{}' (stopped)", app.name, container_name);
@@ -391,7 +387,7 @@ fn install_bare_metal(
     };
 
     if !packages.is_empty() {
-        info!("📦 App Store: installing packages: {}", packages.join(", "));
+
         let output = std::process::Command::new(pkg_cmd)
             .arg(install_flag)
             .arg("-y")
@@ -408,7 +404,7 @@ fn install_bare_metal(
     // Run post-install commands
     let commands = substitute_inputs(&bare.post_install, user_inputs);
     for cmd in &commands {
-        info!("📦 App Store: running post-install: {}", cmd);
+
         let output = std::process::Command::new("sh")
             .args(["-c", cmd])
             .output()
@@ -416,7 +412,7 @@ fn install_bare_metal(
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            info!("⚠️ App Store: post-install exited with {}: {}", output.status, stderr);
+
         }
     }
 

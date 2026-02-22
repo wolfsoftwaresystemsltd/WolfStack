@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use tracing::{info, warn};
+use tracing::warn;
 
 /// Network interface info
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,7 +247,7 @@ fn read_resolv_conf(nameservers: &mut Vec<String>, search_domains: &mut Vec<Stri
 /// Set DNS nameservers and search domains — writes to the correct config
 pub fn set_dns(nameservers: Vec<String>, search_domains: Vec<String>) -> Result<String, String> {
     let method = detect_dns_method();
-    info!("Setting DNS via {:?} — nameservers: {:?}, search: {:?}", method.as_str(), nameservers, search_domains);
+
 
     match method {
         DnsMethod::Netplan => set_dns_netplan(&nameservers, &search_domains),
@@ -312,7 +312,7 @@ fn set_dns_netplan(nameservers: &[String], search_domains: &[String]) -> Result<
         return Err(format!("netplan apply failed: {}", stderr));
     }
 
-    info!("DNS updated via netplan: {:?}", nameservers);
+
     Ok("DNS updated via netplan".to_string())
 }
 
@@ -346,7 +346,7 @@ fn set_dns_systemd_resolved(nameservers: &[String], search_domains: &[String]) -
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
     }
 
-    info!("DNS updated via systemd-resolved: {:?}", nameservers);
+
     Ok("DNS updated via systemd-resolved".to_string())
 }
 
@@ -397,7 +397,7 @@ fn set_dns_networkmanager(nameservers: &[String], search_domains: &[String]) -> 
         .args(["connection", "up", &conn_name])
         .output();
 
-    info!("DNS updated via NetworkManager (connection: {}): {:?}", conn_name, nameservers);
+
     Ok(format!("DNS updated via NetworkManager (connection: {})", conn_name))
 }
 
@@ -441,7 +441,7 @@ fn set_dns_resolv_conf(nameservers: &[String], search_domains: &[String]) -> Res
     std::fs::write("/etc/resolv.conf", &output)
         .map_err(|e| format!("Cannot write /etc/resolv.conf: {}", e))?;
 
-    info!("DNS updated via /etc/resolv.conf: {:?}", nameservers);
+
     Ok("DNS updated via /etc/resolv.conf".to_string())
 }
 
@@ -748,7 +748,7 @@ pub fn get_wolfnet_local_info() -> Option<serde_json::Value> {
 pub fn save_wolfnet_config(content: &str) -> Result<String, String> {
     std::fs::write("/etc/wolfnet/config.toml", content)
         .map_err(|e| format!("Failed to write WolfNet config: {}", e))?;
-    info!("WolfNet config saved");
+
     Ok("Configuration saved".to_string())
 }
 
@@ -823,7 +823,7 @@ pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option
             return Err(format!("Peer '{}' already exists (no changes needed)", name));
         }
 
-        info!("Updated WolfNet peer: {} → {} (endpoint: {} → {})", old_name, name, old_endpoint, endpoint);
+
         result_msg = format!("Peer '{}' updated and WolfNet restarted", name);
     } else {
         // Add new peer
@@ -850,7 +850,7 @@ pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option
             );
         }
 
-        info!("Added WolfNet peer: {} ({})", name, ip);
+
         result_msg = format!("Peer '{}' added and WolfNet restarted", name);
     }
 
@@ -930,7 +930,7 @@ pub fn remove_wolfnet_peer(name: &str) -> Result<String, String> {
     std::fs::write(config_path, &new_content)
         .map_err(|e| format!("Failed to write config: {}", e))?;
 
-    info!("Removed WolfNet peer: {}", name);
+
 
     // Apply config: try SIGHUP hot-reload, fall back to restart for older wolfnet
     reload_or_restart_wolfnet();
@@ -947,7 +947,7 @@ fn reload_or_restart_wolfnet() {
 
     if !was_running {
         // Not running at all — just start it
-        info!("WolfNet not running, starting via systemctl");
+
         let _ = Command::new("systemctl").args(["start", "wolfnet"]).output();
         return;
     }
@@ -966,7 +966,7 @@ fn reload_or_restart_wolfnet() {
         warn!("WolfNet died after SIGHUP (old version?) — restarting via systemctl");
         let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
     } else {
-        info!("WolfNet config hot-reloaded via SIGHUP");
+
     }
 }
 
@@ -978,7 +978,7 @@ pub fn wolfnet_service_action(action: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to {} wolfnet: {}", action, e))?;
 
     if output.status.success() {
-        info!("WolfNet {}: success", action);
+
         Ok(format!("WolfNet {}", action))
     } else {
         Err(format!("Failed to {} WolfNet: {}", action,
@@ -1108,7 +1108,7 @@ pub fn add_ip(interface: &str, address: &str, prefix: u32) -> Result<String, Str
         .map_err(|e| format!("Failed to run ip addr add: {}", e))?;
 
     if output.status.success() {
-        info!("Added {} to {}", cidr, interface);
+
         Ok(format!("Added {} to {}", cidr, interface))
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
@@ -1124,7 +1124,7 @@ pub fn remove_ip(interface: &str, address: &str, prefix: u32) -> Result<String, 
         .map_err(|e| format!("Failed to run ip addr del: {}", e))?;
 
     if output.status.success() {
-        info!("Removed {} from {}", cidr, interface);
+
         Ok(format!("Removed {} from {}", cidr, interface))
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
@@ -1140,7 +1140,7 @@ pub fn set_interface_state(interface: &str, up: bool) -> Result<String, String> 
         .map_err(|e| format!("Failed to set interface state: {}", e))?;
 
     if output.status.success() {
-        info!("Set {} {}", interface, state);
+
         Ok(format!("Interface {} set {}", interface, state))
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
@@ -1166,7 +1166,7 @@ pub fn create_vlan(parent: &str, vlan_id: u32, name: Option<&str>) -> Result<Str
         .args(["link", "set", &vlan_name, "up"])
         .output();
 
-    info!("Created VLAN {} on {} (ID {})", vlan_name, parent, vlan_id);
+
     Ok(format!("Created VLAN {} (ID {}) on {}", vlan_name, vlan_id, parent))
 }
 
@@ -1178,7 +1178,7 @@ pub fn delete_vlan(name: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to delete VLAN: {}", e))?;
 
     if output.status.success() {
-        info!("Deleted VLAN {}", name);
+
         Ok(format!("Deleted VLAN {}", name))
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
@@ -1193,7 +1193,7 @@ pub fn set_mtu(interface: &str, mtu: u32) -> Result<String, String> {
         .map_err(|e| format!("Failed to set MTU: {}", e))?;
 
     if output.status.success() {
-        info!("Set {} MTU to {}", interface, mtu);
+
         Ok(format!("MTU set to {} on {}", mtu, interface))
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
@@ -1411,7 +1411,7 @@ pub fn add_ip_mapping(
     config.mappings.push(mapping.clone());
     save_ip_mapping_config(&config)?;
 
-    info!("Added IP mapping: {} → {} ({})", public_ip, wolfnet_ip, label);
+
     Ok(mapping)
 }
 
@@ -1498,7 +1498,7 @@ pub fn remove_ip_mapping(id: &str) -> Result<String, String> {
     remove_mapping_rules(&mapping);
     save_ip_mapping_config(&config)?;
 
-    info!("Removed IP mapping: {} → {}", mapping.public_ip, mapping.wolfnet_ip);
+
     Ok(format!("Removed mapping {} → {}", mapping.public_ip, mapping.wolfnet_ip))
 }
 
@@ -1569,7 +1569,7 @@ pub fn update_ip_mapping(
     let result = mapping.clone();
     save_ip_mapping_config(&config)?;
 
-    info!("Updated IP mapping {}: {} → {}", id, public_ip, wolfnet_ip);
+
     Ok(result)
 }
 
@@ -1653,7 +1653,7 @@ fn apply_mapping_rules(m: &IpMapping) -> Result<(), String> {
         "-I", "FORWARD", "1", "-d", &m.wolfnet_ip,
     ], &proto_args, &dest_port_args, &["-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"])?;
 
-    info!("Applied iptables rules for {} → {}", m.public_ip, m.wolfnet_ip);
+
     Ok(())
 }
 
@@ -1777,8 +1777,7 @@ fn apply_vip_mapping_rules(
         run_iptables_vec(&fwd_args)?;
     }
 
-    info!("Applied VIP iptables rules for {} → {} ({} backends, {})",
-        m.public_ip, m.wolfnet_ip, n, lb_policy);
+
     Ok(())
 }
 
@@ -1861,8 +1860,7 @@ fn remove_mapping_rules(m: &IpMapping) {
         "-D", "FORWARD", "-d", &m.wolfnet_ip,
     ], &proto_args, &dest_port_args, &["-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"]);
 
-    info!("Removed iptables rules for {} → {}{}", m.public_ip, m.wolfnet_ip,
-        if removed_vip > 0 { format!(" ({} VIP rules)", removed_vip) } else { String::new() });
+
 }
 
 /// Remove all iptables rules matching a comment string (used for VIP cleanup)
@@ -1948,7 +1946,7 @@ pub fn apply_ip_mappings() {
         }
     }
     if count > 0 {
-        info!("Restored {} IP mapping(s)", count);
+
     }
 }
 
