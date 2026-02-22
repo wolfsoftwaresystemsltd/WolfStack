@@ -396,7 +396,7 @@ fn install_bare_metal(
             .map_err(|e| format!("Package install failed: {}", e))?;
 
         if !output.status.success() {
-            let _stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("Package install failed: {}", stderr));
         }
     }
