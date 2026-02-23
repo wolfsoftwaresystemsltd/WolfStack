@@ -2466,6 +2466,14 @@
                                             <span
                                                 style="font-size:13px;font-family:'JetBrains Mono',monospace;min-width:40px;">90%</span>
                                         </div>
+                                        <label style="font-size:13px;">Container Memory Threshold</label>
+                                        <div style="display:flex;align-items:center;gap:8px;">
+                                            <input type="range" id="alerting-container-mem" min="50" max="100"
+                                                value="90" style="width:120px;"
+                                                oninput="this.nextElementSibling.textContent=this.value+'%'">
+                                            <span
+                                                style="font-size:13px;font-family:'JetBrains Mono',monospace;min-width:40px;">90%</span>
+                                        </div>
                                     </div>
                                 </div>
 
@@ -2511,6 +2519,11 @@
                                         style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
                                         <input type="checkbox" id="alerting-evt-disk" checked
                                             style="width:16px;height:16px;"> High disk alert
+                                    </label>
+                                    <label
+                                        style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                                        <input type="checkbox" id="alerting-evt-containers" checked
+                                            style="width:16px;height:16px;"> Container memory alert
                                     </label>
                                 </div>
                             </div>

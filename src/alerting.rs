@@ -16,6 +16,17 @@ pub struct ThresholdAlert {
     pub threshold: f32,       // configured threshold
 }
 
+/// A container-level memory alert
+#[derive(Debug, Clone)]
+pub struct ContainerAlert {
+    pub container_name: String,
+    pub runtime: String,       // "docker" or "lxc"
+    pub memory_percent: f64,
+    pub memory_usage: u64,
+    pub memory_limit: u64,
+    pub threshold: f32,
+}
+
 /// Check a node's metrics against alerting thresholds.
 /// Returns a list of triggered alerts.
 pub fn check_thresholds(config: &AlertConfig, cpu_pct: f32, mem_pct: f32, disk_pct: f32) -> Vec<ThresholdAlert> {
@@ -30,6 +41,29 @@ pub fn check_thresholds(config: &AlertConfig, cpu_pct: f32, mem_pct: f32, disk_p
         alerts.push(ThresholdAlert { alert_type: "disk".into(), current: disk_pct, threshold: config.disk_threshold });
     }
     alerts
+}
+
+/// Check container memory usage against threshold.
+/// Returns a list of containers that exceed the configured container memory threshold.
+pub fn check_container_thresholds(
+    config: &AlertConfig,
+    stats: &[crate::containers::ContainerStats],
+    runtime: &str,
+) -> Vec<ContainerAlert> {
+    if !config.alert_containers { return vec![]; }
+    let threshold = config.container_memory_threshold;
+
+    stats.iter()
+        .filter(|s| s.memory_limit > 0 && s.memory_percent >= threshold as f64)
+        .map(|s| ContainerAlert {
+            container_name: s.name.clone(),
+            runtime: runtime.to_string(),
+            memory_percent: s.memory_percent,
+            memory_usage: s.memory_usage,
+            memory_limit: s.memory_limit,
+            threshold,
+        })
+        .collect()
 }
 
 /// Check if a specific alert is in cooldown. Returns true if it should be suppressed.
@@ -96,6 +130,12 @@ pub struct AlertConfig {
     #[serde(default = "default_true")]
     pub alert_disk: bool,
 
+    // ── Container monitoring ──
+    #[serde(default = "default_true")]
+    pub alert_containers: bool,
+    #[serde(default = "default_container_mem_threshold")]
+    pub container_memory_threshold: f32,  // percentage (0-100)
+
     // ── Check interval ──
     #[serde(default = "default_check_interval")]
     pub check_interval_secs: u64,  // how often to check thresholds (seconds)
@@ -105,6 +145,7 @@ fn default_cpu_threshold() -> f32 { 90.0 }
 fn default_mem_threshold() -> f32 { 90.0 }
 fn default_disk_threshold() -> f32 { 90.0 }
 fn default_true() -> bool { true }
+fn default_container_mem_threshold() -> f32 { 90.0 }
 fn default_check_interval() -> u64 { 60 }
 
 impl Default for AlertConfig {
@@ -123,6 +164,8 @@ impl Default for AlertConfig {
             alert_cpu: true,
             alert_memory: true,
             alert_disk: true,
+            alert_containers: true,
+            container_memory_threshold: 90.0,
             check_interval_secs: 60,
         }
     }
@@ -170,6 +213,8 @@ impl AlertConfig {
             "alert_cpu": self.alert_cpu,
             "alert_memory": self.alert_memory,
             "alert_disk": self.alert_disk,
+            "alert_containers": self.alert_containers,
+            "container_memory_threshold": self.container_memory_threshold,
             "check_interval_secs": self.check_interval_secs,
         })
     }

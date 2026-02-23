@@ -2233,9 +2233,52 @@ fn lxc_info(name: &str) -> LxcDetailInfo {
         .or_else(|| lxc_cgroup_read(name, "memory.usage_in_bytes"))
         .unwrap_or(0);
 
-    let memory_limit = lxc_cgroup_read(name, "memory.max")
+    let mut memory_limit = lxc_cgroup_read(name, "memory.max")
         .or_else(|| lxc_cgroup_read(name, "memory.limit_in_bytes"))
         .unwrap_or(0);
+
+    // Fallback: if cgroup reports 0 (unlimited/"max"), try Proxmox pct config
+    if memory_limit == 0 {
+        if let Ok(out) = Command::new("pct").args(["config", name]).output() {
+            if out.status.success() {
+                let cfg = String::from_utf8_lossy(&out.stdout);
+                for line in cfg.lines() {
+                    let line = line.trim();
+                    if line.starts_with("memory:") {
+                        if let Some(mb_str) = line.split(':').nth(1) {
+                            if let Ok(mb) = mb_str.trim().parse::<u64>() {
+                                memory_limit = mb * 1024 * 1024; // MB → bytes
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: if still 0, try reading /proc/meminfo inside the container
+    if memory_limit == 0 {
+        if let Ok(out) = Command::new("lxc-attach")
+            .args(["-n", name, "--", "cat", "/proc/meminfo"])
+            .output()
+        {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    if line.starts_with("MemTotal:") {
+                        let kb: u64 = line.split_whitespace()
+                            .nth(1)
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
+                        if kb > 0 {
+                            memory_limit = kb * 1024; // kB → bytes
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     // CPU — use lxc-attach to read /proc/stat quickly
     let cpu_percent = lxc_cpu_percent(name);

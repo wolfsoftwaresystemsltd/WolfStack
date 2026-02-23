@@ -6265,7 +6265,7 @@ async function refreshDockerStats() {
                 const cpuCell = row.querySelector('.cpu-cell');
                 const memCell = row.querySelector('.mem-cell');
                 if (cpuCell) cpuCell.textContent = s.cpu_percent.toFixed(1) + '%';
-                if (memCell) memCell.textContent = formatBytes(s.memory_usage);
+                if (memCell) memCell.textContent = formatBytes(s.memory_usage) + (s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : '');
             }
         });
     } catch (e) { /* silent */ }
@@ -6311,7 +6311,7 @@ function renderDockerContainers(containers) {
             <td><span style="color:${stateColor}">●</span> ${c.status}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
             <td class="cpu-cell">${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
-            <td class="mem-cell">${s.memory_usage ? formatBytes(s.memory_usage) : '-'}</td>
+            <td class="mem-cell">${s.memory_usage ? formatBytes(s.memory_usage) + (s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : '') : '-'}</td>
             <td style="font-size:11px;">${ports}</td>
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleDockerAutostart('${c.id}', this.checked)"></td>
             <td style="white-space:nowrap;">
@@ -13563,6 +13563,9 @@ async function loadAlertingConfig() {
         document.getElementById('alerting-evt-cpu').checked = c.alert_cpu !== false;
         document.getElementById('alerting-evt-memory').checked = c.alert_memory !== false;
         document.getElementById('alerting-evt-disk').checked = c.alert_disk !== false;
+        document.getElementById('alerting-evt-containers').checked = c.alert_containers !== false;
+        const containerMemEl = document.getElementById('alerting-container-mem');
+        containerMemEl.value = c.container_memory_threshold || 90; containerMemEl.nextElementSibling.textContent = containerMemEl.value + '%';
         if (c.check_interval_secs) {
             document.getElementById('alerting-check-interval').value = String(c.check_interval_secs);
         }
@@ -13596,6 +13599,8 @@ async function saveAlertingConfig() {
         alert_cpu: document.getElementById('alerting-evt-cpu').checked,
         alert_memory: document.getElementById('alerting-evt-memory').checked,
         alert_disk: document.getElementById('alerting-evt-disk').checked,
+        alert_containers: document.getElementById('alerting-evt-containers').checked,
+        container_memory_threshold: parseInt(document.getElementById('alerting-container-mem').value),
         check_interval_secs: parseInt(document.getElementById('alerting-check-interval').value) || 60,
     };
     const discord = document.getElementById('alerting-discord').value.trim();

@@ -684,6 +684,101 @@ async fn main() -> std::io::Result<()> {
                                 }
                             }
                     }
+
+                    // ── Container memory monitoring (local node only) ──
+                    if config.alert_containers {
+                        let format_bytes = |b: u64| -> String {
+                            if b >= 1073741824 { format!("{:.1} GB", b as f64 / 1073741824.0) }
+                            else if b >= 1048576 { format!("{:.0} MB", b as f64 / 1048576.0) }
+                            else { format!("{:.0} KB", b as f64 / 1024.0) }
+                        };
+
+                        let docker_stats = containers::docker_stats();
+                        let lxc_stats = containers::lxc_stats();
+
+                        let docker_alerts = alerting::check_container_thresholds(&config, &docker_stats, "docker");
+                        let lxc_alerts = alerting::check_container_thresholds(&config, &lxc_stats, "lxc");
+
+                        let all_container_alerts: Vec<_> = docker_alerts.into_iter().chain(lxc_alerts.into_iter()).collect();
+
+                        for alert in &all_container_alerts {
+                            let cooldown_key = format!("container:{}:memory", alert.container_name);
+                            if !alerting::is_in_cooldown(&cooldowns, &cooldown_key, "memory") {
+                                let runtime_label = if alert.runtime == "docker" { "Docker" } else { "LXC" };
+                                let title = format!(
+                                    "[WolfStack ALERT] {} container '{}' memory at {:.1}%",
+                                    runtime_label, alert.container_name, alert.memory_percent
+                                );
+                                let body = format!(
+                                    "⚠️ Container Memory Alert\n\n\
+                                     Container: {} ({})\n\
+                                     Memory Used: {} / {}\n\
+                                     Usage: {:.1}%\n\
+                                     Threshold: {:.0}%\n\
+                                     Time: {}\n\n\
+                                     This alert will not repeat for 15 minutes.",
+                                    alert.container_name, runtime_label,
+                                    format_bytes(alert.memory_usage), format_bytes(alert.memory_limit),
+                                    alert.memory_percent, alert.threshold,
+                                    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+                                );
+
+                                let cfg = config.clone();
+                                let t = title.clone();
+                                let b = body.clone();
+                                tokio::spawn(async move {
+                                    alerting::send_alert(&cfg, &t, &b).await;
+                                });
+                                alerting::record_alert(&mut cooldowns, &cooldown_key, "memory");
+                            }
+                        }
+
+                        // Container recovery: clear cooldown when container drops below threshold
+                        let running_names: Vec<String> = docker_stats.iter().chain(lxc_stats.iter())
+                            .filter(|s| s.memory_limit > 0)
+                            .map(|s| s.name.clone())
+                            .collect();
+                        let alerted_names: Vec<String> = all_container_alerts.iter()
+                            .map(|a| a.container_name.clone())
+                            .collect();
+                        for name in &running_names {
+                            if !alerted_names.contains(name) {
+                                let cooldown_key = format!("container:{}:memory", name);
+                                if alerting::was_alerted(&cooldowns, &cooldown_key, "memory") {
+                                    // Find the stats for recovery message
+                                    let stats = docker_stats.iter().chain(lxc_stats.iter())
+                                        .find(|s| s.name == *name);
+                                    if let Some(s) = stats {
+                                        let runtime_label = if s.runtime == "docker" { "Docker" } else { "LXC" };
+                                        let title = format!(
+                                            "[WolfStack OK] {} container '{}' memory recovered",
+                                            runtime_label, name
+                                        );
+                                        let body = format!(
+                                            "✅ Container Memory Recovered\n\n\
+                                             Container: {} ({})\n\
+                                             Memory Used: {} / {}\n\
+                                             Usage: {:.1}%\n\
+                                             Time: {}\n\n\
+                                             Container memory has dropped below the threshold.",
+                                            name, runtime_label,
+                                            format_bytes(s.memory_usage), format_bytes(s.memory_limit),
+                                            s.memory_percent,
+                                            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+                                        );
+
+                                        let cfg = config.clone();
+                                        let t = title.clone();
+                                        let b = body.clone();
+                                        tokio::spawn(async move {
+                                            alerting::send_alert(&cfg, &t, &b).await;
+                                        });
+                                    }
+                                    alerting::clear_cooldown(&mut cooldowns, &cooldown_key, "memory");
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Use the configured interval (re-read each loop in case user changed it)
