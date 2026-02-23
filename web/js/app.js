@@ -13708,32 +13708,27 @@ function showWolfRunPage(clusterName) {
     }, 10000);
 }
 
+// Build a WolfRun API URL that proxies through a cluster node when
+// the local server isn't part of the target cluster.
+function wolfrunApiUrl(path) {
+    const localNode = allNodes.find(n => n.is_self);
+    const localCluster = localNode ? (localNode.cluster_name || 'WolfStack') : '';
+    const targetCluster = wolfrunCurrentCluster;
+    if (localCluster === targetCluster) return path;
+    // Proxy through an online node in the target cluster
+    const clusterNode = allNodes.find(n =>
+        n.online && !n.is_self &&
+        (n.cluster_name || 'WolfStack') === targetCluster &&
+        n.node_type !== 'proxmox'
+    );
+    if (!clusterNode) return path; // fallback to local
+    const cleanPath = path.replace(/^\//, '');
+    return `/api/nodes/${clusterNode.id}/proxy/${cleanPath}`;
+}
+
 async function loadWolfRunServices() {
     try {
-        // Check if the local node is in the target cluster
-        const localNode = allNodes.find(n => n.is_self);
-        const localCluster = localNode ? (localNode.cluster_name || 'WolfStack') : '';
-        const targetCluster = wolfrunCurrentCluster;
-
-        let url;
-        if (localCluster === targetCluster) {
-            // Local node is in the cluster — fetch directly
-            url = `/api/wolfrun/services?cluster=${encodeURIComponent(targetCluster)}`;
-        } else {
-            // Local node is NOT in this cluster — proxy through a cluster node
-            const clusterNode = allNodes.find(n =>
-                n.online && !n.is_self &&
-                (n.cluster_name || 'WolfStack') === targetCluster &&
-                n.node_type !== 'proxmox'
-            );
-            if (clusterNode) {
-                url = `/api/nodes/${clusterNode.id}/proxy/api/wolfrun/services?cluster=${encodeURIComponent(targetCluster)}`;
-            } else {
-                // No reachable node in cluster — try local anyway
-                url = `/api/wolfrun/services?cluster=${encodeURIComponent(targetCluster)}`;
-            }
-        }
-
+        const url = wolfrunApiUrl(`/api/wolfrun/services?cluster=${encodeURIComponent(wolfrunCurrentCluster)}`);
         const resp = await fetch(url);
         if (!resp.ok) throw new Error('Failed to load services');
         const services = await resp.json();
@@ -13988,7 +13983,7 @@ async function executeWolfRunDeploy() {
     logStep('📡', 'Sending deployment request to API...', 'var(--warning)');
 
     try {
-        const resp = await fetch('/api/wolfrun/services', {
+        const resp = await fetch(wolfrunApiUrl('/api/wolfrun/services'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -14004,7 +13999,7 @@ async function executeWolfRunDeploy() {
                 for (let i = 0; i < 6; i++) {
                     await new Promise(r => setTimeout(r, 5000));
                     try {
-                        const sr = await fetch(`/api/wolfrun/services/${serviceId}`);
+                        const sr = await fetch(wolfrunApiUrl(`/api/wolfrun/services/${serviceId}`));
                         const sdata = await sr.json();
                         const instances = sdata.instances || [];
                         const running = instances.filter(inst => inst.status === 'running').length;
@@ -14099,12 +14094,12 @@ async function saveWolfRunSettings() {
     // Get current running count before saving
     let currentRunning = 0;
     try {
-        const sr = await fetch(`/api/wolfrun/services/${wolfrunSettingsServiceId}`);
+        const sr = await fetch(wolfrunApiUrl(`/api/wolfrun/services/${wolfrunSettingsServiceId}`));
         if (sr.ok) { const s = await sr.json(); currentRunning = (s.instances || []).filter(i => i.status === 'running').length; }
     } catch (e) { }
 
     try {
-        const resp = await fetch(`/api/wolfrun/services/${wolfrunSettingsServiceId}/settings`, {
+        const resp = await fetch(wolfrunApiUrl(`/api/wolfrun/services/${wolfrunSettingsServiceId}/settings`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ desired, min_replicas: min, max_replicas: max, lb_policy, allowed_nodes }),
@@ -14128,7 +14123,7 @@ async function saveWolfRunSettings() {
 
 async function wolfrunAction(serviceId, action) {
     try {
-        const resp = await fetch(`/api/wolfrun/services/${serviceId}/action`, {
+        const resp = await fetch(wolfrunApiUrl(`/api/wolfrun/services/${serviceId}/action`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action }),
@@ -14149,7 +14144,7 @@ async function wolfrunAction(serviceId, action) {
 async function wolfrunScale(serviceId, newReplicas) {
     if (newReplicas < 0) newReplicas = 0;
     try {
-        const resp = await fetch(`/api/wolfrun/services/${serviceId}/scale`, {
+        const resp = await fetch(wolfrunApiUrl(`/api/wolfrun/services/${serviceId}/scale`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ replicas: newReplicas }),
@@ -14170,7 +14165,7 @@ async function showScaleProgress(serviceId, targetReplicas) {
     let svcName = serviceId;
     let prevInstances = [];
     try {
-        const sr = await fetch(`/api/wolfrun/services/${serviceId}`);
+        const sr = await fetch(wolfrunApiUrl(`/api/wolfrun/services/${serviceId}`));
         if (sr.ok) {
             const s = await sr.json();
             svcName = s.name || serviceId;
@@ -14192,7 +14187,7 @@ async function showScaleProgress(serviceId, targetReplicas) {
     const poll = setInterval(async () => {
         attempts++;
         try {
-            const r = await fetch(`/api/wolfrun/services/${serviceId}`);
+            const r = await fetch(wolfrunApiUrl(`/api/wolfrun/services/${serviceId}`));
             if (r.ok) {
                 const svc = await r.json();
                 const instances = svc.instances || [];
@@ -14255,7 +14250,7 @@ async function wolfrunDelete(serviceId, serviceName) {
     const instDiv = document.getElementById('wolfrun-delete-instances');
     instDiv.innerHTML = '<span style="color:var(--text-muted);">Loading...</span>';
     try {
-        const resp = await fetch(`/api/wolfrun/services/${serviceId}`);
+        const resp = await fetch(wolfrunApiUrl(`/api/wolfrun/services/${serviceId}`));
         if (resp.ok) {
             const svc = await resp.json();
             if (svc.instances && svc.instances.length > 0) {
@@ -14298,7 +14293,7 @@ async function executeWolfRunDelete() {
     addLog('🔄 Starting service deletion...', 'var(--text-muted)');
 
     try {
-        const resp = await fetch(`/api/wolfrun/services/${wolfrunDeleteServiceId}`, { method: 'DELETE' });
+        const resp = await fetch(wolfrunApiUrl(`/api/wolfrun/services/${wolfrunDeleteServiceId}`), { method: 'DELETE' });
         if (resp.ok) {
             const data = await resp.json();
             if (data.destroyed && data.destroyed.length > 0) {
@@ -14365,7 +14360,7 @@ async function openWolfRunAdoptModal() {
     // Use name+node_id composite key since containers on different nodes can share names
     let existingContainers = new Set();
     try {
-        const svcResp = await fetch('/api/wolfrun/services');
+        const svcResp = await fetch(wolfrunApiUrl('/api/wolfrun/services'));
         if (svcResp.ok) {
             const svcs = await svcResp.json();
             svcs.forEach(s => s.instances.forEach(i => existingContainers.add(`${i.container_name}@${i.node_id}`)));
@@ -14524,7 +14519,7 @@ async function executeWolfRunAdopt() {
     btn.textContent = '⏳ Adding...';
 
     try {
-        const resp = await fetch(apiUrl('/api/wolfrun/services/adopt'), {
+        const resp = await fetch(wolfrunApiUrl('/api/wolfrun/services/adopt'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -14574,7 +14569,7 @@ function closeWolfRunPFModal() {
 async function loadWolfRunPortForwards(serviceId) {
     const el = document.getElementById('wolfrun-pf-existing');
     try {
-        const resp = await fetch(`/api/wolfrun/services/${serviceId}/portforward`);
+        const resp = await fetch(wolfrunApiUrl(`/api/wolfrun/services/${serviceId}/portforward`));
         const forwards = await resp.json();
 
         if (!forwards.length) {
@@ -14611,7 +14606,7 @@ async function addWolfRunPortForward() {
     if (!publicIp) { showToast('Public IP is required', 'error'); return; }
 
     try {
-        const resp = await fetch(`/api/wolfrun/services/${wolfrunPFServiceId}/portforward`, {
+        const resp = await fetch(wolfrunApiUrl(`/api/wolfrun/services/${wolfrunPFServiceId}/portforward`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -14638,7 +14633,7 @@ async function addWolfRunPortForward() {
 
 async function deleteWolfRunPortForward(serviceId, ruleId) {
     try {
-        const resp = await fetch(`/api/wolfrun/services/${serviceId}/portforward/${ruleId}`, { method: 'DELETE' });
+        const resp = await fetch(wolfrunApiUrl(`/api/wolfrun/services/${serviceId}/portforward/${ruleId}`), { method: 'DELETE' });
         if (resp.ok) {
             showToast('Port forward removed', 'success');
             await loadWolfRunPortForwards(serviceId);
