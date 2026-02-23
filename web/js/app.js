@@ -435,7 +435,10 @@ function buildServerTree(nodes) {
     tree.innerHTML = html;
 
     // Restore active highlight
-    if (currentNodeId && currentPage) {
+    if (currentPage === 'wolfrun' && wolfrunCurrentCluster) {
+        const item = document.querySelector(`.wolfrun-cluster-item[data-cluster="${wolfrunCurrentCluster}"]`);
+        if (item) item.classList.add('active');
+    } else if (currentNodeId && currentPage) {
         const active = document.querySelector(`.server-child-item[data-node="${currentNodeId}"][data-view="${currentPage}"]`);
         if (active) active.classList.add('active');
     }
@@ -13678,6 +13681,8 @@ let wolfrunRefreshTimer = null;
 function showWolfRunPage(clusterName) {
     wolfrunCurrentCluster = clusterName;
     currentPage = 'wolfrun';
+    currentNodeId = null;
+    currentComponent = null;
 
     // Switch to WolfRun page
     document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
