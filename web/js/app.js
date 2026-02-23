@@ -13710,7 +13710,31 @@ function showWolfRunPage(clusterName) {
 
 async function loadWolfRunServices() {
     try {
-        const resp = await fetch(`/api/wolfrun/services?cluster=${encodeURIComponent(wolfrunCurrentCluster)}`);
+        // Check if the local node is in the target cluster
+        const localNode = allNodes.find(n => n.is_self);
+        const localCluster = localNode ? (localNode.cluster_name || 'WolfStack') : '';
+        const targetCluster = wolfrunCurrentCluster;
+
+        let url;
+        if (localCluster === targetCluster) {
+            // Local node is in the cluster — fetch directly
+            url = `/api/wolfrun/services?cluster=${encodeURIComponent(targetCluster)}`;
+        } else {
+            // Local node is NOT in this cluster — proxy through a cluster node
+            const clusterNode = allNodes.find(n =>
+                n.online && !n.is_self &&
+                (n.cluster_name || 'WolfStack') === targetCluster &&
+                n.node_type !== 'proxmox'
+            );
+            if (clusterNode) {
+                url = `/api/nodes/${clusterNode.id}/proxy/api/wolfrun/services?cluster=${encodeURIComponent(targetCluster)}`;
+            } else {
+                // No reachable node in cluster — try local anyway
+                url = `/api/wolfrun/services?cluster=${encodeURIComponent(targetCluster)}`;
+            }
+        }
+
+        const resp = await fetch(url);
         if (!resp.ok) throw new Error('Failed to load services');
         const services = await resp.json();
         renderWolfRunServices(services);
