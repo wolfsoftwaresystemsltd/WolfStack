@@ -13722,7 +13722,7 @@ function wolfrunApiUrl(path) {
         n.node_type !== 'proxmox'
     );
     if (!clusterNode) return path; // fallback to local
-    const cleanPath = path.replace(/^\//, '');
+    const cleanPath = path.replace(/^\/api\//, '');
     return `/api/nodes/${clusterNode.id}/proxy/${cleanPath}`;
 }
 
