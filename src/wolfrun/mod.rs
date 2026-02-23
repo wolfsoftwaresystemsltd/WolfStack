@@ -400,6 +400,133 @@ impl WolfRunState {
         drop(svcs);
         self.save();
     }
+
+
+    /// Merge services received from a cluster peer.
+    /// For each incoming service: if we don't have it, add it.
+    /// If we have it and the peer's version is newer (updated_at), replace ours.
+    /// Services we have that the peer doesn't send are kept (peer may not know about them yet).
+    pub fn merge_from_peer(&self, peer_services: Vec<WolfRunService>) {
+        let mut svcs = self.services.write().unwrap();
+        let mut changed = false;
+
+        for peer_svc in peer_services {
+            if let Some(local) = svcs.iter_mut().find(|s| s.id == peer_svc.id) {
+                // Update if peer has a newer version
+                if peer_svc.updated_at > local.updated_at {
+                    *local = peer_svc;
+                    changed = true;
+                }
+            } else {
+                // New service we don't have yet
+                svcs.push(peer_svc);
+                changed = true;
+            }
+        }
+
+        drop(svcs);
+        if changed {
+            self.save();
+        }
+    }
+
+    /// Mark a service as deleted by removing it from our list (called when peer broadcasts a deletion).
+    /// This is the same as delete() but without returning the service.
+    pub fn remove_if_exists(&self, service_id: &str) -> bool {
+        let mut svcs = self.services.write().unwrap();
+        let before = svcs.len();
+        svcs.retain(|s| s.id != service_id);
+        let removed = svcs.len() < before;
+        drop(svcs);
+        if removed {
+            self.save();
+        }
+        removed
+    }
+
+    /// Get all services (no filter) — used for broadcasting
+    pub fn list_all(&self) -> Vec<WolfRunService> {
+        self.services.read().unwrap().clone()
+    }
+}
+
+/// Broadcast the current WolfRun services list to all online same-cluster peers.
+/// Called after any mutation (create, delete, scale, adopt, update settings).
+pub async fn broadcast_to_cluster(
+    wolfrun: &WolfRunState,
+    cluster: &ClusterState,
+    cluster_secret: &str,
+) {
+    let services = wolfrun.list_all();
+    let nodes = cluster.get_all_nodes();
+
+    // Find our cluster name
+    let self_cluster = nodes.iter()
+        .find(|n| n.is_self)
+        .and_then(|n| n.cluster_name.clone())
+        .unwrap_or_else(|| "WolfStack".to_string());
+
+    // Build HTTP client (reuse for all peers)
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .danger_accept_invalid_certs(true)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    // Send to all online same-cluster peers (not self)
+    for node in &nodes {
+        if node.is_self || !node.online {
+            continue;
+        }
+        let node_cluster = node.cluster_name.as_deref().unwrap_or("WolfStack");
+        if node_cluster != self_cluster {
+            continue;
+        }
+
+        let urls = crate::api::build_node_urls(&node.address, node.port, "/api/wolfrun/sync");
+        for url in &urls {
+            match client.post(url)
+                .header("X-WolfStack-Secret", cluster_secret)
+                .json(&services)
+                .send().await
+            {
+                Ok(_) => break, // Success — move to next node
+                Err(_) => continue, // Try next URL variant
+            }
+        }
+    }
+}
+
+/// Check if this node is the WolfRun leader for its cluster.
+/// Leader = lowest alphabetical node ID among online same-cluster nodes.
+/// This is deterministic and requires no election protocol.
+pub fn is_leader(cluster: &ClusterState) -> bool {
+    let nodes = cluster.get_all_nodes();
+
+    // Find our cluster name
+    let self_cluster = nodes.iter()
+        .find(|n| n.is_self)
+        .and_then(|n| n.cluster_name.clone())
+        .unwrap_or_else(|| "WolfStack".to_string());
+
+    // Get all online same-cluster node IDs
+    let mut cluster_node_ids: Vec<&str> = nodes.iter()
+        .filter(|n| {
+            n.online && n.cluster_name.as_deref().unwrap_or("WolfStack") == self_cluster
+        })
+        .map(|n| n.id.as_str())
+        .collect();
+
+    cluster_node_ids.sort();
+
+    // Leader is the lowest ID; if no nodes found, we are leader by default
+    match cluster_node_ids.first() {
+        Some(leader_id) => *leader_id == cluster.self_id,
+        None => true, // Solo node — we are leader
+    }
 }
 
 // ─── Scheduler ───

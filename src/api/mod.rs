@@ -7677,6 +7677,14 @@ pub async fn wolfrun_create(req: HttpRequest, state: web::Data<AppState>, body: 
         lxc_config,
     );
 
+    // Broadcast to cluster peers
+    let wolfrun = Arc::clone(&state.wolfrun);
+    let cluster = Arc::clone(&state.cluster);
+    let secret = state.cluster_secret.clone();
+    actix_web::rt::spawn(async move {
+        crate::wolfrun::broadcast_to_cluster(&wolfrun, &cluster, &secret).await;
+    });
+
     HttpResponse::Ok().json(svc)
 }
 
@@ -7772,11 +7780,20 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
     }
 
     match state.wolfrun.delete(&id) {
-        Some(_) => HttpResponse::Ok().json(serde_json::json!({
-            "deleted": true,
-            "destroyed": destroyed,
-            "kept": kept,
-        })),
+        Some(_) => {
+            // Broadcast deletion to cluster peers
+            let wolfrun = Arc::clone(&state.wolfrun);
+            let cluster = Arc::clone(&state.cluster);
+            let secret = state.cluster_secret.clone();
+            actix_web::rt::spawn(async move {
+                crate::wolfrun::broadcast_to_cluster(&wolfrun, &cluster, &secret).await;
+            });
+            HttpResponse::Ok().json(serde_json::json!({
+                "deleted": true,
+                "destroyed": destroyed,
+                "kept": kept,
+            }))
+        }
         None => {
             // Log available service IDs for debugging
             let available: Vec<String> = state.wolfrun.list(None).iter().map(|s| format!("{} ({})", s.id, s.name)).collect();
@@ -7974,6 +7991,13 @@ pub async fn wolfrun_scale(req: HttpRequest, state: web::Data<AppState>, path: w
                 crate::wolfrun::reconcile(&wolfrun, &cluster, &secret).await;
             }
         });
+        // Broadcast to cluster peers
+        let wolfrun2 = Arc::clone(&state.wolfrun);
+        let cluster2 = Arc::clone(&state.cluster);
+        let secret2 = state.cluster_secret.clone();
+        actix_web::rt::spawn(async move {
+            crate::wolfrun::broadcast_to_cluster(&wolfrun2, &cluster2, &secret2).await;
+        });
         HttpResponse::Ok().json(serde_json::json!({ "scaled": true, "replicas": body.replicas }))
     } else {
         HttpResponse::NotFound().json(serde_json::json!({ "error": "Service not found" }))
@@ -7993,6 +8017,13 @@ pub async fn wolfrun_update(req: HttpRequest, state: web::Data<AppState>, path: 
         if state.wolfrun.update_image(&id, image.clone()) {
             // Clear instances so reconciliation redeploys with new image
             state.wolfrun.update_instances(&id, Vec::new());
+            // Broadcast to cluster peers
+            let wolfrun = Arc::clone(&state.wolfrun);
+            let cluster = Arc::clone(&state.cluster);
+            let secret = state.cluster_secret.clone();
+            actix_web::rt::spawn(async move {
+                crate::wolfrun::broadcast_to_cluster(&wolfrun, &cluster, &secret).await;
+            });
             HttpResponse::Ok().json(serde_json::json!({ "updated": true, "image": image }))
         } else {
             HttpResponse::NotFound().json(serde_json::json!({ "error": "Service not found" }))
@@ -8021,6 +8052,13 @@ pub async fn wolfrun_settings(req: HttpRequest, state: web::Data<AppState>, path
         let secret = state.cluster_secret.clone();
         actix_web::rt::spawn(async move {
             crate::wolfrun::reconcile(&wolfrun, &cluster, &secret).await;
+        });
+        // Broadcast to cluster peers
+        let wolfrun2 = Arc::clone(&state.wolfrun);
+        let cluster2 = Arc::clone(&state.cluster);
+        let secret2 = state.cluster_secret.clone();
+        actix_web::rt::spawn(async move {
+            crate::wolfrun::broadcast_to_cluster(&wolfrun2, &cluster2, &secret2).await;
         });
         if let Some(svc) = state.wolfrun.get(&id) {
             HttpResponse::Ok().json(serde_json::json!({
@@ -8076,7 +8114,31 @@ pub async fn wolfrun_adopt(req: HttpRequest, state: web::Data<AppState>, body: w
         body.volumes.clone(),
     );
 
+    // Broadcast to cluster peers
+    let wolfrun = Arc::clone(&state.wolfrun);
+    let cluster = Arc::clone(&state.cluster);
+    let secret = state.cluster_secret.clone();
+    actix_web::rt::spawn(async move {
+        crate::wolfrun::broadcast_to_cluster(&wolfrun, &cluster, &secret).await;
+    });
+
     HttpResponse::Ok().json(svc)
+}
+
+/// POST /api/wolfrun/sync — receive WolfRun services from a cluster peer
+pub async fn wolfrun_sync(req: HttpRequest, state: web::Data<AppState>, body: web::Json<Vec<crate::wolfrun::WolfRunService>>) -> HttpResponse {
+    // Authenticate via cluster secret (inter-node auth)
+    let secret = req.headers().get("X-WolfStack-Secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if secret != state.cluster_secret {
+        // Also try cookie auth (in case admin calls it manually)
+        if let Err(resp) = require_auth(&req, &state) { return resp; }
+    }
+
+    let peer_services = body.into_inner();
+    state.wolfrun.merge_from_peer(peer_services);
+    HttpResponse::Ok().json(serde_json::json!({ "synced": true }))
 }
 
 /// Configure all API routes
@@ -8336,6 +8398,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/wolfrun/services", web::get().to(wolfrun_list))
         .route("/api/wolfrun/services", web::post().to(wolfrun_create))
         .route("/api/wolfrun/services/adopt", web::post().to(wolfrun_adopt))
+        .route("/api/wolfrun/sync", web::post().to(wolfrun_sync))
         .route("/api/wolfrun/services/{id}", web::get().to(wolfrun_get))
         .route("/api/wolfrun/services/{id}", web::delete().to(wolfrun_delete))
         .route("/api/wolfrun/services/{id}/scale", web::post().to(wolfrun_scale))

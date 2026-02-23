@@ -701,7 +701,11 @@ async fn main() -> std::io::Result<()> {
             tokio::time::sleep(Duration::from_secs(30)).await;
             info!("WolfRun reconciliation loop started");
             loop {
-                wolfrun::reconcile(&wolfrun_bg, &wolfrun_cluster, &wolfrun_secret).await;
+                // Only the cluster leader runs reconciliation to prevent
+                // duplicate container creation and IP address conflicts
+                if wolfrun::is_leader(&wolfrun_cluster) {
+                    wolfrun::reconcile(&wolfrun_bg, &wolfrun_cluster, &wolfrun_secret).await;
+                }
                 tokio::time::sleep(Duration::from_secs(15)).await;
             }
         });
