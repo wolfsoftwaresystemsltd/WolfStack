@@ -10404,34 +10404,15 @@ setTimeout(checkForUpdates, 5000);
 setInterval(checkForUpdates, 6 * 60 * 60 * 1000);
 
 function triggerUpgrade() {
-    var bannerText = document.getElementById('update-banner-text');
-    var msg = bannerText ? bannerText.textContent : 'Update available';
-
-    // Determine which node we're upgrading
-    var targetNode = null;
-    var isLocal = true;
-    if (currentNodeId) {
-        targetNode = allNodes.find(n => n.id === currentNodeId);
-        if (targetNode && !targetNode.is_self) {
-            isLocal = false;
+    // Navigate to the Issues page and auto-trigger a scan
+    // so the user can use "Upgrade All" to upgrade every node
+    selectView('issues');
+    // Give the page a moment to render, then trigger the scan
+    setTimeout(function () {
+        if (typeof scanForIssues === 'function') {
+            scanForIssues();
         }
-    }
-
-    var machine = isLocal ? 'this machine (local)' : (targetNode ? targetNode.hostname + ' (' + targetNode.address + ')' : 'this machine');
-    if (!confirm('⚡ ' + msg + '\n\nThis will run the WolfStack upgrade script on ' + machine + '.\nA terminal window will open so you can monitor the progress.\n\nProceed?')) return;
-
-    // Open console popup with type=upgrade to stream live output
-    var url = '/console.html?type=upgrade&name=wolfstack';
-    if (targetNode && !targetNode.is_self) {
-        url += '&node_id=' + encodeURIComponent(targetNode.id);
-    }
-    window.open(url, 'upgrade_console', 'width=960,height=600,menubar=no,toolbar=no');
-
-    // Hide the update banner
-    var banner = document.getElementById('update-banner');
-    if (banner) banner.style.display = 'none';
-
-    showToast('Upgrade started — watch the terminal window for progress.', 'info');
+    }, 300);
 }
 
 // ═══════════════════════════════════════════════════
