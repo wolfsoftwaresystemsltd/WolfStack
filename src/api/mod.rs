@@ -8250,34 +8250,6 @@ pub async fn statuspage_monitor_delete(req: HttpRequest, state: web::Data<AppSta
 /// GET /api/statuspage/pages — list all status pages with current status
 pub async fn statuspage_pages_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    // Detect protocol from the incoming request (matches what the server is actually serving)
-    let scheme = req.connection_info().scheme().to_string();
-    // Build a map of cluster name → first online node base URL for URL display
-    let nodes = state.cluster.get_all_nodes();
-    let cluster_urls: std::collections::HashMap<String, String> = {
-        let mut map = std::collections::HashMap::new();
-        for node in &nodes {
-            if !node.online { continue; }
-            let cluster_name = node.cluster_name.as_deref().unwrap_or("WolfStack").to_string();
-            if map.contains_key(&cluster_name) { continue; }
-            if node.is_self {
-                // For self, use the hostname (not the bind address which may be 0.0.0.0)
-                let host = if state.cluster.self_address == "0.0.0.0"
-                    || state.cluster.self_address == "127.0.0.1"
-                    || state.cluster.self_address == "localhost"
-                {
-                    node.hostname.clone()
-                } else {
-                    state.cluster.self_address.clone()
-                };
-                map.insert(cluster_name, format!("{}://{}:{}", scheme, host, state.cluster.port));
-            } else {
-                // Remote nodes always have a proper address configured by the admin
-                map.insert(cluster_name, format!("{}://{}:{}", scheme, node.address, node.port));
-            }
-        }
-        map
-    };
     let config = state.statuspage.config.read().unwrap();
     let pages: Vec<serde_json::Value> = config.pages.iter().map(|p| {
         let overall = state.statuspage.page_overall_status(p);
@@ -8314,11 +8286,6 @@ pub async fn statuspage_pages_list(req: HttpRequest, state: web::Data<AppState>)
             "overall_status": overall,
             "overall_label": overall.label(),
             "uptime_30d": uptime_30d,
-            "cluster_url": cluster_urls.get(&p.cluster).cloned().unwrap_or_default(),
-            "url": match cluster_urls.get(&p.cluster) {
-                Some(base) => format!("{}/status/{}", base, p.slug),
-                None => format!("/status/{}", p.slug),
-            },
         })
     }).collect();
     HttpResponse::Ok().json(serde_json::json!({ "pages": pages }))

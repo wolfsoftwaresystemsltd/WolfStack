@@ -14853,6 +14853,20 @@ function spUrl(path) {
     return base ? `${base}/${path}` : `/api/${path}`;
 }
 
+// Build the public URL for a status page from the frontend's allNodes data.
+// For local cluster: use the current browser origin (the address the user is already on).
+// For remote clusters: use the first online node's address and port.
+function spPublicUrl(slug, cluster) {
+    const selfNode = allNodes.find(n => n.is_self);
+    const selfCluster = selfNode?.cluster_name || 'WolfStack';
+    if (cluster === selfCluster) {
+        return `${window.location.origin}/status/${slug}`;
+    }
+    const remoteNode = allNodes.find(n => n.online && (n.cluster_name || 'WolfStack') === cluster);
+    if (!remoteNode) return `/status/${slug}`;
+    return `${window.location.protocol}//${remoteNode.address}:${remoteNode.port}/status/${slug}`;
+}
+
 function showStatusPagesForCluster(clusterName) {
     spCurrentCluster = clusterName;
     currentPage = 'statuspage';
@@ -14988,6 +15002,7 @@ function renderStatusPages(pages) {
             : '';
 
         const uptime = p.uptime_30d != null ? `${p.uptime_30d.toFixed(2)}%` : '—';
+        const pageUrl = spPublicUrl(p.page.slug, p.page.cluster);
 
         return `<div style="background:var(--bg-input); border:1px solid var(--border); border-radius:12px; padding:20px;">
             <div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:12px;">
@@ -14999,7 +15014,7 @@ function renderStatusPages(pages) {
                         ${incidentBadge}
                     </div>
                     <div style="font-size:12px; color:var(--text-muted); margin-top:6px; margin-left:18px;">
-                        <a href="${p.url || '/status/' + escapeHtml(p.page.slug)}" target="_blank" style="color:var(--accent-light);">${p.url || '/status/' + escapeHtml(p.page.slug)}</a>
+                        <a href="${pageUrl}" target="_blank" style="color:var(--accent-light);">${pageUrl}</a>
                     </div>
                 </div>
                 <div style="text-align:right;">
@@ -15014,7 +15029,7 @@ function renderStatusPages(pages) {
                 <div style="display:flex; gap:6px;">
                     <button class="btn btn-sm" onclick="showIncidentForm(null, '${p.page.id}')" style="font-size:11px;">🚨 Report Incident</button>
                     <button class="btn btn-sm" onclick="editStatusPage('${p.page.id}')" style="font-size:11px;">✏️ Edit</button>
-                    <button class="btn btn-sm" onclick="window.open('${p.url || '/status/' + escapeHtml(p.page.slug)}', '_blank')" style="font-size:11px;">👁️ View</button>
+                    <button class="btn btn-sm" onclick="window.open('${pageUrl}', '_blank')" style="font-size:11px;">👁️ View</button>
                     <button class="btn btn-sm" onclick="deleteStatusPage('${p.page.id}')" style="font-size:11px; color:#ef4444;">🗑️</button>
                 </div>
             </div>
