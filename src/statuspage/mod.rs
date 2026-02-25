@@ -100,7 +100,11 @@ pub struct Incident {
     pub title: String,
     pub status: IncidentStatus,
     pub cluster: String,
+    #[serde(default)]
+    pub impact: Option<String>,
+    #[serde(default)]
     pub service_ids: Vec<String>,
+    #[serde(default)]
     pub updates: Vec<IncidentUpdate>,
     pub created_at: String,
     #[serde(default)]
@@ -618,6 +622,7 @@ fn auto_manage_incidents(state: &Arc<StatusPageState>) {
                         title: format!("{} — {}", monitor.name, status.label()),
                         status: IncidentStatus::Investigating,
                         cluster,
+                        impact: Some(if status == MonitorStatus::Down { "critical".to_string() } else { "minor".to_string() }),
                         service_ids: vec![monitor.id.clone()],
                         updates: vec![IncidentUpdate {
                             timestamp: now_str.clone(),
@@ -741,6 +746,13 @@ pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str) -> Option<St
                 IncidentStatus::Resolved => r#"<span class="badge badge-green">Resolved</span>"#,
             };
 
+            let impact_badge = match incident.impact.as_deref() {
+                Some("critical") => r#" <span class="badge badge-red">Critical</span>"#,
+                Some("major") => r#" <span class="badge badge-orange">Major</span>"#,
+                Some("minor") => r#" <span class="badge badge-yellow">Minor</span>"#,
+                _ => "",
+            };
+
             let mut updates_html = String::new();
             for update in incident.updates.iter().rev() {
                 updates_html.push_str(&format!(
@@ -757,13 +769,14 @@ pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str) -> Option<St
                 r#"<div class="incident">
                     <div class="incident-header">
                         <div class="incident-title">{title}</div>
-                        {badge}
+                        <div>{badge}{impact}</div>
                     </div>
                     <div class="incident-date">{date}</div>
                     <div class="incident-updates">{updates}</div>
                 </div>"#,
                 title = html_escape(&incident.title),
                 badge = status_badge,
+                impact = impact_badge,
                 date = html_escape(&incident.created_at),
                 updates = updates_html,
             ));
@@ -1005,14 +1018,35 @@ mod tests {
     use super::*;
     
     #[test]
+    fn test_incident_deser() {
+        // With impact field
+        let json = r#"{"id":"i1","title":"Test","status":"investigating","cluster":"WolfStack","impact":"critical","service_ids":[],"updates":[],"created_at":"2025-01-01T00:00:00Z"}"#;
+        let result: Result<Incident, _> = serde_json::from_str(json);
+        assert!(result.is_ok(), "with impact failed: {:?}", result.err());
+        assert_eq!(result.unwrap().impact, Some("critical".to_string()));
+
+        // Without impact field (should default to None)
+        let json = r#"{"id":"i2","title":"Test","status":"investigating","cluster":"WolfStack","created_at":"2025-01-01T00:00:00Z"}"#;
+        let result: Result<Incident, _> = serde_json::from_str(json);
+        assert!(result.is_ok(), "without impact failed: {:?}", result.err());
+        assert_eq!(result.unwrap().impact, None);
+
+        // Without service_ids (should default to empty vec)
+        let json = r#"{"id":"i3","title":"Test","status":"resolved","cluster":"WolfStack","created_at":"2025-01-01T00:00:00Z"}"#;
+        let result: Result<Incident, _> = serde_json::from_str(json);
+        assert!(result.is_ok(), "without service_ids failed: {:?}", result.err());
+        assert!(result.unwrap().service_ids.is_empty());
+    }
+
+    #[test]
     fn test_monitor_deser() {
         let cases = vec![
-            ("http", r#"{"id":"t1","name":"HTTP","check":{"type":"http","url":"https://google.com","expected_status":200},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
-            ("tcp", r#"{"id":"t2","name":"TCP","check":{"type":"tcp","host":"1.2.3.4","port":80},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
-            ("ping", r#"{"id":"t3","name":"Ping","check":{"type":"ping","host":"1.2.3.4"},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
-            ("container", r#"{"id":"t4","name":"Container","check":{"type":"container","runtime":"docker","name":"nginx"},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
-            ("container+node", r#"{"id":"t5","name":"Container","check":{"type":"container","runtime":"docker","name":"nginx","node_id":"abc"},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
-            ("wolfrun", r#"{"id":"t6","name":"WR","check":{"type":"wolfrun","service_id":"s1","service_name":"Svc","min_healthy":1,"health_check":"running"},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
+            ("http", r#"{"id":"t1","name":"HTTP","cluster":"WolfStack","check":{"type":"http","url":"https://google.com","expected_status":200},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
+            ("tcp", r#"{"id":"t2","name":"TCP","cluster":"WolfStack","check":{"type":"tcp","host":"1.2.3.4","port":80},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
+            ("ping", r#"{"id":"t3","name":"Ping","cluster":"WolfStack","check":{"type":"ping","host":"1.2.3.4"},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
+            ("container", r#"{"id":"t4","name":"Container","cluster":"WolfStack","check":{"type":"container","runtime":"docker","name":"nginx"},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
+            ("container+node", r#"{"id":"t5","name":"Container","cluster":"WolfStack","check":{"type":"container","runtime":"docker","name":"nginx","node_id":"abc"},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
+            ("wolfrun", r#"{"id":"t6","name":"WR","cluster":"WolfStack","check":{"type":"wolfrun","service_id":"s1","service_name":"Svc","min_healthy":1,"health_check":"running"},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
         ];
         for (label, json) in cases {
             let result: Result<Monitor, _> = serde_json::from_str(json);

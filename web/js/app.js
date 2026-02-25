@@ -15320,37 +15320,7 @@ function editStatusPage(id) {
     if (page) showStatusPageForm(page);
 }
 
-function addServiceRowWithCheck() {
-    const monitors = spConfig?.monitors || [];
-    if (monitors.length === 0) {
-        showToast('Please create at least one monitor first before adding services', 'warning');
-        switchStatusTab('monitors');
-        showMonitorForm();
-        return;
-    }
-    addServiceRow();
-}
-
-function addServiceRow(svc) {
-    const container = document.getElementById('sp-page-services');
-    const monitors = spConfig?.monitors || [];
-
-    const monOptions = monitors.map(m =>
-        `<option value="${m.id}" ${(svc?.monitor_ids || []).includes(m.id) ? 'selected' : ''}>${escapeHtml(m.name)}</option>`
-    ).join('');
-
-    const div = document.createElement('div');
-    div.style.cssText = 'background:var(--bg-tertiary); border:1px solid var(--border); border-radius:8px; padding:12px; display:grid; grid-template-columns:1fr 2fr auto; gap:10px; align-items:start;';
-    div.innerHTML = `
-        <div class="form-group" style="margin:0;"><label style="font-size:11px;">Service Name</label><input type="text" class="form-control sp-svc-name" placeholder="e.g. API Servers" value="${escapeHtml(svc?.name || '')}" style="font-size:12px;"></div>
-        <div class="form-group" style="margin:0;">
-            <label style="font-size:11px;">Monitors (ctrl-click for multiple)</label>
-            <select class="form-control sp-svc-monitors" multiple style="font-size:12px; min-height:60px;">${monOptions}</select>
-        </div>
-        <button class="btn btn-sm" onclick="this.parentElement.remove()" style="font-size:11px; color:#ef4444; margin-top:18px;">✕</button>
-    `;
-    container.appendChild(div);
-}
+// Service row functions removed — page form now uses checkbox-based monitor/incident assignment
 
 async function saveStatusPage() {
     const monitor_ids = Array.from(document.querySelectorAll('.sp-checkbox-monitor:checked')).map(cb => cb.value);
@@ -15456,7 +15426,7 @@ function renderIncidentsList() {
     }).join('');
 }
 
-function showIncidentForm(existing) {
+function showIncidentForm(existing, forPageId) {
     const form = document.getElementById('sp-incident-form');
     document.getElementById('sp-page-form').style.display = 'none';
     document.getElementById('sp-monitor-form').style.display = 'none';
@@ -15469,19 +15439,33 @@ function showIncidentForm(existing) {
     document.getElementById('sp-incident-impact').value = existing?.impact || 'minor';
     document.getElementById('sp-incident-message').value = '';
 
-    // Services are no longer relevant, monitor mapping happens on the status page directly
+    // Populate the affected monitors/services multi-select
     const servicesSelect = document.getElementById('sp-incident-services');
     if (servicesSelect) {
-        servicesSelect.innerHTML = '<option value="" disabled>Service association removed. Assign incidents to status pages instead.</option>';
-        servicesSelect.disabled = true;
+        const monitors = (spConfig?.monitors || []).filter(m => m.cluster === spCurrentCluster);
+        servicesSelect.disabled = false;
+        servicesSelect.innerHTML = monitors.map(m =>
+            `<option value="${m.id}" ${(existing?.service_ids || []).includes(m.id) ? 'selected' : ''}>${escapeHtml(m.name)}</option>`
+        ).join('');
+        if (monitors.length === 0) {
+            servicesSelect.innerHTML = '<option value="" disabled>No monitors in this cluster</option>';
+        }
     }
 
-    // The page selector is also no longer relevant for incidents, as incidents are top-level
+    // Populate the page selector so user can link incident to a page
     const pageSelect = document.getElementById('sp-incident-page');
     if (pageSelect) {
-        pageSelect.innerHTML = '<option value="" disabled>Page association removed. Incidents are top-level.</option>';
-        pageSelect.disabled = true;
+        const pages = (spConfig?.pages || []).filter(p => p.cluster === spCurrentCluster);
+        pageSelect.disabled = false;
+        pageSelect.innerHTML = '<option value="">-- None (standalone incident) --</option>' +
+            pages.map(p => {
+                const selected = (forPageId && forPageId === p.id) ? 'selected' : '';
+                return `<option value="${p.id}" ${selected}>${escapeHtml(p.title)}</option>`;
+            }).join('');
     }
+
+    // Store the page ID for save
+    document.getElementById('sp-incident-page-id').value = forPageId || '';
 
     form.scrollIntoView({ behavior: 'smooth' });
 }
@@ -15510,6 +15494,11 @@ async function saveIncident() {
     const status = document.getElementById('sp-incident-status').value;
     const impact = document.getElementById('sp-incident-impact').value;
     const message = document.getElementById('sp-incident-message').value.trim();
+    const selectedPageId = document.getElementById('sp-incident-page-id')?.value || document.getElementById('sp-incident-page')?.value || '';
+
+    // Collect selected affected services
+    const servicesSelect = document.getElementById('sp-incident-services');
+    const selectedServiceIds = servicesSelect ? Array.from(servicesSelect.selectedOptions).map(o => o.value).filter(v => v) : [];
 
     const existingIncident = (spConfig.incidents || []).find(i => i.id === incidentId);
 
@@ -15519,9 +15508,11 @@ async function saveIncident() {
         status,
         impact,
         cluster: spCurrentCluster,
+        service_ids: selectedServiceIds.length > 0 ? selectedServiceIds : (existingIncident?.service_ids || []),
         created_at: existingIncident?.created_at || new Date().toISOString(),
         resolved_at: status === 'resolved' ? (existingIncident?.resolved_at || new Date().toISOString()) : null,
-        updates: existingIncident?.updates || []
+        updates: existingIncident?.updates || [],
+        auto_created: existingIncident?.auto_created || false,
     };
 
     if (message) {
@@ -15539,6 +15530,20 @@ async function saveIncident() {
             body: JSON.stringify(incident),
         });
         if (!res.ok) throw new Error(await res.text());
+
+        // If a page was selected, link the incident to that page
+        if (selectedPageId) {
+            const page = spConfig.pages.find(p => p.id === selectedPageId);
+            if (page && !page.incident_ids.includes(incidentId)) {
+                page.incident_ids.push(incidentId);
+                await fetch('/api/statuspage/pages', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+                    body: JSON.stringify(page),
+                });
+            }
+        }
+
         showToast('Incident saved', 'success');
         document.getElementById('sp-incident-form').style.display = 'none';
         loadStatusPageData();

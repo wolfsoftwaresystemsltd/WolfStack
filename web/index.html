@@ -2318,13 +2318,12 @@
                         <span style="font-size:13px; font-weight:500;">Enabled</span>
                     </label>
 
-                    <!-- Services editor -->
-                    <h4 style="margin:16px 0 8px 0; font-size:14px; font-weight:600;">Services</h4>
+                    <!-- Monitors & Incidents assignment -->
+                    <h4 style="margin:16px 0 8px 0; font-size:14px; font-weight:600;">Monitors & Incidents</h4>
                     <p style="font-size:12px; color:var(--text-muted); margin:0 0 12px 0;">
-                        Each service groups one or more monitors. The public page shows status per service.
+                        Select which monitors and incidents to display on this public status page.
                     </p>
                     <div id="sp-page-services" style="display:grid; gap:8px; margin-bottom:12px;"></div>
-                    <button class="btn btn-sm" onclick="addServiceRowWithCheck()" id="sp-add-service-btn" style="font-size:11px;">+ Add Service</button>
 
                     <div style="margin-top:20px; display:flex; gap:12px;">
                         <button class="btn btn-primary" onclick="saveStatusPage()">💾 Save Page</button>
@@ -2389,10 +2388,11 @@
                     <input type="hidden" id="sp-incident-id">
                     <input type="hidden" id="sp-incident-page-id">
                     <div class="form-group" style="margin-bottom:16px;">
-                        <label>Status Page</label>
+                        <label>Link to Status Page (optional)</label>
                         <select id="sp-incident-page" class="form-control">
-                            <option value="">-- Select a status page --</option>
+                            <option value="">-- None (standalone incident) --</option>
                         </select>
+                        <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Linking an incident to a page makes it visible on the public status page.</div>
                     </div>
                     <div class="form-group" style="margin-bottom:16px;">
                         <label>Incident Title</label>
@@ -2419,10 +2419,10 @@
                         </div>
                     </div>
                     <div class="form-group" style="margin-bottom:16px;">
-                        <label>Affected Services</label>
+                        <label>Affected Monitors</label>
                         <select id="sp-incident-services" class="form-control" multiple style="min-height:80px;">
                         </select>
-                        <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Hold Ctrl/Cmd to select multiple services</div>
+                        <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Hold Ctrl/Cmd to select multiple monitors affected by this incident</div>
                     </div>
                     <div class="form-group" style="margin-bottom:16px;">
                         <label>Update Message</label>
