@@ -14833,6 +14833,7 @@ function copySystemLogs() {
 let spConfig = { monitors: [], pages: [] };
 let spMonitorsEnriched = [];
 let spCurrentCluster = null;
+let spRefreshTimer = null;
 
 function showStatusPagesForCluster(clusterName) {
     spCurrentCluster = clusterName;
@@ -14861,7 +14862,19 @@ function showStatusPagesForCluster(clusterName) {
     if (spMonForm) spMonForm.style.display = 'none';
     if (spIncForm) spIncForm.style.display = 'none';
 
+    spInitialLoad = true;
     loadStatusPageData();
+
+    // Auto-refresh status data every 30s while viewing this page
+    if (spRefreshTimer) clearInterval(spRefreshTimer);
+    spRefreshTimer = setInterval(() => {
+        if (currentPage !== 'statuspage') {
+            clearInterval(spRefreshTimer);
+            spRefreshTimer = null;
+            return;
+        }
+        loadStatusPageData();
+    }, 30000);
 }
 
 function switchStatusTab(tab) {
@@ -14877,6 +14890,8 @@ function switchStatusTab(tab) {
     }
 }
 
+let spInitialLoad = true;
+
 async function loadStatusPageData() {
     let pages = [];
     let monitors = [];
@@ -14887,12 +14902,13 @@ async function loadStatusPageData() {
             spConfig = await cfgRes.json();
             if (!spConfig.monitors) spConfig.monitors = [];
             if (!spConfig.pages) spConfig.pages = [];
+            if (!spConfig.incidents) spConfig.incidents = [];
         } else {
-            spConfig = { monitors: [], pages: [] };
+            spConfig = { monitors: [], pages: [], incidents: [] };
         }
     } catch (e) {
         console.warn('Status page config load failed, using defaults:', e);
-        spConfig = { monitors: [], pages: [] };
+        spConfig = { monitors: [], pages: [], incidents: [] };
     }
 
     try {
@@ -14919,7 +14935,11 @@ async function loadStatusPageData() {
     renderStatusPages(pages);
     renderStatusMonitors(monitors);
     renderIncidentsList();
-    switchStatusTab('pages');
+    // Only switch to pages tab on initial load, not on auto-refresh
+    if (spInitialLoad) {
+        switchStatusTab('pages');
+        spInitialLoad = false;
+    }
 }
 
 function renderStatusPages(pages) {
