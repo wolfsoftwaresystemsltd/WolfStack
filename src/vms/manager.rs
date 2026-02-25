@@ -595,17 +595,20 @@ impl VmManager {
         write_log(&format!("Config: cpus={}, memory={}MB, disk={}GB, iso={:?}, wolfnet_ip={:?}", 
                   config.cpus, config.memory_mb, config.disk_size_gb, config.iso_path, config.wolfnet_ip));
 
-        // Check if qemu-system-x86_64 is available
-        let qemu_check = Command::new("which").arg("qemu-system-x86_64").output();
+        // Detect host architecture and select the right QEMU binary
+        let is_arm64 = std::env::consts::ARCH == "aarch64";
+        let qemu_bin = if is_arm64 { "qemu-system-aarch64" } else { "qemu-system-x86_64" };
+        let qemu_check = Command::new("which").arg(qemu_bin).output();
         let qemu_path = match &qemu_check {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             _ => {
-                let msg = "qemu-system-x86_64 not found. Install QEMU: apt install qemu-system-x86 qemu-utils";
-                write_log(msg);
-                return Err(msg.to_string());
+                let pkg = if is_arm64 { "qemu-system-arm" } else { "qemu-system-x86" };
+                let msg = format!("{} not found. Install QEMU: apt install {} qemu-utils", qemu_bin, pkg);
+                write_log(&msg);
+                return Err(msg);
             }
         };
-        write_log(&format!("QEMU binary: {}", qemu_path));
+        write_log(&format!("QEMU binary: {} (arch: {})", qemu_path, std::env::consts::ARCH));
 
         let mut rng = rand::thread_rng();
         let vnc_num: u16 = rng.gen_range(10..99); 
@@ -636,7 +639,7 @@ impl VmManager {
         let actual_disk = if disk_path.exists() { &disk_path } else { &self.vm_disk_path(name) };
         write_log(&format!("OS Disk: {} (exists)", actual_disk.display()));
 
-        let mut cmd = Command::new("qemu-system-x86_64");
+        let mut cmd = Command::new(qemu_bin);
         
         // OS disk: use configured bus type (virtio by default, ide/sata for Windows)
         let os_disk_if = match config.os_disk_bus.as_str() {
@@ -652,6 +655,23 @@ impl VmManager {
            .arg("-drive").arg(format!("file={},format=qcow2,if={},index=0", actual_disk.display(), os_disk_if))
            .arg("-vnc").arg(&vnc_arg)
            .arg("-daemonize");
+
+        // ARM64 requires the 'virt' machine type and UEFI firmware (no legacy BIOS)
+        if is_arm64 {
+            cmd.arg("-M").arg("virt");
+            // Look for UEFI firmware in common distribution paths
+            let fw_paths = [
+                "/usr/share/AAVMF/AAVMF_CODE.fd",
+                "/usr/share/qemu-efi-aarch64/QEMU_EFI.fd",
+                "/usr/share/edk2/aarch64/QEMU_EFI.fd",
+            ];
+            if let Some(fw) = fw_paths.iter().find(|p| std::path::Path::new(p).exists()) {
+                cmd.arg("-bios").arg(*fw);
+                write_log(&format!("ARM64 UEFI firmware: {}", fw));
+            } else {
+                write_log("WARNING: No UEFI firmware found for ARM64. Install qemu-efi-aarch64 (apt install qemu-efi-aarch64)");
+            }
+        }
 
         // Attach extra storage volumes
         for (i, vol) in config.extra_disks.iter().enumerate() {
@@ -679,7 +699,8 @@ impl VmManager {
         if kvm_available {
             cmd.arg("-enable-kvm").arg("-cpu").arg("host");
         } else {
-            cmd.arg("-cpu").arg("qemu64");
+            let fallback_cpu = if is_arm64 { "max" } else { "qemu64" };
+            cmd.arg("-cpu").arg(fallback_cpu);
         }
 
         // Determine NIC model: virtio-net-pci (Linux), e1000 (Windows), rtl8139

@@ -8575,6 +8575,9 @@ let lxcTemplatesCache = null;
 let lxcTemplatesCacheNodeId = null;
 
 function showLxcCreate() {
+    // Clean up any leftover progress modal from a previous attempt
+    document.getElementById('lxc-create-modal')?.remove();
+
     const modal = document.getElementById('container-detail-modal');
     const title = document.getElementById('container-detail-title');
     const body = document.getElementById('container-detail-body');
@@ -8859,6 +8862,9 @@ function selectLxcTemplate(distro, release, arch, variant) {
 }
 
 async function createLxcContainer() {
+    // Remove any stale progress modal from a previous attempt
+    document.getElementById('lxc-create-modal')?.remove();
+
     const name = document.getElementById('lxc-create-name').value.trim();
     const distribution = document.getElementById('lxc-create-distro').value.trim();
     const release = document.getElementById('lxc-create-release').value.trim();
