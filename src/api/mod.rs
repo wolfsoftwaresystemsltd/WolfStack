@@ -8761,29 +8761,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/status/{slug}", web::get().to(statuspage_public_page));
 }
 
-/// GET /status/{slug} — public status page (any cluster — dedicated port 8550)
-pub async fn statuspage_public_page_any(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    let slug = path.into_inner();
-    match crate::statuspage::render_public_page_any(&state.statuspage, &slug) {
-        Some(html) => HttpResponse::Ok().content_type("text/html; charset=utf-8").body(html),
-        None => HttpResponse::NotFound().content_type("text/html; charset=utf-8").body(
-            r#"<!DOCTYPE html><html><head><title>Not Found</title></head><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#0f172a;color:#fff;"><p>Status page not found.</p></body></html>"#
-        ),
-    }
-}
-
-/// GET /status — index of all status pages on this node (any cluster — dedicated port 8550)
-pub async fn statuspage_public_index_any(state: web::Data<AppState>) -> HttpResponse {
-    let html = crate::statuspage::render_index_page_any(&state.statuspage);
-    HttpResponse::Ok().content_type("text/html; charset=utf-8").body(html)
-}
-
 /// Minimal config for the dedicated status page HTTP listener (port 8550).
-/// Only serves public status pages — no auth, no API, no admin.
-/// Uses cluster-agnostic handlers so replicated pages from any cluster are served.
+/// Only serves status pages belonging to this node's cluster.
 pub fn configure_statuspage_only(cfg: &mut web::ServiceConfig) {
     cfg
-        .route("/", web::get().to(statuspage_public_index_any))
-        .route("/status", web::get().to(statuspage_public_index_any))
-        .route("/status/{slug}", web::get().to(statuspage_public_page_any));
+        .route("/", web::get().to(statuspage_public_index))
+        .route("/status", web::get().to(statuspage_public_index))
+        .route("/status/{slug}", web::get().to(statuspage_public_page));
 }

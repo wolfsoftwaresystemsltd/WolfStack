@@ -347,20 +347,6 @@ impl StatusPageState {
         config.pages.iter().find(|p| p.slug == slug && p.cluster == cluster).cloned()
     }
 
-    /// Find a page by slug only (any cluster — used by the dedicated status page port)
-    pub fn find_page_by_slug(&self, slug: &str) -> Option<StatusPage> {
-        let config = self.config.read().unwrap();
-        config.pages.iter().find(|p| p.slug == slug).cloned()
-    }
-
-    /// List all page slugs + titles on this node (any cluster)
-    pub fn list_all_pages(&self) -> Vec<(String, String, bool)> {
-        let config = self.config.read().unwrap();
-        config.pages.iter()
-            .map(|p| (p.slug.clone(), p.title.clone(), p.enabled))
-            .collect()
-    }
-
     /// List page slugs + titles for a specific cluster only
     pub fn list_pages_for_cluster(&self, cluster: &str) -> Vec<(String, String, bool)> {
         let config = self.config.read().unwrap();
@@ -935,12 +921,6 @@ fn theme_colors(theme: Option<&str>) -> ThemeColors {
     }
 }
 
-/// Render the public status page for any slug on this node (used by dedicated port 8550)
-pub fn render_public_page_any(state: &Arc<StatusPageState>, slug: &str) -> Option<String> {
-    let page = state.find_page_by_slug(slug)?;
-    render_public_page_inner(state, &page)
-}
-
 /// Render the public status page for a specific page slug (only if it belongs to this cluster)
 pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str, local_cluster: &str) -> Option<String> {
     let page = state.find_page_by_slug_and_cluster(slug, local_cluster)?;
@@ -1185,69 +1165,6 @@ pub fn render_index_page(state: &Arc<StatusPageState>, local_cluster: &str) -> S
     }
 
     // If only one page, redirect to it
-    if enabled_pages.len() == 1 {
-        return format!(
-            r#"<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url=/status/{}"></head><body></body></html>"#,
-            html_escape(&enabled_pages[0].0)
-        );
-    }
-
-    let mut links_html = String::new();
-    for (slug, title, _) in &enabled_pages {
-        links_html.push_str(&format!(
-            r#"<a href="/status/{slug}" class="page-link">
-                <div class="page-title">{title}</div>
-                <div class="page-url">/status/{slug}</div>
-            </a>"#,
-            slug = html_escape(slug),
-            title = html_escape(title),
-        ));
-    }
-
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Status Pages</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ font-family: 'Inter', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh;
-            display: flex; align-items: center; justify-content: center; }}
-        .container {{ max-width: 480px; width: 100%; padding: 2rem; }}
-        h1 {{ text-align: center; font-size: 1.3rem; margin-bottom: 1.5rem; color: #f8fafc; }}
-        .page-link {{ display: block; background: #1e293b; border: 1px solid #334155; border-radius: 10px;
-            padding: 1.25rem; margin-bottom: 0.75rem; text-decoration: none; color: #e2e8f0;
-            transition: all 0.2s; }}
-        .page-link:hover {{ border-color: #22c55e; transform: translateY(-2px); }}
-        .page-title {{ font-weight: 600; font-size: 1rem; }}
-        .page-url {{ font-size: 0.8rem; color: #64748b; margin-top: 4px; }}
-        .footer {{ text-align: center; margin-top: 2rem; font-size: 0.75rem; color: #475569; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Status Pages</h1>
-        {links}
-        <div class="footer">Powered by WolfStack</div>
-    </div>
-</body>
-</html>"#,
-        links = links_html,
-    )
-}
-
-/// Render a status page index listing all pages on this node (any cluster — for dedicated port)
-pub fn render_index_page_any(state: &Arc<StatusPageState>) -> String {
-    let pages = state.list_all_pages();
-    let enabled_pages: Vec<_> = pages.iter().filter(|(_, _, enabled)| *enabled).collect();
-
-    if enabled_pages.is_empty() {
-        return not_enabled_html();
-    }
-
     if enabled_pages.len() == 1 {
         return format!(
             r#"<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url=/status/{}"></head><body></body></html>"#,
