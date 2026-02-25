@@ -868,17 +868,14 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
-        // Background: periodic status page sync to cluster peers (every 5 min)
+        // Background: on startup, pull status page config from a peer if we have none
         let sp_sync = statuspage_state.clone();
         let sp_sync_cluster = cluster.clone();
         let sp_sync_secret = cluster_secret.clone();
         tokio::spawn(async move {
-            // Wait for nodes to connect before first broadcast
+            // Wait for nodes to connect before pulling
             tokio::time::sleep(Duration::from_secs(30)).await;
-            loop {
-                statuspage::broadcast_to_cluster(&sp_sync, &sp_sync_cluster, &sp_sync_secret).await;
-                tokio::time::sleep(Duration::from_secs(300)).await;
-            }
+            statuspage::pull_from_peer(&sp_sync, &sp_sync_cluster, &sp_sync_secret).await;
         });
 
         // Determine web directory

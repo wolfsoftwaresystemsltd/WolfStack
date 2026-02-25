@@ -389,13 +389,14 @@ impl StatusPageState {
 // ─── Cluster Broadcast ───
 // ═══════════════════════════════════════════════
 
-/// Broadcast status page config to all online same-cluster peers.
+/// Broadcast this cluster's status page config to all online same-cluster peers.
+/// Only sends pages/monitors/incidents that belong to this node's cluster so
+/// we never overwrite another cluster's data on the receiving end.
 pub async fn broadcast_to_cluster(
     state: &Arc<StatusPageState>,
     cluster: &crate::agent::ClusterState,
     cluster_secret: &str,
 ) {
-    let config = state.config.read().unwrap().clone();
     let nodes = cluster.get_all_nodes();
 
     // Find our cluster name
@@ -403,6 +404,19 @@ pub async fn broadcast_to_cluster(
         .find(|n| n.is_self)
         .and_then(|n| n.cluster_name.clone())
         .unwrap_or_else(|| "WolfStack".to_string());
+
+    // Filter config to only our cluster's data
+    let full_config = state.config.read().unwrap().clone();
+    let filtered = StatusPageConfig {
+        monitors: full_config.monitors.into_iter().filter(|m| m.cluster == self_cluster).collect(),
+        pages: full_config.pages.into_iter().filter(|p| p.cluster == self_cluster).collect(),
+        incidents: full_config.incidents.into_iter().filter(|i| i.cluster == self_cluster).collect(),
+    };
+
+    // Nothing to send
+    if filtered.pages.is_empty() && filtered.monitors.is_empty() && filtered.incidents.is_empty() {
+        return;
+    }
 
     // Build HTTP client
     let client = match reqwest::Client::builder()
@@ -428,12 +442,68 @@ pub async fn broadcast_to_cluster(
         for url in &urls {
             match client.post(url)
                 .header("X-WolfStack-Secret", cluster_secret)
-                .json(&config)
+                .json(&filtered)
                 .send().await
             {
                 Ok(_) => break,
                 Err(_) => continue,
             }
+        }
+    }
+}
+
+/// Pull status page config from a cluster peer (used on startup to catch up).
+/// Only pulls if our own config has no pages for our cluster.
+pub async fn pull_from_peer(
+    state: &Arc<StatusPageState>,
+    cluster: &crate::agent::ClusterState,
+    cluster_secret: &str,
+) {
+    let nodes = cluster.get_all_nodes();
+
+    let self_cluster = nodes.iter()
+        .find(|n| n.is_self)
+        .and_then(|n| n.cluster_name.clone())
+        .unwrap_or_else(|| "WolfStack".to_string());
+
+    // Check if we already have pages for our cluster — if so, no need to pull
+    {
+        let config = state.config.read().unwrap();
+        if config.pages.iter().any(|p| p.cluster == self_cluster) {
+            return;
+        }
+    }
+
+    // Find the first online same-cluster peer
+    let peer = match nodes.iter().find(|n| {
+        !n.is_self && n.online && n.cluster_name.as_deref().unwrap_or("WolfStack") == self_cluster
+    }) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .danger_accept_invalid_certs(true)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let urls = crate::api::build_node_urls(&peer.address, peer.port, "/api/statuspage/config");
+    for url in &urls {
+        match client.get(url)
+            .header("X-WolfStack-Secret", cluster_secret)
+            .send().await
+        {
+            Ok(resp) => {
+                if let Ok(peer_config) = resp.json::<StatusPageConfig>().await {
+                    state.merge_from_peer(peer_config);
+                }
+                return;
+            }
+            Err(_) => continue,
         }
     }
 }

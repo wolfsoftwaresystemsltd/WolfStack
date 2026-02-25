@@ -8167,7 +8167,13 @@ pub async fn wolfrun_reconcile(req: HttpRequest, state: web::Data<AppState>) -> 
 
 /// GET /api/statuspage/config — get full config (monitors + pages)
 pub async fn statuspage_config_get(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    // Accept cluster secret (for inter-node pull) or cookie auth
+    let secret = req.headers().get("X-WolfStack-Secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if secret != state.cluster_secret {
+        if let Err(resp) = require_auth(&req, &state) { return resp; }
+    }
     let config = state.statuspage.config.read().unwrap().clone();
     HttpResponse::Ok().json(config)
 }
