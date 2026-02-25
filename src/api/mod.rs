@@ -559,7 +559,9 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
         cluster_name.clone(),
         body.login_disabled,
     ) {
-        // If cluster name changed, migrate all cluster-scoped data
+        // If cluster name changed, rename all cluster-scoped data to match.
+        // All nodes in the cluster share the same name, so wolfrun services,
+        // status pages, monitors, and incidents must all follow the rename.
         if let (Some(ref old_name), Some(ref new_name)) = (&old_cluster_name, &cluster_name) {
             if old_name != new_name {
                 // Rename status page monitors, pages, and incidents
@@ -575,6 +577,16 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                 let wr_count = state.wolfrun.rename_cluster(old_name, new_name);
                 if wr_count > 0 {
                     tracing::info!("Cluster rename: updated {} WolfRun services '{}' -> '{}'", wr_count, old_name, new_name);
+                }
+
+                // Rename other nodes in the same cluster so the whole cluster stays together
+                for node in state.cluster.get_all_nodes() {
+                    if node.cluster_name.as_deref() == Some(old_name.as_str()) {
+                        state.cluster.update_node_settings(
+                            &node.id, None, None, None, None, None,
+                            Some(new_name.clone()), None,
+                        );
+                    }
                 }
             }
         }
