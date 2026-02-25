@@ -4603,7 +4603,37 @@ fn docker_search_hub_api(query: &str) -> Vec<DockerSearchResult> {
 
 /// Pull a Docker image
 pub fn docker_pull(image: &str) -> Result<String, String> {
-
+    // Check if the image supports the current architecture before pulling.
+    // On non-x86 systems (e.g. IBM Power ppc64le), many images are x86-only
+    // and will fail with a confusing error. Give a clear message instead.
+    let host_arch = std::env::consts::ARCH; // "x86_64", "aarch64", "powerpc64"
+    if host_arch != "x86_64" {
+        let docker_arch = match host_arch {
+            "aarch64" => "arm64",
+            "powerpc64" => "ppc64le",
+            other => other,
+        };
+        // Use docker manifest inspect to check supported platforms
+        if let Ok(manifest_out) = Command::new("docker")
+            .args(["manifest", "inspect", image])
+            .output()
+        {
+            if manifest_out.status.success() {
+                let manifest = String::from_utf8_lossy(&manifest_out.stdout);
+                // Check if our architecture appears in the manifest
+                if !manifest.contains(docker_arch) && !manifest.contains(host_arch) {
+                    return Err(format!(
+                        "Image '{}' does not support {} architecture. \
+                         This image is only available for x86_64/amd64. \
+                         Check Docker Hub for a ppc64le-compatible alternative or \
+                         use the bare-metal install option instead.",
+                        image, docker_arch
+                    ));
+                }
+            }
+            // If manifest inspect fails (e.g. private image), proceed with pull anyway
+        }
+    }
 
     let output = Command::new("docker")
         .args(["pull", image])
