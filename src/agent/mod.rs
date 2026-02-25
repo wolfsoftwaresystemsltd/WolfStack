@@ -86,6 +86,8 @@ pub struct Node {
     pub has_kvm: bool,                    // Whether KVM/QEMU is installed on this node
     #[serde(default)]
     pub login_disabled: bool,             // Whether direct login is disabled on this node
+    #[serde(default)]
+    pub tls: bool,                        // Whether this node serves HTTPS on its main port
 }
 
 fn default_node_type() -> String { "wolfstack".to_string() }
@@ -210,7 +212,7 @@ impl ClusterState {
     }
 
     /// Update this node's own status
-    pub fn update_self(&self, metrics: SystemMetrics, components: Vec<ComponentStatus>, docker_count: u32, lxc_count: u32, vm_count: u32, public_ip: Option<String>, has_docker: bool, has_lxc: bool, has_kvm: bool) {
+    pub fn update_self(&self, metrics: SystemMetrics, components: Vec<ComponentStatus>, docker_count: u32, lxc_count: u32, vm_count: u32, public_ip: Option<String>, has_docker: bool, has_lxc: bool, has_kvm: bool, tls_enabled: bool) {
         let mut nodes = self.nodes.write().unwrap();
         // Fetch existing cluster_name: in-memory first, then persisted file, then default
         let cluster_name = nodes.get(&self.self_id)
@@ -246,6 +248,7 @@ impl ClusterState {
             has_lxc,
             has_kvm,
             login_disabled: prev_login_disabled.or_else(|| Self::load_self_login_disabled()).unwrap_or(false),
+            tls: tls_enabled,
         });
     }
 
@@ -350,6 +353,7 @@ impl ClusterState {
             has_lxc: false,
             has_kvm: false,
             login_disabled: false,
+            tls: false,
         });
         drop(nodes);
         self.save_nodes();
@@ -658,6 +662,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         has_lxc: true,
                         has_kvm: true,
                         login_disabled: node.login_disabled,
+                        tls: true, // Proxmox always serves HTTPS
                     });
 
                     // Reset fail count on success
@@ -714,6 +719,8 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                     if let Ok(msg) = resp.json::<AgentMessage>().await {
                         if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes, deleted_ids, wolfnet_ips, has_docker, has_lxc, has_kvm } = msg {
                             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                            // Detect TLS: if HTTPS on the main port succeeded, the node has TLS
+                            let node_tls = url.starts_with("https://");
                             cluster.update_remote(Node {
                                 id: node.id.clone(),
                                 hostname,
@@ -739,6 +746,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                 has_lxc,
                                 has_kvm,
                                 login_disabled: node.login_disabled,
+                                tls: node_tls,
                             });
 
                             // Reset fail count on success
