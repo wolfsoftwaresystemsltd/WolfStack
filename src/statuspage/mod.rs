@@ -39,8 +39,22 @@ pub enum CheckType {
     Container {
         runtime: String, // "docker" or "lxc"
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node_id: Option<String>,
+    },
+    Wolfrun {
+        service_id: String,
+        #[serde(default)]
+        service_name: String,
+        #[serde(default = "default_min_healthy")]
+        min_healthy: u32,
+        #[serde(default = "default_health_check")]
+        health_check: String,
     },
 }
+
+fn default_min_healthy() -> u32 { 1 }
+fn default_health_check() -> String { "running".to_string() }
 
 fn default_expected_status() -> u16 { 200 }
 fn default_interval() -> u64 { 60 }
@@ -446,8 +460,11 @@ pub async fn run_checks(state: &Arc<StatusPageState>) {
             CheckType::Ping { host } => {
                 run_ping_check(host, timeout).await
             }
-            CheckType::Container { runtime, name } => {
+            CheckType::Container { runtime, name, node_id: _ } => {
                 run_container_check(runtime, name)
+            }
+            CheckType::Wolfrun { service_id, min_healthy, health_check, .. } => {
+                run_wolfrun_check(service_id, *min_healthy, health_check).await
             }
         };
 
@@ -563,6 +580,43 @@ fn run_container_check(runtime: &str, name: &str) -> (bool, Option<String>) {
             }
         }
         _ => (false, Some(format!("Unknown runtime: {}", runtime))),
+    }
+}
+
+/// Check WolfRun service health by counting running instances
+async fn run_wolfrun_check(service_id: &str, min_healthy: u32, _health_check: &str) -> (bool, Option<String>) {
+    // Try to read WolfRun services from the local file
+    let wolfrun_path = std::path::Path::new("data/wolfrun.json");
+    if !wolfrun_path.exists() {
+        return (false, Some("WolfRun not configured".to_string()));
+    }
+    
+    let content = match std::fs::read_to_string(wolfrun_path) {
+        Ok(c) => c,
+        Err(e) => return (false, Some(format!("Failed to read WolfRun config: {}", e))),
+    };
+    
+    let services: Vec<serde_json::Value> = match serde_json::from_str(&content) {
+        Ok(s) => s,
+        Err(e) => return (false, Some(format!("Failed to parse WolfRun config: {}", e))),
+    };
+    
+    // Find the service
+    let service = match services.iter().find(|s| s.get("id").and_then(|v| v.as_str()) == Some(service_id)) {
+        Some(s) => s,
+        None => return (false, Some(format!("Service {} not found", service_id))),
+    };
+    
+    // Count running instances
+    let instances = service.get("instances").and_then(|v| v.as_array()).map(|a| a.to_vec()).unwrap_or_default();
+    let running_count = instances.iter().filter(|i| {
+        i.get("status").and_then(|v| v.as_str()) == Some("running")
+    }).count() as u32;
+    
+    if running_count >= min_healthy {
+        (true, None)
+    } else {
+        (false, Some(format!("Only {}/{} instances running", running_count, min_healthy)))
     }
 }
 
