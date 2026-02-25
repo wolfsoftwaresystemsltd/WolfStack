@@ -66,6 +66,7 @@ pub struct Monitor {
     pub id: String,
     pub name: String,
     pub check: CheckType,
+    pub cluster: String,
     #[serde(default = "default_interval")]
     pub interval_secs: u64,
     #[serde(default = "default_timeout")]
@@ -76,15 +77,6 @@ pub struct Monitor {
 
 fn default_true() -> bool { true }
 
-/// A user-facing service (group of monitors) — belongs to a specific status page
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Service {
-    pub id: String,
-    pub name: String,
-    pub monitor_ids: Vec<String>,
-    #[serde(default)]
-    pub description: String,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -107,6 +99,7 @@ pub struct Incident {
     pub id: String,
     pub title: String,
     pub status: IncidentStatus,
+    pub cluster: String,
     pub service_ids: Vec<String>,
     pub updates: Vec<IncidentUpdate>,
     pub created_at: String,
@@ -140,15 +133,15 @@ pub struct StatusPage {
     /// URL slug — the page is served at /status/{slug}
     pub slug: String,
     pub title: String,
+    pub cluster: String,
     #[serde(default)]
     pub logo_url: Option<String>,
     #[serde(default)]
     pub footer_text: Option<String>,
-    /// Services displayed on this page (each references global monitors)
-    pub services: Vec<Service>,
-    /// Incidents for this page
     #[serde(default)]
-    pub incidents: Vec<Incident>,
+    pub monitor_ids: Vec<String>,
+    #[serde(default)]
+    pub incident_ids: Vec<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -163,7 +156,10 @@ pub struct StatusPageConfig {
     /// Global pool of monitors (shared across all pages)
     #[serde(default)]
     pub monitors: Vec<Monitor>,
-    /// Multiple status pages, each with their own slug, services, incidents
+    /// Global pool of incidents (shared across all pages)
+    #[serde(default)]
+    pub incidents: Vec<Incident>,
+    /// Multiple status pages, each with their own slug, monitors, incidents
     #[serde(default)]
     pub pages: Vec<StatusPage>,
 }
@@ -172,6 +168,7 @@ impl Default for StatusPageConfig {
     fn default() -> Self {
         Self {
             monitors: Vec::new(),
+            incidents: Vec::new(),
             pages: Vec::new(),
         }
     }
@@ -242,26 +239,14 @@ impl StatusPageState {
         }
     }
 
-    /// Get current status for a service (worst of its monitors)
-    pub fn service_status(&self, service: &Service) -> MonitorStatus {
-        if service.monitor_ids.is_empty() {
-            return MonitorStatus::Unknown;
-        }
-        let mut worst = MonitorStatus::Up;
-        for mid in &service.monitor_ids {
-            worst = worst.worst(self.monitor_status(mid));
-        }
-        worst
-    }
-
-    /// Get overall status for a specific page
+    /// Get overall status for a specific page by aggregating its monitors
     pub fn page_overall_status(&self, page: &StatusPage) -> MonitorStatus {
-        if page.services.is_empty() {
+        if page.monitor_ids.is_empty() {
             return MonitorStatus::Unknown;
         }
         let mut worst = MonitorStatus::Up;
-        for svc in &page.services {
-            worst = worst.worst(self.service_status(svc));
+        for mid in &page.monitor_ids {
+            worst = worst.worst(self.monitor_status(mid));
         }
         worst
     }
@@ -347,20 +332,7 @@ impl StatusPageState {
             }
             _ => 100.0,
         }
-    }
-
-    /// Calculate overall uptime percent for a service (worst of its monitors)
-    pub fn service_uptime_percent(&self, service: &Service) -> f32 {
-        if service.monitor_ids.is_empty() {
-            return 100.0;
-        }
-        // Use minimum uptime across monitors (weakest link)
-        service.monitor_ids.iter()
-            .map(|mid| self.uptime_percent(mid))
-            .fold(f32::MAX, f32::min)
-    }
-
-    /// Find a page by slug
+    }    /// Find a page by slug
     pub fn find_page_by_slug(&self, slug: &str) -> Option<StatusPage> {
         let config = self.config.read().unwrap();
         config.pages.iter().find(|p| p.slug == slug).cloned()
@@ -620,84 +592,77 @@ async fn run_wolfrun_check(service_id: &str, min_healthy: u32, _health_check: &s
     }
 }
 
-/// Auto-create incidents when services go down, auto-resolve when back up.
-/// Operates on ALL enabled pages.
+/// Auto-create incidents when monitors go down, auto-resolve when back up.
 fn auto_manage_incidents(state: &Arc<StatusPageState>) {
     let mut config = state.config.write().unwrap();
     let now_str = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-    for page in config.pages.iter_mut() {
-        if !page.enabled { continue; }
+    // Iterate over all monitors in the global pool that are enabled
+    let active_monitors: Vec<_> = config.monitors.iter().filter(|m| m.enabled).cloned().collect();
 
-        for service in &page.services {
-            let status = compute_service_status(state, service);
+    for monitor in active_monitors {
+        let status = compute_monitor_status(state, &monitor.id);
 
-            // Find existing auto-incident for this service on this page
-            let existing = page.incidents.iter_mut().find(|i| {
-                i.auto_created && i.status != IncidentStatus::Resolved && i.service_ids.contains(&service.id)
-            });
+        let cluster = monitor.cluster.clone();
+        
+        // Find existing auto-incident for this monitor
+        let existing = config.incidents.iter_mut().find(|i| {
+            i.auto_created && i.status != IncidentStatus::Resolved && i.service_ids.contains(&monitor.id)
+        });
 
-            match status {
-                MonitorStatus::Down | MonitorStatus::Degraded => {
-                    if existing.is_none() {
-                        page.incidents.push(Incident {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            title: format!("{} — {}", service.name, status.label()),
-                            status: IncidentStatus::Investigating,
-                            service_ids: vec![service.id.clone()],
-                            updates: vec![IncidentUpdate {
-                                timestamp: now_str.clone(),
-                                status: IncidentStatus::Investigating,
-                                message: format!("Automated detection: {} is {}", service.name, status.label().to_lowercase()),
-                            }],
-                            created_at: now_str.clone(),
-                            resolved_at: None,
-                            auto_created: true,
-                        });
-                    }
-                }
-                MonitorStatus::Up => {
-                    if let Some(incident) = existing {
-                        incident.status = IncidentStatus::Resolved;
-                        incident.resolved_at = Some(now_str.clone());
-                        incident.updates.push(IncidentUpdate {
+        match status {
+            MonitorStatus::Down | MonitorStatus::Degraded => {
+                if existing.is_none() {
+                    config.incidents.push(Incident {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        title: format!("{} — {}", monitor.name, status.label()),
+                        status: IncidentStatus::Investigating,
+                        cluster,
+                        service_ids: vec![monitor.id.clone()],
+                        updates: vec![IncidentUpdate {
                             timestamp: now_str.clone(),
-                            status: IncidentStatus::Resolved,
-                            message: format!("{} has recovered and is operational", service.name),
-                        });
-                    }
+                            status: IncidentStatus::Investigating,
+                            message: format!("Automated detection: {} is {}", monitor.name, status.label().to_lowercase()),
+                        }],
+                        created_at: now_str.clone(),
+                        resolved_at: None,
+                        auto_created: true,
+                    });
                 }
-                _ => {}
             }
+            MonitorStatus::Up => {
+                if let Some(incident) = existing {
+                    incident.status = IncidentStatus::Resolved;
+                    incident.resolved_at = Some(now_str.clone());
+                    incident.updates.push(IncidentUpdate {
+                        timestamp: now_str.clone(),
+                        status: IncidentStatus::Resolved,
+                        message: format!("{} has recovered and is operational", monitor.name),
+                    });
+                }
+            }
+            _ => {}
         }
     }
 
     let _ = config.save();
 }
 
-/// Compute service status from check results (uses state.results directly to avoid RwLock issues)
-fn compute_service_status(state: &Arc<StatusPageState>, service: &Service) -> MonitorStatus {
-    if service.monitor_ids.is_empty() {
-        return MonitorStatus::Unknown;
-    }
+/// Compute monitor status from check results (uses state.results directly to avoid RwLock issues)
+fn compute_monitor_status(state: &Arc<StatusPageState>, monitor_id: &str) -> MonitorStatus {
     let results = state.results.read().unwrap();
-    let mut worst = MonitorStatus::Up;
-    for mid in &service.monitor_ids {
-        let s = match results.get(mid) {
-            Some(deque) if !deque.is_empty() => {
-                let last = deque.back().unwrap();
-                if last.success {
-                    MonitorStatus::Up
-                } else {
-                    let recent_failures = deque.iter().rev().take(3).filter(|r| !r.success).count();
-                    if recent_failures >= 3 { MonitorStatus::Down } else { MonitorStatus::Degraded }
-                }
+    match results.get(monitor_id) {
+        Some(deque) if !deque.is_empty() => {
+            let last = deque.back().unwrap();
+            if last.success {
+                MonitorStatus::Up
+            } else {
+                let recent_failures = deque.iter().rev().take(3).filter(|r| !r.success).count();
+                if recent_failures >= 3 { MonitorStatus::Down } else { MonitorStatus::Degraded }
             }
-            _ => MonitorStatus::Unknown,
-        };
-        worst = worst.worst(s);
+        }
+        _ => MonitorStatus::Unknown,
     }
-    worst
 }
 
 // ═══════════════════════════════════════════════
@@ -714,47 +679,49 @@ pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str) -> Option<St
 
     let overall = state.page_overall_status(&page);
 
-    // Build services HTML
+    let config = state.config.read().unwrap();
+
+    // Build monitors HTML
     let mut services_html = String::new();
-    for svc in &page.services {
-        let svc_status = state.service_status(svc);
-        let uptime = state.service_uptime_percent(svc);
+    for mid in &page.monitor_ids {
+        if let Some(monitor) = config.monitors.iter().find(|m| m.id == *mid) {
+            let m_status = state.monitor_status(mid);
+            let uptime = state.uptime_percent(mid);
 
-        let bars_html = if let Some(first_mid) = svc.monitor_ids.first() {
-            let daily = state.get_daily_uptime(first_mid);
-            build_uptime_bars(&daily)
-        } else {
-            String::new()
-        };
+            let daily = state.get_daily_uptime(mid);
+            let bars_html = build_uptime_bars(&daily);
 
-        services_html.push_str(&format!(
-            r#"<div class="service-row">
-                <div class="service-header">
-                    <div class="service-name">{name}</div>
-                    <div class="service-status" style="color:{color}">{emoji} {label}</div>
-                </div>
-                <div class="uptime-section">
-                    <div class="uptime-bars">{bars}</div>
-                    <div class="uptime-legend">
-                        <span>90 days ago</span>
-                        <span class="uptime-pct">{uptime:.2}% uptime</span>
-                        <span>Today</span>
+            services_html.push_str(&format!(
+                r#"<div class="service-row">
+                    <div class="service-header">
+                        <div class="service-name">{name}</div>
+                        <div class="service-status" style="color:{color}">{emoji} {label}</div>
                     </div>
-                </div>
-            </div>"#,
-            name = html_escape(&svc.name),
-            color = svc_status.color(),
-            emoji = svc_status.emoji(),
-            label = svc_status.label(),
-            bars = bars_html,
-            uptime = uptime,
-        ));
+                    <div class="uptime-section">
+                        <div class="uptime-bars">{bars}</div>
+                        <div class="uptime-legend">
+                            <span>90 days ago</span>
+                            <span class="uptime-pct">{uptime:.2}% uptime</span>
+                            <span>Today</span>
+                        </div>
+                    </div>
+                </div>"#,
+                name = html_escape(&monitor.name),
+                color = m_status.color(),
+                emoji = m_status.emoji(),
+                label = m_status.label(),
+                bars = bars_html,
+                uptime = uptime,
+            ));
+        }
     }
 
     // Build incidents HTML (last 14 days)
     let mut incidents_html = String::new();
     let cutoff = chrono::Utc::now() - chrono::Duration::days(14);
-    let mut recent_incidents: Vec<&Incident> = page.incidents.iter()
+    
+    let mut recent_incidents: Vec<&Incident> = config.incidents.iter()
+        .filter(|i| page.incident_ids.contains(&i.id))
         .filter(|i| {
             chrono::DateTime::parse_from_rfc3339(&format!("{}+00:00", i.created_at.replace('Z', "")))
                 .map(|dt| dt > cutoff)

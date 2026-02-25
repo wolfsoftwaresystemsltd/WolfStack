@@ -8222,11 +8222,9 @@ pub async fn statuspage_monitor_delete(req: HttpRequest, state: web::Data<AppSta
     let mut config = state.statuspage.config.write().unwrap();
     let before = config.monitors.len();
     config.monitors.retain(|m| m.id != id);
-    // Also remove this monitor from all services across all pages
+    // Also remove this monitor from all pages
     for page in config.pages.iter_mut() {
-        for svc in page.services.iter_mut() {
-            svc.monitor_ids.retain(|mid| mid != &id);
-        }
+        page.monitor_ids.retain(|mid| mid != &id);
     }
     if config.monitors.len() == before {
         return HttpResponse::NotFound().json(serde_json::json!({ "error": "Monitor not found" }));
@@ -8297,91 +8295,59 @@ pub async fn statuspage_page_delete(req: HttpRequest, state: web::Data<AppState>
     HttpResponse::Ok().json(serde_json::json!({ "deleted": true }))
 }
 
-/// POST /api/statuspage/pages/{page_id}/incidents — create an incident
-pub async fn statuspage_incident_create(
-    req: HttpRequest, state: web::Data<AppState>,
-    path: web::Path<String>, body: web::Json<serde_json::Value>,
-) -> HttpResponse {
+/// GET /api/statuspage/incidents — list all incidents
+pub async fn statuspage_incidents_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let page_id = path.into_inner();
-    let title = body.get("title").and_then(|v| v.as_str()).unwrap_or("Incident").to_string();
-    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("Investigating an issue").to_string();
-    let service_ids: Vec<String> = body.get("service_ids")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-        .unwrap_or_default();
-
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let incident = crate::statuspage::Incident {
-        id: uuid::Uuid::new_v4().to_string(),
-        title,
-        status: crate::statuspage::IncidentStatus::Investigating,
-        service_ids,
-        updates: vec![crate::statuspage::IncidentUpdate {
-            timestamp: now.clone(),
-            status: crate::statuspage::IncidentStatus::Investigating,
-            message,
-        }],
-        created_at: now,
-        resolved_at: None,
-        auto_created: false,
-    };
-
-    let mut config = state.statuspage.config.write().unwrap();
-    match config.pages.iter_mut().find(|p| p.id == page_id) {
-        Some(page) => {
-            let incident_clone = incident.clone();
-            page.incidents.push(incident);
-            let _ = config.save();
-            HttpResponse::Ok().json(serde_json::json!({ "created": true, "incident": incident_clone }))
-        }
-        None => HttpResponse::NotFound().json(serde_json::json!({ "error": "Page not found" })),
-    }
+    let config = state.statuspage.config.read().unwrap();
+    HttpResponse::Ok().json(serde_json::json!({ "incidents": config.incidents }))
 }
 
-/// PATCH /api/statuspage/pages/{page_id}/incidents/{id} — update incident status
-pub async fn statuspage_incident_update(
+/// POST /api/statuspage/incidents — create or update an incident
+pub async fn statuspage_incident_save(
     req: HttpRequest, state: web::Data<AppState>,
-    path: web::Path<(String, String)>, body: web::Json<serde_json::Value>,
+    body: web::Json<crate::statuspage::Incident>,
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let (page_id, incident_id) = path.into_inner();
-    let status_str = body.get("status").and_then(|v| v.as_str()).unwrap_or("investigating");
-    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
-    let new_status = match status_str {
-        "identified" => crate::statuspage::IncidentStatus::Identified,
-        "monitoring" => crate::statuspage::IncidentStatus::Monitoring,
-        "resolved" => crate::statuspage::IncidentStatus::Resolved,
-        _ => crate::statuspage::IncidentStatus::Investigating,
-    };
-
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let incident = body.into_inner();
 
     let mut config = state.statuspage.config.write().unwrap();
-    let page = match config.pages.iter_mut().find(|p| p.id == page_id) {
-        Some(p) => p,
-        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Page not found" })),
-    };
-
-    match page.incidents.iter_mut().find(|i| i.id == incident_id) {
-        Some(incident) => {
-            incident.status = new_status.clone();
-            if new_status == crate::statuspage::IncidentStatus::Resolved {
-                incident.resolved_at = Some(now.clone());
-            }
-            if !message.is_empty() {
-                incident.updates.push(crate::statuspage::IncidentUpdate {
-                    timestamp: now,
-                    status: new_status,
-                    message,
-                });
-            }
-            let _ = config.save();
-            HttpResponse::Ok().json(serde_json::json!({ "updated": true }))
+    if let Some(existing) = config.incidents.iter_mut().find(|i| i.id == incident.id) {
+        // If status changed to resolved and we didn't have a resolved_at, set it
+        if incident.status == crate::statuspage::IncidentStatus::Resolved && existing.status != crate::statuspage::IncidentStatus::Resolved {
+            let mut updated_incident = incident.clone();
+            updated_incident.resolved_at = Some(chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
+            *existing = updated_incident;
+        } else {
+            *existing = incident.clone();
         }
-        None => HttpResponse::NotFound().json(serde_json::json!({ "error": "Incident not found" })),
+    } else {
+        config.incidents.push(incident.clone());
     }
+
+    if let Err(e) = config.save() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "saved": true, "incident": incident }))
+}
+
+/// DELETE /api/statuspage/incidents/{id} — delete an incident
+pub async fn statuspage_incident_delete(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let mut config = state.statuspage.config.write().unwrap();
+    let before = config.incidents.len();
+    config.incidents.retain(|i| i.id != id);
+
+    // Also remove this incident from all pages
+    for page in config.pages.iter_mut() {
+        page.incident_ids.retain(|iid| iid != &id);
+    }
+
+    if config.incidents.len() == before {
+        return HttpResponse::NotFound().json(serde_json::json!({ "error": "Incident not found" }));
+    }
+    let _ = config.save();
+    HttpResponse::Ok().json(serde_json::json!({ "deleted": true }))
 }
 
 /// GET /status — public index listing all enabled status pages (or redirect if only one)
@@ -8683,8 +8649,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/statuspage/pages", web::get().to(statuspage_pages_list))
         .route("/api/statuspage/pages", web::post().to(statuspage_page_save))
         .route("/api/statuspage/pages/{id}", web::delete().to(statuspage_page_delete))
-        .route("/api/statuspage/pages/{page_id}/incidents", web::post().to(statuspage_incident_create))
-        .route("/api/statuspage/pages/{page_id}/incidents/{id}", web::patch().to(statuspage_incident_update))
+        .route("/api/statuspage/incidents", web::get().to(statuspage_incidents_list))
+        .route("/api/statuspage/incidents", web::post().to(statuspage_incident_save))
+        .route("/api/statuspage/incidents/{id}", web::delete().to(statuspage_incident_delete))
         // Status Page (public — NO auth)
         .route("/status", web::get().to(statuspage_public_index))
         .route("/status/{slug}", web::get().to(statuspage_public_page));

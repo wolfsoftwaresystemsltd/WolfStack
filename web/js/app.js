@@ -14871,7 +14871,7 @@ function switchStatusTab(tab) {
     document.getElementById('sp-tab-pages').classList.toggle('btn-primary', tab === 'pages');
     document.getElementById('sp-tab-monitors').classList.toggle('btn-primary', tab === 'monitors');
     document.getElementById('sp-tab-incidents').classList.toggle('btn-primary', tab === 'incidents');
-    
+
     if (tab === 'incidents') {
         renderIncidentsList();
     }
@@ -14939,14 +14939,14 @@ function renderStatusPages(pages) {
         const colors = { up: '#22c55e', degraded: '#eab308', down: '#ef4444', unknown: '#6b7280' };
         const labels = { up: 'Operational', degraded: 'Degraded', down: 'Major Outage', unknown: 'Unknown' };
         const svcCount = (p.page?.services || []).length;
-        
+
         const activeIncidents = (p.page?.incidents || []).filter(i => i.status !== 'resolved');
-        const incidentBadge = activeIncidents.length > 0 
+        const incidentBadge = activeIncidents.length > 0
             ? `<span style="font-size:10px; padding:2px 8px; background:#ef4444; color:#fff; border-radius:10px; margin-left:8px;">${activeIncidents.length} active</span>`
             : '';
-        
+
         const uptime = p.uptime_30d != null ? `${p.uptime_30d.toFixed(2)}%` : '—';
-        
+
         return `<div style="background:var(--bg-input); border:1px solid var(--border); border-radius:12px; padding:20px;">
             <div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:12px;">
                 <div>
@@ -14967,7 +14967,7 @@ function renderStatusPages(pages) {
             </div>
             <div style="display:flex; justify-content:space-between; align-items:center; padding-top:12px; border-top:1px solid var(--border);">
                 <div style="font-size:12px; color:var(--text-muted);">
-                    ${svcCount} service${svcCount !== 1 ? 's' : ''} monitored
+                    ${(p.page?.monitor_ids || []).length} monitor(s) &bull; ${(p.page?.incident_ids || []).length} incident(s) assigned
                 </div>
                 <div style="display:flex; gap:6px;">
                     <button class="btn btn-sm" onclick="showIncidentForm(null, '${p.page.id}')" style="font-size:11px;">🚨 Report Incident</button>
@@ -14999,9 +14999,9 @@ function renderStatusMonitors(monitors) {
         const latencyStr = m.latest ? `${m.latest.latency_ms}ms` : '—';
         const typeLabel = mon.check?.type || '?';
         const uptime = (m.uptime_percent || 100).toFixed(2);
-        
+
         const uptimeHistory = renderUptimeBar(m.history || [], 30);
-        
+
         return `<div style="background:var(--bg-input); border:1px solid var(--border); border-radius:10px; padding:16px;">
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
                 <div style="display:flex; align-items:center; gap:12px;">
@@ -15039,12 +15039,12 @@ function renderStatusMonitors(monitors) {
 function renderUptimeBar(history, days) {
     const bars = [];
     const colors = { up: '#22c55e', degraded: '#eab308', down: '#ef4444', unknown: '#374151' };
-    
+
     for (let i = 0; i < days; i++) {
         const dayData = history[i];
         let color = colors.unknown;
         let tooltip = 'No data';
-        
+
         if (dayData) {
             const pct = dayData.uptime_percent || 0;
             if (pct >= 99.5) {
@@ -15056,21 +15056,21 @@ function renderUptimeBar(history, days) {
             }
             tooltip = `${pct.toFixed(2)}% uptime`;
         }
-        
+
         bars.push(`<div style="flex:1; background:${color}; transition:background 0.2s;" title="${tooltip}"></div>`);
     }
-    
+
     return bars.join('');
 }
 
 async function showMonitorDetails(monitorId) {
     const m = spMonitorsEnriched.find(x => x.monitor.id === monitorId);
     if (!m) return;
-    
+
     const mon = m.monitor;
     const colors = { up: '#22c55e', degraded: '#eab308', down: '#ef4444', unknown: '#6b7280' };
     const st = m.status || 'unknown';
-    
+
     let checkDetails = '';
     const c = mon.check || {};
     if (c.type === 'http') {
@@ -15084,7 +15084,7 @@ async function showMonitorDetails(monitorId) {
     } else if (c.type === 'wolfrun') {
         checkDetails = `Service: <code>${escapeHtml(c.service_name)}</code><br>Min healthy: ${c.min_healthy}`;
     }
-    
+
     const recentChecks = (m.recent_checks || []).slice(0, 10).map(chk => {
         const time = new Date(chk.timestamp).toLocaleString();
         const statusColor = chk.success ? colors.up : colors.down;
@@ -15094,7 +15094,7 @@ async function showMonitorDetails(monitorId) {
             <span style="font-size:11px;">${chk.latency_ms}ms</span>
         </div>`;
     }).join('') || '<div style="color:var(--text-muted); padding:12px;">No recent checks</div>';
-    
+
     const modal = document.createElement('div');
     modal.className = 'modal active';
     modal.id = 'sp-monitor-details-modal';
@@ -15170,7 +15170,7 @@ async function updateMonitorFormFields(existingCheck) {
     const type = document.getElementById('sp-mon-type').value;
     const el = document.getElementById('sp-mon-fields');
     const c = existingCheck || {};
-    
+
     if (type === 'http') {
         el.innerHTML = `<div style="display:grid; grid-template-columns:3fr 1fr; gap:16px; margin-bottom:16px;">
             <div class="form-group"><label>URL</label><input type="text" id="sp-mon-url" class="form-control" placeholder="https://example.com" value="${escapeHtml(c.url || '')}"></div>
@@ -15205,9 +15205,9 @@ async function saveMonitor() {
         check = { type: 'ping', host: document.getElementById('sp-mon-host').value };
     } else if (type === 'container') {
         const nodeId = document.getElementById('sp-mon-container-node')?.value || null;
-        check = { 
-            type: 'container', 
-            runtime: document.getElementById('sp-mon-runtime').value, 
+        check = {
+            type: 'container',
+            runtime: document.getElementById('sp-mon-runtime').value,
             name: document.getElementById('sp-mon-container').value,
             node_id: nodeId || undefined
         };
@@ -15234,6 +15234,7 @@ async function saveMonitor() {
         interval_secs: parseInt(document.getElementById('sp-mon-interval').value) || 60,
         timeout_secs: parseInt(document.getElementById('sp-mon-timeout').value) || 10,
         enabled: document.getElementById('sp-mon-enabled').checked,
+        cluster: spCurrentCluster,
     };
     try {
         const res = await fetch('/api/statuspage/monitors', {
@@ -15273,18 +15274,44 @@ function showStatusPageForm(existing) {
 
     const container = document.getElementById('sp-page-services');
     container.innerHTML = '';
-    
-    const monitors = spConfig?.monitors || [];
+
+    const monitors = (spConfig?.monitors || []).filter(m => m.cluster === spCurrentCluster);
+    const incidents = (spConfig?.incidents || []).filter(i => i.cluster === spCurrentCluster);
     if (monitors.length === 0 && !existing) {
         container.innerHTML = `<div style="background:var(--bg-tertiary); border:1px dashed var(--border); border-radius:8px; padding:20px; text-align:center; color:var(--text-muted);">
             <div style="font-size:24px; margin-bottom:8px;">🔍</div>
-            <div style="font-size:13px; margin-bottom:12px;">You need to create monitors before adding services to a status page.</div>
+            <div style="font-size:13px; margin-bottom:12px;">You need to create monitors in this cluster before adding them to a status page.</div>
             <button class="btn btn-sm btn-primary" onclick="switchStatusTab('monitors'); showMonitorForm();" style="font-size:12px;">+ Create Your First Monitor</button>
         </div>`;
     } else {
-        (existing?.services || []).forEach(svc => addServiceRow(svc));
+        const monHtml = monitors.map(m => `
+            <label style="display:block; margin-bottom:4px; font-size:13px;">
+                <input type="checkbox" class="sp-checkbox-monitor" value="${m.id}" ${(existing?.monitor_ids || []).includes(m.id) ? 'checked' : ''}>
+                ${escapeHtml(m.name)}
+            </label>
+        `).join('');
+
+        const incHtml = incidents.length ? incidents.map(i => `
+            <label style="display:block; margin-bottom:4px; font-size:13px;">
+                <input type="checkbox" class="sp-checkbox-incident" value="${i.id}" ${(existing?.incident_ids || []).includes(i.id) ? 'checked' : ''}>
+                ${escapeHtml(i.title)} (${i.status})
+            </label>
+        `).join('') : '<div style="font-size:12px; color:var(--text-muted);">No incidents in this cluster.</div>';
+
+        container.innerHTML = `
+            <div style="background:var(--bg-tertiary); border:1px solid var(--border); border-radius:8px; padding:16px;">
+                <h4 style="margin:0 0 12px 0; font-size:14px;">Assign Monitors</h4>
+                <div style="max-height:150px; overflow-y:auto; border-bottom:1px solid var(--border); padding-bottom:12px; margin-bottom:12px;">
+                    ${monHtml || '<div style="font-size:12px; color:var(--text-muted);">No monitors.</div>'}
+                </div>
+                <h4 style="margin:0 0 12px 0; font-size:14px;">Assign Incidents</h4>
+                <div style="max-height:150px; overflow-y:auto;">
+                    ${incHtml}
+                </div>
+            </div>
+        `;
     }
-    
+
     form.scrollIntoView({ behavior: 'smooth' });
 }
 
@@ -15307,11 +15334,11 @@ function addServiceRowWithCheck() {
 function addServiceRow(svc) {
     const container = document.getElementById('sp-page-services');
     const monitors = spConfig?.monitors || [];
-    
+
     const monOptions = monitors.map(m =>
         `<option value="${m.id}" ${(svc?.monitor_ids || []).includes(m.id) ? 'selected' : ''}>${escapeHtml(m.name)}</option>`
     ).join('');
-    
+
     const div = document.createElement('div');
     div.style.cssText = 'background:var(--bg-tertiary); border:1px solid var(--border); border-radius:8px; padding:12px; display:grid; grid-template-columns:1fr 2fr auto; gap:10px; align-items:start;';
     div.innerHTML = `
@@ -15326,13 +15353,8 @@ function addServiceRow(svc) {
 }
 
 async function saveStatusPage() {
-    const services = [];
-    document.querySelectorAll('#sp-page-services > div').forEach(row => {
-        const name = row.querySelector('.sp-svc-name')?.value || '';
-        const select = row.querySelector('.sp-svc-monitors');
-        const monitor_ids = Array.from(select?.selectedOptions || []).map(o => o.value);
-        if (name) services.push({ id: crypto.randomUUID(), name, monitor_ids, description: '' });
-    });
+    const monitor_ids = Array.from(document.querySelectorAll('.sp-checkbox-monitor:checked')).map(cb => cb.value);
+    const incident_ids = Array.from(document.querySelectorAll('.sp-checkbox-incident:checked')).map(cb => cb.value);
 
     const page = {
         id: document.getElementById('sp-page-id').value,
@@ -15341,8 +15363,9 @@ async function saveStatusPage() {
         logo_url: document.getElementById('sp-page-logo').value || null,
         footer_text: document.getElementById('sp-page-footer').value || null,
         enabled: document.getElementById('sp-page-enabled').checked,
-        services,
-        incidents: spConfig.pages.find(p => p.id === document.getElementById('sp-page-id').value)?.incidents || [],
+        cluster: spCurrentCluster,
+        monitor_ids,
+        incident_ids,
     };
 
     try {
@@ -15375,16 +15398,10 @@ let spAllIncidents = [];
 
 function renderIncidentsList() {
     const el = document.getElementById('sp-incidents-list');
-    
-    spAllIncidents = [];
-    (spConfig.pages || []).forEach(page => {
-        (page.incidents || []).forEach(inc => {
-            spAllIncidents.push({ ...inc, page_id: page.id, page_title: page.title });
-        });
-    });
-    
+
+    spAllIncidents = (spConfig.incidents || []).filter(i => i.cluster === spCurrentCluster);
     spAllIncidents.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
-    
+
     if (!spAllIncidents.length) {
         el.innerHTML = `<div style="text-align:center; padding:40px; color:var(--text-muted);">
             <div style="font-size:32px; margin-bottom:12px;">✅</div>
@@ -15393,10 +15410,10 @@ function renderIncidentsList() {
         </div>`;
         return;
     }
-    
+
     const impactColors = { none: '#6b7280', minor: '#eab308', major: '#f97316', critical: '#ef4444' };
     const statusIcons = { investigating: '🔍', identified: '🎯', monitoring: '👀', resolved: '✅' };
-    
+
     el.innerHTML = spAllIncidents.map(inc => {
         const impact = inc.impact || 'none';
         const status = inc.status || 'investigating';
@@ -15404,7 +15421,7 @@ function renderIncidentsList() {
         const resolved = inc.resolved_at ? new Date(inc.resolved_at).toLocaleString() : null;
         const updates = inc.updates || [];
         const lastUpdate = updates.length ? updates[updates.length - 1] : null;
-        
+
         const updatesHtml = updates.slice(-3).map(u => {
             const time = u.timestamp ? new Date(u.timestamp).toLocaleString() : '';
             return `<div style="padding:8px 0; border-bottom:1px solid var(--border);">
@@ -15412,21 +15429,21 @@ function renderIncidentsList() {
                 <div style="font-size:12px; margin-top:4px;">${escapeHtml(u.message)}</div>
             </div>`;
         }).join('');
-        
+
         return `<div style="background:var(--bg-input); border:1px solid var(--border); border-left:4px solid ${impactColors[impact]}; border-radius:10px; padding:16px;">
             <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px;">
                 <div>
                     <div style="font-weight:600; font-size:15px;">${statusIcons[status]} ${escapeHtml(inc.title)}</div>
                     <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">
                         <span style="padding:2px 8px; background:${impactColors[impact]}22; color:${impactColors[impact]}; border-radius:4px; text-transform:uppercase; font-size:10px; font-weight:600;">${impact}</span>
-                        &bull; ${escapeHtml(inc.page_title)} &bull; Started: ${created}
+                        &bull; Started: ${created}
                         ${resolved ? `&bull; Resolved: ${resolved}` : ''}
                     </div>
                 </div>
                 <div style="display:flex; gap:6px;">
-                    ${status !== 'resolved' ? `<button class="btn btn-sm" onclick="updateIncident('${inc.id}', '${inc.page_id}')" style="font-size:11px;">📝 Update</button>` : ''}
-                    <button class="btn btn-sm" onclick="editIncident('${inc.id}', '${inc.page_id}')" style="font-size:11px;">✏️</button>
-                    <button class="btn btn-sm" onclick="deleteIncident('${inc.id}', '${inc.page_id}')" style="font-size:11px; color:#ef4444;">🗑️</button>
+                    ${status !== 'resolved' ? `<button class="btn btn-sm" onclick="updateIncident('${inc.id}')" style="font-size:11px;">📝 Update</button>` : ''}
+                    <button class="btn btn-sm" onclick="editIncident('${inc.id}')" style="font-size:11px;">✏️</button>
+                    <button class="btn btn-sm" onclick="deleteIncident('${inc.id}')" style="font-size:11px; color:#ef4444;">🗑️</button>
                 </div>
             </div>
             ${updates.length > 0 ? `
@@ -15439,107 +15456,74 @@ function renderIncidentsList() {
     }).join('');
 }
 
-function showIncidentForm(existing, pageId) {
+function showIncidentForm(existing) {
     const form = document.getElementById('sp-incident-form');
     document.getElementById('sp-page-form').style.display = 'none';
     document.getElementById('sp-monitor-form').style.display = 'none';
     form.style.display = '';
-    
+
     document.getElementById('sp-incident-form-title').textContent = existing ? 'Edit Incident' : 'Report Incident';
     document.getElementById('sp-incident-id').value = existing?.id || crypto.randomUUID();
-    document.getElementById('sp-incident-page-id').value = pageId || '';
     document.getElementById('sp-incident-title').value = existing?.title || '';
     document.getElementById('sp-incident-status').value = existing?.status || 'investigating';
     document.getElementById('sp-incident-impact').value = existing?.impact || 'minor';
     document.getElementById('sp-incident-message').value = '';
-    
-    const pageSelect = document.getElementById('sp-incident-page');
-    pageSelect.innerHTML = `<option value="">-- Select a status page --</option>` +
-        (spConfig.pages || []).map(p => 
-            `<option value="${p.id}" ${p.id === pageId ? 'selected' : ''}>${escapeHtml(p.title)}</option>`
-        ).join('');
-    
-    updateIncidentServicesSelect(pageId);
-    
-    pageSelect.onchange = function() {
-        updateIncidentServicesSelect(this.value);
-    };
-    
-    if (existing?.affected_services) {
-        setTimeout(() => {
-            const servicesSelect = document.getElementById('sp-incident-services');
-            Array.from(servicesSelect.options).forEach(opt => {
-                opt.selected = existing.affected_services.includes(opt.value);
-            });
-        }, 100);
+
+    // Services are no longer relevant, monitor mapping happens on the status page directly
+    const servicesSelect = document.getElementById('sp-incident-services');
+    if (servicesSelect) {
+        servicesSelect.innerHTML = '<option value="" disabled>Service association removed. Assign incidents to status pages instead.</option>';
+        servicesSelect.disabled = true;
     }
-    
+
+    // The page selector is also no longer relevant for incidents, as incidents are top-level
+    const pageSelect = document.getElementById('sp-incident-page');
+    if (pageSelect) {
+        pageSelect.innerHTML = '<option value="" disabled>Page association removed. Incidents are top-level.</option>';
+        pageSelect.disabled = true;
+    }
+
     form.scrollIntoView({ behavior: 'smooth' });
 }
 
-function updateIncidentServicesSelect(pageId) {
-    const servicesSelect = document.getElementById('sp-incident-services');
-    const page = (spConfig.pages || []).find(p => p.id === pageId);
-    
-    if (!page || !page.services?.length) {
-        servicesSelect.innerHTML = '<option value="" disabled>No services on this page</option>';
-        return;
-    }
-    
-    servicesSelect.innerHTML = page.services.map(svc =>
-        `<option value="${svc.id}">${escapeHtml(svc.name)}</option>`
-    ).join('');
+function editIncident(incidentId) {
+    const incident = (spConfig.incidents || []).find(i => i.id === incidentId);
+    if (incident) showIncidentForm(incident);
 }
 
-function editIncident(incidentId, pageId) {
-    const page = (spConfig.pages || []).find(p => p.id === pageId);
-    const incident = page?.incidents?.find(i => i.id === incidentId);
-    if (incident) showIncidentForm(incident, pageId);
-}
-
-function updateIncident(incidentId, pageId) {
-    const page = (spConfig.pages || []).find(p => p.id === pageId);
-    const incident = page?.incidents?.find(i => i.id === incidentId);
+function updateIncident(incidentId) {
+    const incident = (spConfig.incidents || []).find(i => i.id === incidentId);
     if (!incident) return;
-    
-    showIncidentForm(incident, pageId);
+
+    showIncidentForm(incident);
     document.getElementById('sp-incident-form-title').textContent = 'Add Update to Incident';
 }
 
 async function saveIncident() {
-    const pageId = document.getElementById('sp-incident-page').value || document.getElementById('sp-incident-page-id').value;
-    if (!pageId) {
-        showToast('Please select a status page', 'error');
-        return;
-    }
-    
     const title = document.getElementById('sp-incident-title').value.trim();
     if (!title) {
         showToast('Please enter an incident title', 'error');
         return;
     }
-    
+
     const incidentId = document.getElementById('sp-incident-id').value;
     const status = document.getElementById('sp-incident-status').value;
     const impact = document.getElementById('sp-incident-impact').value;
     const message = document.getElementById('sp-incident-message').value.trim();
-    const servicesSelect = document.getElementById('sp-incident-services');
-    const affected_services = Array.from(servicesSelect.selectedOptions).map(o => o.value);
-    
-    const page = (spConfig.pages || []).find(p => p.id === pageId);
-    const existingIncident = page?.incidents?.find(i => i.id === incidentId);
-    
+
+    const existingIncident = (spConfig.incidents || []).find(i => i.id === incidentId);
+
     const incident = {
         id: incidentId,
         title,
         status,
         impact,
-        affected_services,
+        cluster: spCurrentCluster,
         created_at: existingIncident?.created_at || new Date().toISOString(),
         resolved_at: status === 'resolved' ? (existingIncident?.resolved_at || new Date().toISOString()) : null,
         updates: existingIncident?.updates || []
     };
-    
+
     if (message) {
         incident.updates.push({
             timestamp: new Date().toISOString(),
@@ -15547,9 +15531,9 @@ async function saveIncident() {
             message
         });
     }
-    
+
     try {
-        const res = await fetch(`/api/statuspage/pages/${pageId}/incidents`, {
+        const res = await fetch(`/api/statuspage/incidents`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
             body: JSON.stringify(incident),
@@ -15558,24 +15542,24 @@ async function saveIncident() {
         showToast('Incident saved', 'success');
         document.getElementById('sp-incident-form').style.display = 'none';
         loadStatusPageData();
-    } catch (e) { 
-        showToast('Failed to save incident: ' + e.message, 'error'); 
+    } catch (e) {
+        showToast('Failed to save incident: ' + e.message, 'error');
     }
 }
 
-async function deleteIncident(incidentId, pageId) {
+async function deleteIncident(incidentId) {
     if (!confirm('Delete this incident?')) return;
-    
+
     try {
-        const res = await fetch(`/api/statuspage/pages/${pageId}/incidents/${incidentId}`, {
+        const res = await fetch(`/api/statuspage/incidents/${incidentId}`, {
             method: 'DELETE',
             headers: { 'Authorization': `Bearer ${sessionToken}` },
         });
         if (!res.ok) throw new Error(await res.text());
         showToast('Incident deleted', 'success');
         loadStatusPageData();
-    } catch (e) { 
-        showToast('Failed to delete incident: ' + e.message, 'error'); 
+    } catch (e) {
+        showToast('Failed to delete incident: ' + e.message, 'error');
     }
 }
 
@@ -15592,7 +15576,7 @@ async function loadContainersForMonitor() {
         const nodeCluster = n.cluster_name || 'WolfStack';
         return nodeCluster === spCurrentCluster && n.online;
     });
-    
+
     for (const node of clusterNodes) {
         try {
             const dockerRes = await fetch(`/api/nodes/${node.id}/proxy/containers/docker`, {
@@ -15611,7 +15595,7 @@ async function loadContainersForMonitor() {
                 });
             }
         } catch (e) { }
-        
+
         try {
             const lxcRes = await fetch(`/api/nodes/${node.id}/proxy/containers/lxc`, {
                 headers: { 'Authorization': `Bearer ${sessionToken}` }
@@ -15654,7 +15638,7 @@ function renderContainerPicker(existingCheck) {
         const stateIcon = ct.state === 'running' ? '🟢' : '🔴';
         return `<option value="${ct.runtime}:${escapeHtml(ct.name)}:${ct.node_id}" ${selected}>${stateIcon} ${escapeHtml(ct.name)} (${ct.runtime} @ ${escapeHtml(ct.node)})</option>`;
     }).join('');
-    
+
     return `<div class="form-group" style="margin-bottom:16px;">
         <label>Select Container</label>
         <select id="sp-mon-container-select" class="form-control" onchange="onContainerSelect()">
@@ -15693,7 +15677,7 @@ function renderWolfrunServicePicker(existingCheck) {
         const statusIcon = running === total && total > 0 ? '🟢' : running > 0 ? '🟡' : '🔴';
         return `<option value="${svc.id}" ${selected}>${statusIcon} ${escapeHtml(svc.name)} (${running}/${total} running)</option>`;
     }).join('');
-    
+
     return `<div class="form-group" style="margin-bottom:16px;">
         <label>WolfRun Service</label>
         <select id="sp-mon-wolfrun-svc" class="form-control">
