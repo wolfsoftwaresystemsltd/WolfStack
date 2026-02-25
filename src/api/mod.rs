@@ -8188,12 +8188,21 @@ pub async fn statuspage_monitors_list(req: HttpRequest, state: web::Data<AppStat
         let status = state.statuspage.monitor_status(&m.id);
         let latest = state.statuspage.latest_result(&m.id);
         let uptime = state.statuspage.uptime_percent(&m.id);
+        let history = state.statuspage.get_daily_uptime(&m.id);
+        let recent_checks: Vec<_> = {
+            let results = state.statuspage.results.read().unwrap();
+            results.get(&m.id)
+                .map(|d| d.iter().rev().take(20).cloned().collect())
+                .unwrap_or_default()
+        };
         serde_json::json!({
             "monitor": m,
             "status": status,
             "status_label": status.label(),
             "latest": latest,
             "uptime_percent": uptime,
+            "history": history,
+            "recent_checks": recent_checks,
         })
     }).collect();
     HttpResponse::Ok().json(serde_json::json!({ "monitors": monitors }))
@@ -8239,10 +8248,38 @@ pub async fn statuspage_pages_list(req: HttpRequest, state: web::Data<AppState>)
     let config = state.statuspage.config.read().unwrap();
     let pages: Vec<serde_json::Value> = config.pages.iter().map(|p| {
         let overall = state.statuspage.page_overall_status(p);
+        // Calculate 30-day uptime across all monitors on this page
+        let uptime_30d: Option<f64> = if p.monitor_ids.is_empty() {
+            None
+        } else {
+            let uptimes: Vec<f32> = p.monitor_ids.iter()
+                .map(|mid| state.statuspage.uptime_percent(mid))
+                .collect();
+            if uptimes.is_empty() { None }
+            else { Some(uptimes.iter().sum::<f32>() as f64 / uptimes.len() as f64) }
+        };
+        // Collect active incidents for this page
+        let active_incidents: Vec<_> = config.incidents.iter()
+            .filter(|i| p.incident_ids.contains(&i.id) && i.status != crate::statuspage::IncidentStatus::Resolved)
+            .cloned()
+            .collect();
         serde_json::json!({
-            "page": p,
+            "page": {
+                "id": p.id,
+                "slug": p.slug,
+                "title": p.title,
+                "cluster": p.cluster,
+                "logo_url": p.logo_url,
+                "footer_text": p.footer_text,
+                "monitor_ids": p.monitor_ids,
+                "incident_ids": p.incident_ids,
+                "enabled": p.enabled,
+                "incidents": active_incidents,
+                "services": p.monitor_ids,
+            },
             "overall_status": overall,
             "overall_label": overall.label(),
+            "uptime_30d": uptime_30d,
             "url": format!("/status/{}", p.slug),
         })
     }).collect();
