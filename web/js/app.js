@@ -14870,21 +14870,21 @@ function spUrl(path) {
 }
 
 // Build the public URL for a status page.
-// Uses the node's address (admin-configured FQDN) with the same protocol the user is on.
+// Uses port 8550 (dedicated status page HTTP listener) on the node's address.
 function spPublicUrl(slug, cluster) {
     const selfNode = allNodes.find(n => n.is_self);
     const selfCluster = selfNode?.cluster_name || 'WolfStack';
     const resolvedCluster = cluster || spCurrentCluster || selfCluster;
-    const scheme = window.location.protocol.replace(':', '');
     if (resolvedCluster === selfCluster) {
-        return `${scheme}://${window.location.host}/status/${slug}`;
+        const host = selfNode?.address || window.location.hostname;
+        return `http://${host}:8550/status/${slug}`;
     }
     const remoteNode = spFindRemoteNode(resolvedCluster);
     if (remoteNode) {
         const host = remoteNode.address || remoteNode.hostname;
-        return `${scheme}://${host}:${remoteNode.port}/status/${slug}`;
+        return `http://${host}:8550/status/${slug}`;
     }
-    return `/status/${slug}`;
+    return `http://${window.location.hostname}:8550/status/${slug}`;
 }
 
 function showStatusPagesForCluster(clusterName) {
