@@ -14869,17 +14869,19 @@ function spUrl(path) {
 function spPublicUrl(slug, cluster) {
     const selfNode = allNodes.find(n => n.is_self);
     const selfCluster = selfNode?.cluster_name || 'WolfStack';
-    // Treat empty/missing cluster as local
-    if (!cluster || cluster === selfCluster) {
-        return `${window.location.origin}/status/${slug}`;
-    }
-    const remoteNode = allNodes.find(n => n.online && (n.cluster_name || 'WolfStack') === cluster);
-    if (!remoteNode) {
-        // No online node found for that cluster — use local origin as best fallback
-        return `${window.location.origin}/status/${slug}`;
-    }
+    // Use spCurrentCluster as fallback when page has no cluster set
+    const resolvedCluster = cluster || spCurrentCluster || selfCluster;
     const scheme = serverTlsEnabled ? 'https' : 'http';
-    return `${scheme}://${remoteNode.address}:${remoteNode.port}/status/${slug}`;
+    if (resolvedCluster === selfCluster) {
+        return `${window.location.origin}/status/${slug}`;
+    }
+    // Remote cluster — find an online node to build the URL from
+    const remoteNode = allNodes.find(n => n.online && (n.cluster_name || 'WolfStack') === resolvedCluster);
+    if (remoteNode) {
+        return `${scheme}://${remoteNode.address}:${remoteNode.port}/status/${slug}`;
+    }
+    // No online node — still show the cluster name so the user knows it's remote
+    return `${scheme}://${resolvedCluster}:${selfNode?.port || 8553}/status/${slug}`;
 }
 
 function showStatusPagesForCluster(clusterName) {
