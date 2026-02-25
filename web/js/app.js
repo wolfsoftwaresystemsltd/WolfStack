@@ -14835,6 +14835,24 @@ let spMonitorsEnriched = [];
 let spCurrentCluster = null;
 let spRefreshTimer = null;
 
+// Determine if the current cluster is local (this server) or remote.
+// Returns the API base path: '' for local, '/api/nodes/{id}/proxy' for remote.
+function spApiBase() {
+    if (!spCurrentCluster) return '';
+    const selfNode = allNodes.find(n => n.is_self);
+    const selfCluster = selfNode?.cluster_name || 'WolfStack';
+    if (spCurrentCluster === selfCluster) return '';
+    // Find first online node in the target cluster to proxy through
+    const remoteNode = allNodes.find(n => n.online && (n.cluster_name || 'WolfStack') === spCurrentCluster);
+    if (!remoteNode) return '';
+    return `/api/nodes/${remoteNode.id}/proxy`;
+}
+
+function spUrl(path) {
+    const base = spApiBase();
+    return base ? `${base}/${path}` : `/api/${path}`;
+}
+
 function showStatusPagesForCluster(clusterName) {
     spCurrentCluster = clusterName;
     currentPage = 'statuspage';
@@ -14897,7 +14915,7 @@ async function loadStatusPageData() {
     let monitors = [];
 
     try {
-        const cfgRes = await fetch('/api/statuspage/config');
+        const cfgRes = await fetch(spUrl('statuspage/config'));
         if (cfgRes.ok) {
             spConfig = await cfgRes.json();
             if (!spConfig.monitors) spConfig.monitors = [];
@@ -14912,7 +14930,7 @@ async function loadStatusPageData() {
     }
 
     try {
-        const pagesRes = await fetch('/api/statuspage/pages');
+        const pagesRes = await fetch(spUrl('statuspage/pages'));
         if (pagesRes.ok) {
             const pagesData = await pagesRes.json();
             pages = pagesData.pages || [];
@@ -14922,7 +14940,7 @@ async function loadStatusPageData() {
     }
 
     try {
-        const monsRes = await fetch('/api/statuspage/monitors');
+        const monsRes = await fetch(spUrl('statuspage/monitors'));
         if (monsRes.ok) {
             const monsData = await monsRes.json();
             monitors = monsData.monitors || [];
@@ -15265,7 +15283,7 @@ async function saveMonitor() {
         cluster: spCurrentCluster,
     };
     try {
-        const res = await fetch('/api/statuspage/monitors', {
+        const res = await fetch(spUrl('statuspage/monitors'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(monitor),
@@ -15280,7 +15298,7 @@ async function saveMonitor() {
 async function deleteMonitor(id) {
     if (!confirm('Delete this monitor?')) return;
     try {
-        await fetch(`/api/statuspage/monitors/${id}`, { method: 'DELETE' });
+        await fetch(spUrl(`statuspage/monitors/${id}`), { method: 'DELETE' });
         showToast('Monitor deleted', 'success');
         loadStatusPageData();
     } catch (e) { showToast('Failed to delete monitor', 'error'); }
@@ -15369,7 +15387,7 @@ async function saveStatusPage() {
     };
 
     try {
-        const res = await fetch('/api/statuspage/pages', {
+        const res = await fetch(spUrl('statuspage/pages'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(page),
@@ -15384,7 +15402,7 @@ async function saveStatusPage() {
 async function deleteStatusPage(id) {
     if (!confirm('Delete this status page? This cannot be undone.')) return;
     try {
-        await fetch(`/api/statuspage/pages/${id}`, { method: 'DELETE' });
+        await fetch(spUrl(`statuspage/pages/${id}`), { method: 'DELETE' });
         showToast('Status page deleted', 'success');
         loadStatusPageData();
     } catch (e) { showToast('Failed to delete page', 'error'); }
@@ -15554,7 +15572,7 @@ async function saveIncident() {
     }
 
     try {
-        const res = await fetch(`/api/statuspage/incidents`, {
+        const res = await fetch(spUrl('statuspage/incidents'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(incident),
@@ -15566,7 +15584,7 @@ async function saveIncident() {
             const page = spConfig.pages.find(p => p.id === selectedPageId);
             if (page && !page.incident_ids.includes(incidentId)) {
                 page.incident_ids.push(incidentId);
-                await fetch('/api/statuspage/pages', {
+                await fetch(spUrl('statuspage/pages'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(page),
@@ -15586,7 +15604,7 @@ async function deleteIncident(incidentId) {
     if (!confirm('Delete this incident?')) return;
 
     try {
-        const res = await fetch(`/api/statuspage/incidents/${incidentId}`, {
+        const res = await fetch(spUrl(`statuspage/incidents/${incidentId}`), {
             method: 'DELETE',
         });
         if (!res.ok) throw new Error(await res.text());
