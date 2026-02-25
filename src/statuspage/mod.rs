@@ -142,6 +142,9 @@ pub struct StatusPage {
     pub logo_url: Option<String>,
     #[serde(default)]
     pub footer_text: Option<String>,
+    /// Theme for the public status page (dark, light, midnight, datacenter, forest, amber, glass, deepred)
+    #[serde(default)]
+    pub theme: Option<String>,
     #[serde(default)]
     pub monitor_ids: Vec<String>,
     #[serde(default)]
@@ -674,6 +677,64 @@ fn compute_monitor_status(state: &Arc<StatusPageState>, monitor_id: &str) -> Mon
 // ─── Public Status Page HTML Renderer ───
 // ═══════════════════════════════════════════════
 
+/// Theme color palette for public status pages
+struct ThemeColors {
+    body_bg: &'static str,
+    text: &'static str,
+    heading: &'static str,
+    card_bg: &'static str,
+    card_border: &'static str,
+    muted: &'static str,
+    secondary: &'static str,
+    divider: &'static str,
+    bar_empty: &'static str,
+}
+
+fn theme_colors(theme: Option<&str>) -> ThemeColors {
+    match theme {
+        Some("light") => ThemeColors {
+            body_bg: "#f5f6fa", text: "#1a1d2e", heading: "#0f1118", card_bg: "#ffffff",
+            card_border: "#e2e4ea", muted: "#8b90a0", secondary: "#5a5f72",
+            divider: "#e2e4ea", bar_empty: "#e2e4ea",
+        },
+        Some("midnight") => ThemeColors {
+            body_bg: "#000000", text: "#e4e4f0", heading: "#f0f0ff", card_bg: "#111118",
+            card_border: "#1e1e2e", muted: "#555570", secondary: "#8888a8",
+            divider: "#1e1e2e", bar_empty: "#111118",
+        },
+        Some("datacenter") => ThemeColors {
+            body_bg: "#1d2733", text: "#dce3eb", heading: "#eef2f7", card_bg: "#2a3849",
+            card_border: "#374b5e", muted: "#607588", secondary: "#8fa4b8",
+            divider: "#374b5e", bar_empty: "#2a3849",
+        },
+        Some("forest") => ThemeColors {
+            body_bg: "#0c1a10", text: "#d8eedc", heading: "#e8ffe8", card_bg: "#1a3020",
+            card_border: "#264030", muted: "#5a7868", secondary: "#88b098",
+            divider: "#264030", bar_empty: "#1a3020",
+        },
+        Some("amber") => ThemeColors {
+            body_bg: "#0a0800", text: "#f0d890", heading: "#ffe8a0", card_bg: "#1a1610",
+            card_border: "#2e2818", muted: "#786840", secondary: "#b8a060",
+            divider: "#2e2818", bar_empty: "#1a1610",
+        },
+        Some("glass") => ThemeColors {
+            body_bg: "#020512", text: "#c8e0ff", heading: "#e0f0ff", card_bg: "#0a1840",
+            card_border: "rgba(55,110,220,0.20)", muted: "#2e4d78", secondary: "#5a88c0",
+            divider: "rgba(55,110,220,0.20)", bar_empty: "#0a1840",
+        },
+        Some("deepred") => ThemeColors {
+            body_bg: "#100408", text: "#f0dde2", heading: "#fff0f2", card_bg: "#240c14",
+            card_border: "#3a1420", muted: "#704858", secondary: "#b08090",
+            divider: "#3a1420", bar_empty: "#240c14",
+        },
+        _ => ThemeColors { // dark (default)
+            body_bg: "#0f172a", text: "#e2e8f0", heading: "#f8fafc", card_bg: "#1e293b",
+            card_border: "#334155", muted: "#64748b", secondary: "#94a3b8",
+            divider: "#1e293b", bar_empty: "#1e293b",
+        },
+    }
+}
+
 /// Render the public status page for a specific page slug
 pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str) -> Option<String> {
     let page = state.find_page_by_slug(slug)?;
@@ -683,6 +744,7 @@ pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str) -> Option<St
     }
 
     let overall = state.page_overall_status(&page);
+    let tc = theme_colors(page.theme.as_deref());
 
     let config = state.config.read().unwrap();
 
@@ -694,7 +756,7 @@ pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str) -> Option<St
             let uptime = state.uptime_percent(mid);
 
             let daily = state.get_daily_uptime(mid);
-            let bars_html = build_uptime_bars(&daily);
+            let bars_html = build_uptime_bars(&daily, tc.bar_empty);
 
             services_html.push_str(&format!(
                 r#"<div class="service-row">
@@ -805,14 +867,14 @@ pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str) -> Option<St
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
             font-family: 'Inter', -apple-system, sans-serif;
-            background: #0f172a;
-            color: #e2e8f0;
+            background: {body_bg};
+            color: {text};
             min-height: 100vh;
         }}
         .container {{ max-width: 720px; margin: 0 auto; padding: 2rem 1.5rem; }}
         .header {{ text-align: center; margin-bottom: 2rem; }}
         .logo {{ max-height: 60px; margin-bottom: 1rem; }}
-        .header h1 {{ font-size: 1.5rem; font-weight: 700; color: #f8fafc; }}
+        .header h1 {{ font-size: 1.5rem; font-weight: 700; color: {heading}; }}
         .overall-status {{
             text-align: center; padding: 1.25rem; margin-bottom: 2rem;
             border-radius: 12px; font-size: 1.1rem; font-weight: 600;
@@ -821,9 +883,9 @@ pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str) -> Option<St
             color: {overall_color};
         }}
         .section-title {{ font-size: 0.8rem; font-weight: 600; text-transform: uppercase;
-            letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 0.75rem; }}
+            letter-spacing: 0.05em; color: {secondary}; margin-bottom: 0.75rem; }}
         .service-row {{
-            background: #1e293b; border: 1px solid #334155; border-radius: 10px;
+            background: {card_bg}; border: 1px solid {card_border}; border-radius: 10px;
             padding: 1.25rem; margin-bottom: 0.75rem;
         }}
         .service-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; }}
@@ -833,29 +895,29 @@ pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str) -> Option<St
         .uptime-bars {{ display: flex; gap: 1px; height: 28px; border-radius: 4px; overflow: hidden; }}
         .uptime-bar {{ flex: 1; min-width: 2px; transition: opacity 0.2s; cursor: default; }}
         .uptime-bar:hover {{ opacity: 0.8; }}
-        .uptime-legend {{ display: flex; justify-content: space-between; font-size: 0.7rem; color: #64748b; margin-top: 4px; }}
-        .uptime-pct {{ font-weight: 600; color: #94a3b8; }}
+        .uptime-legend {{ display: flex; justify-content: space-between; font-size: 0.7rem; color: {muted}; margin-top: 4px; }}
+        .uptime-pct {{ font-weight: 600; color: {secondary}; }}
         .incidents-section {{ margin-top: 2rem; }}
         .incident {{
-            background: #1e293b; border: 1px solid #334155; border-radius: 10px;
+            background: {card_bg}; border: 1px solid {card_border}; border-radius: 10px;
             padding: 1.25rem; margin-bottom: 0.75rem;
         }}
         .incident-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }}
         .incident-title {{ font-weight: 600; font-size: 0.95rem; }}
-        .incident-date {{ font-size: 0.75rem; color: #64748b; margin-bottom: 0.75rem; }}
+        .incident-date {{ font-size: 0.75rem; color: {muted}; margin-bottom: 0.75rem; }}
         .badge {{ padding: 3px 10px; border-radius: 100px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; }}
         .badge-red {{ background: rgba(239,68,68,0.15); color: #ef4444; }}
         .badge-orange {{ background: rgba(249,115,22,0.15); color: #f97316; }}
         .badge-yellow {{ background: rgba(234,179,8,0.15); color: #eab308; }}
         .badge-green {{ background: rgba(34,197,94,0.15); color: #22c55e; }}
-        .incident-update {{ padding: 0.5rem 0; border-top: 1px solid #334155; }}
+        .incident-update {{ padding: 0.5rem 0; border-top: 1px solid {card_border}; }}
         .incident-update:first-child {{ border-top: none; }}
-        .update-time {{ font-size: 0.7rem; color: #64748b; margin-bottom: 2px; }}
-        .update-msg {{ font-size: 0.85rem; color: #cbd5e1; }}
-        .no-incidents {{ color: #64748b; font-size: 0.9rem; text-align: center; padding: 1rem; }}
+        .update-time {{ font-size: 0.7rem; color: {muted}; margin-bottom: 2px; }}
+        .update-msg {{ font-size: 0.85rem; color: {secondary}; }}
+        .no-incidents {{ color: {muted}; font-size: 0.9rem; text-align: center; padding: 1rem; }}
         .footer {{ text-align: center; margin-top: 3rem; padding-top: 1.5rem;
-            border-top: 1px solid #1e293b; font-size: 0.75rem; color: #475569; }}
-        .footer a {{ color: #64748b; text-decoration: underline; }}
+            border-top: 1px solid {divider}; font-size: 0.75rem; color: {muted}; }}
+        .footer a {{ color: {secondary}; text-decoration: underline; }}
     </style>
 </head>
 <body>
@@ -879,6 +941,14 @@ pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str) -> Option<St
 </html>"#,
         title = html_escape(&page.title),
         logo = logo_html,
+        body_bg = tc.body_bg,
+        text = tc.text,
+        heading = tc.heading,
+        card_bg = tc.card_bg,
+        card_border = tc.card_border,
+        muted = tc.muted,
+        secondary = tc.secondary,
+        divider = tc.divider,
         overall_bg = overall_status_bg(overall),
         overall_border = overall_status_border(overall),
         overall_color = overall.color(),
@@ -963,13 +1033,13 @@ fn not_enabled_html() -> String {
     r#"<!DOCTYPE html><html><head><title>Status</title></head><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#0f172a;color:#fff;"><p>Status page is not enabled.</p></body></html>"#.to_string()
 }
 
-fn build_uptime_bars(daily: &[DailyUptime]) -> String {
+fn build_uptime_bars(daily: &[DailyUptime], bar_empty: &str) -> String {
     let mut bars = String::new();
     let target: usize = 90;
     let pad_count = target.saturating_sub(daily.len());
 
     for _ in 0..pad_count {
-        bars.push_str(r#"<div class="uptime-bar" style="background:#1e293b;" title="No data"></div>"#);
+        bars.push_str(&format!(r#"<div class="uptime-bar" style="background:{};" title="No data"></div>"#, bar_empty));
     }
     for day in daily {
         let color = if day.uptime_percent >= 99.5 {

@@ -8276,6 +8276,7 @@ pub async fn statuspage_pages_list(req: HttpRequest, state: web::Data<AppState>)
                 "cluster": p.cluster,
                 "logo_url": p.logo_url,
                 "footer_text": p.footer_text,
+                "theme": p.theme,
                 "monitor_ids": p.monitor_ids,
                 "incident_ids": p.incident_ids,
                 "enabled": p.enabled,

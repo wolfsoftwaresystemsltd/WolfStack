@@ -302,7 +302,7 @@ function buildServerTree(nodes) {
             </div>
             <div class="server-node-children ${shouldExpandCluster ? 'expanded' : ''}" id="children-${clusterId}">
                 <a class="nav-item server-child-item statuspage-cluster-item" data-cluster="${escapedName}" data-view="statuspage" onclick="showStatusPagesForCluster('${escapedName}')" style="margin-left: 8px; padding: 6px 10px; display:flex; align-items:center; gap:6px;">
-                    <span class="icon" style="font-size:15px;">📊</span> <span style="font-weight:600;">Status Pages</span>
+                    <span class="icon" style="font-size:15px;">🛡️</span> <span style="font-weight:600;">Status Pages</span>
                 </a>
                 <a class="nav-item server-child-item wolfrun-cluster-item" data-cluster="${escapedName}" data-view="wolfrun" onclick="showWolfRunPage('${escapedName}')" style="margin-left: 8px; padding: 6px 10px; display:flex; align-items:center; gap:6px;">
                     <span class="icon" style="font-size:15px;">🏃</span> <span style="font-weight:600;">WolfRun</span>
@@ -14945,9 +14945,13 @@ async function loadStatusPageData() {
 function renderStatusPages(pages) {
     const el = document.getElementById('sp-pages-list');
     if (!el) return;
+    // Filter pages by current cluster
+    if (spCurrentCluster) {
+        pages = pages.filter(p => p.page && p.page.cluster === spCurrentCluster);
+    }
     if (!pages || !pages.length) {
         el.innerHTML = `<div style="text-align:center; padding:50px; color:var(--text-muted);">
-            <div style="font-size:48px; margin-bottom:16px;">📊</div>
+            <div style="font-size:48px; margin-bottom:16px;">🛡️</div>
             <div style="font-size:16px; font-weight:600; margin-bottom:8px;">No Status Pages Yet</div>
             <div style="font-size:13px; margin-bottom:20px;">Create a public status page to monitor your services and share uptime with your users.</div>
             <button class="btn btn-primary" onclick="showStatusPageForm()" style="font-size:13px;">+ Create Your First Status Page</button>
@@ -15003,6 +15007,10 @@ function renderStatusPages(pages) {
 function renderStatusMonitors(monitors) {
     const el = document.getElementById('sp-monitors-list');
     if (!el) return;
+    // Filter monitors by current cluster
+    if (spCurrentCluster) {
+        monitors = monitors.filter(m => m.monitor && m.monitor.cluster === spCurrentCluster);
+    }
     if (!monitors || !monitors.length) {
         el.innerHTML = `<div style="text-align:center; padding:50px; color:var(--text-muted);">
             <div style="font-size:48px; margin-bottom:16px;">🔍</div>
@@ -15291,6 +15299,7 @@ function showStatusPageForm(existing) {
     document.getElementById('sp-page-logo').value = existing?.logo_url || '';
     document.getElementById('sp-page-footer').value = existing?.footer_text || '';
     document.getElementById('sp-page-enabled').checked = existing?.enabled !== false;
+    document.getElementById('sp-page-theme').value = existing?.theme || 'dark';
 
     const container = document.getElementById('sp-page-services');
     container.innerHTML = '';
@@ -15352,6 +15361,7 @@ async function saveStatusPage() {
         title: document.getElementById('sp-page-title').value,
         logo_url: document.getElementById('sp-page-logo').value || null,
         footer_text: document.getElementById('sp-page-footer').value || null,
+        theme: document.getElementById('sp-page-theme').value || null,
         enabled: document.getElementById('sp-page-enabled').checked,
         cluster: spCurrentCluster,
         monitor_ids,
