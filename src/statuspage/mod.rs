@@ -529,11 +529,16 @@ pub async fn pull_from_peers(
             {
                 Ok(resp) if resp.status().is_success() => {
                     if let Ok(peer_config) = resp.json::<StatusPageConfig>().await {
-                        let has_pages = peer_config.pages.iter().any(|p| p.cluster == self_cluster);
-                        if has_pages {
+                        // Filter to only our cluster's data — peer may have replicated data from other clusters
+                        let filtered = StatusPageConfig {
+                            monitors: peer_config.monitors.into_iter().filter(|m| m.cluster == self_cluster).collect(),
+                            pages: peer_config.pages.into_iter().filter(|p| p.cluster == self_cluster).collect(),
+                            incidents: peer_config.incidents.into_iter().filter(|i| i.cluster == self_cluster).collect(),
+                        };
+                        if !filtered.pages.is_empty() {
                             tracing::info!("StatusPage pull: got config from {} ({} pages, {} monitors)",
-                                peer.hostname, peer_config.pages.len(), peer_config.monitors.len());
-                            state.merge_from_peer(peer_config);
+                                peer.hostname, filtered.pages.len(), filtered.monitors.len());
+                            state.merge_from_peer(filtered);
                             return;
                         }
                     }
