@@ -266,41 +266,94 @@ if ! rpm -q s3fs-fuse &>/dev/null; then
     fi
 fi
 
-# LXC — not in base RHEL repos for ppc64le, try EPEL or build from source
-if ! command -v lxc-ls &> /dev/null; then
-    echo "  Installing LXC..."
-    # Ensure EPEL is available (LXC is in EPEL for ppc64le)
-    if ! rpm -q epel-release &>/dev/null; then
-        pkg_install epel-release 2>/dev/null || true
-    fi
-    # Try installing LXC and related packages
-    if pkg_install lxc lxc-templates lxc-libs 2>/dev/null; then
-        echo "  LXC installed from EPEL"
-    else
-        # EPEL might not have it — try building from source
-        echo "  LXC not in repos — building from source..."
-        pkg_install lxc-devel libcap-devel libseccomp-devel docbook2X 2>/dev/null || true
-        LXC_BUILD_DIR=$(mktemp -d)
-        if git clone --depth 1 https://github.com/lxc/lxc.git "$LXC_BUILD_DIR/lxc" 2>/dev/null; then
-            cd "$LXC_BUILD_DIR/lxc"
-            if command -v meson &> /dev/null || pkg_install meson 2>/dev/null; then
-                meson setup build 2>/dev/null && \
-                ninja -C build 2>/dev/null && \
-                ninja -C build install 2>/dev/null && \
-                ldconfig && \
-                echo "  LXC built and installed from source" || \
-                echo "  LXC build failed — LXC features will be unavailable"
-            else
-                echo "  meson not available — skipping LXC build"
-            fi
-            cd - > /dev/null
-        else
-            echo "  Could not clone LXC source — LXC features will be unavailable"
-        fi
-        rm -rf "$LXC_BUILD_DIR"
-    fi
-else
+# LXC — not in RHEL 10 repos for ppc64le, build from source
+if command -v lxc-ls &> /dev/null; then
     echo "  LXC already installed"
+else
+    echo "  Installing LXC (building from source for ppc64le)..."
+
+    # Install LXC build dependencies
+    echo "  Installing LXC build dependencies..."
+    pkg_install \
+        meson \
+        ninja-build \
+        libseccomp-devel \
+        libcap-devel \
+        openssl-devel \
+        pam-devel \
+        libselinux-devel \
+        dbus-devel \
+        glibc-devel \
+        kernel-headers \
+        systemd-devel \
+        2>/dev/null || true
+
+    # Some packages have different names on RHEL 10
+    pkg_install liburing-devel 2>/dev/null || true
+    pkg_install docbook2X 2>/dev/null || pkg_install docbook-utils 2>/dev/null || true
+
+    LXC_BUILD_DIR="/opt/lxc-build"
+    rm -rf "$LXC_BUILD_DIR"
+    mkdir -p "$LXC_BUILD_DIR"
+
+    echo "  Cloning LXC source..."
+    if git clone --depth 1 https://github.com/lxc/lxc.git "$LXC_BUILD_DIR/lxc"; then
+        cd "$LXC_BUILD_DIR/lxc"
+
+        echo "  Configuring LXC build..."
+        if meson setup build \
+            --prefix=/usr \
+            --libdir=/usr/lib64 \
+            --sysconfdir=/etc \
+            --localstatedir=/var \
+            -Dinit-script=systemd \
+            -Dman=false \
+            -Dapi-docs=false \
+            -Dtests=false \
+            -Dapparmor=false; then
+
+            echo "  Compiling LXC..."
+            if ninja -C build; then
+                echo "  Installing LXC..."
+                ninja -C build install
+                ldconfig
+
+                # Verify installation
+                if command -v lxc-ls &> /dev/null; then
+                    echo "  LXC installed successfully ($(lxc-ls --version 2>/dev/null || echo 'unknown version'))"
+
+                    # Enable lxc-net for container networking
+                    systemctl enable lxc-net 2>/dev/null || true
+                    systemctl start lxc-net 2>/dev/null || true
+
+                    # Create default container config if missing
+                    mkdir -p /etc/lxc
+                    if [ ! -f /etc/lxc/default.conf ]; then
+                        cat > /etc/lxc/default.conf << 'LXCCONF'
+lxc.net.0.type = veth
+lxc.net.0.link = lxcbr0
+lxc.net.0.flags = up
+lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx
+LXCCONF
+                        echo "  LXC default config created"
+                    fi
+                else
+                    echo "  LXC build completed but lxc-ls not found in PATH"
+                    echo "  You may need to add /usr/bin or /usr/local/bin to PATH"
+                fi
+            else
+                echo "  LXC compilation failed"
+            fi
+        else
+            echo "  LXC meson configure failed"
+        fi
+        cd - > /dev/null
+    else
+        echo "  Could not clone LXC source"
+    fi
+
+    # Clean up build directory to save space (keep source for potential rebuilds)
+    rm -rf "$LXC_BUILD_DIR/lxc/build"
 fi
 
 echo "  System dependencies installed"
