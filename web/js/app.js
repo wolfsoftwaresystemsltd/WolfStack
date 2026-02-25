@@ -15231,7 +15231,7 @@ function showMonitorForm(existing) {
     document.getElementById('sp-page-form').style.display = 'none';
     form.style.display = '';
     document.getElementById('sp-monitor-form-title').textContent = existing ? 'Edit Monitor' : 'New Monitor';
-    document.getElementById('sp-mon-id').value = existing?.id || crypto.randomUUID();
+    document.getElementById('sp-mon-id').value = existing?.id || (crypto.randomUUID?.() || ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c => (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)));
     document.getElementById('sp-mon-name').value = existing?.name || '';
     document.getElementById('sp-mon-interval').value = existing?.interval_secs || 60;
     document.getElementById('sp-mon-timeout').value = existing?.timeout_secs || 10;
@@ -15345,7 +15345,7 @@ function showStatusPageForm(existing) {
     document.getElementById('sp-incident-form').style.display = 'none';
     form.style.display = '';
     document.getElementById('sp-page-form-title').textContent = existing ? 'Edit Status Page' : 'New Status Page';
-    document.getElementById('sp-page-id').value = existing?.id || crypto.randomUUID();
+    document.getElementById('sp-page-id').value = existing?.id || (crypto.randomUUID?.() || ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c => (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)));
     document.getElementById('sp-page-title').value = existing?.title || '';
     document.getElementById('sp-page-slug').value = existing?.slug || '';
     document.getElementById('sp-page-logo').value = existing?.logo_url || '';
@@ -15515,7 +15515,7 @@ function showIncidentForm(existing, forPageId) {
     form.style.display = '';
 
     document.getElementById('sp-incident-form-title').textContent = existing ? 'Edit Incident' : 'Report Incident';
-    document.getElementById('sp-incident-id').value = existing?.id || crypto.randomUUID();
+    document.getElementById('sp-incident-id').value = existing?.id || (crypto.randomUUID?.() || ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c => (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)));
     document.getElementById('sp-incident-title').value = existing?.title || '';
     document.getElementById('sp-incident-status').value = existing?.status || 'investigating';
     document.getElementById('sp-incident-impact').value = existing?.impact || 'minor';
