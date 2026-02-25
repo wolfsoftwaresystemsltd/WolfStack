@@ -14875,13 +14875,14 @@ function spPublicUrl(slug, cluster) {
     if (resolvedCluster === selfCluster) {
         return `${window.location.origin}/status/${slug}`;
     }
-    // Remote cluster — find an online node to build the URL from
+    // Remote cluster — find an online node and use its hostname (FQDN)
     const remoteNode = allNodes.find(n => n.online && (n.cluster_name || 'WolfStack') === resolvedCluster);
     if (remoteNode) {
-        return `${scheme}://${remoteNode.address}:${remoteNode.port}/status/${slug}`;
+        // Prefer hostname (FQDN like cluster1.wolf.uk.com), then public_ip, then address
+        const host = remoteNode.hostname || remoteNode.public_ip || remoteNode.address;
+        return `${scheme}://${host}:${remoteNode.port}/status/${slug}`;
     }
-    // No online node — still show the cluster name so the user knows it's remote
-    return `${scheme}://${resolvedCluster}:${selfNode?.port || 8553}/status/${slug}`;
+    return `${scheme}://${resolvedCluster}/status/${slug}`;
 }
 
 function showStatusPagesForCluster(clusterName) {
