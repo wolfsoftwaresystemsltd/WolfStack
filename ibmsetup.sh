@@ -152,15 +152,23 @@ echo ""
 echo "Installing system dependencies for ppc64le..."
 
 # Build toolchain (needed to compile WolfStack and WolfNet from source)
-$PKG install -y \
-    git \
-    curl \
-    gcc \
-    gcc-c++ \
-    make \
-    openssl-devel \
-    pkg-config \
-    2>/dev/null || true
+# Install critical packages first — these MUST succeed
+for critical_pkg in git curl gcc gcc-c++ make; do
+    if ! rpm -q "$critical_pkg" &>/dev/null; then
+        echo "  Installing $critical_pkg..."
+        if ! $PKG install -y "$critical_pkg"; then
+            echo "  FAILED to install $critical_pkg — this is required."
+            echo "  Check your RHEL subscription and repos, then re-run."
+            exit 1
+        fi
+    fi
+done
+
+# Development headers — try to install, not fatal if missing
+for dev_pkg in openssl-devel pkg-config; do
+    $PKG install -y "$dev_pkg" 2>/dev/null || \
+        echo "  Could not install $dev_pkg — will try to continue"
+done
 
 # libxcrypt-devel — try both names
 if ! rpm -q libxcrypt-devel &>/dev/null && ! rpm -q libcrypt-devel &>/dev/null; then
@@ -408,28 +416,45 @@ fi
 mkdir -p /etc/wolfstack/s3 /etc/wolfstack/pbs /mnt/wolfstack /var/cache/wolfstack/s3
 echo "  Storage directories configured"
 
-# ─── Install Docker ──────────────────────────────────────────────────────────
-if ! command -v docker &> /dev/null; then
+# ─── Install container runtime ────────────────────────────────────────────────
+if command -v docker &> /dev/null; then
+    echo "  Docker already installed"
+elif command -v podman &> /dev/null; then
+    echo "  Podman already installed"
+    # Ensure docker compatibility shim is present
+    $PKG install -y podman-docker 2>/dev/null || true
+else
     echo ""
-    echo "Installing Docker..."
-    if curl -fsSL https://get.docker.com | sh; then
-        systemctl enable docker 2>/dev/null || true
-        systemctl start docker 2>/dev/null || true
-        echo "  Docker installed"
+    echo "Installing container runtime..."
+
+    # On RHEL ppc64le, Podman is available from base repos and is the best option.
+    # Docker CE for ppc64le often has repo/signing issues on RHEL 10.
+    # Try Podman first (RHEL-native), then Docker as fallback.
+    echo "  Trying Podman (RHEL-native for ppc64le)..."
+    if $PKG install -y podman; then
+        $PKG install -y podman-docker buildah skopeo 2>/dev/null || true
+        # Enable podman socket so WolfStack can talk to it via Docker-compatible API
+        systemctl enable podman.socket 2>/dev/null || true
+        systemctl start podman.socket 2>/dev/null || true
+        # Create docker socket symlink if podman-docker didn't
+        if [ ! -e /var/run/docker.sock ] && [ -e /var/run/podman/podman.sock ]; then
+            ln -sf /var/run/podman/podman.sock /var/run/docker.sock
+        fi
+        echo "  Podman installed with Docker compatibility"
     else
-        # Fallback to Podman with Docker compatibility
-        echo "  Docker installer failed — installing Podman instead..."
-        $PKG install -y podman podman-docker buildah skopeo containernetworking-plugins 2>/dev/null || true
-        if command -v podman &> /dev/null; then
-            systemctl enable podman.socket 2>/dev/null || true
-            systemctl start podman.socket 2>/dev/null || true
-            echo "  Podman installed with Docker compatibility"
+        echo "  Podman install failed — trying Docker CE..."
+        if curl -fsSL https://get.docker.com | sh; then
+            systemctl enable docker 2>/dev/null || true
+            systemctl start docker 2>/dev/null || true
+            echo "  Docker installed"
         else
-            echo "  Could not install container runtime — install Docker or Podman manually"
+            echo ""
+            echo "  Could not install Podman or Docker automatically."
+            echo "  Please install a container runtime manually:"
+            echo "    $PKG install podman podman-docker"
+            echo "  or follow https://docs.docker.com/engine/install/"
         fi
     fi
-else
-    echo "  Docker already installed"
 fi
 
 echo ""
