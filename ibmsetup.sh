@@ -266,9 +266,41 @@ if ! rpm -q s3fs-fuse &>/dev/null; then
     fi
 fi
 
-# LXC — not available on RHEL ppc64le
+# LXC — not in base RHEL repos for ppc64le, try EPEL or build from source
 if ! command -v lxc-ls &> /dev/null; then
-    echo "  LXC not available on RHEL ppc64le — Docker/Podman containers fully supported"
+    echo "  Installing LXC..."
+    # Ensure EPEL is available (LXC is in EPEL for ppc64le)
+    if ! rpm -q epel-release &>/dev/null; then
+        pkg_install epel-release 2>/dev/null || true
+    fi
+    # Try installing LXC and related packages
+    if pkg_install lxc lxc-templates lxc-libs 2>/dev/null; then
+        echo "  LXC installed from EPEL"
+    else
+        # EPEL might not have it — try building from source
+        echo "  LXC not in repos — building from source..."
+        pkg_install lxc-devel libcap-devel libseccomp-devel docbook2X 2>/dev/null || true
+        LXC_BUILD_DIR=$(mktemp -d)
+        if git clone --depth 1 https://github.com/lxc/lxc.git "$LXC_BUILD_DIR/lxc" 2>/dev/null; then
+            cd "$LXC_BUILD_DIR/lxc"
+            if command -v meson &> /dev/null || pkg_install meson 2>/dev/null; then
+                meson setup build 2>/dev/null && \
+                ninja -C build 2>/dev/null && \
+                ninja -C build install 2>/dev/null && \
+                ldconfig && \
+                echo "  LXC built and installed from source" || \
+                echo "  LXC build failed — LXC features will be unavailable"
+            else
+                echo "  meson not available — skipping LXC build"
+            fi
+            cd - > /dev/null
+        else
+            echo "  Could not clone LXC source — LXC features will be unavailable"
+        fi
+        rm -rf "$LXC_BUILD_DIR"
+    fi
+else
+    echo "  LXC already installed"
 fi
 
 echo "  System dependencies installed"
@@ -523,6 +555,17 @@ echo ""
 # ─── Install WolfNet (cluster network layer) ────────────────────────────────
 echo "Checking WolfNet (cluster networking)..."
 
+# Ensure tun module is loaded — required for WolfNet on IBM Power LPARs
+modprobe tun 2>/dev/null || true
+if [ ! -f /etc/modules-load.d/wolfnet-tun.conf ]; then
+    echo "tun" > /etc/modules-load.d/wolfnet-tun.conf
+fi
+if [ ! -e /dev/net/tun ]; then
+    mkdir -p /dev/net
+    mknod /dev/net/tun c 10 200 2>/dev/null || true
+    chmod 666 /dev/net/tun 2>/dev/null || true
+fi
+
 if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev/null; then
     echo "  WolfNet already installed and running"
     WOLFNET_IP=$(ip -4 addr show wolfnet0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]}' || echo "")
@@ -625,7 +668,24 @@ else
     echo "  WolfNet not found — installing for cluster networking..."
     echo ""
 
-    # WolfNet needs /dev/net/tun
+    # WolfNet needs the tun kernel module and /dev/net/tun device
+    # On IBM Power LPARs the module is often not loaded by default
+    echo "  Ensuring TUN/TAP support..."
+    modprobe tun 2>/dev/null || true
+
+    # Make tun module load on boot
+    if [ ! -f /etc/modules-load.d/wolfnet-tun.conf ]; then
+        echo "tun" > /etc/modules-load.d/wolfnet-tun.conf
+    fi
+
+    # Create the device node if it doesn't exist
+    if [ ! -e /dev/net/tun ]; then
+        mkdir -p /dev/net
+        mknod /dev/net/tun c 10 200 2>/dev/null || true
+        chmod 666 /dev/net/tun 2>/dev/null || true
+    fi
+
+    # Verify it works
     if [ ! -e /dev/net/tun ]; then
         echo ""
         echo "  /dev/net/tun is NOT available!"
@@ -634,16 +694,12 @@ else
         echo "  WolfNet needs TUN/TAP to create its network overlay."
         echo "  If this is an LPAR, ensure the VIO server provides TUN/TAP."
         echo ""
-        echo "  To create the device manually:"
-        echo "     mkdir -p /dev/net"
-        echo "     mknod /dev/net/tun c 10 200"
-        echo "     chmod 666 /dev/net/tun"
-        echo ""
         echo "  Then re-run this installer."
         echo ""
         echo "  Cannot continue without WolfNet. Fix /dev/net/tun and re-run."
         exit 1
     fi
+    echo "  TUN/TAP ready"
 
     # Download WolfNet source
     echo "  Downloading WolfNet..."
