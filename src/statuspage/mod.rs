@@ -356,6 +356,86 @@ impl StatusPageState {
             .collect()
     }
 
+    /// Merge status page config received from a cluster peer.
+    /// Replaces all local pages/monitors/incidents for the incoming clusters.
+    pub fn merge_from_peer(&self, peer_config: StatusPageConfig) {
+        // Identify which clusters the peer is sending data for
+        let peer_clusters: std::collections::HashSet<String> = peer_config.pages.iter()
+            .map(|p| p.cluster.clone())
+            .chain(peer_config.monitors.iter().map(|m| m.cluster.clone()))
+            .chain(peer_config.incidents.iter().map(|i| i.cluster.clone()))
+            .collect();
+
+        if peer_clusters.is_empty() { return; }
+
+        let mut config = self.config.write().unwrap();
+
+        // Remove all local data for the incoming clusters
+        config.pages.retain(|p| !peer_clusters.contains(&p.cluster));
+        config.monitors.retain(|m| !peer_clusters.contains(&m.cluster));
+        config.incidents.retain(|i| !peer_clusters.contains(&i.cluster));
+
+        // Add all peer data
+        config.pages.extend(peer_config.pages);
+        config.monitors.extend(peer_config.monitors);
+        config.incidents.extend(peer_config.incidents);
+
+        drop(config);
+        self.config.read().unwrap().save().ok();
+    }
+}
+
+// ═══════════════════════════════════════════════
+// ─── Cluster Broadcast ───
+// ═══════════════════════════════════════════════
+
+/// Broadcast status page config to all online same-cluster peers.
+pub async fn broadcast_to_cluster(
+    state: &Arc<StatusPageState>,
+    cluster: &crate::agent::ClusterState,
+    cluster_secret: &str,
+) {
+    let config = state.config.read().unwrap().clone();
+    let nodes = cluster.get_all_nodes();
+
+    // Find our cluster name
+    let self_cluster = nodes.iter()
+        .find(|n| n.is_self)
+        .and_then(|n| n.cluster_name.clone())
+        .unwrap_or_else(|| "WolfStack".to_string());
+
+    // Build HTTP client
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .danger_accept_invalid_certs(true)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    // Send to all online same-cluster peers (not self)
+    for node in &nodes {
+        if node.is_self || !node.online {
+            continue;
+        }
+        let node_cluster = node.cluster_name.as_deref().unwrap_or("WolfStack");
+        if node_cluster != self_cluster {
+            continue;
+        }
+
+        let urls = crate::api::build_node_urls(&node.address, node.port, "/api/statuspage/sync");
+        for url in &urls {
+            match client.post(url)
+                .header("X-WolfStack-Secret", cluster_secret)
+                .json(&config)
+                .send().await
+            {
+                Ok(_) => break,
+                Err(_) => continue,
+            }
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════
