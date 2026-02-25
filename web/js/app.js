@@ -14846,11 +14846,10 @@ let spRefreshTimer = null;
 
 // Determine if the current cluster is local (this server) or remote.
 // Returns the API base path: '' for local, '/api/nodes/{id}/proxy' for remote.
-// Find the best online WolfStack node in a remote cluster (shared by proxy + public URL)
+// Find the first online node in a remote cluster (shared by proxy + public URL)
 function spFindRemoteNode(clusterName) {
     return allNodes.find(n =>
         n.online &&
-        (n.node_type || 'wolfstack') === 'wolfstack' &&
         (n.cluster_name || 'WolfStack') === clusterName
     ) || null;
 }
