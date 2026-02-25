@@ -14874,29 +14874,55 @@ function switchStatusTab(tab) {
 }
 
 async function loadStatusPageData() {
+    const pagesEl = document.getElementById('sp-pages-list');
+    const monsEl = document.getElementById('sp-monitors-list');
+    const incidentsEl = document.getElementById('sp-incidents-list');
+    
     try {
         const [pagesRes, monsRes] = await Promise.all([
             fetch('/api/statuspage/pages', { headers: { 'Authorization': `Bearer ${sessionToken}` } }),
             fetch('/api/statuspage/monitors', { headers: { 'Authorization': `Bearer ${sessionToken}` } }),
         ]);
+        
+        if (!pagesRes.ok || !monsRes.ok) {
+            throw new Error('API request failed');
+        }
+        
         const pagesData = await pagesRes.json();
         const monsData = await monsRes.json();
         spMonitorsEnriched = monsData.monitors || [];
-        // Also load config for the raw data
+        
         const cfgRes = await fetch('/api/statuspage/config', { headers: { 'Authorization': `Bearer ${sessionToken}` } });
-        spConfig = await cfgRes.json();
+        spConfig = cfgRes.ok ? await cfgRes.json() : { monitors: [], pages: [] };
+        
         renderStatusPages(pagesData.pages || []);
         renderStatusMonitors(spMonitorsEnriched);
+        renderIncidentsList();
         switchStatusTab('pages');
     } catch (e) {
+        console.error('Status page load error:', e);
+        const errorHtml = `<div style="text-align:center; padding:40px; color:var(--text-muted);">
+            <div style="font-size:24px; margin-bottom:12px;">⚠️</div>
+            <div style="font-size:13px;">Failed to load data</div>
+            <button class="btn btn-sm" onclick="loadStatusPageData()" style="margin-top:12px;">🔄 Retry</button>
+        </div>`;
+        if (pagesEl) pagesEl.innerHTML = errorHtml;
+        if (monsEl) monsEl.innerHTML = errorHtml;
+        if (incidentsEl) incidentsEl.innerHTML = errorHtml;
         showToast('Failed to load status page data', 'error');
     }
 }
 
 function renderStatusPages(pages) {
     const el = document.getElementById('sp-pages-list');
-    if (!pages.length) {
-        el.innerHTML = '<div style="text-align:center; padding:30px; color:var(--text-muted); font-size:13px;">No status pages yet. Click <strong>+ New Page</strong> to create one.</div>';
+    if (!el) return;
+    if (!pages || !pages.length) {
+        el.innerHTML = `<div style="text-align:center; padding:50px; color:var(--text-muted);">
+            <div style="font-size:48px; margin-bottom:16px;">📊</div>
+            <div style="font-size:16px; font-weight:600; margin-bottom:8px;">No Status Pages Yet</div>
+            <div style="font-size:13px; margin-bottom:20px;">Create a public status page to monitor your services and share uptime with your users.</div>
+            <button class="btn btn-primary" onclick="showStatusPageForm()" style="font-size:13px;">+ Create Your First Status Page</button>
+        </div>`;
         return;
     }
     el.innerHTML = pages.map(p => {
@@ -14947,8 +14973,14 @@ function renderStatusPages(pages) {
 
 function renderStatusMonitors(monitors) {
     const el = document.getElementById('sp-monitors-list');
-    if (!monitors.length) {
-        el.innerHTML = '<div style="text-align:center; padding:30px; color:var(--text-muted); font-size:13px;">No monitors yet. Click <strong>+ New Monitor</strong> to create one.</div>';
+    if (!el) return;
+    if (!monitors || !monitors.length) {
+        el.innerHTML = `<div style="text-align:center; padding:50px; color:var(--text-muted);">
+            <div style="font-size:48px; margin-bottom:16px;">🔍</div>
+            <div style="font-size:16px; font-weight:600; margin-bottom:8px;">No Monitors Yet</div>
+            <div style="font-size:13px; margin-bottom:20px;">Create monitors to check the health of your services, containers, and endpoints.</div>
+            <button class="btn btn-primary" onclick="showMonitorForm()" style="font-size:13px;">+ Create Your First Monitor</button>
+        </div>`;
         return;
     }
     el.innerHTML = monitors.map(m => {
