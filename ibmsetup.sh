@@ -165,34 +165,34 @@ if [ -f /etc/yum.repos.d/docker-ce.repo ]; then
 fi
 
 # ─── Fix RHEL 10 GPG key issues ──────────────────────────────────────────────
-# RHEL 10 early releases ship GPG keys that don't match some package signatures.
-# Refresh the keys and test with a simple install before proceeding.
+# RHEL 10 early releases on ppc64le ship GPG keys (0xFD431D51, 0x5A6340B3)
+# that don't match some package signatures (e.g. kernel-headers).
+# This breaks installing gcc and other build tools.
+# We detect this and use --nogpgcheck as a workaround.
 echo "Checking RPM GPG keys..."
 
-# Re-import the latest keys from disk (RHEL may have updated them)
+DNF_GPG_FLAG=""
+
+# Re-import the latest keys from disk
 rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release 2>/dev/null || true
 
-# Test if GPG is working by doing a dry-run install
-if ! $PKG install -y --downloadonly coreutils &>/dev/null; then
-    echo "  GPG verification is failing for RHEL packages."
-    echo "  This is a known issue with early RHEL 10 on ppc64le."
-    echo ""
-    echo "  Attempting to update GPG keys from Red Hat CDN..."
-    $PKG update -y redhat-release 2>/dev/null || true
+# Test GPG by trying to download kernel-headers (the known problem package)
+# Use --downloadonly so nothing actually gets installed
+if ! $PKG install -y --downloadonly kernel-headers &>/dev/null; then
+    echo "  GPG verification failing (known RHEL 10 ppc64le issue)."
+    echo "  Attempting to update redhat-release for new GPG keys..."
+    $PKG update -y --nogpgcheck redhat-release 2>/dev/null || true
     rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release 2>/dev/null || true
 
-    # If it still fails, we need to bypass GPG for the initial packages
-    if ! $PKG install -y --downloadonly coreutils &>/dev/null; then
-        echo "  GPG keys still mismatched after update."
-        echo "  Will use --nogpgcheck for initial package install."
-        echo "  (This is safe when using official RHEL repos via subscription-manager)"
+    if ! $PKG install -y --downloadonly kernel-headers &>/dev/null; then
+        echo "  GPG keys still mismatched — using --nogpgcheck."
+        echo "  (Safe when using official RHEL repos via subscription-manager)"
         DNF_GPG_FLAG="--nogpgcheck"
     else
-        echo "  GPG keys updated successfully"
-        DNF_GPG_FLAG=""
+        echo "  GPG keys fixed after update"
     fi
 else
-    DNF_GPG_FLAG=""
+    echo "  GPG keys OK"
 fi
 
 # Helper: wraps $PKG install with GPG flag if needed
