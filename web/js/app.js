@@ -15252,6 +15252,7 @@ async function deleteMonitor(id) {
 function showStatusPageForm(existing) {
     const form = document.getElementById('sp-page-form');
     document.getElementById('sp-monitor-form').style.display = 'none';
+    document.getElementById('sp-incident-form').style.display = 'none';
     form.style.display = '';
     document.getElementById('sp-page-form-title').textContent = existing ? 'Edit Status Page' : 'New Status Page';
     document.getElementById('sp-page-id').value = existing?.id || crypto.randomUUID();
@@ -15263,7 +15264,18 @@ function showStatusPageForm(existing) {
 
     const container = document.getElementById('sp-page-services');
     container.innerHTML = '';
-    (existing?.services || []).forEach(svc => addServiceRow(svc));
+    
+    const monitors = spConfig?.monitors || [];
+    if (monitors.length === 0 && !existing) {
+        container.innerHTML = `<div style="background:var(--bg-tertiary); border:1px dashed var(--border); border-radius:8px; padding:20px; text-align:center; color:var(--text-muted);">
+            <div style="font-size:24px; margin-bottom:8px;">🔍</div>
+            <div style="font-size:13px; margin-bottom:12px;">You need to create monitors before adding services to a status page.</div>
+            <button class="btn btn-sm btn-primary" onclick="switchStatusTab('monitors'); showMonitorForm();" style="font-size:12px;">+ Create Your First Monitor</button>
+        </div>`;
+    } else {
+        (existing?.services || []).forEach(svc => addServiceRow(svc));
+    }
+    
     form.scrollIntoView({ behavior: 'smooth' });
 }
 
@@ -15272,16 +15284,33 @@ function editStatusPage(id) {
     if (page) showStatusPageForm(page);
 }
 
+function addServiceRowWithCheck() {
+    const monitors = spConfig?.monitors || [];
+    if (monitors.length === 0) {
+        showToast('Please create at least one monitor first before adding services', 'warning');
+        switchStatusTab('monitors');
+        showMonitorForm();
+        return;
+    }
+    addServiceRow();
+}
+
 function addServiceRow(svc) {
     const container = document.getElementById('sp-page-services');
-    const monOptions = spConfig.monitors.map(m =>
+    const monitors = spConfig?.monitors || [];
+    
+    const monOptions = monitors.map(m =>
         `<option value="${m.id}" ${(svc?.monitor_ids || []).includes(m.id) ? 'selected' : ''}>${escapeHtml(m.name)}</option>`
     ).join('');
+    
     const div = document.createElement('div');
     div.style.cssText = 'background:var(--bg-tertiary); border:1px solid var(--border); border-radius:8px; padding:12px; display:grid; grid-template-columns:1fr 2fr auto; gap:10px; align-items:start;';
     div.innerHTML = `
         <div class="form-group" style="margin:0;"><label style="font-size:11px;">Service Name</label><input type="text" class="form-control sp-svc-name" placeholder="e.g. API Servers" value="${escapeHtml(svc?.name || '')}" style="font-size:12px;"></div>
-        <div class="form-group" style="margin:0;"><label style="font-size:11px;">Monitors (ctrl-click for multiple)</label><select class="form-control sp-svc-monitors" multiple style="font-size:12px; min-height:60px;">${monOptions}</select></div>
+        <div class="form-group" style="margin:0;">
+            <label style="font-size:11px;">Monitors (ctrl-click for multiple)</label>
+            <select class="form-control sp-svc-monitors" multiple style="font-size:12px; min-height:60px;">${monOptions}</select>
+        </div>
         <button class="btn btn-sm" onclick="this.parentElement.remove()" style="font-size:11px; color:#ef4444; margin-top:18px;">✕</button>
     `;
     container.appendChild(div);
