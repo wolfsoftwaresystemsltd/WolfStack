@@ -75,10 +75,6 @@
                     style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;border-radius:10px;">
                     <span class="icon" style="margin:0;font-size:20px;">🌐</span>
                 </a>
-                <a class="nav-item" data-page="statuspage" onclick="selectView('statuspage')" title="Status Pages"
-                    style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;border-radius:10px;">
-                    <span class="icon" style="margin:0;font-size:20px;">📊</span>
-                </a>
             </div>
             <div class="nav-section">
                 <div class="nav-section-title">Servers</div>
@@ -2225,6 +2221,8 @@
                             style="font-size:12px;">📄 Pages</button>
                         <button class="btn btn-sm" onclick="switchStatusTab('monitors')" id="sp-tab-monitors"
                             style="font-size:12px;">🔍 Monitors</button>
+                        <button class="btn btn-sm" onclick="switchStatusTab('incidents')" id="sp-tab-incidents"
+                            style="font-size:12px;">🚨 Incidents</button>
                     </div>
                 </div>
                 <div class="card-body" style="padding:20px;">
@@ -2255,7 +2253,24 @@
                             Monitors are shared across all status pages. Each page picks which monitors to show via its
                             Services.
                         </p>
-                        <div id="sp-monitors-list" style="display:grid; gap:8px;">
+                        <div id="sp-monitors-list" style="display:grid; gap:12px;">
+                            <div style="text-align:center; padding:30px; color:var(--text-muted); font-size:13px;">
+                                Loading...</div>
+                        </div>
+                    </div>
+
+                    <!-- Incidents Tab -->
+                    <div id="sp-panel-incidents" style="display:none;">
+                        <div
+                            style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                            <h4 style="margin:0; font-size:15px; font-weight:600;">Incidents</h4>
+                            <button class="btn btn-sm btn-primary" onclick="showIncidentForm()" style="font-size:12px;">+
+                                Report Incident</button>
+                        </div>
+                        <p style="font-size:12px; color:var(--text-muted); margin:0 0 12px 0;">
+                            Report and track incidents. Incidents will appear on your public status pages.
+                        </p>
+                        <div id="sp-incidents-list" style="display:grid; gap:12px;">
                             <div style="text-align:center; padding:30px; color:var(--text-muted); font-size:13px;">
                                 Loading...</div>
                         </div>
@@ -2338,6 +2353,7 @@
                                 <option value="tcp">TCP Port</option>
                                 <option value="ping">Ping</option>
                                 <option value="container">Container</option>
+                                <option value="wolfrun">WolfRun Service</option>
                             </select>
                         </div>
                     </div>
@@ -2360,6 +2376,61 @@
                         <button class="btn btn-primary" onclick="saveMonitor()">💾 Save Monitor</button>
                         <button class="btn btn-sm"
                             onclick="document.getElementById('sp-monitor-form').style.display='none'">Cancel</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Incident Edit Form (hidden initially) -->
+            <div id="sp-incident-form" class="card" style="display:none; margin-bottom:16px;">
+                <div class="card-header">
+                    <h3 id="sp-incident-form-title">Report Incident</h3>
+                </div>
+                <div class="card-body" style="padding:20px;">
+                    <input type="hidden" id="sp-incident-id">
+                    <input type="hidden" id="sp-incident-page-id">
+                    <div class="form-group" style="margin-bottom:16px;">
+                        <label>Status Page</label>
+                        <select id="sp-incident-page" class="form-control">
+                            <option value="">-- Select a status page --</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="margin-bottom:16px;">
+                        <label>Incident Title</label>
+                        <input type="text" id="sp-incident-title" class="form-control" placeholder="e.g. API Service Degradation">
+                    </div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+                        <div class="form-group">
+                            <label>Status</label>
+                            <select id="sp-incident-status" class="form-control">
+                                <option value="investigating">🔍 Investigating</option>
+                                <option value="identified">🎯 Identified</option>
+                                <option value="monitoring">👀 Monitoring</option>
+                                <option value="resolved">✅ Resolved</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Impact</label>
+                            <select id="sp-incident-impact" class="form-control">
+                                <option value="none">None</option>
+                                <option value="minor">Minor</option>
+                                <option value="major">Major</option>
+                                <option value="critical">Critical</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:16px;">
+                        <label>Affected Services</label>
+                        <select id="sp-incident-services" class="form-control" multiple style="min-height:80px;">
+                        </select>
+                        <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Hold Ctrl/Cmd to select multiple services</div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:16px;">
+                        <label>Update Message</label>
+                        <textarea id="sp-incident-message" class="form-control" rows="3" placeholder="Describe the current status and any updates..."></textarea>
+                    </div>
+                    <div style="display:flex; gap:12px;">
+                        <button class="btn btn-primary" onclick="saveIncident()">💾 Save Incident</button>
+                        <button class="btn btn-sm" onclick="document.getElementById('sp-incident-form').style.display='none'">Cancel</button>
                     </div>
                 </div>
             </div>

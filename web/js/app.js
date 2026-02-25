@@ -97,7 +97,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', 'global-wolfnet': 'Global WolfNet', statuspage: 'Status Pages' };
+    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', 'global-wolfnet': 'Global WolfNet' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -115,8 +115,6 @@ function selectView(page) {
     } else if (page === 'issues') {
         checkIssuesAiBadge();
         loadIssueSchedule();
-    } else if (page === 'statuspage') {
-        loadStatusPageData();
     }
 }
 
@@ -303,6 +301,9 @@ function buildServerTree(nodes) {
                 <span class="remove-server-btn" onclick="event.stopPropagation(); openWsClusterSettings('${escapedName}')" title="Cluster settings" style="margin-left:4px;">⚙️</span>
             </div>
             <div class="server-node-children ${shouldExpandCluster ? 'expanded' : ''}" id="children-${clusterId}">
+                <a class="nav-item server-child-item statuspage-cluster-item" data-cluster="${escapedName}" data-view="statuspage" onclick="showStatusPagesForCluster('${escapedName}')" style="margin-left: 8px; padding: 6px 10px; display:flex; align-items:center; gap:6px;">
+                    <span class="icon" style="font-size:15px;">📊</span> <span style="font-weight:600;">Status Pages</span>
+                </a>
                 <a class="nav-item server-child-item wolfrun-cluster-item" data-cluster="${escapedName}" data-view="wolfrun" onclick="showWolfRunPage('${escapedName}')" style="margin-left: 8px; padding: 6px 10px; display:flex; align-items:center; gap:6px;">
                     <span class="icon" style="font-size:15px;">🏃</span> <span style="font-weight:600;">WolfRun</span>
                     <span class="wolfrun-svc-count" id="wolfrun-count-${clusterId}" style="margin-left:auto; font-size:10px; padding:1px 6px; background:var(--primary-color,#6366f1); color:#fff; border-radius:10px; display:none;"></span>
@@ -14831,12 +14832,45 @@ function copySystemLogs() {
 
 let spConfig = { monitors: [], pages: [] };
 let spMonitorsEnriched = [];
+let spCurrentCluster = null;
+
+function showStatusPagesForCluster(clusterName) {
+    spCurrentCluster = clusterName;
+    currentPage = 'statuspage';
+    currentNodeId = null;
+    currentComponent = null;
+
+    // Switch to status page view
+    document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
+    const el = document.getElementById('page-statuspage');
+    if (el) el.style.display = 'block';
+
+    // Highlight sidebar item
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    const item = document.querySelector(`.statuspage-cluster-item[data-cluster="${clusterName}"]`);
+    if (item) item.classList.add('active');
+
+    // Update page title
+    document.getElementById('page-title').textContent = `Status Pages — ${clusterName}`;
+
+    // Hide forms
+    document.getElementById('sp-page-form').style.display = 'none';
+    document.getElementById('sp-monitor-form').style.display = 'none';
+
+    loadStatusPageData();
+}
 
 function switchStatusTab(tab) {
     document.getElementById('sp-panel-pages').style.display = tab === 'pages' ? '' : 'none';
     document.getElementById('sp-panel-monitors').style.display = tab === 'monitors' ? '' : 'none';
+    document.getElementById('sp-panel-incidents').style.display = tab === 'incidents' ? '' : 'none';
     document.getElementById('sp-tab-pages').classList.toggle('btn-primary', tab === 'pages');
     document.getElementById('sp-tab-monitors').classList.toggle('btn-primary', tab === 'monitors');
+    document.getElementById('sp-tab-incidents').classList.toggle('btn-primary', tab === 'incidents');
+    
+    if (tab === 'incidents') {
+        renderIncidentsList();
+    }
 }
 
 async function loadStatusPageData() {
@@ -14870,20 +14904,42 @@ function renderStatusPages(pages) {
         const colors = { up: '#22c55e', degraded: '#eab308', down: '#ef4444', unknown: '#6b7280' };
         const labels = { up: 'Operational', degraded: 'Degraded', down: 'Major Outage', unknown: 'Unknown' };
         const svcCount = (p.page?.services || []).length;
-        return `<div style="background:var(--bg-input); border:1px solid var(--border); border-radius:10px; padding:16px; display:flex; align-items:center; justify-content:space-between;">
-            <div>
-                <div style="font-weight:600; font-size:14px;">${escapeHtml(p.page.title)}
-                    ${p.page.enabled ? '' : '<span style="font-size:11px; padding:1px 6px; background:rgba(107,114,128,0.2); border-radius:4px; color:#9ca3af; margin-left:6px;">Disabled</span>'}
+        
+        const activeIncidents = (p.page?.incidents || []).filter(i => i.status !== 'resolved');
+        const incidentBadge = activeIncidents.length > 0 
+            ? `<span style="font-size:10px; padding:2px 8px; background:#ef4444; color:#fff; border-radius:10px; margin-left:8px;">${activeIncidents.length} active</span>`
+            : '';
+        
+        const uptime = p.uptime_30d != null ? `${p.uptime_30d.toFixed(2)}%` : '—';
+        
+        return `<div style="background:var(--bg-input); border:1px solid var(--border); border-radius:12px; padding:20px;">
+            <div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:12px;">
+                <div>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span style="width:10px; height:10px; border-radius:50%; background:${colors[st]}; box-shadow:0 0 8px ${colors[st]}50;"></span>
+                        <span style="font-weight:600; font-size:16px;">${escapeHtml(p.page.title)}</span>
+                        ${p.page.enabled ? '' : '<span style="font-size:10px; padding:2px 8px; background:rgba(107,114,128,0.2); border-radius:4px; color:#9ca3af;">Disabled</span>'}
+                        ${incidentBadge}
+                    </div>
+                    <div style="font-size:12px; color:var(--text-muted); margin-top:6px; margin-left:18px;">
+                        <a href="/status/${escapeHtml(p.page.slug)}" target="_blank" style="color:var(--accent-light);">/status/${escapeHtml(p.page.slug)}</a>
+                    </div>
                 </div>
-                <div style="font-size:12px; color:var(--text-muted); margin-top:3px;">
-                    <a href="/status/${escapeHtml(p.page.slug)}" target="_blank" style="color:var(--accent-light);">/status/${escapeHtml(p.page.slug)}</a>
-                    &bull; ${svcCount} service${svcCount !== 1 ? 's' : ''}
-                    &bull; <span style="color:${colors[st]}">${labels[st]}</span>
+                <div style="text-align:right;">
+                    <div style="font-size:20px; font-weight:700; color:${colors[st]};">${labels[st]}</div>
+                    <div style="font-size:11px; color:var(--text-muted);">${uptime} uptime (30d)</div>
                 </div>
             </div>
-            <div style="display:flex; gap:6px;">
-                <button class="btn btn-sm" onclick="editStatusPage('${p.page.id}')" style="font-size:11px;">✏️ Edit</button>
-                <button class="btn btn-sm" onclick="deleteStatusPage('${p.page.id}')" style="font-size:11px; color:#ef4444;">🗑️</button>
+            <div style="display:flex; justify-content:space-between; align-items:center; padding-top:12px; border-top:1px solid var(--border);">
+                <div style="font-size:12px; color:var(--text-muted);">
+                    ${svcCount} service${svcCount !== 1 ? 's' : ''} monitored
+                </div>
+                <div style="display:flex; gap:6px;">
+                    <button class="btn btn-sm" onclick="showIncidentForm(null, '${p.page.id}')" style="font-size:11px;">🚨 Report Incident</button>
+                    <button class="btn btn-sm" onclick="editStatusPage('${p.page.id}')" style="font-size:11px;">✏️ Edit</button>
+                    <button class="btn btn-sm" onclick="window.open('/status/${escapeHtml(p.page.slug)}', '_blank')" style="font-size:11px;">👁️ View</button>
+                    <button class="btn btn-sm" onclick="deleteStatusPage('${p.page.id}')" style="font-size:11px; color:#ef4444;">🗑️</button>
+                </div>
             </div>
         </div>`;
     }).join('');
@@ -14901,27 +14957,157 @@ function renderStatusMonitors(monitors) {
         const st = m.status || 'unknown';
         const latencyStr = m.latest ? `${m.latest.latency_ms}ms` : '—';
         const typeLabel = mon.check?.type || '?';
-        return `<div style="background:var(--bg-input); border:1px solid var(--border); border-radius:8px; padding:12px 16px; display:flex; align-items:center; justify-content:space-between;">
-            <div style="display:flex; align-items:center; gap:12px;">
-                <span style="width:10px; height:10px; border-radius:50%; background:${colors[st]}; display:inline-block;"></span>
-                <div>
-                    <div style="font-weight:600; font-size:13px;">${escapeHtml(mon.name)}
-                        <span style="font-size:11px; padding:1px 6px; background:var(--bg-tertiary); border-radius:4px; color:var(--text-muted); margin-left:6px;">${typeLabel}</span>
+        const uptime = (m.uptime_percent || 100).toFixed(2);
+        
+        const uptimeHistory = renderUptimeBar(m.history || [], 30);
+        
+        return `<div style="background:var(--bg-input); border:1px solid var(--border); border-radius:10px; padding:16px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <span style="width:12px; height:12px; border-radius:50%; background:${colors[st]}; display:inline-block; box-shadow:0 0 8px ${colors[st]}50;"></span>
+                    <div>
+                        <div style="font-weight:600; font-size:14px;">${escapeHtml(mon.name)}
+                            <span style="font-size:10px; padding:2px 8px; background:var(--bg-tertiary); border-radius:4px; color:var(--text-muted); margin-left:8px; text-transform:uppercase;">${typeLabel}</span>
+                        </div>
+                        <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">${m.status_label} &bull; ${latencyStr} response</div>
                     </div>
-                    <div style="font-size:11px; color:var(--text-muted);">${m.status_label} &bull; ${latencyStr} &bull; ${(m.uptime_percent || 100).toFixed(2)}% uptime</div>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <div style="text-align:right;">
+                        <div style="font-size:18px; font-weight:700; color:${colors[st]};">${uptime}%</div>
+                        <div style="font-size:10px; color:var(--text-muted);">30-day uptime</div>
+                    </div>
+                    <div style="display:flex; gap:4px; margin-left:12px;">
+                        <button class="btn btn-sm" onclick="showMonitorDetails('${mon.id}')" style="font-size:11px;" title="View Details">📈</button>
+                        <button class="btn btn-sm" onclick="editMonitor('${mon.id}')" style="font-size:11px;" title="Edit">✏️</button>
+                        <button class="btn btn-sm" onclick="deleteMonitor('${mon.id}')" style="font-size:11px; color:#ef4444;" title="Delete">🗑️</button>
+                    </div>
                 </div>
             </div>
-            <div style="display:flex; gap:6px;">
-                <button class="btn btn-sm" onclick="editMonitor('${mon.id}')" style="font-size:11px;">✏️</button>
-                <button class="btn btn-sm" onclick="deleteMonitor('${mon.id}')" style="font-size:11px; color:#ef4444;">🗑️</button>
+            <div style="display:flex; gap:1px; height:24px; background:var(--bg-tertiary); border-radius:4px; overflow:hidden;" title="30-day uptime history">
+                ${uptimeHistory}
+            </div>
+            <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:10px; color:var(--text-muted);">
+                <span>30 days ago</span>
+                <span>Today</span>
             </div>
         </div>`;
     }).join('');
 }
 
+function renderUptimeBar(history, days) {
+    const bars = [];
+    const colors = { up: '#22c55e', degraded: '#eab308', down: '#ef4444', unknown: '#374151' };
+    
+    for (let i = 0; i < days; i++) {
+        const dayData = history[i];
+        let color = colors.unknown;
+        let tooltip = 'No data';
+        
+        if (dayData) {
+            const pct = dayData.uptime_percent || 0;
+            if (pct >= 99.5) {
+                color = colors.up;
+            } else if (pct >= 95) {
+                color = colors.degraded;
+            } else if (pct > 0) {
+                color = colors.down;
+            }
+            tooltip = `${pct.toFixed(2)}% uptime`;
+        }
+        
+        bars.push(`<div style="flex:1; background:${color}; transition:background 0.2s;" title="${tooltip}"></div>`);
+    }
+    
+    return bars.join('');
+}
+
+async function showMonitorDetails(monitorId) {
+    const m = spMonitorsEnriched.find(x => x.monitor.id === monitorId);
+    if (!m) return;
+    
+    const mon = m.monitor;
+    const colors = { up: '#22c55e', degraded: '#eab308', down: '#ef4444', unknown: '#6b7280' };
+    const st = m.status || 'unknown';
+    
+    let checkDetails = '';
+    const c = mon.check || {};
+    if (c.type === 'http') {
+        checkDetails = `URL: <code>${escapeHtml(c.url)}</code><br>Expected: ${c.expected_status || 200}`;
+    } else if (c.type === 'tcp') {
+        checkDetails = `Host: <code>${escapeHtml(c.host)}:${c.port}</code>`;
+    } else if (c.type === 'ping') {
+        checkDetails = `Host: <code>${escapeHtml(c.host)}</code>`;
+    } else if (c.type === 'container') {
+        checkDetails = `Container: <code>${escapeHtml(c.name)}</code> (${c.runtime})`;
+    } else if (c.type === 'wolfrun') {
+        checkDetails = `Service: <code>${escapeHtml(c.service_name)}</code><br>Min healthy: ${c.min_healthy}`;
+    }
+    
+    const recentChecks = (m.recent_checks || []).slice(0, 10).map(chk => {
+        const time = new Date(chk.timestamp).toLocaleString();
+        const statusColor = chk.success ? colors.up : colors.down;
+        return `<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--border);">
+            <span style="color:${statusColor};">${chk.success ? '✓' : '✗'}</span>
+            <span style="font-size:11px; color:var(--text-muted);">${time}</span>
+            <span style="font-size:11px;">${chk.latency_ms}ms</span>
+        </div>`;
+    }).join('') || '<div style="color:var(--text-muted); padding:12px;">No recent checks</div>';
+    
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.id = 'sp-monitor-details-modal';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width:600px;">
+            <div class="modal-header">
+                <h3 style="display:flex; align-items:center; gap:10px;">
+                    <span style="width:12px; height:12px; border-radius:50%; background:${colors[st]};"></span>
+                    ${escapeHtml(mon.name)}
+                </h3>
+                <button class="modal-close" onclick="document.getElementById('sp-monitor-details-modal').remove()">&times;</button>
+            </div>
+            <div class="modal-body" style="padding:20px;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:20px;">
+                    <div>
+                        <div style="font-size:12px; color:var(--text-muted); margin-bottom:4px;">Status</div>
+                        <div style="font-size:16px; font-weight:600; color:${colors[st]};">${m.status_label}</div>
+                    </div>
+                    <div>
+                        <div style="font-size:12px; color:var(--text-muted); margin-bottom:4px;">Uptime (30 days)</div>
+                        <div style="font-size:16px; font-weight:600;">${(m.uptime_percent || 100).toFixed(2)}%</div>
+                    </div>
+                    <div>
+                        <div style="font-size:12px; color:var(--text-muted); margin-bottom:4px;">Check Interval</div>
+                        <div style="font-size:14px;">${mon.interval_secs}s</div>
+                    </div>
+                    <div>
+                        <div style="font-size:12px; color:var(--text-muted); margin-bottom:4px;">Timeout</div>
+                        <div style="font-size:14px;">${mon.timeout_secs}s</div>
+                    </div>
+                </div>
+                <div style="margin-bottom:20px;">
+                    <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">Check Configuration</div>
+                    <div style="background:var(--bg-tertiary); padding:12px; border-radius:8px; font-size:13px;">
+                        <span style="text-transform:uppercase; font-size:10px; padding:2px 6px; background:var(--primary-color); color:#fff; border-radius:4px; margin-right:8px;">${c.type}</span>
+                        ${checkDetails}
+                    </div>
+                </div>
+                <div>
+                    <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">Recent Checks</div>
+                    <div style="background:var(--bg-tertiary); padding:12px; border-radius:8px; max-height:200px; overflow-y:auto;">
+                        ${recentChecks}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
 // ─── Monitor Form ───
 function showMonitorForm(existing) {
     const form = document.getElementById('sp-monitor-form');
+    document.getElementById('sp-page-form').style.display = 'none';
     form.style.display = '';
     document.getElementById('sp-monitor-form-title').textContent = existing ? 'Edit Monitor' : 'New Monitor';
     document.getElementById('sp-mon-id').value = existing?.id || crypto.randomUUID();
@@ -14939,10 +15125,11 @@ function editMonitor(id) {
     if (mon) showMonitorForm(mon);
 }
 
-function updateMonitorFormFields(existingCheck) {
+async function updateMonitorFormFields(existingCheck) {
     const type = document.getElementById('sp-mon-type').value;
     const el = document.getElementById('sp-mon-fields');
     const c = existingCheck || {};
+    
     if (type === 'http') {
         el.innerHTML = `<div style="display:grid; grid-template-columns:3fr 1fr; gap:16px; margin-bottom:16px;">
             <div class="form-group"><label>URL</label><input type="text" id="sp-mon-url" class="form-control" placeholder="https://example.com" value="${escapeHtml(c.url || '')}"></div>
@@ -14956,10 +15143,13 @@ function updateMonitorFormFields(existingCheck) {
     } else if (type === 'ping') {
         el.innerHTML = `<div class="form-group" style="margin-bottom:16px;"><label>Host</label><input type="text" id="sp-mon-host" class="form-control" placeholder="192.168.1.10" value="${escapeHtml(c.host || '')}"></div>`;
     } else if (type === 'container') {
-        el.innerHTML = `<div style="display:grid; grid-template-columns:1fr 2fr; gap:16px; margin-bottom:16px;">
-            <div class="form-group"><label>Runtime</label><select id="sp-mon-runtime" class="form-control"><option value="docker" ${c.runtime === 'docker' || !c.runtime ? 'selected' : ''}>Docker</option><option value="lxc" ${c.runtime === 'lxc' ? 'selected' : ''}>LXC</option></select></div>
-            <div class="form-group"><label>Container Name</label><input type="text" id="sp-mon-container" class="form-control" placeholder="my-container" value="${escapeHtml(c.name || '')}"></div>
-        </div>`;
+        el.innerHTML = `<div style="text-align:center; padding:16px; color:var(--text-muted);">Loading containers...</div>`;
+        await loadContainersForMonitor();
+        el.innerHTML = renderContainerPicker(c);
+    } else if (type === 'wolfrun') {
+        el.innerHTML = `<div style="text-align:center; padding:16px; color:var(--text-muted);">Loading WolfRun services...</div>`;
+        await loadWolfrunServicesForMonitor();
+        el.innerHTML = renderWolfrunServicePicker(c);
     }
 }
 
@@ -14973,7 +15163,28 @@ async function saveMonitor() {
     } else if (type === 'ping') {
         check = { type: 'ping', host: document.getElementById('sp-mon-host').value };
     } else if (type === 'container') {
-        check = { type: 'container', runtime: document.getElementById('sp-mon-runtime').value, name: document.getElementById('sp-mon-container').value };
+        const nodeId = document.getElementById('sp-mon-container-node')?.value || null;
+        check = { 
+            type: 'container', 
+            runtime: document.getElementById('sp-mon-runtime').value, 
+            name: document.getElementById('sp-mon-container').value,
+            node_id: nodeId || undefined
+        };
+    } else if (type === 'wolfrun') {
+        const svcSelect = document.getElementById('sp-mon-wolfrun-svc');
+        const svcId = svcSelect?.value;
+        if (!svcId) {
+            showToast('Please select a WolfRun service', 'error');
+            return;
+        }
+        const svc = spAvailableWolfrunServices.find(s => s.id === svcId);
+        check = {
+            type: 'wolfrun',
+            service_id: svcId,
+            service_name: svc?.name || '',
+            min_healthy: parseInt(document.getElementById('sp-mon-wolfrun-min')?.value) || 1,
+            health_check: document.getElementById('sp-mon-wolfrun-check')?.value || 'running'
+        };
     }
     const monitor = {
         id: document.getElementById('sp-mon-id').value,
@@ -15008,6 +15219,7 @@ async function deleteMonitor(id) {
 // ─── Page Form ───
 function showStatusPageForm(existing) {
     const form = document.getElementById('sp-page-form');
+    document.getElementById('sp-monitor-form').style.display = 'none';
     form.style.display = '';
     document.getElementById('sp-page-form-title').textContent = existing ? 'Edit Status Page' : 'New Status Page';
     document.getElementById('sp-page-id').value = existing?.id || crypto.randomUUID();
@@ -15030,7 +15242,6 @@ function editStatusPage(id) {
 
 function addServiceRow(svc) {
     const container = document.getElementById('sp-page-services');
-    const idx = container.children.length;
     const monOptions = spConfig.monitors.map(m =>
         `<option value="${m.id}" ${(svc?.monitor_ids || []).includes(m.id) ? 'selected' : ''}>${escapeHtml(m.name)}</option>`
     ).join('');
@@ -15086,7 +15297,354 @@ async function deleteStatusPage(id) {
     } catch (e) { showToast('Failed to delete page', 'error'); }
 }
 
-function escapeHtml(s) {
-    if (!s) return '';
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// ═══════════════════════════════════════════════
+// ─── Status Page Incident Management ───
+// ═══════════════════════════════════════════════
+
+let spAllIncidents = [];
+
+function renderIncidentsList() {
+    const el = document.getElementById('sp-incidents-list');
+    
+    spAllIncidents = [];
+    (spConfig.pages || []).forEach(page => {
+        (page.incidents || []).forEach(inc => {
+            spAllIncidents.push({ ...inc, page_id: page.id, page_title: page.title });
+        });
+    });
+    
+    spAllIncidents.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+    
+    if (!spAllIncidents.length) {
+        el.innerHTML = `<div style="text-align:center; padding:40px; color:var(--text-muted);">
+            <div style="font-size:32px; margin-bottom:12px;">✅</div>
+            <div style="font-size:14px;">No incidents reported</div>
+            <div style="font-size:12px; margin-top:4px;">All systems operational</div>
+        </div>`;
+        return;
+    }
+    
+    const impactColors = { none: '#6b7280', minor: '#eab308', major: '#f97316', critical: '#ef4444' };
+    const statusIcons = { investigating: '🔍', identified: '🎯', monitoring: '👀', resolved: '✅' };
+    
+    el.innerHTML = spAllIncidents.map(inc => {
+        const impact = inc.impact || 'none';
+        const status = inc.status || 'investigating';
+        const created = inc.created_at ? new Date(inc.created_at).toLocaleString() : 'Unknown';
+        const resolved = inc.resolved_at ? new Date(inc.resolved_at).toLocaleString() : null;
+        const updates = inc.updates || [];
+        const lastUpdate = updates.length ? updates[updates.length - 1] : null;
+        
+        const updatesHtml = updates.slice(-3).map(u => {
+            const time = u.timestamp ? new Date(u.timestamp).toLocaleString() : '';
+            return `<div style="padding:8px 0; border-bottom:1px solid var(--border);">
+                <div style="font-size:11px; color:var(--text-muted);">${time} — ${statusIcons[u.status] || ''} ${u.status}</div>
+                <div style="font-size:12px; margin-top:4px;">${escapeHtml(u.message)}</div>
+            </div>`;
+        }).join('');
+        
+        return `<div style="background:var(--bg-input); border:1px solid var(--border); border-left:4px solid ${impactColors[impact]}; border-radius:10px; padding:16px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px;">
+                <div>
+                    <div style="font-weight:600; font-size:15px;">${statusIcons[status]} ${escapeHtml(inc.title)}</div>
+                    <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">
+                        <span style="padding:2px 8px; background:${impactColors[impact]}22; color:${impactColors[impact]}; border-radius:4px; text-transform:uppercase; font-size:10px; font-weight:600;">${impact}</span>
+                        &bull; ${escapeHtml(inc.page_title)} &bull; Started: ${created}
+                        ${resolved ? `&bull; Resolved: ${resolved}` : ''}
+                    </div>
+                </div>
+                <div style="display:flex; gap:6px;">
+                    ${status !== 'resolved' ? `<button class="btn btn-sm" onclick="updateIncident('${inc.id}', '${inc.page_id}')" style="font-size:11px;">📝 Update</button>` : ''}
+                    <button class="btn btn-sm" onclick="editIncident('${inc.id}', '${inc.page_id}')" style="font-size:11px;">✏️</button>
+                    <button class="btn btn-sm" onclick="deleteIncident('${inc.id}', '${inc.page_id}')" style="font-size:11px; color:#ef4444;">🗑️</button>
+                </div>
+            </div>
+            ${updates.length > 0 ? `
+                <div style="background:var(--bg-tertiary); border-radius:8px; padding:12px; margin-top:12px;">
+                    <div style="font-size:11px; font-weight:600; color:var(--text-muted); margin-bottom:8px;">RECENT UPDATES</div>
+                    ${updatesHtml}
+                </div>
+            ` : ''}
+        </div>`;
+    }).join('');
+}
+
+function showIncidentForm(existing, pageId) {
+    const form = document.getElementById('sp-incident-form');
+    document.getElementById('sp-page-form').style.display = 'none';
+    document.getElementById('sp-monitor-form').style.display = 'none';
+    form.style.display = '';
+    
+    document.getElementById('sp-incident-form-title').textContent = existing ? 'Edit Incident' : 'Report Incident';
+    document.getElementById('sp-incident-id').value = existing?.id || crypto.randomUUID();
+    document.getElementById('sp-incident-page-id').value = pageId || '';
+    document.getElementById('sp-incident-title').value = existing?.title || '';
+    document.getElementById('sp-incident-status').value = existing?.status || 'investigating';
+    document.getElementById('sp-incident-impact').value = existing?.impact || 'minor';
+    document.getElementById('sp-incident-message').value = '';
+    
+    const pageSelect = document.getElementById('sp-incident-page');
+    pageSelect.innerHTML = `<option value="">-- Select a status page --</option>` +
+        (spConfig.pages || []).map(p => 
+            `<option value="${p.id}" ${p.id === pageId ? 'selected' : ''}>${escapeHtml(p.title)}</option>`
+        ).join('');
+    
+    updateIncidentServicesSelect(pageId);
+    
+    pageSelect.onchange = function() {
+        updateIncidentServicesSelect(this.value);
+    };
+    
+    if (existing?.affected_services) {
+        setTimeout(() => {
+            const servicesSelect = document.getElementById('sp-incident-services');
+            Array.from(servicesSelect.options).forEach(opt => {
+                opt.selected = existing.affected_services.includes(opt.value);
+            });
+        }, 100);
+    }
+    
+    form.scrollIntoView({ behavior: 'smooth' });
+}
+
+function updateIncidentServicesSelect(pageId) {
+    const servicesSelect = document.getElementById('sp-incident-services');
+    const page = (spConfig.pages || []).find(p => p.id === pageId);
+    
+    if (!page || !page.services?.length) {
+        servicesSelect.innerHTML = '<option value="" disabled>No services on this page</option>';
+        return;
+    }
+    
+    servicesSelect.innerHTML = page.services.map(svc =>
+        `<option value="${svc.id}">${escapeHtml(svc.name)}</option>`
+    ).join('');
+}
+
+function editIncident(incidentId, pageId) {
+    const page = (spConfig.pages || []).find(p => p.id === pageId);
+    const incident = page?.incidents?.find(i => i.id === incidentId);
+    if (incident) showIncidentForm(incident, pageId);
+}
+
+function updateIncident(incidentId, pageId) {
+    const page = (spConfig.pages || []).find(p => p.id === pageId);
+    const incident = page?.incidents?.find(i => i.id === incidentId);
+    if (!incident) return;
+    
+    showIncidentForm(incident, pageId);
+    document.getElementById('sp-incident-form-title').textContent = 'Add Update to Incident';
+}
+
+async function saveIncident() {
+    const pageId = document.getElementById('sp-incident-page').value || document.getElementById('sp-incident-page-id').value;
+    if (!pageId) {
+        showToast('Please select a status page', 'error');
+        return;
+    }
+    
+    const title = document.getElementById('sp-incident-title').value.trim();
+    if (!title) {
+        showToast('Please enter an incident title', 'error');
+        return;
+    }
+    
+    const incidentId = document.getElementById('sp-incident-id').value;
+    const status = document.getElementById('sp-incident-status').value;
+    const impact = document.getElementById('sp-incident-impact').value;
+    const message = document.getElementById('sp-incident-message').value.trim();
+    const servicesSelect = document.getElementById('sp-incident-services');
+    const affected_services = Array.from(servicesSelect.selectedOptions).map(o => o.value);
+    
+    const page = (spConfig.pages || []).find(p => p.id === pageId);
+    const existingIncident = page?.incidents?.find(i => i.id === incidentId);
+    
+    const incident = {
+        id: incidentId,
+        title,
+        status,
+        impact,
+        affected_services,
+        created_at: existingIncident?.created_at || new Date().toISOString(),
+        resolved_at: status === 'resolved' ? (existingIncident?.resolved_at || new Date().toISOString()) : null,
+        updates: existingIncident?.updates || []
+    };
+    
+    if (message) {
+        incident.updates.push({
+            timestamp: new Date().toISOString(),
+            status,
+            message
+        });
+    }
+    
+    try {
+        const res = await fetch(`/api/statuspage/pages/${pageId}/incidents`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+            body: JSON.stringify(incident),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        showToast('Incident saved', 'success');
+        document.getElementById('sp-incident-form').style.display = 'none';
+        loadStatusPageData();
+    } catch (e) { 
+        showToast('Failed to save incident: ' + e.message, 'error'); 
+    }
+}
+
+async function deleteIncident(incidentId, pageId) {
+    if (!confirm('Delete this incident?')) return;
+    
+    try {
+        const res = await fetch(`/api/statuspage/pages/${pageId}/incidents/${incidentId}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${sessionToken}` },
+        });
+        if (!res.ok) throw new Error(await res.text());
+        showToast('Incident deleted', 'success');
+        loadStatusPageData();
+    } catch (e) { 
+        showToast('Failed to delete incident: ' + e.message, 'error'); 
+    }
+}
+
+// ═══════════════════════════════════════════════
+// ─── Status Page Container/Service Picker ───
+// ═══════════════════════════════════════════════
+
+let spAvailableContainers = [];
+let spAvailableWolfrunServices = [];
+
+async function loadContainersForMonitor() {
+    spAvailableContainers = [];
+    const clusterNodes = allNodes.filter(n => {
+        const nodeCluster = n.cluster_name || 'WolfStack';
+        return nodeCluster === spCurrentCluster && n.online;
+    });
+    
+    for (const node of clusterNodes) {
+        try {
+            const dockerRes = await fetch(`/api/nodes/${node.id}/proxy/containers/docker`, {
+                headers: { 'Authorization': `Bearer ${sessionToken}` }
+            });
+            if (dockerRes.ok) {
+                const containers = await dockerRes.json();
+                containers.forEach(c => {
+                    spAvailableContainers.push({
+                        name: c.Names?.[0]?.replace(/^\//, '') || c.name || c.Id?.slice(0, 12),
+                        runtime: 'docker',
+                        node: node.hostname,
+                        node_id: node.id,
+                        state: c.State || c.status
+                    });
+                });
+            }
+        } catch (e) { }
+        
+        try {
+            const lxcRes = await fetch(`/api/nodes/${node.id}/proxy/containers/lxc`, {
+                headers: { 'Authorization': `Bearer ${sessionToken}` }
+            });
+            if (lxcRes.ok) {
+                const containers = await lxcRes.json();
+                containers.forEach(c => {
+                    spAvailableContainers.push({
+                        name: c.name,
+                        runtime: 'lxc',
+                        node: node.hostname,
+                        node_id: node.id,
+                        state: c.state
+                    });
+                });
+            }
+        } catch (e) { }
+    }
+}
+
+async function loadWolfrunServicesForMonitor() {
+    spAvailableWolfrunServices = [];
+    try {
+        const url = wolfrunApiUrl('/api/wolfrun/services');
+        const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${sessionToken}` } });
+        if (resp.ok) {
+            const services = await resp.json();
+            spAvailableWolfrunServices = services.filter(s => {
+                const svcCluster = s.cluster_name || 'WolfStack';
+                return svcCluster === spCurrentCluster;
+            });
+        }
+    } catch (e) { }
+}
+
+function renderContainerPicker(existingCheck) {
+    const c = existingCheck || {};
+    const containerOptions = spAvailableContainers.map(ct => {
+        const selected = c.name === ct.name && c.runtime === ct.runtime ? 'selected' : '';
+        const stateIcon = ct.state === 'running' ? '🟢' : '🔴';
+        return `<option value="${ct.runtime}:${escapeHtml(ct.name)}:${ct.node_id}" ${selected}>${stateIcon} ${escapeHtml(ct.name)} (${ct.runtime} @ ${escapeHtml(ct.node)})</option>`;
+    }).join('');
+    
+    return `<div class="form-group" style="margin-bottom:16px;">
+        <label>Select Container</label>
+        <select id="sp-mon-container-select" class="form-control" onchange="onContainerSelect()">
+            <option value="">-- Select a container --</option>
+            ${containerOptions}
+        </select>
+        <div style="margin-top:8px; font-size:11px; color:var(--text-muted);">
+            Or manually specify:
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 2fr 1fr; gap:8px; margin-top:6px;">
+            <select id="sp-mon-runtime" class="form-control" style="font-size:12px;">
+                <option value="docker" ${c.runtime === 'docker' || !c.runtime ? 'selected' : ''}>Docker</option>
+                <option value="lxc" ${c.runtime === 'lxc' ? 'selected' : ''}>LXC</option>
+            </select>
+            <input type="text" id="sp-mon-container" class="form-control" placeholder="container-name" value="${escapeHtml(c.name || '')}" style="font-size:12px;">
+            <input type="text" id="sp-mon-container-node" class="form-control" placeholder="node-id (optional)" value="${escapeHtml(c.node_id || '')}" style="font-size:12px;">
+        </div>
+    </div>`;
+}
+
+function onContainerSelect() {
+    const select = document.getElementById('sp-mon-container-select');
+    if (!select.value) return;
+    const [runtime, name, nodeId] = select.value.split(':');
+    document.getElementById('sp-mon-runtime').value = runtime;
+    document.getElementById('sp-mon-container').value = name;
+    document.getElementById('sp-mon-container-node').value = nodeId || '';
+}
+
+function renderWolfrunServicePicker(existingCheck) {
+    const c = existingCheck || {};
+    const svcOptions = spAvailableWolfrunServices.map(svc => {
+        const selected = c.service_id === svc.id ? 'selected' : '';
+        const running = svc.instances?.filter(i => i.status === 'running').length || 0;
+        const total = svc.instances?.length || 0;
+        const statusIcon = running === total && total > 0 ? '🟢' : running > 0 ? '🟡' : '🔴';
+        return `<option value="${svc.id}" ${selected}>${statusIcon} ${escapeHtml(svc.name)} (${running}/${total} running)</option>`;
+    }).join('');
+    
+    return `<div class="form-group" style="margin-bottom:16px;">
+        <label>WolfRun Service</label>
+        <select id="sp-mon-wolfrun-svc" class="form-control">
+            <option value="">-- Select a WolfRun service --</option>
+            ${svcOptions}
+        </select>
+        <div style="margin-top:8px; font-size:11px; color:var(--text-muted);">
+            Monitors all instances of this service and reports UP if minimum replicas are healthy.
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:12px;">
+            <div class="form-group" style="margin:0;">
+                <label style="font-size:11px;">Min Healthy Instances</label>
+                <input type="number" id="sp-mon-wolfrun-min" class="form-control" value="${c.min_healthy || 1}" min="1" style="font-size:12px;">
+            </div>
+            <div class="form-group" style="margin:0;">
+                <label style="font-size:11px;">Health Check Type</label>
+                <select id="sp-mon-wolfrun-check" class="form-control" style="font-size:12px;">
+                    <option value="running" ${c.health_check === 'running' || !c.health_check ? 'selected' : ''}>Container Running</option>
+                    <option value="http" ${c.health_check === 'http' ? 'selected' : ''}>HTTP Health Endpoint</option>
+                </select>
+            </div>
+        </div>
+    </div>`;
 }
