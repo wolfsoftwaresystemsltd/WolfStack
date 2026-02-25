@@ -8212,15 +8212,20 @@ pub async fn statuspage_monitors_list(req: HttpRequest, state: web::Data<AppStat
 pub async fn statuspage_monitor_save(req: HttpRequest, state: web::Data<AppState>, body: web::Json<crate::statuspage::Monitor>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let monitor = body.into_inner();
-    let mut config = state.statuspage.config.write().unwrap();
-    if let Some(existing) = config.monitors.iter_mut().find(|m| m.id == monitor.id) {
-        *existing = monitor.clone();
-    } else {
-        config.monitors.push(monitor.clone());
+    {
+        let mut config = state.statuspage.config.write().unwrap();
+        if let Some(existing) = config.monitors.iter_mut().find(|m| m.id == monitor.id) {
+            *existing = monitor.clone();
+        } else {
+            config.monitors.push(monitor.clone());
+        }
+        if let Err(e) = config.save() {
+            return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+        }
     }
-    if let Err(e) = config.save() {
-        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
-    }
+    // Trigger immediate check cycle so status is available right away
+    let sp = state.statuspage.clone();
+    tokio::spawn(async move { crate::statuspage::run_checks(&sp).await; });
     HttpResponse::Ok().json(serde_json::json!({ "saved": true, "monitor": monitor }))
 }
 
@@ -8315,6 +8320,10 @@ pub async fn statuspage_page_save(req: HttpRequest, state: web::Data<AppState>, 
     if let Err(e) = config.save() {
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
     }
+    drop(config);
+    // Trigger immediate check cycle so status is available right away
+    let sp = state.statuspage.clone();
+    tokio::spawn(async move { crate::statuspage::run_checks(&sp).await; });
     HttpResponse::Ok().json(serde_json::json!({ "saved": true, "page": page }))
 }
 

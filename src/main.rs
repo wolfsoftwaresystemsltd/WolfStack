@@ -815,8 +815,8 @@ async fn main() -> std::io::Result<()> {
         // Background: Status page health check runner (every 30s)
         let sp_state = statuspage_state.clone();
         tokio::spawn(async move {
-            // Wait 15 seconds after startup before first check
-            tokio::time::sleep(Duration::from_secs(15)).await;
+            // Short delay after startup, then run first check immediately
+            tokio::time::sleep(Duration::from_secs(5)).await;
             loop {
                 statuspage::run_checks(&sp_state).await;
                 tokio::time::sleep(Duration::from_secs(30)).await;
