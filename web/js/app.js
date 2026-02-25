@@ -14882,7 +14882,7 @@ async function loadStatusPageData() {
     let monitors = [];
 
     try {
-        const cfgRes = await fetch('/api/statuspage/config', { headers: { 'Authorization': `Bearer ${sessionToken}` } });
+        const cfgRes = await fetch('/api/statuspage/config');
         if (cfgRes.ok) {
             spConfig = await cfgRes.json();
             if (!spConfig.monitors) spConfig.monitors = [];
@@ -14896,7 +14896,7 @@ async function loadStatusPageData() {
     }
 
     try {
-        const pagesRes = await fetch('/api/statuspage/pages', { headers: { 'Authorization': `Bearer ${sessionToken}` } });
+        const pagesRes = await fetch('/api/statuspage/pages');
         if (pagesRes.ok) {
             const pagesData = await pagesRes.json();
             pages = pagesData.pages || [];
@@ -14906,7 +14906,7 @@ async function loadStatusPageData() {
     }
 
     try {
-        const monsRes = await fetch('/api/statuspage/monitors', { headers: { 'Authorization': `Bearer ${sessionToken}` } });
+        const monsRes = await fetch('/api/statuspage/monitors');
         if (monsRes.ok) {
             const monsData = await monsRes.json();
             monitors = monsData.monitors || [];
@@ -15239,7 +15239,7 @@ async function saveMonitor() {
     try {
         const res = await fetch('/api/statuspage/monitors', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(monitor),
         });
         if (!res.ok) throw new Error(await res.text());
@@ -15252,7 +15252,7 @@ async function saveMonitor() {
 async function deleteMonitor(id) {
     if (!confirm('Delete this monitor?')) return;
     try {
-        await fetch(`/api/statuspage/monitors/${id}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${sessionToken}` } });
+        await fetch(`/api/statuspage/monitors/${id}`, { method: 'DELETE' });
         showToast('Monitor deleted', 'success');
         loadStatusPageData();
     } catch (e) { showToast('Failed to delete monitor', 'error'); }
@@ -15341,7 +15341,7 @@ async function saveStatusPage() {
     try {
         const res = await fetch('/api/statuspage/pages', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(page),
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.error || 'Failed'); }
@@ -15354,7 +15354,7 @@ async function saveStatusPage() {
 async function deleteStatusPage(id) {
     if (!confirm('Delete this status page? This cannot be undone.')) return;
     try {
-        await fetch(`/api/statuspage/pages/${id}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${sessionToken}` } });
+        await fetch(`/api/statuspage/pages/${id}`, { method: 'DELETE' });
         showToast('Status page deleted', 'success');
         loadStatusPageData();
     } catch (e) { showToast('Failed to delete page', 'error'); }
@@ -15526,7 +15526,7 @@ async function saveIncident() {
     try {
         const res = await fetch(`/api/statuspage/incidents`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(incident),
         });
         if (!res.ok) throw new Error(await res.text());
@@ -15538,7 +15538,7 @@ async function saveIncident() {
                 page.incident_ids.push(incidentId);
                 await fetch('/api/statuspage/pages', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(page),
                 });
             }
@@ -15558,7 +15558,6 @@ async function deleteIncident(incidentId) {
     try {
         const res = await fetch(`/api/statuspage/incidents/${incidentId}`, {
             method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${sessionToken}` },
         });
         if (!res.ok) throw new Error(await res.text());
         showToast('Incident deleted', 'success');
@@ -15584,9 +15583,7 @@ async function loadContainersForMonitor() {
 
     for (const node of clusterNodes) {
         try {
-            const dockerRes = await fetch(`/api/nodes/${node.id}/proxy/containers/docker`, {
-                headers: { 'Authorization': `Bearer ${sessionToken}` }
-            });
+            const dockerRes = await fetch(`/api/nodes/${node.id}/proxy/containers/docker`);
             if (dockerRes.ok) {
                 const containers = await dockerRes.json();
                 containers.forEach(c => {
@@ -15602,9 +15599,7 @@ async function loadContainersForMonitor() {
         } catch (e) { }
 
         try {
-            const lxcRes = await fetch(`/api/nodes/${node.id}/proxy/containers/lxc`, {
-                headers: { 'Authorization': `Bearer ${sessionToken}` }
-            });
+            const lxcRes = await fetch(`/api/nodes/${node.id}/proxy/containers/lxc`);
             if (lxcRes.ok) {
                 const containers = await lxcRes.json();
                 containers.forEach(c => {
@@ -15625,7 +15620,7 @@ async function loadWolfrunServicesForMonitor() {
     spAvailableWolfrunServices = [];
     try {
         const url = wolfrunApiUrl('/api/wolfrun/services');
-        const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${sessionToken}` } });
+        const resp = await fetch(url);
         if (resp.ok) {
             const services = await resp.json();
             spAvailableWolfrunServices = services.filter(s => {
