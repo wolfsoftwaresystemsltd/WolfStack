@@ -8437,6 +8437,8 @@ pub async fn statuspage_sync(req: HttpRequest, state: web::Data<AppState>, body:
     }
 
     let peer_config = body.into_inner();
+    tracing::info!("StatusPage sync: received {} pages, {} monitors, {} incidents from peer",
+        peer_config.pages.len(), peer_config.monitors.len(), peer_config.incidents.len());
     state.statuspage.merge_from_peer(peer_config);
     HttpResponse::Ok().json(serde_json::json!({ "synced": true }))
 }

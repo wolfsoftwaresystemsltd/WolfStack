@@ -413,8 +413,11 @@ pub async fn broadcast_to_cluster(
         incidents: full_config.incidents.into_iter().filter(|i| i.cluster == self_cluster).collect(),
     };
 
+    let page_count = filtered.pages.len();
+    let monitor_count = filtered.monitors.len();
+
     // Nothing to send
-    if filtered.pages.is_empty() && filtered.monitors.is_empty() && filtered.incidents.is_empty() {
+    if page_count == 0 && monitor_count == 0 && filtered.incidents.is_empty() {
         return;
     }
 
@@ -439,22 +442,39 @@ pub async fn broadcast_to_cluster(
         }
 
         let urls = crate::api::build_node_urls(&node.address, node.port, "/api/statuspage/sync");
+        let mut sent = false;
         for url in &urls {
             match client.post(url)
                 .header("X-WolfStack-Secret", cluster_secret)
                 .json(&filtered)
                 .send().await
             {
-                Ok(_) => break,
-                Err(_) => continue,
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!("StatusPage sync: sent {} pages, {} monitors to {} ({})",
+                        page_count, monitor_count, node.hostname, url);
+                    sent = true;
+                    break;
+                }
+                Ok(resp) => {
+                    tracing::warn!("StatusPage sync: {} returned HTTP {} — trying next URL",
+                        url, resp.status());
+                    continue;
+                }
+                Err(e) => {
+                    tracing::debug!("StatusPage sync: {} failed: {} — trying next URL", url, e);
+                    continue;
+                }
             }
+        }
+        if !sent {
+            tracing::warn!("StatusPage sync: failed to reach {} (all URLs failed)", node.hostname);
         }
     }
 }
 
-/// Pull status page config from a cluster peer (used on startup to catch up).
-/// Only pulls if our own config has no pages for our cluster.
-pub async fn pull_from_peer(
+/// Pull status page config from cluster peers.
+/// Tries each online same-cluster peer until one responds with data.
+pub async fn pull_from_peers(
     state: &Arc<StatusPageState>,
     cluster: &crate::agent::ClusterState,
     cluster_secret: &str,
@@ -466,21 +486,13 @@ pub async fn pull_from_peer(
         .and_then(|n| n.cluster_name.clone())
         .unwrap_or_else(|| "WolfStack".to_string());
 
-    // Check if we already have pages for our cluster — if so, no need to pull
+    // Check if we already have pages for our cluster
     {
         let config = state.config.read().unwrap();
         if config.pages.iter().any(|p| p.cluster == self_cluster) {
             return;
         }
     }
-
-    // Find the first online same-cluster peer
-    let peer = match nodes.iter().find(|n| {
-        !n.is_self && n.online && n.cluster_name.as_deref().unwrap_or("WolfStack") == self_cluster
-    }) {
-        Some(p) => p,
-        None => return,
-    };
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -491,21 +503,34 @@ pub async fn pull_from_peer(
         Err(_) => return,
     };
 
-    let urls = crate::api::build_node_urls(&peer.address, peer.port, "/api/statuspage/config");
-    for url in &urls {
-        match client.get(url)
-            .header("X-WolfStack-Secret", cluster_secret)
-            .send().await
-        {
-            Ok(resp) => {
-                if let Ok(peer_config) = resp.json::<StatusPageConfig>().await {
-                    state.merge_from_peer(peer_config);
+    // Try each online same-cluster peer
+    for peer in nodes.iter().filter(|n| {
+        !n.is_self && n.online && n.cluster_name.as_deref().unwrap_or("WolfStack") == self_cluster
+    }) {
+        let urls = crate::api::build_node_urls(&peer.address, peer.port, "/api/statuspage/config");
+        for url in &urls {
+            match client.get(url)
+                .header("X-WolfStack-Secret", cluster_secret)
+                .send().await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(peer_config) = resp.json::<StatusPageConfig>().await {
+                        let has_pages = peer_config.pages.iter().any(|p| p.cluster == self_cluster);
+                        if has_pages {
+                            tracing::info!("StatusPage pull: got config from {} ({} pages, {} monitors)",
+                                peer.hostname, peer_config.pages.len(), peer_config.monitors.len());
+                            state.merge_from_peer(peer_config);
+                            return;
+                        }
+                    }
+                    break; // Peer responded but had no data — try next peer
                 }
-                return;
+                Ok(_) => continue, // Non-success HTTP — try next URL
+                Err(_) => continue, // Network error — try next URL
             }
-            Err(_) => continue,
         }
     }
+    tracing::debug!("StatusPage pull: no peer had pages for cluster '{}'", self_cluster);
 }
 
 // ═══════════════════════════════════════════════
