@@ -14871,17 +14871,17 @@ function spPublicUrl(slug, cluster) {
     const selfCluster = selfNode?.cluster_name || 'WolfStack';
     // Use spCurrentCluster as fallback when page has no cluster set
     const resolvedCluster = cluster || spCurrentCluster || selfCluster;
-    const scheme = serverTlsEnabled ? 'https' : 'http';
     if (resolvedCluster === selfCluster) {
         return `${window.location.origin}/status/${slug}`;
     }
-    // Remote cluster — find an online node and use its address (FQDN set by the admin)
+    // Remote cluster — find an online node and use its per-node TLS flag
     const remoteNode = allNodes.find(n => n.online && (n.cluster_name || 'WolfStack') === resolvedCluster);
     if (remoteNode) {
-        // Prefer address (admin-configured FQDN like cynthia.wolfterritories.org), then hostname
+        const scheme = remoteNode.tls ? 'https' : 'http';
         const host = remoteNode.address || remoteNode.hostname;
         return `${scheme}://${host}:${remoteNode.port}/status/${slug}`;
     }
+    const scheme = serverTlsEnabled ? 'https' : 'http';
     return `${scheme}://${resolvedCluster}/status/${slug}`;
 }
 

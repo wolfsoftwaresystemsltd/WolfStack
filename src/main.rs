@@ -185,6 +185,13 @@ async fn main() -> std::io::Result<()> {
     containers::lxc_autostart_all();
     vms_manager.autostart_vms();
 
+    // Check if TLS will be available (so the frontend knows the correct protocol for URLs)
+    let tls_enabled = if cli.tls_cert.is_some() && cli.tls_key.is_some() {
+        true
+    } else {
+        installer::find_tls_certificate(cli.tls_domain.as_deref()).is_some()
+    };
+
     // Initial self-update
     {
         let mut mon = monitor;
@@ -196,7 +203,7 @@ async fn main() -> std::io::Result<()> {
         let has_docker = containers::docker_status().installed;
         let has_lxc = containers::lxc_status().installed;
         let has_kvm = containers::kvm_installed();
-        cluster.update_self(metrics, components, docker_count, lxc_count, vm_count, public_ip.clone(), has_docker, has_lxc, has_kvm);
+        cluster.update_self(metrics, components, docker_count, lxc_count, vm_count, public_ip.clone(), has_docker, has_lxc, has_kvm, tls_enabled);
 
         // Initialize AI agent
         let ai_agent = Arc::new(ai::AiAgent::new());
@@ -208,13 +215,6 @@ async fn main() -> std::io::Result<()> {
 
         // Initialize Status Page monitoring state
         let statuspage_state = Arc::new(statuspage::StatusPageState::new());
-
-        // Check if TLS will be available (so the frontend knows the correct protocol for URLs)
-        let tls_enabled = if cli.tls_cert.is_some() && cli.tls_key.is_some() {
-            true
-        } else {
-            installer::find_tls_certificate(cli.tls_domain.as_deref()).is_some()
-        };
 
         // Create app state
         let app_state = web::Data::new(api::AppState {
@@ -287,7 +287,7 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
 
-                cluster_clone.update_self(metrics, components, docker_count, lxc_count, vm_count, public_ip.clone(), has_docker, has_lxc, has_kvm);
+                cluster_clone.update_self(metrics, components, docker_count, lxc_count, vm_count, public_ip.clone(), has_docker, has_lxc, has_kvm, tls_enabled);
             }
         });
 
