@@ -14854,8 +14854,12 @@ function showStatusPagesForCluster(clusterName) {
     document.getElementById('page-title').textContent = `Status Pages — ${clusterName}`;
 
     // Hide forms
-    document.getElementById('sp-page-form').style.display = 'none';
-    document.getElementById('sp-monitor-form').style.display = 'none';
+    const spPageForm = document.getElementById('sp-page-form');
+    const spMonForm = document.getElementById('sp-monitor-form');
+    const spIncForm = document.getElementById('sp-incident-form');
+    if (spPageForm) spPageForm.style.display = 'none';
+    if (spMonForm) spMonForm.style.display = 'none';
+    if (spIncForm) spIncForm.style.display = 'none';
 
     loadStatusPageData();
 }
@@ -14874,43 +14878,48 @@ function switchStatusTab(tab) {
 }
 
 async function loadStatusPageData() {
-    const pagesEl = document.getElementById('sp-pages-list');
-    const monsEl = document.getElementById('sp-monitors-list');
-    const incidentsEl = document.getElementById('sp-incidents-list');
-    
+    let pages = [];
+    let monitors = [];
+
     try {
-        const [pagesRes, monsRes] = await Promise.all([
-            fetch('/api/statuspage/pages', { headers: { 'Authorization': `Bearer ${sessionToken}` } }),
-            fetch('/api/statuspage/monitors', { headers: { 'Authorization': `Bearer ${sessionToken}` } }),
-        ]);
-        
-        if (!pagesRes.ok || !monsRes.ok) {
-            throw new Error('API request failed');
-        }
-        
-        const pagesData = await pagesRes.json();
-        const monsData = await monsRes.json();
-        spMonitorsEnriched = monsData.monitors || [];
-        
         const cfgRes = await fetch('/api/statuspage/config', { headers: { 'Authorization': `Bearer ${sessionToken}` } });
-        spConfig = cfgRes.ok ? await cfgRes.json() : { monitors: [], pages: [] };
-        
-        renderStatusPages(pagesData.pages || []);
-        renderStatusMonitors(spMonitorsEnriched);
-        renderIncidentsList();
-        switchStatusTab('pages');
+        if (cfgRes.ok) {
+            spConfig = await cfgRes.json();
+            if (!spConfig.monitors) spConfig.monitors = [];
+            if (!spConfig.pages) spConfig.pages = [];
+        } else {
+            spConfig = { monitors: [], pages: [] };
+        }
     } catch (e) {
-        console.error('Status page load error:', e);
-        const errorHtml = `<div style="text-align:center; padding:40px; color:var(--text-muted);">
-            <div style="font-size:24px; margin-bottom:12px;">⚠️</div>
-            <div style="font-size:13px;">Failed to load data</div>
-            <button class="btn btn-sm" onclick="loadStatusPageData()" style="margin-top:12px;">🔄 Retry</button>
-        </div>`;
-        if (pagesEl) pagesEl.innerHTML = errorHtml;
-        if (monsEl) monsEl.innerHTML = errorHtml;
-        if (incidentsEl) incidentsEl.innerHTML = errorHtml;
-        showToast('Failed to load status page data', 'error');
+        console.warn('Status page config load failed, using defaults:', e);
+        spConfig = { monitors: [], pages: [] };
     }
+
+    try {
+        const pagesRes = await fetch('/api/statuspage/pages', { headers: { 'Authorization': `Bearer ${sessionToken}` } });
+        if (pagesRes.ok) {
+            const pagesData = await pagesRes.json();
+            pages = pagesData.pages || [];
+        }
+    } catch (e) {
+        console.warn('Status pages list load failed:', e);
+    }
+
+    try {
+        const monsRes = await fetch('/api/statuspage/monitors', { headers: { 'Authorization': `Bearer ${sessionToken}` } });
+        if (monsRes.ok) {
+            const monsData = await monsRes.json();
+            monitors = monsData.monitors || [];
+        }
+    } catch (e) {
+        console.warn('Status monitors list load failed:', e);
+    }
+
+    spMonitorsEnriched = monitors;
+    renderStatusPages(pages);
+    renderStatusMonitors(monitors);
+    renderIncidentsList();
+    switchStatusTab('pages');
 }
 
 function renderStatusPages(pages) {
