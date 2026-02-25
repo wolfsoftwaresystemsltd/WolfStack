@@ -14846,13 +14846,21 @@ let spRefreshTimer = null;
 
 // Determine if the current cluster is local (this server) or remote.
 // Returns the API base path: '' for local, '/api/nodes/{id}/proxy' for remote.
+// Find the best online WolfStack node in a remote cluster (shared by proxy + public URL)
+function spFindRemoteNode(clusterName) {
+    return allNodes.find(n =>
+        n.online &&
+        (n.node_type || 'wolfstack') === 'wolfstack' &&
+        (n.cluster_name || 'WolfStack') === clusterName
+    ) || null;
+}
+
 function spApiBase() {
     if (!spCurrentCluster) return '';
     const selfNode = allNodes.find(n => n.is_self);
     const selfCluster = selfNode?.cluster_name || 'WolfStack';
     if (spCurrentCluster === selfCluster) return '';
-    // Find first online node in the target cluster to proxy through
-    const remoteNode = allNodes.find(n => n.online && (n.cluster_name || 'WolfStack') === spCurrentCluster);
+    const remoteNode = spFindRemoteNode(spCurrentCluster);
     if (!remoteNode) return '';
     return `/api/nodes/${remoteNode.id}/proxy`;
 }
@@ -14862,20 +14870,17 @@ function spUrl(path) {
     return base ? `${base}/${path}` : `/api/${path}`;
 }
 
-// Build the public URL for a status page from the frontend's allNodes data.
-// For local cluster: use the current browser origin (the address the user is already on).
-// For remote clusters: use the first online node's address and port.
-// Uses serverTlsEnabled from the /api/nodes response to pick https vs http.
+// Build the public URL for a status page.
+// Local cluster: use the current browser origin.
+// Remote cluster: use the same node that spApiBase() routes through.
 function spPublicUrl(slug, cluster) {
     const selfNode = allNodes.find(n => n.is_self);
     const selfCluster = selfNode?.cluster_name || 'WolfStack';
-    // Use spCurrentCluster as fallback when page has no cluster set
     const resolvedCluster = cluster || spCurrentCluster || selfCluster;
     if (resolvedCluster === selfCluster) {
         return `${window.location.origin}/status/${slug}`;
     }
-    // Remote cluster — find an online node and use its per-node TLS flag
-    const remoteNode = allNodes.find(n => n.online && (n.cluster_name || 'WolfStack') === resolvedCluster);
+    const remoteNode = spFindRemoteNode(resolvedCluster);
     if (remoteNode) {
         const scheme = remoteNode.tls ? 'https' : 'http';
         const host = remoteNode.address || remoteNode.hostname;
