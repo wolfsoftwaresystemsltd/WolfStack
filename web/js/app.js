@@ -14875,11 +14875,11 @@ function spPublicUrl(slug, cluster) {
     if (resolvedCluster === selfCluster) {
         return `${window.location.origin}/status/${slug}`;
     }
-    // Remote cluster — find an online node and use its hostname (FQDN)
+    // Remote cluster — find an online node and use its address (FQDN set by the admin)
     const remoteNode = allNodes.find(n => n.online && (n.cluster_name || 'WolfStack') === resolvedCluster);
     if (remoteNode) {
-        // Prefer hostname (FQDN like cluster1.wolf.uk.com), then public_ip, then address
-        const host = remoteNode.hostname || remoteNode.public_ip || remoteNode.address;
+        // Prefer address (admin-configured FQDN like cynthia.wolfterritories.org), then hostname
+        const host = remoteNode.address || remoteNode.hostname;
         return `${scheme}://${host}:${remoteNode.port}/status/${slug}`;
     }
     return `${scheme}://${resolvedCluster}/status/${slug}`;
