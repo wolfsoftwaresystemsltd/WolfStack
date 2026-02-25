@@ -719,8 +719,10 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                     if let Ok(msg) = resp.json::<AgentMessage>().await {
                         if let AgentMessage::StatusReport { node_id: _, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes, deleted_ids, wolfnet_ips, has_docker, has_lxc, has_kvm } = msg {
                             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-                            // Detect TLS: if HTTPS on the main port succeeded, the node has TLS
-                            let node_tls = url.starts_with("https://");
+                            // Detect TLS: HTTP on port+1 means TLS is on the main port,
+                            // HTTPS on main port also means TLS. Only plain HTTP on the
+                            // main port means no TLS.
+                            let node_tls = *url != format!("http://{}:{}/api/agent/status", node.address, node.port);
                             cluster.update_remote(Node {
                                 id: node.id.clone(),
                                 hostname,
