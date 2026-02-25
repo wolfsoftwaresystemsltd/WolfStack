@@ -14870,19 +14870,18 @@ function spUrl(path) {
 }
 
 // Build the public URL for a status page.
-// Uses the node's public IP (or address fallback) with the same protocol the user is on.
+// Uses the node's address (admin-configured FQDN) with the same protocol the user is on.
 function spPublicUrl(slug, cluster) {
     const selfNode = allNodes.find(n => n.is_self);
     const selfCluster = selfNode?.cluster_name || 'WolfStack';
     const resolvedCluster = cluster || spCurrentCluster || selfCluster;
     const scheme = window.location.protocol.replace(':', '');
     if (resolvedCluster === selfCluster) {
-        const host = selfNode?.public_ip || selfNode?.address || window.location.hostname;
-        return `${scheme}://${host}:${selfNode?.port || window.location.port}/status/${slug}`;
+        return `${scheme}://${window.location.host}/status/${slug}`;
     }
     const remoteNode = spFindRemoteNode(resolvedCluster);
     if (remoteNode) {
-        const host = remoteNode.public_ip || remoteNode.address || remoteNode.hostname;
+        const host = remoteNode.address || remoteNode.hostname;
         return `${scheme}://${host}:${remoteNode.port}/status/${slug}`;
     }
     return `/status/${slug}`;
