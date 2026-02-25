@@ -430,6 +430,7 @@ impl WolfRunState {
 
     /// Mark a service as deleted by removing it from our list (called when peer broadcasts a deletion).
     /// This is the same as delete() but without returning the service.
+    #[allow(dead_code)]
     pub fn remove_if_exists(&self, service_id: &str) -> bool {
         let mut svcs = self.services.write().unwrap();
         let before = svcs.len();

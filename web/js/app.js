@@ -97,7 +97,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', 'global-wolfnet': 'Global WolfNet' };
+    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', 'global-wolfnet': 'Global WolfNet', statuspage: 'Status Pages' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -115,6 +115,8 @@ function selectView(page) {
     } else if (page === 'issues') {
         checkIssuesAiBadge();
         loadIssueSchedule();
+    } else if (page === 'statuspage') {
+        loadStatusPageData();
     }
 }
 
@@ -14823,3 +14825,268 @@ function copySystemLogs() {
     });
 }
 
+// ═══════════════════════════════════════════════
+// ─── Status Page Admin ───
+// ═══════════════════════════════════════════════
+
+let spConfig = { monitors: [], pages: [] };
+let spMonitorsEnriched = [];
+
+function switchStatusTab(tab) {
+    document.getElementById('sp-panel-pages').style.display = tab === 'pages' ? '' : 'none';
+    document.getElementById('sp-panel-monitors').style.display = tab === 'monitors' ? '' : 'none';
+    document.getElementById('sp-tab-pages').classList.toggle('btn-primary', tab === 'pages');
+    document.getElementById('sp-tab-monitors').classList.toggle('btn-primary', tab === 'monitors');
+}
+
+async function loadStatusPageData() {
+    try {
+        const [pagesRes, monsRes] = await Promise.all([
+            fetch('/api/statuspage/pages', { headers: { 'Authorization': `Bearer ${sessionToken}` } }),
+            fetch('/api/statuspage/monitors', { headers: { 'Authorization': `Bearer ${sessionToken}` } }),
+        ]);
+        const pagesData = await pagesRes.json();
+        const monsData = await monsRes.json();
+        spMonitorsEnriched = monsData.monitors || [];
+        // Also load config for the raw data
+        const cfgRes = await fetch('/api/statuspage/config', { headers: { 'Authorization': `Bearer ${sessionToken}` } });
+        spConfig = await cfgRes.json();
+        renderStatusPages(pagesData.pages || []);
+        renderStatusMonitors(spMonitorsEnriched);
+        switchStatusTab('pages');
+    } catch (e) {
+        showToast('Failed to load status page data', 'error');
+    }
+}
+
+function renderStatusPages(pages) {
+    const el = document.getElementById('sp-pages-list');
+    if (!pages.length) {
+        el.innerHTML = '<div style="text-align:center; padding:30px; color:var(--text-muted); font-size:13px;">No status pages yet. Click <strong>+ New Page</strong> to create one.</div>';
+        return;
+    }
+    el.innerHTML = pages.map(p => {
+        const st = p.overall_status || 'unknown';
+        const colors = { up: '#22c55e', degraded: '#eab308', down: '#ef4444', unknown: '#6b7280' };
+        const labels = { up: 'Operational', degraded: 'Degraded', down: 'Major Outage', unknown: 'Unknown' };
+        const svcCount = (p.page?.services || []).length;
+        return `<div style="background:var(--bg-input); border:1px solid var(--border); border-radius:10px; padding:16px; display:flex; align-items:center; justify-content:space-between;">
+            <div>
+                <div style="font-weight:600; font-size:14px;">${escapeHtml(p.page.title)}
+                    ${p.page.enabled ? '' : '<span style="font-size:11px; padding:1px 6px; background:rgba(107,114,128,0.2); border-radius:4px; color:#9ca3af; margin-left:6px;">Disabled</span>'}
+                </div>
+                <div style="font-size:12px; color:var(--text-muted); margin-top:3px;">
+                    <a href="/status/${escapeHtml(p.page.slug)}" target="_blank" style="color:var(--accent-light);">/status/${escapeHtml(p.page.slug)}</a>
+                    &bull; ${svcCount} service${svcCount !== 1 ? 's' : ''}
+                    &bull; <span style="color:${colors[st]}">${labels[st]}</span>
+                </div>
+            </div>
+            <div style="display:flex; gap:6px;">
+                <button class="btn btn-sm" onclick="editStatusPage('${p.page.id}')" style="font-size:11px;">✏️ Edit</button>
+                <button class="btn btn-sm" onclick="deleteStatusPage('${p.page.id}')" style="font-size:11px; color:#ef4444;">🗑️</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function renderStatusMonitors(monitors) {
+    const el = document.getElementById('sp-monitors-list');
+    if (!monitors.length) {
+        el.innerHTML = '<div style="text-align:center; padding:30px; color:var(--text-muted); font-size:13px;">No monitors yet. Click <strong>+ New Monitor</strong> to create one.</div>';
+        return;
+    }
+    el.innerHTML = monitors.map(m => {
+        const mon = m.monitor;
+        const colors = { up: '#22c55e', degraded: '#eab308', down: '#ef4444', unknown: '#6b7280' };
+        const st = m.status || 'unknown';
+        const latencyStr = m.latest ? `${m.latest.latency_ms}ms` : '—';
+        const typeLabel = mon.check?.type || '?';
+        return `<div style="background:var(--bg-input); border:1px solid var(--border); border-radius:8px; padding:12px 16px; display:flex; align-items:center; justify-content:space-between;">
+            <div style="display:flex; align-items:center; gap:12px;">
+                <span style="width:10px; height:10px; border-radius:50%; background:${colors[st]}; display:inline-block;"></span>
+                <div>
+                    <div style="font-weight:600; font-size:13px;">${escapeHtml(mon.name)}
+                        <span style="font-size:11px; padding:1px 6px; background:var(--bg-tertiary); border-radius:4px; color:var(--text-muted); margin-left:6px;">${typeLabel}</span>
+                    </div>
+                    <div style="font-size:11px; color:var(--text-muted);">${m.status_label} &bull; ${latencyStr} &bull; ${(m.uptime_percent || 100).toFixed(2)}% uptime</div>
+                </div>
+            </div>
+            <div style="display:flex; gap:6px;">
+                <button class="btn btn-sm" onclick="editMonitor('${mon.id}')" style="font-size:11px;">✏️</button>
+                <button class="btn btn-sm" onclick="deleteMonitor('${mon.id}')" style="font-size:11px; color:#ef4444;">🗑️</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// ─── Monitor Form ───
+function showMonitorForm(existing) {
+    const form = document.getElementById('sp-monitor-form');
+    form.style.display = '';
+    document.getElementById('sp-monitor-form-title').textContent = existing ? 'Edit Monitor' : 'New Monitor';
+    document.getElementById('sp-mon-id').value = existing?.id || crypto.randomUUID();
+    document.getElementById('sp-mon-name').value = existing?.name || '';
+    document.getElementById('sp-mon-interval').value = existing?.interval_secs || 60;
+    document.getElementById('sp-mon-timeout').value = existing?.timeout_secs || 10;
+    document.getElementById('sp-mon-enabled').checked = existing?.enabled !== false;
+    document.getElementById('sp-mon-type').value = existing?.check?.type || 'http';
+    updateMonitorFormFields(existing?.check);
+    form.scrollIntoView({ behavior: 'smooth' });
+}
+
+function editMonitor(id) {
+    const mon = spConfig.monitors.find(m => m.id === id);
+    if (mon) showMonitorForm(mon);
+}
+
+function updateMonitorFormFields(existingCheck) {
+    const type = document.getElementById('sp-mon-type').value;
+    const el = document.getElementById('sp-mon-fields');
+    const c = existingCheck || {};
+    if (type === 'http') {
+        el.innerHTML = `<div style="display:grid; grid-template-columns:3fr 1fr; gap:16px; margin-bottom:16px;">
+            <div class="form-group"><label>URL</label><input type="text" id="sp-mon-url" class="form-control" placeholder="https://example.com" value="${escapeHtml(c.url || '')}"></div>
+            <div class="form-group"><label>Expected Status</label><input type="number" id="sp-mon-status" class="form-control" value="${c.expected_status || 200}"></div>
+        </div>`;
+    } else if (type === 'tcp') {
+        el.innerHTML = `<div style="display:grid; grid-template-columns:3fr 1fr; gap:16px; margin-bottom:16px;">
+            <div class="form-group"><label>Host</label><input type="text" id="sp-mon-host" class="form-control" placeholder="192.168.1.10" value="${escapeHtml(c.host || '')}"></div>
+            <div class="form-group"><label>Port</label><input type="number" id="sp-mon-port" class="form-control" value="${c.port || 80}"></div>
+        </div>`;
+    } else if (type === 'ping') {
+        el.innerHTML = `<div class="form-group" style="margin-bottom:16px;"><label>Host</label><input type="text" id="sp-mon-host" class="form-control" placeholder="192.168.1.10" value="${escapeHtml(c.host || '')}"></div>`;
+    } else if (type === 'container') {
+        el.innerHTML = `<div style="display:grid; grid-template-columns:1fr 2fr; gap:16px; margin-bottom:16px;">
+            <div class="form-group"><label>Runtime</label><select id="sp-mon-runtime" class="form-control"><option value="docker" ${c.runtime === 'docker' || !c.runtime ? 'selected' : ''}>Docker</option><option value="lxc" ${c.runtime === 'lxc' ? 'selected' : ''}>LXC</option></select></div>
+            <div class="form-group"><label>Container Name</label><input type="text" id="sp-mon-container" class="form-control" placeholder="my-container" value="${escapeHtml(c.name || '')}"></div>
+        </div>`;
+    }
+}
+
+async function saveMonitor() {
+    const type = document.getElementById('sp-mon-type').value;
+    let check;
+    if (type === 'http') {
+        check = { type: 'http', url: document.getElementById('sp-mon-url').value, expected_status: parseInt(document.getElementById('sp-mon-status').value) || 200 };
+    } else if (type === 'tcp') {
+        check = { type: 'tcp', host: document.getElementById('sp-mon-host').value, port: parseInt(document.getElementById('sp-mon-port').value) || 80 };
+    } else if (type === 'ping') {
+        check = { type: 'ping', host: document.getElementById('sp-mon-host').value };
+    } else if (type === 'container') {
+        check = { type: 'container', runtime: document.getElementById('sp-mon-runtime').value, name: document.getElementById('sp-mon-container').value };
+    }
+    const monitor = {
+        id: document.getElementById('sp-mon-id').value,
+        name: document.getElementById('sp-mon-name').value,
+        check,
+        interval_secs: parseInt(document.getElementById('sp-mon-interval').value) || 60,
+        timeout_secs: parseInt(document.getElementById('sp-mon-timeout').value) || 10,
+        enabled: document.getElementById('sp-mon-enabled').checked,
+    };
+    try {
+        const res = await fetch('/api/statuspage/monitors', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+            body: JSON.stringify(monitor),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        showToast('Monitor saved', 'success');
+        document.getElementById('sp-monitor-form').style.display = 'none';
+        loadStatusPageData();
+    } catch (e) { showToast('Failed to save monitor: ' + e.message, 'error'); }
+}
+
+async function deleteMonitor(id) {
+    if (!confirm('Delete this monitor?')) return;
+    try {
+        await fetch(`/api/statuspage/monitors/${id}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${sessionToken}` } });
+        showToast('Monitor deleted', 'success');
+        loadStatusPageData();
+    } catch (e) { showToast('Failed to delete monitor', 'error'); }
+}
+
+// ─── Page Form ───
+function showStatusPageForm(existing) {
+    const form = document.getElementById('sp-page-form');
+    form.style.display = '';
+    document.getElementById('sp-page-form-title').textContent = existing ? 'Edit Status Page' : 'New Status Page';
+    document.getElementById('sp-page-id').value = existing?.id || crypto.randomUUID();
+    document.getElementById('sp-page-title').value = existing?.title || '';
+    document.getElementById('sp-page-slug').value = existing?.slug || '';
+    document.getElementById('sp-page-logo').value = existing?.logo_url || '';
+    document.getElementById('sp-page-footer').value = existing?.footer_text || '';
+    document.getElementById('sp-page-enabled').checked = existing?.enabled !== false;
+
+    const container = document.getElementById('sp-page-services');
+    container.innerHTML = '';
+    (existing?.services || []).forEach(svc => addServiceRow(svc));
+    form.scrollIntoView({ behavior: 'smooth' });
+}
+
+function editStatusPage(id) {
+    const page = spConfig.pages.find(p => p.id === id);
+    if (page) showStatusPageForm(page);
+}
+
+function addServiceRow(svc) {
+    const container = document.getElementById('sp-page-services');
+    const idx = container.children.length;
+    const monOptions = spConfig.monitors.map(m =>
+        `<option value="${m.id}" ${(svc?.monitor_ids || []).includes(m.id) ? 'selected' : ''}>${escapeHtml(m.name)}</option>`
+    ).join('');
+    const div = document.createElement('div');
+    div.style.cssText = 'background:var(--bg-tertiary); border:1px solid var(--border); border-radius:8px; padding:12px; display:grid; grid-template-columns:1fr 2fr auto; gap:10px; align-items:start;';
+    div.innerHTML = `
+        <div class="form-group" style="margin:0;"><label style="font-size:11px;">Service Name</label><input type="text" class="form-control sp-svc-name" placeholder="e.g. API Servers" value="${escapeHtml(svc?.name || '')}" style="font-size:12px;"></div>
+        <div class="form-group" style="margin:0;"><label style="font-size:11px;">Monitors (ctrl-click for multiple)</label><select class="form-control sp-svc-monitors" multiple style="font-size:12px; min-height:60px;">${monOptions}</select></div>
+        <button class="btn btn-sm" onclick="this.parentElement.remove()" style="font-size:11px; color:#ef4444; margin-top:18px;">✕</button>
+    `;
+    container.appendChild(div);
+}
+
+async function saveStatusPage() {
+    const services = [];
+    document.querySelectorAll('#sp-page-services > div').forEach(row => {
+        const name = row.querySelector('.sp-svc-name')?.value || '';
+        const select = row.querySelector('.sp-svc-monitors');
+        const monitor_ids = Array.from(select?.selectedOptions || []).map(o => o.value);
+        if (name) services.push({ id: crypto.randomUUID(), name, monitor_ids, description: '' });
+    });
+
+    const page = {
+        id: document.getElementById('sp-page-id').value,
+        slug: document.getElementById('sp-page-slug').value.toLowerCase().replace(/[^a-z0-9-]/g, ''),
+        title: document.getElementById('sp-page-title').value,
+        logo_url: document.getElementById('sp-page-logo').value || null,
+        footer_text: document.getElementById('sp-page-footer').value || null,
+        enabled: document.getElementById('sp-page-enabled').checked,
+        services,
+        incidents: spConfig.pages.find(p => p.id === document.getElementById('sp-page-id').value)?.incidents || [],
+    };
+
+    try {
+        const res = await fetch('/api/statuspage/pages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+            body: JSON.stringify(page),
+        });
+        if (!res.ok) { const d = await res.json(); throw new Error(d.error || 'Failed'); }
+        showToast('Status page saved', 'success');
+        document.getElementById('sp-page-form').style.display = 'none';
+        loadStatusPageData();
+    } catch (e) { showToast('Failed to save page: ' + e.message, 'error'); }
+}
+
+async function deleteStatusPage(id) {
+    if (!confirm('Delete this status page? This cannot be undone.')) return;
+    try {
+        await fetch(`/api/statuspage/pages/${id}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${sessionToken}` } });
+        showToast('Status page deleted', 'success');
+        loadStatusPageData();
+    } catch (e) { showToast('Failed to delete page', 'error'); }
+}
+
+function escapeHtml(s) {
+    if (!s) return '';
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}

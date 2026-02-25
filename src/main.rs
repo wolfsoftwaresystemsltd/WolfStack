@@ -28,6 +28,7 @@ mod mysql_editor;
 mod appstore;
 mod alerting;
 mod wolfrun;
+mod statuspage;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_files;
@@ -205,6 +206,9 @@ async fn main() -> std::io::Result<()> {
         // Initialize WolfRun orchestration state
         let wolfrun_state = Arc::new(wolfrun::WolfRunState::new());
 
+        // Initialize Status Page monitoring state
+        let statuspage_state = Arc::new(statuspage::StatusPageState::new());
+
         // Create app state
         let app_state = web::Data::new(api::AppState {
             monitor: Mutex::new(mon),
@@ -218,6 +222,7 @@ async fn main() -> std::io::Result<()> {
             ai_agent: ai_agent.clone(),
             cached_status: cached_status.clone(),
             wolfrun: wolfrun_state.clone(),
+            statuspage: statuspage_state.clone(),
         });
 
         // Background: periodic self-monitoring update
@@ -804,6 +809,17 @@ async fn main() -> std::io::Result<()> {
                     wolfrun::broadcast_to_cluster(&wolfrun_bg, &wolfrun_cluster, &wolfrun_secret).await;
                 }
                 tokio::time::sleep(Duration::from_secs(15)).await;
+            }
+        });
+
+        // Background: Status page health check runner (every 30s)
+        let sp_state = statuspage_state.clone();
+        tokio::spawn(async move {
+            // Wait 15 seconds after startup before first check
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            loop {
+                statuspage::run_checks(&sp_state).await;
+                tokio::time::sleep(Duration::from_secs(30)).await;
             }
         });
 

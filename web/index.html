@@ -75,6 +75,10 @@
                     style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;border-radius:10px;">
                     <span class="icon" style="margin:0;font-size:20px;">🌐</span>
                 </a>
+                <a class="nav-item" data-page="statuspage" onclick="selectView('statuspage')" title="Status Pages"
+                    style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;border-radius:10px;">
+                    <span class="icon" style="margin:0;font-size:20px;">📊</span>
+                </a>
             </div>
             <div class="nav-section">
                 <div class="nav-section-title">Servers</div>
@@ -2203,6 +2207,160 @@
                     <p id="vms-empty" style="display:none; text-align:center; padding:20px; color: var(--text-muted);">
                         No virtual machines found. Click <strong>+ Create VM</strong> to start one.
                     </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Status Pages Admin ═══ -->
+        <div id="page-statuspage" class="page-view" style="display:none;">
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <div style="display:flex; align-items:center; gap:12px;">
+                        <h3>📊 Status Pages</h3>
+                        <span style="font-size:12px; color:var(--text-muted);">Create public status pages for your
+                            applications</span>
+                    </div>
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn btn-sm" onclick="switchStatusTab('pages')" id="sp-tab-pages"
+                            style="font-size:12px;">📄 Pages</button>
+                        <button class="btn btn-sm" onclick="switchStatusTab('monitors')" id="sp-tab-monitors"
+                            style="font-size:12px;">🔍 Monitors</button>
+                    </div>
+                </div>
+                <div class="card-body" style="padding:20px;">
+
+                    <!-- Pages Tab -->
+                    <div id="sp-panel-pages">
+                        <div
+                            style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                            <h4 style="margin:0; font-size:15px; font-weight:600;">Your Status Pages</h4>
+                            <button class="btn btn-sm btn-primary" onclick="showStatusPageForm()"
+                                style="font-size:12px;">+ New Page</button>
+                        </div>
+                        <div id="sp-pages-list" style="display:grid; gap:12px;">
+                            <div style="text-align:center; padding:30px; color:var(--text-muted); font-size:13px;">
+                                Loading...</div>
+                        </div>
+                    </div>
+
+                    <!-- Monitors Tab -->
+                    <div id="sp-panel-monitors" style="display:none;">
+                        <div
+                            style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                            <h4 style="margin:0; font-size:15px; font-weight:600;">Global Monitors</h4>
+                            <button class="btn btn-sm btn-primary" onclick="showMonitorForm()" style="font-size:12px;">+
+                                New Monitor</button>
+                        </div>
+                        <p style="font-size:12px; color:var(--text-muted); margin:0 0 12px 0;">
+                            Monitors are shared across all status pages. Each page picks which monitors to show via its
+                            Services.
+                        </p>
+                        <div id="sp-monitors-list" style="display:grid; gap:8px;">
+                            <div style="text-align:center; padding:30px; color:var(--text-muted); font-size:13px;">
+                                Loading...</div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+
+            <!-- Page Edit Form (hidden initially) -->
+            <div id="sp-page-form" class="card" style="display:none; margin-bottom:16px;">
+                <div class="card-header">
+                    <h3 id="sp-page-form-title">New Status Page</h3>
+                </div>
+                <div class="card-body" style="padding:20px;">
+                    <input type="hidden" id="sp-page-id">
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+                        <div class="form-group">
+                            <label>Page Title</label>
+                            <input type="text" id="sp-page-title" class="form-control"
+                                placeholder="e.g. WolfGrid Status">
+                        </div>
+                        <div class="form-group">
+                            <label>URL Slug</label>
+                            <div style="display:flex; align-items:center; gap:4px;">
+                                <span
+                                    style="color:var(--text-muted); font-size:13px; white-space:nowrap;">/status/</span>
+                                <input type="text" id="sp-page-slug" class="form-control" placeholder="wolfgrid"
+                                    style="flex:1;">
+                            </div>
+                        </div>
+                    </div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+                        <div class="form-group">
+                            <label>Logo URL (optional)</label>
+                            <input type="text" id="sp-page-logo" class="form-control" placeholder="https://...">
+                        </div>
+                        <div class="form-group">
+                            <label>Footer Text (optional)</label>
+                            <input type="text" id="sp-page-footer" class="form-control"
+                                placeholder="Powered by WolfStack">
+                        </div>
+                    </div>
+                    <label style="display:flex; align-items:center; gap:8px; margin-bottom:16px; cursor:pointer;">
+                        <input type="checkbox" id="sp-page-enabled" checked style="width:16px; height:16px;">
+                        <span style="font-size:13px; font-weight:500;">Enabled</span>
+                    </label>
+
+                    <!-- Services editor -->
+                    <h4 style="margin:16px 0 8px 0; font-size:14px; font-weight:600;">Services</h4>
+                    <p style="font-size:12px; color:var(--text-muted); margin:0 0 12px 0;">
+                        Each service groups one or more monitors. The public page shows status per service.
+                    </p>
+                    <div id="sp-page-services" style="display:grid; gap:8px; margin-bottom:12px;"></div>
+                    <button class="btn btn-sm" onclick="addServiceRow()" style="font-size:11px;">+ Add Service</button>
+
+                    <div style="margin-top:20px; display:flex; gap:12px;">
+                        <button class="btn btn-primary" onclick="saveStatusPage()">💾 Save Page</button>
+                        <button class="btn btn-sm"
+                            onclick="document.getElementById('sp-page-form').style.display='none'">Cancel</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Monitor Edit Form (hidden initially) -->
+            <div id="sp-monitor-form" class="card" style="display:none; margin-bottom:16px;">
+                <div class="card-header">
+                    <h3 id="sp-monitor-form-title">New Monitor</h3>
+                </div>
+                <div class="card-body" style="padding:20px;">
+                    <input type="hidden" id="sp-mon-id">
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+                        <div class="form-group">
+                            <label>Monitor Name</label>
+                            <input type="text" id="sp-mon-name" class="form-control" placeholder="e.g. Web Server">
+                        </div>
+                        <div class="form-group">
+                            <label>Check Type</label>
+                            <select id="sp-mon-type" class="form-control" onchange="updateMonitorFormFields()">
+                                <option value="http">HTTP(S)</option>
+                                <option value="tcp">TCP Port</option>
+                                <option value="ping">Ping</option>
+                                <option value="container">Container</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="sp-mon-fields"></div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+                        <div class="form-group">
+                            <label>Check Interval (seconds)</label>
+                            <input type="number" id="sp-mon-interval" class="form-control" value="60" min="10">
+                        </div>
+                        <div class="form-group">
+                            <label>Timeout (seconds)</label>
+                            <input type="number" id="sp-mon-timeout" class="form-control" value="10" min="1">
+                        </div>
+                    </div>
+                    <label style="display:flex; align-items:center; gap:8px; margin-bottom:16px; cursor:pointer;">
+                        <input type="checkbox" id="sp-mon-enabled" checked style="width:16px; height:16px;">
+                        <span style="font-size:13px; font-weight:500;">Enabled</span>
+                    </label>
+                    <div style="display:flex; gap:12px;">
+                        <button class="btn btn-primary" onclick="saveMonitor()">💾 Save Monitor</button>
+                        <button class="btn btn-sm"
+                            onclick="document.getElementById('sp-monitor-form').style.display='none'">Cancel</button>
+                    </div>
                 </div>
             </div>
         </div>
