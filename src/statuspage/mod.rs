@@ -339,16 +339,21 @@ impl StatusPageState {
             }
             _ => 100.0,
         }
-    }    /// Find a page by slug
-    pub fn find_page_by_slug(&self, slug: &str) -> Option<StatusPage> {
-        let config = self.config.read().unwrap();
-        config.pages.iter().find(|p| p.slug == slug).cloned()
     }
 
-    /// List all page slugs + titles (for index)
-    pub fn list_pages(&self) -> Vec<(String, String, bool)> {
+    /// Find a page by slug, restricted to a specific cluster
+    pub fn find_page_by_slug_and_cluster(&self, slug: &str, cluster: &str) -> Option<StatusPage> {
         let config = self.config.read().unwrap();
-        config.pages.iter().map(|p| (p.slug.clone(), p.title.clone(), p.enabled)).collect()
+        config.pages.iter().find(|p| p.slug == slug && p.cluster == cluster).cloned()
+    }
+
+    /// List page slugs + titles for a specific cluster only
+    pub fn list_pages_for_cluster(&self, cluster: &str) -> Vec<(String, String, bool)> {
+        let config = self.config.read().unwrap();
+        config.pages.iter()
+            .filter(|p| p.cluster == cluster)
+            .map(|p| (p.slug.clone(), p.title.clone(), p.enabled))
+            .collect()
     }
 
     /// Merge status page config received from a cluster peer.
@@ -817,9 +822,9 @@ fn theme_colors(theme: Option<&str>) -> ThemeColors {
     }
 }
 
-/// Render the public status page for a specific page slug
-pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str) -> Option<String> {
-    let page = state.find_page_by_slug(slug)?;
+/// Render the public status page for a specific page slug (only if it belongs to this cluster)
+pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str, local_cluster: &str) -> Option<String> {
+    let page = state.find_page_by_slug_and_cluster(slug, local_cluster)?;
 
     if !page.enabled {
         return Some(not_enabled_html());
@@ -1047,9 +1052,9 @@ pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str) -> Option<St
     ))
 }
 
-/// Render a status page index listing all available pages
-pub fn render_index_page(state: &Arc<StatusPageState>) -> String {
-    let pages = state.list_pages();
+/// Render a status page index listing all available pages for this cluster
+pub fn render_index_page(state: &Arc<StatusPageState>, local_cluster: &str) -> String {
+    let pages = state.list_pages_for_cluster(local_cluster);
     let enabled_pages: Vec<_> = pages.iter().filter(|(_, _, enabled)| *enabled).collect();
 
     if enabled_pages.is_empty() {

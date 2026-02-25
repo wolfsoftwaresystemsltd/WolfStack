@@ -8494,16 +8494,26 @@ pub async fn statuspage_sync(req: HttpRequest, state: web::Data<AppState>, body:
     HttpResponse::Ok().json(serde_json::json!({ "synced": true }))
 }
 
+/// Get the local cluster name from cluster state
+fn local_cluster_name(cluster: &crate::agent::ClusterState) -> String {
+    let nodes = cluster.nodes.read().unwrap();
+    nodes.get(&cluster.self_id)
+        .and_then(|n| n.cluster_name.clone())
+        .unwrap_or_else(|| "WolfStack".to_string())
+}
+
 /// GET /status — public index listing all enabled status pages (or redirect if only one)
 pub async fn statuspage_public_index(state: web::Data<AppState>) -> HttpResponse {
-    let html = crate::statuspage::render_index_page(&state.statuspage);
+    let cluster_name = local_cluster_name(&state.cluster);
+    let html = crate::statuspage::render_index_page(&state.statuspage, &cluster_name);
     HttpResponse::Ok().content_type("text/html; charset=utf-8").body(html)
 }
 
 /// GET /status/{slug} — public status page for a specific application
 pub async fn statuspage_public_page(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
     let slug = path.into_inner();
-    match crate::statuspage::render_public_page(&state.statuspage, &slug) {
+    let cluster_name = local_cluster_name(&state.cluster);
+    match crate::statuspage::render_public_page(&state.statuspage, &slug, &cluster_name) {
         Some(html) => HttpResponse::Ok().content_type("text/html; charset=utf-8").body(html),
         None => HttpResponse::NotFound().content_type("text/html; charset=utf-8").body(
             r#"<!DOCTYPE html><html><head><title>Not Found</title></head><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#0f172a;color:#fff;"><p>Status page not found.</p></body></html>"#
