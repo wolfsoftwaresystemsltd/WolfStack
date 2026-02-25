@@ -14981,7 +14981,7 @@ function renderStatusPages(pages) {
                         ${incidentBadge}
                     </div>
                     <div style="font-size:12px; color:var(--text-muted); margin-top:6px; margin-left:18px;">
-                        <a href="/status/${escapeHtml(p.page.slug)}" target="_blank" style="color:var(--accent-light);">/status/${escapeHtml(p.page.slug)}</a>
+                        <a href="${p.url || '/status/' + escapeHtml(p.page.slug)}" target="_blank" style="color:var(--accent-light);">${p.url || '/status/' + escapeHtml(p.page.slug)}</a>
                     </div>
                 </div>
                 <div style="text-align:right;">
@@ -14996,7 +14996,7 @@ function renderStatusPages(pages) {
                 <div style="display:flex; gap:6px;">
                     <button class="btn btn-sm" onclick="showIncidentForm(null, '${p.page.id}')" style="font-size:11px;">🚨 Report Incident</button>
                     <button class="btn btn-sm" onclick="editStatusPage('${p.page.id}')" style="font-size:11px;">✏️ Edit</button>
-                    <button class="btn btn-sm" onclick="window.open('/status/${escapeHtml(p.page.slug)}', '_blank')" style="font-size:11px;">👁️ View</button>
+                    <button class="btn btn-sm" onclick="window.open('${p.url || '/status/' + escapeHtml(p.page.slug)}', '_blank')" style="font-size:11px;">👁️ View</button>
                     <button class="btn btn-sm" onclick="deleteStatusPage('${p.page.id}')" style="font-size:11px; color:#ef4444;">🗑️</button>
                 </div>
             </div>

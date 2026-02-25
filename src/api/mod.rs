@@ -8226,6 +8226,14 @@ pub async fn statuspage_monitor_save(req: HttpRequest, state: web::Data<AppState
     // Trigger immediate check cycle so status is available right away
     let sp = state.statuspage.clone();
     tokio::spawn(async move { crate::statuspage::run_checks(&sp).await; });
+    // Broadcast to cluster peers
+    let sp2 = state.statuspage.clone();
+    let cluster = state.cluster.clone();
+    let secret = state.cluster_secret.clone();
+    let target = monitor.cluster.clone();
+    actix_web::rt::spawn(async move {
+        crate::statuspage::broadcast_to_cluster(&sp2, &cluster, &secret, &target).await;
+    });
     HttpResponse::Ok().json(serde_json::json!({ "saved": true, "monitor": monitor }))
 }
 
@@ -8234,6 +8242,8 @@ pub async fn statuspage_monitor_delete(req: HttpRequest, state: web::Data<AppSta
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
     let mut config = state.statuspage.config.write().unwrap();
+    // Capture cluster before deletion for broadcast
+    let target_cluster = config.monitors.iter().find(|m| m.id == id).map(|m| m.cluster.clone());
     let before = config.monitors.len();
     config.monitors.retain(|m| m.id != id);
     // Also remove this monitor from all pages
@@ -8244,12 +8254,39 @@ pub async fn statuspage_monitor_delete(req: HttpRequest, state: web::Data<AppSta
         return HttpResponse::NotFound().json(serde_json::json!({ "error": "Monitor not found" }));
     }
     let _ = config.save();
+    drop(config);
+    // Broadcast to cluster peers
+    if let Some(target) = target_cluster {
+        let sp = state.statuspage.clone();
+        let cluster = state.cluster.clone();
+        let secret = state.cluster_secret.clone();
+        actix_web::rt::spawn(async move {
+            crate::statuspage::broadcast_to_cluster(&sp, &cluster, &secret, &target).await;
+        });
+    }
     HttpResponse::Ok().json(serde_json::json!({ "deleted": true }))
 }
 
 /// GET /api/statuspage/pages — list all status pages with current status
 pub async fn statuspage_pages_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    // Build a map of cluster name → first online node address for URL display
+    let nodes = state.cluster.get_all_nodes();
+    let cluster_urls: std::collections::HashMap<String, String> = {
+        let mut map = std::collections::HashMap::new();
+        for node in &nodes {
+            if !node.online { continue; }
+            let cluster_name = node.cluster_name.as_deref().unwrap_or("WolfStack").to_string();
+            if map.contains_key(&cluster_name) { continue; }
+            if node.is_self {
+                // For self, use the actual address the server is listening on
+                map.insert(cluster_name, format!("https://{}:{}", state.cluster.self_address, state.cluster.port));
+            } else {
+                map.insert(cluster_name, format!("https://{}:{}", node.address, node.port));
+            }
+        }
+        map
+    };
     let config = state.statuspage.config.read().unwrap();
     let pages: Vec<serde_json::Value> = config.pages.iter().map(|p| {
         let overall = state.statuspage.page_overall_status(p);
@@ -8286,7 +8323,11 @@ pub async fn statuspage_pages_list(req: HttpRequest, state: web::Data<AppState>)
             "overall_status": overall,
             "overall_label": overall.label(),
             "uptime_30d": uptime_30d,
-            "url": format!("/status/{}", p.slug),
+            "cluster_url": cluster_urls.get(&p.cluster).cloned().unwrap_or_default(),
+            "url": match cluster_urls.get(&p.cluster) {
+                Some(base) => format!("{}/status/{}", base, p.slug),
+                None => format!("/status/{}", p.slug),
+            },
         })
     }).collect();
     HttpResponse::Ok().json(serde_json::json!({ "pages": pages }))
@@ -8325,6 +8366,14 @@ pub async fn statuspage_page_save(req: HttpRequest, state: web::Data<AppState>, 
     // Trigger immediate check cycle so status is available right away
     let sp = state.statuspage.clone();
     tokio::spawn(async move { crate::statuspage::run_checks(&sp).await; });
+    // Broadcast to cluster peers
+    let sp2 = state.statuspage.clone();
+    let cluster = state.cluster.clone();
+    let secret = state.cluster_secret.clone();
+    let target = page.cluster.clone();
+    actix_web::rt::spawn(async move {
+        crate::statuspage::broadcast_to_cluster(&sp2, &cluster, &secret, &target).await;
+    });
     HttpResponse::Ok().json(serde_json::json!({ "saved": true, "page": page }))
 }
 
@@ -8333,12 +8382,22 @@ pub async fn statuspage_page_delete(req: HttpRequest, state: web::Data<AppState>
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
     let mut config = state.statuspage.config.write().unwrap();
+    let target_cluster = config.pages.iter().find(|p| p.id == id).map(|p| p.cluster.clone());
     let before = config.pages.len();
     config.pages.retain(|p| p.id != id);
     if config.pages.len() == before {
         return HttpResponse::NotFound().json(serde_json::json!({ "error": "Page not found" }));
     }
     let _ = config.save();
+    drop(config);
+    if let Some(target) = target_cluster {
+        let sp = state.statuspage.clone();
+        let cluster = state.cluster.clone();
+        let secret = state.cluster_secret.clone();
+        actix_web::rt::spawn(async move {
+            crate::statuspage::broadcast_to_cluster(&sp, &cluster, &secret, &target).await;
+        });
+    }
     HttpResponse::Ok().json(serde_json::json!({ "deleted": true }))
 }
 
@@ -8374,6 +8433,15 @@ pub async fn statuspage_incident_save(
     if let Err(e) = config.save() {
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
     }
+    drop(config);
+    // Broadcast to cluster peers
+    let sp = state.statuspage.clone();
+    let cluster = state.cluster.clone();
+    let secret = state.cluster_secret.clone();
+    let target = incident.cluster.clone();
+    actix_web::rt::spawn(async move {
+        crate::statuspage::broadcast_to_cluster(&sp, &cluster, &secret, &target).await;
+    });
     HttpResponse::Ok().json(serde_json::json!({ "saved": true, "incident": incident }))
 }
 
@@ -8382,6 +8450,7 @@ pub async fn statuspage_incident_delete(req: HttpRequest, state: web::Data<AppSt
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
     let mut config = state.statuspage.config.write().unwrap();
+    let target_cluster = config.incidents.iter().find(|i| i.id == id).map(|i| i.cluster.clone());
     let before = config.incidents.len();
     config.incidents.retain(|i| i.id != id);
 
@@ -8394,7 +8463,35 @@ pub async fn statuspage_incident_delete(req: HttpRequest, state: web::Data<AppSt
         return HttpResponse::NotFound().json(serde_json::json!({ "error": "Incident not found" }));
     }
     let _ = config.save();
+    drop(config);
+    if let Some(target) = target_cluster {
+        let sp = state.statuspage.clone();
+        let cluster = state.cluster.clone();
+        let secret = state.cluster_secret.clone();
+        actix_web::rt::spawn(async move {
+            crate::statuspage::broadcast_to_cluster(&sp, &cluster, &secret, &target).await;
+        });
+    }
     HttpResponse::Ok().json(serde_json::json!({ "deleted": true }))
+}
+
+/// POST /api/statuspage/sync — receive status page config from a cluster peer
+pub async fn statuspage_sync(req: HttpRequest, state: web::Data<AppState>, body: web::Json<crate::statuspage::StatusPageConfig>) -> HttpResponse {
+    // Authenticate via cluster secret (inter-node auth)
+    let secret = req.headers().get("X-WolfStack-Secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if secret != state.cluster_secret {
+        // Also try cookie auth (in case admin calls it manually)
+        if let Err(resp) = require_auth(&req, &state) { return resp; }
+    }
+
+    let peer_config = body.into_inner();
+    state.statuspage.merge_from_peer(peer_config);
+    // Trigger immediate check cycle so status is available right away
+    let sp = state.statuspage.clone();
+    tokio::spawn(async move { crate::statuspage::run_checks(&sp).await; });
+    HttpResponse::Ok().json(serde_json::json!({ "synced": true }))
 }
 
 /// GET /status — public index listing all enabled status pages (or redirect if only one)
@@ -8699,6 +8796,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/statuspage/incidents", web::get().to(statuspage_incidents_list))
         .route("/api/statuspage/incidents", web::post().to(statuspage_incident_save))
         .route("/api/statuspage/incidents/{id}", web::delete().to(statuspage_incident_delete))
+        .route("/api/statuspage/sync", web::post().to(statuspage_sync))
         // Status Page (public — NO auth)
         .route("/status", web::get().to(statuspage_public_index))
         .route("/status/{slug}", web::get().to(statuspage_public_page));
