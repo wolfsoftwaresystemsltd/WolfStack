@@ -14869,11 +14869,15 @@ function spUrl(path) {
 function spPublicUrl(slug, cluster) {
     const selfNode = allNodes.find(n => n.is_self);
     const selfCluster = selfNode?.cluster_name || 'WolfStack';
-    if (cluster === selfCluster) {
+    // Treat empty/missing cluster as local
+    if (!cluster || cluster === selfCluster) {
         return `${window.location.origin}/status/${slug}`;
     }
     const remoteNode = allNodes.find(n => n.online && (n.cluster_name || 'WolfStack') === cluster);
-    if (!remoteNode) return `/status/${slug}`;
+    if (!remoteNode) {
+        // No online node found for that cluster — use local origin as best fallback
+        return `${window.location.origin}/status/${slug}`;
+    }
     const scheme = serverTlsEnabled ? 'https' : 'http';
     return `${scheme}://${remoteNode.address}:${remoteNode.port}/status/${slug}`;
 }
