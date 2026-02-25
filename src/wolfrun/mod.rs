@@ -679,7 +679,17 @@ pub async fn reconcile(
     }
     let _guard = ReconcileGuard;
 
-    let services = wolfrun.list(None);
+    // Only reconcile services belonging to this node's cluster — other clusters
+    // manage their own services via their own leader.  Without this filter the
+    // local reconcile marks cross-cluster instances as "offline" because it
+    // cannot reach their host nodes.
+    let self_cluster = {
+        let nodes = cluster.get_all_nodes();
+        nodes.iter().find(|n| n.is_self)
+            .and_then(|n| n.cluster_name.clone())
+            .unwrap_or_else(|| "WolfStack".to_string())
+    };
+    let services = wolfrun.list(Some(&self_cluster));
     if services.is_empty() { return; }
 
     let client = match reqwest::Client::builder()

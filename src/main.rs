@@ -479,6 +479,43 @@ async fn main() -> std::io::Result<()> {
                                 "📋 Daily Issues Report\nDate: {}\nWolfStack v{}\nNodes scanned: {}\n",
                                 today, env!("CARGO_PKG_VERSION"), total_nodes
                             );
+
+                            // Node inventory grouped by cluster
+                            {
+                                let all_nodes = scan_cluster.get_all_nodes();
+                                let mut clusters: std::collections::BTreeMap<String, Vec<&crate::agent::Node>> = std::collections::BTreeMap::new();
+                                for n in all_nodes.iter().filter(|n| n.node_type != "proxmox") {
+                                    let c = n.cluster_name.as_deref().unwrap_or("Default").to_string();
+                                    clusters.entry(c).or_default().push(n);
+                                }
+                                body.push_str("\n━━━ Node Inventory ━━━\n");
+                                for (cluster, nodes) in &clusters {
+                                    body.push_str(&format!("\n🏷️ Cluster: {}\n", cluster));
+                                    for n in nodes {
+                                        let status = if n.online { "🟢 online" } else { "🔴 offline" };
+                                        let addr = if n.address.is_empty() { &n.hostname } else { &n.address };
+                                        body.push_str(&format!("  📍 {} ({}:{})\n", n.hostname, addr, n.port));
+                                        body.push_str(&format!("     Status: {}  |  TLS: {}\n", status, if n.tls { "yes" } else { "no" }));
+                                        // Metrics summary if available
+                                        if let Some(ref m) = n.metrics {
+                                            let cpu = m.cpu_usage_percent;
+                                            let mem_pct = if m.memory_total_bytes > 0 {
+                                                (m.memory_used_bytes as f64 / m.memory_total_bytes as f64 * 100.0) as u64
+                                            } else { 0 };
+                                            body.push_str(&format!("     CPU: {:.0}%  |  RAM: {}%\n", cpu, mem_pct));
+                                        }
+                                        // Workload counts
+                                        let mut workloads = Vec::new();
+                                        if n.has_docker { workloads.push(format!("{} containers", n.docker_count)); }
+                                        if n.has_lxc { workloads.push(format!("{} LXC", n.lxc_count)); }
+                                        if n.has_kvm { workloads.push(format!("{} VMs", n.vm_count)); }
+                                        if !workloads.is_empty() {
+                                            body.push_str(&format!("     Workloads: {}\n", workloads.join("  |  ")));
+                                        }
+                                    }
+                                }
+                            }
+
                             if all_issues.is_empty() {
                                 body.push_str("\n✅ No issues detected — all systems healthy.\n");
                             } else {
