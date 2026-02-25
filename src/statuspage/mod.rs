@@ -347,6 +347,12 @@ impl StatusPageState {
         config.pages.iter().find(|p| p.slug == slug && p.cluster == cluster).cloned()
     }
 
+    /// Find a page by slug (any cluster — safe because replication only stores own-cluster data)
+    pub fn find_page_by_slug(&self, slug: &str) -> Option<StatusPage> {
+        let config = self.config.read().unwrap();
+        config.pages.iter().find(|p| p.slug == slug).cloned()
+    }
+
     /// List page slugs + titles for a specific cluster only
     pub fn list_pages_for_cluster(&self, cluster: &str) -> Vec<(String, String, bool)> {
         let config = self.config.read().unwrap();
@@ -928,7 +934,7 @@ pub fn render_public_page(state: &Arc<StatusPageState>, slug: &str, local_cluste
 }
 
 /// Shared rendering logic for public status pages
-fn render_public_page_inner(state: &Arc<StatusPageState>, page: &StatusPage) -> Option<String> {
+pub fn render_public_page_inner(state: &Arc<StatusPageState>, page: &StatusPage) -> Option<String> {
     if !page.enabled {
         return Some(not_enabled_html());
     }

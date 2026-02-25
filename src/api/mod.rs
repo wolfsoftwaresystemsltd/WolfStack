@@ -8464,9 +8464,18 @@ pub async fn statuspage_public_page(state: web::Data<AppState>, path: web::Path<
     let cluster_name = local_cluster_name(&state.cluster);
     match crate::statuspage::render_public_page(&state.statuspage, &slug, &cluster_name) {
         Some(html) => HttpResponse::Ok().content_type("text/html; charset=utf-8").body(html),
-        None => HttpResponse::NotFound().content_type("text/html; charset=utf-8").body(
-            r#"<!DOCTYPE html><html><head><title>Not Found</title></head><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#0f172a;color:#fff;"><p>Status page not found.</p></body></html>"#
-        ),
+        None => {
+            // Log what we have vs what we're looking for
+            let config = state.statuspage.config.read().unwrap();
+            let available: Vec<String> = config.pages.iter()
+                .map(|p| format!("{}(cluster={})", p.slug, p.cluster))
+                .collect();
+            tracing::warn!("Status page 404: slug='{}' cluster='{}' — available pages: {:?}", slug, cluster_name, available);
+            drop(config);
+            HttpResponse::NotFound().content_type("text/html; charset=utf-8").body(
+                r#"<!DOCTYPE html><html><head><title>Not Found</title></head><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#0f172a;color:#fff;"><p>Status page not found.</p></body></html>"#
+            )
+        },
     }
 }
 
@@ -8761,11 +8770,31 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/status/{slug}", web::get().to(statuspage_public_page));
 }
 
+/// GET /status/{slug} — public status page on dedicated port 8550.
+/// Uses slug-only lookup. Data integrity is guaranteed by replication filters
+/// (broadcast and pull only store own-cluster data), so a node only has its own pages.
+pub async fn statuspage_public_page_dedicated(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    let slug = path.into_inner();
+    let page = state.statuspage.find_page_by_slug(&slug);
+    match page {
+        Some(p) => {
+            match crate::statuspage::render_public_page_inner(&state.statuspage, &p) {
+                Some(html) => HttpResponse::Ok().content_type("text/html; charset=utf-8").body(html),
+                None => HttpResponse::NotFound().content_type("text/html; charset=utf-8").body(
+                    r#"<!DOCTYPE html><html><head><title>Not Found</title></head><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#0f172a;color:#fff;"><p>Status page not found.</p></body></html>"#
+                ),
+            }
+        }
+        None => HttpResponse::NotFound().content_type("text/html; charset=utf-8").body(
+            r#"<!DOCTYPE html><html><head><title>Not Found</title></head><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#0f172a;color:#fff;"><p>Status page not found.</p></body></html>"#
+        ),
+    }
+}
+
 /// Minimal config for the dedicated status page HTTP listener (port 8550).
-/// Only serves status pages belonging to this node's cluster.
 pub fn configure_statuspage_only(cfg: &mut web::ServiceConfig) {
     cfg
         .route("/", web::get().to(statuspage_public_index))
         .route("/status", web::get().to(statuspage_public_index))
-        .route("/status/{slug}", web::get().to(statuspage_public_page));
+        .route("/status/{slug}", web::get().to(statuspage_public_page_dedicated));
 }
