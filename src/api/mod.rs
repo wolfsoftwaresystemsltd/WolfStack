@@ -8318,8 +8318,8 @@ pub async fn statuspage_page_save(req: HttpRequest, state: web::Data<AppState>, 
 
     let mut config = state.statuspage.config.write().unwrap();
 
-    // Check slug uniqueness (except for self)
-    if config.pages.iter().any(|p| p.slug == page.slug && p.id != page.id) {
+    // Check slug uniqueness within the same cluster (except for self)
+    if config.pages.iter().any(|p| p.slug == page.slug && p.id != page.id && p.cluster == page.cluster) {
         return HttpResponse::Conflict().json(serde_json::json!({
             "error": "A page with this slug already exists"
         }));
