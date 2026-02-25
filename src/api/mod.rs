@@ -8760,3 +8760,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/status", web::get().to(statuspage_public_index))
         .route("/status/{slug}", web::get().to(statuspage_public_page));
 }
+
+/// Minimal config for the dedicated status page HTTP listener (port 8550).
+/// Only serves public status pages — no auth, no API, no admin.
+pub fn configure_statuspage_only(cfg: &mut web::ServiceConfig) {
+    cfg
+        .route("/", web::get().to(statuspage_public_index))
+        .route("/status", web::get().to(statuspage_public_index))
+        .route("/status/{slug}", web::get().to(statuspage_public_page));
+}

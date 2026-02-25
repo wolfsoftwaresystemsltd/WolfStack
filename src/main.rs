@@ -924,11 +924,13 @@ async fn main() -> std::io::Result<()> {
             info!("     Key:  {}", key_path);
             info!("     HTTPS: https://{}:{}", cli.bind, cli.port);
             info!("     HTTP (inter-node): http://{}:{}", cli.bind, cli.port + 1);
+            info!("     Status pages: http://{}:8550", cli.bind);
             info!("");
 
             // Clone web_dir for second closure
             let web_dir2 = web_dir.clone();
             let app_state2 = app_state.clone();
+            let app_state3 = app_state.clone();
 
             // Start HTTPS server on main port + HTTP server on port+1 for inter-node
             let https_bind = format!("{}:{}", cli.bind, cli.port);
@@ -961,9 +963,30 @@ async fn main() -> std::io::Result<()> {
             })?
             .run();
 
-            let (r1, r2) = tokio::join!(https_server, http_server);
-            r1?;
-            r2?;
+            // Dedicated status page listener — plain HTTP on port 8550
+            let sp_bind = format!("{}:8550", cli.bind);
+            let sp_server = HttpServer::new(move || {
+                App::new()
+                    .app_data(app_state3.clone())
+                    .configure(api::configure_statuspage_only)
+            })
+            .bind(&sp_bind)
+            .map_err(|e| {
+                tracing::warn!("⚠️  Failed to bind status page listener on {}: {}", sp_bind, e);
+                e
+            });
+
+            match sp_server {
+                Ok(sp) => {
+                    let (r1, r2, r3) = tokio::join!(https_server, http_server, sp.run());
+                    r1?; r2?; r3?;
+                }
+                Err(_) => {
+                    // Status page port unavailable — run without it
+                    let (r1, r2) = tokio::join!(https_server, http_server);
+                    r1?; r2?;
+                }
+            }
             Ok(())
         } else {
             if tls_paths.is_some() {
@@ -972,11 +995,14 @@ async fn main() -> std::io::Result<()> {
                 info!("  ⚡ HTTP mode (no TLS certificates found)");
             }
             info!("     Dashboard: http://{}:{}", cli.bind, cli.port);
+            info!("     Status pages: http://{}:8550", cli.bind);
             info!("     Tip: Use the Certificates page to request a Let's Encrypt certificate");
             info!("");
 
+            let app_state2 = app_state.clone();
+
             // Start HTTP server (same as before — no breaking changes)
-            HttpServer::new(move || {
+            let main_server = HttpServer::new(move || {
                 App::new()
                     .app_data(app_state.clone())
                     .configure(api::configure)
@@ -984,8 +1010,31 @@ async fn main() -> std::io::Result<()> {
                     .service(actix_files::Files::new("/", &web_dir).index_file("login.html"))
             })
             .bind(format!("{}:{}", cli.bind, cli.port))?
-            .run()
-            .await
+            .run();
+
+            // Dedicated status page listener — plain HTTP on port 8550
+            let sp_bind = format!("{}:8550", cli.bind);
+            let sp_server = HttpServer::new(move || {
+                App::new()
+                    .app_data(app_state2.clone())
+                    .configure(api::configure_statuspage_only)
+            })
+            .bind(&sp_bind)
+            .map_err(|e| {
+                tracing::warn!("⚠️  Failed to bind status page listener on {}: {}", sp_bind, e);
+                e
+            });
+
+            match sp_server {
+                Ok(sp) => {
+                    let (r1, r2) = tokio::join!(main_server, sp.run());
+                    r1?; r2?;
+                }
+                Err(_) => {
+                    main_server.await?;
+                }
+            }
+            Ok(())
         }
     }
 }
