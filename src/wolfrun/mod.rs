@@ -171,6 +171,23 @@ impl WolfRunState {
         }
     }
 
+    /// Rename all cluster references from old_name to new_name.
+    pub fn rename_cluster(&self, old_name: &str, new_name: &str) -> usize {
+        let mut svcs = self.services.write().unwrap();
+        let mut count = 0;
+        for svc in svcs.iter_mut() {
+            if svc.cluster_name == old_name {
+                svc.cluster_name = new_name.to_string();
+                count += 1;
+            }
+        }
+        drop(svcs);
+        if count > 0 {
+            self.save();
+        }
+        count
+    }
+
     /// List all services, optionally filtered by cluster
     pub fn list(&self, cluster: Option<&str>) -> Vec<WolfRunService> {
         let svcs = self.services.read().unwrap();

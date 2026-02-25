@@ -545,6 +545,10 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
     // Support updating both pve_cluster_name (for compat) and generic cluster_name
     let cluster_name = body.cluster_name.clone().or(body.pve_cluster_name.clone());
 
+    // Capture old cluster name before update so we can migrate data if it changes
+    let old_cluster_name = state.cluster.get_node(&id)
+        .and_then(|n| n.cluster_name.clone());
+
     if state.cluster.update_node_settings(
         &id,
         body.hostname.clone(),
@@ -552,9 +556,28 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
         body.port,
         body.pve_token.clone(),
         fp,
-        cluster_name,
+        cluster_name.clone(),
         body.login_disabled,
     ) {
+        // If cluster name changed, migrate all cluster-scoped data
+        if let (Some(ref old_name), Some(ref new_name)) = (&old_cluster_name, &cluster_name) {
+            if old_name != new_name {
+                // Rename status page monitors, pages, and incidents
+                let mut config = state.statuspage.config.write().unwrap();
+                let sp_count = config.rename_cluster(old_name, new_name);
+                if sp_count > 0 {
+                    let _ = config.save();
+                    tracing::info!("Cluster rename: updated {} status page items '{}' -> '{}'", sp_count, old_name, new_name);
+                }
+                drop(config);
+
+                // Rename wolfrun services
+                let wr_count = state.wolfrun.rename_cluster(old_name, new_name);
+                if wr_count > 0 {
+                    tracing::info!("Cluster rename: updated {} WolfRun services '{}' -> '{}'", wr_count, old_name, new_name);
+                }
+            }
+        }
         // Propagate login_disabled to remote node so it takes effect on their login page
         if let Some(disabled) = body.login_disabled {
             let node = state.cluster.get_node(&id);

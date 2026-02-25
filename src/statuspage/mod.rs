@@ -194,6 +194,32 @@ impl StatusPageConfig {
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         std::fs::write(CONFIG_FILE, json).map_err(|e| e.to_string())
     }
+
+    /// Rename all cluster references from old_name to new_name.
+    /// Called when the cluster name is changed so monitors, pages,
+    /// and incidents don't become orphaned under the old name.
+    pub fn rename_cluster(&mut self, old_name: &str, new_name: &str) -> usize {
+        let mut count = 0;
+        for m in &mut self.monitors {
+            if m.cluster == old_name {
+                m.cluster = new_name.to_string();
+                count += 1;
+            }
+        }
+        for p in &mut self.pages {
+            if p.cluster == old_name {
+                p.cluster = new_name.to_string();
+                count += 1;
+            }
+        }
+        for i in &mut self.incidents {
+            if i.cluster == old_name {
+                i.cluster = new_name.to_string();
+                count += 1;
+            }
+        }
+        count
+    }
 }
 
 // ═══════════════════════════════════════════════
