@@ -65,6 +65,8 @@ pub struct AppState {
     pub wolfrun: Arc<crate::wolfrun::WolfRunState>,
     /// Status page monitoring state
     pub statuspage: Arc<crate::statuspage::StatusPageState>,
+    /// Whether this server has TLS enabled (HTTPS on main port)
+    pub tls_enabled: bool,
 }
 
 /// Load or generate the join token from /etc/wolfstack/join-token
@@ -285,6 +287,7 @@ pub async fn get_nodes(req: HttpRequest, state: web::Data<AppState>) -> HttpResp
     HttpResponse::Ok().json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "nodes": nodes,
+        "tls_enabled": state.tls_enabled,
     }))
 }
 

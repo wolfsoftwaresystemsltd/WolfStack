@@ -9,6 +9,7 @@ let currentPage = 'datacenter';
 let currentComponent = null;
 let currentNodeId = null;  // null = datacenter, node ID = specific server
 let allNodes = [];         // cached node list
+let serverTlsEnabled = false; // whether the server has TLS (HTTPS) enabled
 let cpuHistory = [];
 let memHistory = [];
 let netHistory = []; // { timestamp, rx_bytes, tx_bytes } — cumulative
@@ -1677,6 +1678,8 @@ async function fetchNodes() {
             var versionEl = document.querySelector('.version');
             if (versionEl) versionEl.textContent = 'v' + data.version;
         }
+        // Track server TLS state for URL generation
+        if (data.tls_enabled !== undefined) serverTlsEnabled = data.tls_enabled;
 
         // Only rebuild sidebar tree if node list structure changed (NOT online status)
         var treeChanged = false;
@@ -14862,6 +14865,7 @@ function spUrl(path) {
 // Build the public URL for a status page from the frontend's allNodes data.
 // For local cluster: use the current browser origin (the address the user is already on).
 // For remote clusters: use the first online node's address and port.
+// Uses serverTlsEnabled from the /api/nodes response to pick https vs http.
 function spPublicUrl(slug, cluster) {
     const selfNode = allNodes.find(n => n.is_self);
     const selfCluster = selfNode?.cluster_name || 'WolfStack';
@@ -14870,7 +14874,8 @@ function spPublicUrl(slug, cluster) {
     }
     const remoteNode = allNodes.find(n => n.online && (n.cluster_name || 'WolfStack') === cluster);
     if (!remoteNode) return `/status/${slug}`;
-    return `${window.location.protocol}//${remoteNode.address}:${remoteNode.port}/status/${slug}`;
+    const scheme = serverTlsEnabled ? 'https' : 'http';
+    return `${scheme}://${remoteNode.address}:${remoteNode.port}/status/${slug}`;
 }
 
 function showStatusPagesForCluster(clusterName) {

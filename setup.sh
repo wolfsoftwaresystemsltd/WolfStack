@@ -113,18 +113,36 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         if [ "$ARCH" = "ppc64le" ] || [ "$ARCH" = "ppc64" ]; then
             QEMU_PKG="qemu-system-ppc qemu-utils"
         elif [ "$ARCH" = "aarch64" ]; then
-            QEMU_PKG="qemu-system-arm qemu-utils"
+            QEMU_PKG="qemu-system-arm qemu-utils qemu-efi-aarch64"
         else
             QEMU_PKG="qemu-system-x86 qemu-utils"
         fi
         apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils $QEMU_PKG socat s3fs nfs-common fuse3
     fi
 elif [ "$PKG_MANAGER" = "dnf" ]; then
-    dnf install -y git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat s3fs-fuse nfs-utils fuse3
+    ARCH=$(uname -m)
+    if [ "$ARCH" = "aarch64" ]; then
+        QEMU_DNF="qemu-system-aarch64 qemu-img edk2-aarch64"
+    else
+        QEMU_DNF="qemu-kvm qemu-img"
+    fi
+    dnf install -y git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils $QEMU_DNF socat s3fs-fuse nfs-utils fuse3
 elif [ "$PKG_MANAGER" = "yum" ]; then
-    yum install -y git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils qemu-kvm qemu-img socat s3fs-fuse nfs-utils fuse
+    ARCH=$(uname -m)
+    if [ "$ARCH" = "aarch64" ]; then
+        QEMU_YUM="qemu-system-aarch64 qemu-img"
+    else
+        QEMU_YUM="qemu-kvm qemu-img"
+    fi
+    yum install -y git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils $QEMU_YUM socat s3fs-fuse nfs-utils fuse
 elif [ "$PKG_MANAGER" = "zypper" ]; then
-    zypper install -y git curl gcc gcc-c++ make libopenssl-devel pkg-config lxc dnsmasq bridge-utils qemu-kvm qemu-tools socat s3fs nfs-client fuse3
+    ARCH=$(uname -m)
+    if [ "$ARCH" = "aarch64" ]; then
+        QEMU_ZYPP="qemu-arm qemu-tools qemu-uefi-aarch64"
+    else
+        QEMU_ZYPP="qemu-kvm qemu-tools"
+    fi
+    zypper install -y git curl gcc gcc-c++ make libopenssl-devel pkg-config lxc dnsmasq bridge-utils $QEMU_ZYPP socat s3fs nfs-client fuse3
 fi
 
 echo "✓ System dependencies installed"

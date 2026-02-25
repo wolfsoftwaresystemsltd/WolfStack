@@ -209,6 +209,13 @@ async fn main() -> std::io::Result<()> {
         // Initialize Status Page monitoring state
         let statuspage_state = Arc::new(statuspage::StatusPageState::new());
 
+        // Check if TLS will be available (so the frontend knows the correct protocol for URLs)
+        let tls_enabled = if cli.tls_cert.is_some() && cli.tls_key.is_some() {
+            true
+        } else {
+            installer::find_tls_certificate(cli.tls_domain.as_deref()).is_some()
+        };
+
         // Create app state
         let app_state = web::Data::new(api::AppState {
             monitor: Mutex::new(mon),
@@ -223,6 +230,7 @@ async fn main() -> std::io::Result<()> {
             cached_status: cached_status.clone(),
             wolfrun: wolfrun_state.clone(),
             statuspage: statuspage_state.clone(),
+            tls_enabled,
         });
 
         // Background: periodic self-monitoring update
