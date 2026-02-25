@@ -142,6 +142,28 @@ fi
 
 echo ""
 
+# ─── Clean up broken Docker CE repo (if present) ────────────────────────────
+# The Docker CE Stable repo has no valid ppc64le metadata on RHEL 10.
+# If a previous install attempt added it, every dnf command will fail.
+# Disable or remove it before we install anything.
+if [ -f /etc/yum.repos.d/docker-ce.repo ]; then
+    echo "Removing broken Docker CE repo (no ppc64le support on RHEL 10)..."
+    # Disable all docker-ce repos rather than deleting the file
+    $PKG config-manager --set-disabled docker-ce-stable 2>/dev/null || true
+    $PKG config-manager --set-disabled docker-ce-stable-debuginfo 2>/dev/null || true
+    $PKG config-manager --set-disabled docker-ce-stable-source 2>/dev/null || true
+    # If config-manager didn't work, remove the repo file entirely
+    if $PKG repolist --enabled 2>/dev/null | grep -q docker-ce; then
+        rm -f /etc/yum.repos.d/docker-ce.repo
+        echo "  Removed /etc/yum.repos.d/docker-ce.repo"
+    else
+        echo "  Docker CE repos disabled"
+    fi
+    # Clean dnf cache so the broken metadata is gone
+    $PKG clean all &>/dev/null || true
+    echo ""
+fi
+
 # ─── Install system dependencies (ppc64le / RHEL 10) ────────────────────────
 # Many packages that setup.sh expects don't exist on RHEL 10 ppc64le:
 #   lxc, lxc-templates, lxc-extra  — not packaged for RHEL ppc64le
@@ -442,18 +464,15 @@ else
         fi
         echo "  Podman installed with Docker compatibility"
     else
-        echo "  Podman install failed — trying Docker CE..."
-        if curl -fsSL https://get.docker.com | sh; then
-            systemctl enable docker 2>/dev/null || true
-            systemctl start docker 2>/dev/null || true
-            echo "  Docker installed"
-        else
-            echo ""
-            echo "  Could not install Podman or Docker automatically."
-            echo "  Please install a container runtime manually:"
-            echo "    $PKG install podman podman-docker"
-            echo "  or follow https://docs.docker.com/engine/install/"
-        fi
+        # Do NOT run get.docker.com on ppc64le RHEL 10 — it adds a broken repo
+        # that has no valid ppc64le metadata and poisons all future dnf commands.
+        echo ""
+        echo "  Could not install Podman."
+        echo "  Docker CE is not supported on RHEL 10 ppc64le (broken repo metadata)."
+        echo ""
+        echo "  Please install Podman manually:"
+        echo "    $PKG install podman podman-docker"
+        echo "  or check your RHEL subscription/repos and re-run this script."
     fi
 fi
 
