@@ -14876,8 +14876,7 @@ function spPublicUrl(slug, cluster) {
     const selfCluster = selfNode?.cluster_name || 'WolfStack';
     const resolvedCluster = cluster || spCurrentCluster || selfCluster;
     if (resolvedCluster === selfCluster) {
-        const host = selfNode?.address || window.location.hostname;
-        return `http://${host}:8550/status/${slug}`;
+        return `http://${window.location.hostname}:8550/status/${slug}`;
     }
     const remoteNode = spFindRemoteNode(resolvedCluster);
     if (remoteNode) {
