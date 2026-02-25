@@ -1032,3 +1032,24 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_monitor_deser() {
+        let cases = vec![
+            ("http", r#"{"id":"t1","name":"HTTP","check":{"type":"http","url":"https://google.com","expected_status":200},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
+            ("tcp", r#"{"id":"t2","name":"TCP","check":{"type":"tcp","host":"1.2.3.4","port":80},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
+            ("ping", r#"{"id":"t3","name":"Ping","check":{"type":"ping","host":"1.2.3.4"},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
+            ("container", r#"{"id":"t4","name":"Container","check":{"type":"container","runtime":"docker","name":"nginx"},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
+            ("container+node", r#"{"id":"t5","name":"Container","check":{"type":"container","runtime":"docker","name":"nginx","node_id":"abc"},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
+            ("wolfrun", r#"{"id":"t6","name":"WR","check":{"type":"wolfrun","service_id":"s1","service_name":"Svc","min_healthy":1,"health_check":"running"},"interval_secs":60,"timeout_secs":10,"enabled":true}"#),
+        ];
+        for (label, json) in cases {
+            let result: Result<Monitor, _> = serde_json::from_str(json);
+            assert!(result.is_ok(), "{} failed: {:?}", label, result.err());
+        }
+    }
+}
