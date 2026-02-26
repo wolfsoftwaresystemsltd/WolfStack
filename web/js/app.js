@@ -151,11 +151,11 @@ function applyDcBackground() {
     }
     bgEl.style.cssText = `
         position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-        background-image: url(${dcBgImage});
         background-size: cover; background-position: center;
         filter: brightness(${dcBgBrightness / 100}) blur(${dcBgBlur}px);
-        z-index: 0; pointer-events: none;
+        z-index: -1; pointer-events: none;
     `;
+    bgEl.style.backgroundImage = `url(${dcBgImage})`;
 }
 
 function initDcLayoutToolbar() {
@@ -734,16 +734,6 @@ function renderDatacenterOverview() {
 
         const metricBar = (label, pct, color) => {
             const pctNum = parseFloat(pct) || 0;
-            if (dcCompact) {
-                // LED dot mode
-                const ledColor = pctNum > 90 ? 'var(--danger)' : pctNum > 70 ? 'var(--warning)' : 'var(--success)';
-                const ledGlow = pctNum > 90 ? 'rgba(239,68,68,0.4)' : pctNum > 70 ? 'rgba(245,158,11,0.3)' : 'rgba(16,185,129,0.3)';
-                return `<div style="display:flex;align-items:center;gap:6px;" title="${label}: ${pct}%">
-                    <span style="font-size:10px;color:var(--text-muted);width:28px;text-transform:uppercase;">${label}</span>
-                    <span class="dc-led" style="background:${ledColor};box-shadow:0 0 6px ${ledGlow};"></span>
-                    <span style="font-size:11px;font-weight:600;color:var(--text-secondary);font-family:'JetBrains Mono',monospace;">${pct}%</span>
-                </div>`;
-            }
             return `<div style="display:flex;align-items:center;gap:6px;">
                 <span style="font-size:10px;color:var(--text-muted);width:28px;text-transform:uppercase;">${label}</span>
                 <div class="progress-bar" style="flex:1;height:6px;"><div class="fill ${progressClass(pctNum)}" style="width:${pct}%"></div></div>
@@ -751,11 +741,38 @@ function renderDatacenterOverview() {
             </div>`;
         };
 
+        const ledDot = (label, pct) => {
+            const pctNum = parseFloat(pct) || 0;
+            const ledColor = pctNum > 90 ? 'var(--danger)' : pctNum > 70 ? 'var(--warning)' : 'var(--success)';
+            const ledGlow = pctNum > 90 ? 'rgba(239,68,68,0.4)' : pctNum > 70 ? 'rgba(245,158,11,0.3)' : 'rgba(16,185,129,0.3)';
+            return `<span style="display:inline-flex;align-items:center;gap:4px;" title="${label}: ${pct}%">
+                <span style="font-size:9px;color:var(--text-muted);text-transform:uppercase;">${label}</span>
+                <span class="dc-led" style="background:${ledColor};box-shadow:0 0 6px ${ledGlow};"></span>
+            </span>`;
+        };
+
         const components = isPve
             ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(99,102,241,0.1);color:var(--accent-light);">${node.vm_count || 0} VMs</span><span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(99,102,241,0.1);color:var(--accent-light);">${node.lxc_count || 0} CTs</span>`
             : node.components.filter(c => c.installed).map(c =>
                 `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'};color:${c.running ? 'var(--success)' : 'var(--danger)'};">${c.component}</span>`
             ).join('');
+
+        if (dcCompact) {
+            // Compact: single row with hostname, LED lights, and uptime — like a server faceplate
+            return `<div class="card dc-compact-card${criticalClass}" style="cursor:pointer;padding:6px 12px;" onclick="selectServerView('${node.id}', 'dashboard')">
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <span class="server-dot online" style="flex-shrink:0;"></span>
+                    <span style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;">${node.hostname}</span>
+                    ${pveBadge}
+                    <span style="display:inline-flex;align-items:center;gap:10px;margin-left:auto;flex-shrink:0;">
+                        ${ledDot('CPU', cpuPct)}
+                        ${ledDot('Mem', memPct)}
+                        ${ledDot('Disk', diskPct)}
+                    </span>
+                    <span style="font-size:9px;padding:1px 5px;border-radius:3px;background:rgba(16,185,129,0.1);color:var(--success);font-family:'JetBrains Mono',monospace;white-space:nowrap;flex-shrink:0;">▲ ${formatUptimeShort(m.uptime_secs)}</span>
+                </div>
+            </div>`;
+        }
 
         return `<div class="card dc-compact-card${criticalClass}" style="cursor:pointer;" onclick="selectServerView('${node.id}', 'dashboard')">
             <div style="display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:1px solid var(--border);">
