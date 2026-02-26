@@ -712,6 +712,16 @@ function renderDatacenterOverview() {
 
         // If offline or no metrics — always critical (red glow)
         if (!m || !node.online) {
+            if (dcCompact) {
+                return `<div class="card dc-compact-card dc-card-critical" style="cursor:pointer;opacity:0.7;padding:6px 12px;" onclick="selectServerView('${node.id}', 'dashboard')">
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <span class="server-dot offline" style="flex-shrink:0;"></span>
+                        <span style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;">${node.hostname}</span>
+                        ${pveBadge}
+                        <span style="margin-left:auto;font-size:11px;color:var(--danger);flex-shrink:0;">Offline</span>
+                    </div>
+                </div>`;
+            }
             return `<div class="card dc-compact-card dc-card-critical" style="cursor:pointer;opacity:0.7;" onclick="selectServerView('${node.id}', 'dashboard')">
                 <div style="display:flex;align-items:center;gap:6px;padding:10px 12px;">
                     <span class="server-dot offline" style="flex-shrink:0;"></span>
