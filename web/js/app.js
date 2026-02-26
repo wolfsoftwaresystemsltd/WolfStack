@@ -32,7 +32,7 @@ if (localStorage.getItem('wolfstack_sidebar_collapsed') === '1') {
 }
 
 // ─── Map Collapse Toggle ───
-let mapCollapsed = localStorage.getItem('wolfstack_map_collapsed') !== '0'; // default collapsed
+let mapCollapsed = localStorage.getItem('wolfstack_map_collapsed') === '1'; // default expanded
 
 function toggleMapCollapse() {
     mapCollapsed = !mapCollapsed;
