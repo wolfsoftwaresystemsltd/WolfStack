@@ -98,7 +98,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', 'global-wolfnet': 'Global WolfNet' };
+    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', 'global-wolfnet': 'Global View' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -1970,9 +1970,9 @@ function renderVms(vms) {
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="showVmLogs('${vm.name}')" title="Logs">📋</button>
                     ${vm.running ?
                 `${vm.vnc_ws_port ? `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port})" title="Console">🖥️</button>` : ''}
-                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="vmAction('${vm.name}', 'stop')" title="Stop">⏹️</button>` :
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="vmAction('${vm.name}', 'stop', this)" title="Stop">⏹️</button>` :
                 `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="showVmSettings('${vm.name}')" title="Settings">⚙️</button>
-                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#22c55e;" onclick="vmAction('${vm.name}', 'start')" title="Start">▶️</button>
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#22c55e;" onclick="vmAction('${vm.name}', 'start', this)" title="Start">▶️</button>
                          <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="deleteVm('${vm.name}')" title="Delete">🗑️</button>`
             }
                 </td>
@@ -3413,7 +3413,12 @@ async function createVm() {
     }
 }
 
-async function vmAction(name, action) {
+async function vmAction(name, action, btn) {
+    const row = btn?.closest('tr');
+    const buttons = row ? row.querySelectorAll('button') : [];
+    buttons.forEach(b => { b.disabled = true; b.style.opacity = '0.4'; b.style.pointerEvents = 'none'; });
+    if (btn) btn.innerHTML = '<span style="display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;"></span>';
+
     try {
         showToast(`${action}ing VM...`, 'info');
         const resp = await fetch(apiUrl(`/api/vms/${name}/action`), {
@@ -3424,12 +3429,14 @@ async function vmAction(name, action) {
         const data = await resp.json();
         if (resp.ok) {
             showToast(`VM ${action}ed`, 'success');
-            setTimeout(loadVms, 2000); // Wait for state change
+            setTimeout(loadVms, 2000);
         } else {
             showToast(data.error || 'Action failed', 'error');
+            buttons.forEach(b => { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
         }
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
+        buttons.forEach(b => { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
     }
 }
 
@@ -6270,8 +6277,8 @@ async function refreshDockerStats() {
             if (s) {
                 const cpuCell = row.querySelector('.cpu-cell');
                 const memCell = row.querySelector('.mem-cell');
-                if (cpuCell) cpuCell.textContent = s.cpu_percent.toFixed(1) + '%';
-                if (memCell) memCell.textContent = formatBytes(s.memory_usage) + (s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : '');
+                if (cpuCell) { const cp = Math.min(s.cpu_percent, 100); const cc = cp > 80 ? '#ef4444' : cp > 50 ? '#f59e0b' : '#10b981'; cpuCell.innerHTML = `<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:${cp}%;height:100%;background:${cc};border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">${s.cpu_percent.toFixed(1)}%</span></div>`; }
+                if (memCell) { const mp = s.memory_limit ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : 0; const mc = mp > 90 ? '#ef4444' : mp > 70 ? '#f59e0b' : '#10b981'; memCell.innerHTML = `<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:${mp}%;height:100%;background:${mc};border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">${formatBytes(s.memory_usage)}${s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : ''}</span></div>`; }
             }
         });
     } catch (e) { /* silent */ }
@@ -6316,27 +6323,27 @@ function renderDockerContainers(containers) {
             <td>${c.image}</td>
             <td><span style="color:${stateColor}">●</span> ${c.status}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
-            <td class="cpu-cell">${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
-            <td class="mem-cell">${s.memory_usage ? formatBytes(s.memory_usage) + (s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : '') : '-'}</td>
+            <td class="cpu-cell">${s.cpu_percent !== undefined ? (() => { const cp = Math.min(s.cpu_percent, 100); const cc = cp > 80 ? '#ef4444' : cp > 50 ? '#f59e0b' : '#10b981'; return `<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:${cp}%;height:100%;background:${cc};border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">${s.cpu_percent.toFixed(1)}%</span></div>`; })() : '-'}</td>
+            <td class="mem-cell">${s.memory_usage ? (() => { const mp = s.memory_limit ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : 0; const mc = mp > 90 ? '#ef4444' : mp > 70 ? '#f59e0b' : '#10b981'; return `<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:${mp}%;height:100%;background:${mc};border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">${formatBytes(s.memory_usage)}${s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : ''}</span></div>`; })() : '-'}</td>
             <td style="font-size:11px;">${ports}</td>
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleDockerAutostart('${c.id}', this.checked)"></td>
             <td style="white-space:nowrap;">
                 ${isRunning ? `
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Start">▶️</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'stop')" title="Stop">⏹️</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'restart')" title="Restart">🔄</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'pause')" title="Pause">⏸️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'stop', this)" title="Stop">⏹️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'restart', this)" title="Restart">🔄</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'pause', this)" title="Pause">⏸️</button>
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openConsole('docker', '${c.name}')" title="Console">💻</button>
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Remove">🗑️</button>
                 ` : isPaused ? `
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'unpause')" title="Unpause">▶️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'unpause', this)" title="Unpause">▶️</button>
                 ` : `
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'start')" title="Start">▶️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'start', this)" title="Start">▶️</button>
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Stop">⏹️</button>
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Restart">🔄</button>
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Freeze">⏸️</button>
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Console">💻</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="dockerAction('${c.name}', 'remove')" title="Remove">🗑️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="dockerAction('${c.name}', 'remove', this)" title="Remove">🗑️</button>
                 `}
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs">📜</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewDockerVolumes('${c.name}')" title="Volumes">📁</button>
@@ -6436,8 +6443,13 @@ async function deleteDockerImage(id, name) {
 }
 
 
-async function dockerAction(container, action) {
+async function dockerAction(container, action, btn) {
     if (action === 'remove' && !confirm(`Remove container '${container}'? This cannot be undone.`)) return;
+
+    const row = btn?.closest('tr');
+    const buttons = row ? row.querySelectorAll('button') : [];
+    buttons.forEach(b => { b.disabled = true; b.style.opacity = '0.4'; b.style.pointerEvents = 'none'; });
+    if (btn) btn.innerHTML = '<span style="display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;"></span>';
 
     try {
         const resp = await fetch(apiUrl(`/api/containers/docker/${container}/action`), {
@@ -6451,9 +6463,11 @@ async function dockerAction(container, action) {
             setTimeout(loadDockerContainers, 500);
         } else {
             showToast(data.error || `Failed to ${action}`, 'error');
+            buttons.forEach(b => { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
         }
     } catch (e) {
         showToast(`Failed: ${e.message}`, 'error');
+        buttons.forEach(b => { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
     }
 }
 
@@ -6851,16 +6865,16 @@ function renderLxcContainers(containers, stats) {
             <td style="font-size:12px;color:var(--text-secondary);">${c.version || '<span style="color:var(--text-muted)">—</span>'}</td>
             <td><span style="color:${stateColor}">●</span> ${c.state}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
-            <td>${s.cpu_percent !== undefined ? s.cpu_percent.toFixed(1) + '%' : '-'}</td>
-            <td>${s.memory_usage ? formatBytes(s.memory_usage) + (s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : '') : '-'}</td>
+            <td>${s.cpu_percent !== undefined ? (() => { const cp = Math.min(s.cpu_percent, 100); const cc = cp > 80 ? '#ef4444' : cp > 50 ? '#f59e0b' : '#10b981'; return `<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:${cp}%;height:100%;background:${cc};border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">${s.cpu_percent.toFixed(1)}%</span></div>`; })() : '-'}</td>
+            <td>${s.memory_usage ? (() => { const mp = s.memory_limit ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : 0; const mc = mp > 90 ? '#ef4444' : mp > 70 ? '#f59e0b' : '#10b981'; return `<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:${mp}%;height:100%;background:${mc};border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">${formatBytes(s.memory_usage)}${s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : ''}</span></div>`; })() : '-'}</td>
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleLxcAutostart('${c.name}', this.checked)"></td>
             <td style="white-space:nowrap;">
-                <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'start')"` : ''} title="Start">▶️</button>
-                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'stop')"` : ''} title="Stop">⏹️</button>
-                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'restart')"` : ''} title="Restart">🔄</button>
-                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'freeze')"` : ''} title="Freeze">⏸️</button>
+                <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'start', this)"` : ''} title="Start">▶️</button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'stop', this)"` : ''} title="Stop">⏹️</button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'restart', this)"` : ''} title="Restart">🔄</button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'freeze', this)"` : ''} title="Freeze">⏸️</button>
                 <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}', '${c.hostname || c.name}')"` : ''} title="Console">💻</button>
-                <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'destroy')"` : ''} title="Destroy">🗑️</button>
+                <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'destroy', this)"` : ''} title="Destroy">🗑️</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs">📜</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="browseContainerFiles('lxc', '${c.name}', '${(c.storage_path || '').replace(/'/g, "\\'")}')" title="Browse Files">📂</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcSettings('${c.name}')" title="Settings">⚙️</button>
@@ -6872,8 +6886,13 @@ function renderLxcContainers(containers, stats) {
     }).join('');
 }
 
-async function lxcAction(container, action) {
+async function lxcAction(container, action, btn) {
     if (action === 'destroy' && !confirm(`Destroy LXC container '${container}'? This cannot be undone.`)) return;
+
+    const row = btn?.closest('tr');
+    const buttons = row ? row.querySelectorAll('button') : [];
+    buttons.forEach(b => { b.disabled = true; b.style.opacity = '0.4'; b.style.pointerEvents = 'none'; });
+    if (btn) btn.innerHTML = '<span style="display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;"></span>';
 
     try {
         const resp = await fetch(apiUrl(`/api/containers/lxc/${container}/action`), {
@@ -6887,9 +6906,11 @@ async function lxcAction(container, action) {
             setTimeout(loadLxcContainers, 500);
         } else {
             showToast(data.error || `Failed to ${action}`, 'error');
+            buttons.forEach(b => { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
         }
     } catch (e) {
         showToast(`Failed: ${e.message}`, 'error');
+        buttons.forEach(b => { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
     }
 }
 
@@ -12797,6 +12818,7 @@ async function scanGlobalWolfNet() {
         el = document.getElementById('gwn-count-peers'); if (el) el.textContent = gwnScanData.filter(function (r) { return r.type === 'WolfNet'; }).length;
         el = document.getElementById('gwn-count-lxc'); if (el) el.textContent = gwnScanData.filter(function (r) { return r.type === 'LXC'; }).length;
         el = document.getElementById('gwn-count-docker'); if (el) el.textContent = gwnScanData.filter(function (r) { return r.type === 'Docker'; }).length;
+        el = document.getElementById('gwn-count-vms'); if (el) el.textContent = gwnScanData.filter(function (r) { return r.type === 'VM'; }).length;
     }
 
     async function scanNode(node) {
@@ -12866,10 +12888,147 @@ async function scanGlobalWolfNet() {
     // Fire ALL node scans in parallel
     await Promise.all(wsNodes.map(function (node) { return scanNode(node); }));
     if (btn) { btn.disabled = false; btn.innerHTML = '\uD83D\uDD0D Scan'; }
+
+    // Show fleet containers section
+    var fleetSection = document.getElementById('gwn-fleet-section');
+    if (fleetSection) fleetSection.style.display = '';
 }
 
 function filterGlobalWolfNet() {
     renderGwnTable();
+}
+
+// ─── Fleet Containers (lazy loaded) ───
+
+async function loadFleetContainers() {
+    var btn = document.getElementById('fleet-load-btn');
+    var content = document.getElementById('fleet-containers-content');
+    if (!content) return;
+
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Loading...'; }
+
+    var wsNodes = (typeof allNodes !== 'undefined' && allNodes.length) ? allNodes : [{ id: 'local', hostname: 'local', is_self: true, cluster_name: 'WolfStack' }];
+
+    // Build table with placeholder rows
+    var html = '<table class="data-table" id="fleet-table"><thead><tr>';
+    html += '<th>Node</th><th>Type</th><th>Name</th><th>Status</th><th>IP Address</th><th>CPU</th><th>Memory</th><th>Disk</th>';
+    html += '</tr></thead><tbody id="fleet-tbody">';
+    wsNodes.forEach(function (n) {
+        var safeId = (n.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
+        html += '<tr id="fleet-ph-' + safeId + '" style="color:var(--text-muted);"><td>' + escapeHtml(n.hostname || n.id || 'local') + '</td><td colspan="7"><span style="display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,0.15);border-top-color:var(--text-muted);border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Loading...</td></tr>';
+    });
+    html += '</tbody></table>';
+    content.innerHTML = html;
+
+    function makeBar(pct, color) {
+        return '<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:' + Math.min(pct, 100) + '%;height:100%;background:' + color + ';border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">' + pct + '%</span></div>';
+    }
+
+    function cpuBar(pct) {
+        var c = pct > 80 ? '#ef4444' : pct > 50 ? '#f59e0b' : '#10b981';
+        return makeBar(Math.round(pct * 10) / 10, c);
+    }
+
+    function memBar(used, limit) {
+        var pct = limit ? Math.min(Math.round((used / limit) * 100), 100) : 0;
+        var c = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#10b981';
+        return '<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:' + pct + '%;height:100%;background:' + c + ';border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">' + formatBytes(used) + ' / ' + formatBytes(limit) + '</span></div>';
+    }
+
+    function diskBar(used, total) {
+        if (!total) return '-';
+        var pct = Math.round((used / total) * 100);
+        var c = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#10b981';
+        return '<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:' + pct + '%;height:100%;background:' + c + ';border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">' + formatBytes(used) + ' / ' + formatBytes(total) + '</span></div>';
+    }
+
+    async function scanNodeContainers(node) {
+        var isLocal = !!node.is_self;
+        var urlBase = isLocal ? '/api/' : '/api/nodes/' + encodeURIComponent(node.id) + '/proxy/';
+        var serverName = node.hostname || node.id || 'local';
+        var tbody = document.getElementById('fleet-tbody');
+        var safeId = (node.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
+        var rowsAdded = false;
+
+        function addRow(html) {
+            if (!tbody) return;
+            var tr = document.createElement('tr');
+            tr.innerHTML = html;
+            tbody.appendChild(tr);
+            rowsAdded = true;
+        }
+
+        // Docker containers + stats
+        try {
+            var [dockerData, dockerStatsData] = await Promise.all([
+                fetch(urlBase + 'containers/docker', { credentials: 'include' }).then(function (r) { return r.ok ? r.json() : null; }),
+                fetch(urlBase + 'containers/docker/stats', { credentials: 'include' }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
+            ]);
+            if (dockerData) {
+                var list = Array.isArray(dockerData) ? dockerData : (dockerData.containers || []);
+                var statsMap = {};
+                if (dockerStatsData) { (Array.isArray(dockerStatsData) ? dockerStatsData : []).forEach(function (s) { statsMap[s.name] = s; }); }
+                list.forEach(function (c) {
+                    var s = statsMap[c.name] || {};
+                    var stateColor = c.state === 'running' ? '#10b981' : c.state === 'paused' ? '#f59e0b' : '#6b7280';
+                    var cpuHtml = s.cpu_percent !== undefined ? cpuBar(s.cpu_percent) : '-';
+                    var memHtml = s.memory_usage ? memBar(s.memory_usage, s.memory_limit) : '-';
+                    var diskHtml = c.disk_usage !== undefined && c.disk_total ? diskBar(c.disk_usage, c.disk_total) : '-';
+                    addRow('<td>' + escapeHtml(serverName) + '</td><td>🐳 Docker</td><td><strong>' + escapeHtml(c.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || c.status || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + cpuHtml + '</td><td>' + memHtml + '</td><td>' + diskHtml + '</td>');
+                });
+            }
+        } catch (e) { }
+
+        // LXC containers + stats
+        try {
+            var [lxcData, lxcStatsData] = await Promise.all([
+                fetch(urlBase + 'containers/lxc', { credentials: 'include' }).then(function (r) { return r.ok ? r.json() : null; }),
+                fetch(urlBase + 'containers/lxc/stats', { credentials: 'include' }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
+            ]);
+            if (lxcData) {
+                var list = Array.isArray(lxcData) ? lxcData : (lxcData.containers || []);
+                var statsMap = {};
+                if (lxcStatsData) { (Array.isArray(lxcStatsData) ? lxcStatsData : []).forEach(function (s) { statsMap[s.name] = s; }); }
+                list.forEach(function (c) {
+                    var s = statsMap[c.name] || {};
+                    var stateColor = c.state === 'running' ? '#10b981' : c.state === 'frozen' ? '#f59e0b' : '#6b7280';
+                    var cpuHtml = s.cpu_percent !== undefined ? cpuBar(s.cpu_percent) : '-';
+                    var memHtml = s.memory_usage ? memBar(s.memory_usage, s.memory_limit) : '-';
+                    var diskHtml = c.disk_usage !== undefined && c.disk_total ? diskBar(c.disk_usage, c.disk_total) : '-';
+                    addRow('<td>' + escapeHtml(serverName) + '</td><td>📦 LXC</td><td><strong>' + escapeHtml(c.hostname || c.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + cpuHtml + '</td><td>' + memHtml + '</td><td>' + diskHtml + '</td>');
+                });
+            }
+        } catch (e) { }
+
+        // VMs
+        try {
+            var vmData = await fetch(urlBase + 'vms', { credentials: 'include' }).then(function (r) { return r.ok ? r.json() : null; });
+            if (vmData) {
+                var list = Array.isArray(vmData) ? vmData : (vmData.vms || []);
+                list.forEach(function (v) {
+                    var stateColor = v.running ? '#10b981' : '#6b7280';
+                    var statusText = v.running ? 'running' : 'stopped';
+                    var ip = v.wolfnet_ip || '-';
+                    addRow('<td>' + escapeHtml(serverName) + '</td><td>🖥️ VM</td><td><strong>' + escapeHtml(v.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + statusText + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(ip) + '</td><td>' + v.cpus + ' vCPU</td><td>' + v.memory_mb + ' MB</td><td>' + (v.disk_size_gb || '?') + ' GiB</td>');
+                });
+            }
+        } catch (e) { }
+
+        // Remove placeholder
+        var ph = document.getElementById('fleet-ph-' + safeId);
+        if (ph) ph.remove();
+
+        // If no rows were added for this node, show a "no data" row
+        if (!rowsAdded && tbody) {
+            var tr = document.createElement('tr');
+            tr.style.color = 'var(--text-muted)';
+            tr.innerHTML = '<td>' + escapeHtml(serverName) + '</td><td colspan="7">No containers or VMs</td>';
+            tbody.appendChild(tr);
+        }
+    }
+
+    await Promise.all(wsNodes.map(function (node) { return scanNodeContainers(node); }));
+    if (btn) { btn.disabled = false; btn.innerHTML = '📦 Load Containers'; }
 }
 
 

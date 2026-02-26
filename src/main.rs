@@ -35,7 +35,7 @@ use actix_files;
 use clap::Parser;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 /// WolfStack — Wolf Software Management Platform
 #[derive(Parser)]
@@ -876,6 +876,102 @@ async fn main() -> std::io::Result<()> {
             tokio::time::sleep(Duration::from_secs(15)).await;
             loop {
                 statuspage::pull_from_peers(&sp_sync, &sp_sync_cluster, &sp_sync_secret).await;
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        });
+
+        // Background: WolfNet auto-restart watchdog (check every 60s, restart at most once/hour)
+        tokio::spawn(async move {
+            // Wait for system to stabilise before first check
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let mut last_restart_attempt: Option<std::time::Instant> = None;
+            let mut restart_failed = false;
+            loop {
+                let status = networking::get_wolfnet_status();
+                // Only act if WolfNet is installed but not running
+                if status.installed && !status.running {
+                    let should_attempt = match last_restart_attempt {
+                        None => true,
+                        Some(t) => t.elapsed().as_secs() >= 3600, // once per hour
+                    };
+
+                    if should_attempt {
+                        info!("WolfNet is down — attempting automatic restart");
+                        match networking::wolfnet_service_action("restart") {
+                            Ok(_) => {
+                                // Verify it actually came up
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                                let check = networking::get_wolfnet_status();
+                                if check.running {
+                                    info!("WolfNet auto-restart succeeded");
+                                    restart_failed = false;
+                                    // Send recovery alert if we previously reported failure
+                                    let config = alerting::AlertConfig::load();
+                                    if config.enabled && config.has_channels() {
+                                        let title = "[WolfStack OK] WolfNet auto-recovered".to_string();
+                                        let body = format!(
+                                            "✅ WolfNet Auto-Recovery\n\n\
+                                             WolfNet was detected as down and has been automatically restarted.\n\
+                                             Time: {}",
+                                            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+                                        );
+                                        tokio::spawn(async move {
+                                            alerting::send_alert(&config, &title, &body).await;
+                                        });
+                                    }
+                                } else {
+                                    warn!("WolfNet auto-restart failed — service did not come up");
+                                    if !restart_failed {
+                                        restart_failed = true;
+                                        let config = alerting::AlertConfig::load();
+                                        if config.enabled && config.has_channels() {
+                                            let title = "[WolfStack ALERT] WolfNet down — auto-restart failed".to_string();
+                                            let body = format!(
+                                                "⚠️ WolfNet Down\n\n\
+                                                 WolfNet was detected as down and an automatic restart was attempted but failed.\n\
+                                                 Manual intervention may be required.\n\
+                                                 Time: {}\n\n\
+                                                 Next restart attempt in 1 hour.",
+                                                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+                                            );
+                                            tokio::spawn(async move {
+                                                alerting::send_alert(&config, &title, &body).await;
+                                            });
+                                        }
+                                    }
+                                }
+                                last_restart_attempt = Some(std::time::Instant::now());
+                            }
+                            Err(e) => {
+                                warn!("WolfNet auto-restart command failed: {}", e);
+                                if !restart_failed {
+                                    restart_failed = true;
+                                    let config = alerting::AlertConfig::load();
+                                    if config.enabled && config.has_channels() {
+                                        let title = "[WolfStack ALERT] WolfNet down — auto-restart failed".to_string();
+                                        let body = format!(
+                                            "⚠️ WolfNet Down\n\n\
+                                             WolfNet was detected as down and an automatic restart was attempted but failed.\n\
+                                             Error: {}\n\
+                                             Manual intervention may be required.\n\
+                                             Time: {}\n\n\
+                                             Next restart attempt in 1 hour.",
+                                            e, chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+                                        );
+                                        tokio::spawn(async move {
+                                            alerting::send_alert(&config, &title, &body).await;
+                                        });
+                                    }
+                                }
+                                last_restart_attempt = Some(std::time::Instant::now());
+                            }
+                        }
+                    }
+                } else if status.installed && status.running && restart_failed {
+                    // WolfNet came back (maybe manually restarted)
+                    restart_failed = false;
+                    info!("WolfNet is running again");
+                }
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         });

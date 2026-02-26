@@ -5339,13 +5339,16 @@ fn lxc_cpu_percent(name: &str) -> f64 {
         });
 
     if let Some(usec) = usage {
-        // Convert to rough percentage using total system uptime
+        // Convert to percentage using total system uptime normalised by CPU count
         if let Ok(uptime) = std::fs::read_to_string("/proc/uptime") {
             if let Some(secs) = uptime.split_whitespace().next()
                 .and_then(|s| s.parse::<f64>().ok()) {
-                let total_usec = (secs * 1_000_000.0) as u64;
-                if total_usec > 0 {
-                    return ((usec as f64 / total_usec as f64) * 100.0 * 10.0).round() / 10.0;
+                let num_cpus = std::thread::available_parallelism()
+                    .map(|n| n.get() as f64)
+                    .unwrap_or(1.0);
+                let total_usec = secs * 1_000_000.0 * num_cpus;
+                if total_usec > 0.0 {
+                    return ((usec as f64 / total_usec) * 100.0 * 10.0).round() / 10.0;
                 }
             }
         }
