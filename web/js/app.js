@@ -54,6 +54,144 @@ function applyMapCollapse() {
     }
 }
 
+// ─── Dashboard Layout Preferences ───
+let dcLayout = localStorage.getItem('wolfstack_dc_layout') || 'grid';
+let dcCompact = localStorage.getItem('wolfstack_dc_compact') === '1';
+let dcBgImage = localStorage.getItem('wolfstack_dc_bg_image') || '';
+let dcBgBrightness = parseInt(localStorage.getItem('wolfstack_dc_bg_brightness') || '100', 10);
+let dcBgBlur = parseInt(localStorage.getItem('wolfstack_dc_bg_blur') || '0', 10);
+
+function toggleLayoutDropdown() {
+    const dd = document.getElementById('dc-layout-dropdown');
+    const bgp = document.getElementById('dc-bg-panel');
+    if (bgp) bgp.style.display = 'none';
+    dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
+    document.querySelectorAll('.dc-layout-option').forEach(o => {
+        o.classList.toggle('active', o.getAttribute('data-layout') === dcLayout);
+    });
+    const ct = document.getElementById('dc-compact-toggle');
+    if (ct) ct.checked = dcCompact;
+}
+
+function toggleBgSettingsPanel() {
+    const bgp = document.getElementById('dc-bg-panel');
+    const dd = document.getElementById('dc-layout-dropdown');
+    if (dd) dd.style.display = 'none';
+    bgp.style.display = bgp.style.display === 'none' ? 'block' : 'none';
+}
+
+function setDcLayout(layout) {
+    dcLayout = layout;
+    localStorage.setItem('wolfstack_dc_layout', layout);
+    const icon = document.getElementById('dc-layout-icon');
+    const label = document.getElementById('dc-layout-label');
+    if (icon) icon.textContent = layout === 'grid' ? '⊞' : '▥';
+    if (label) label.textContent = layout === 'grid' ? 'Grid' : 'Server Room';
+    document.querySelectorAll('.dc-layout-option').forEach(o => {
+        o.classList.toggle('active', o.getAttribute('data-layout') === layout);
+    });
+    renderDatacenterOverview();
+}
+
+function toggleDcCompact(checked) {
+    dcCompact = checked;
+    localStorage.setItem('wolfstack_dc_compact', checked ? '1' : '0');
+    renderDatacenterOverview();
+}
+
+function handleBgUpload(input) {
+    const file = input.files[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) {
+        showModal('Image too large', 'Please use an image under 2MB.');
+        return;
+    }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        dcBgImage = e.target.result;
+        localStorage.setItem('wolfstack_dc_bg_image', dcBgImage);
+        applyDcBackground();
+    };
+    reader.readAsDataURL(file);
+}
+
+function clearBgImage() {
+    dcBgImage = '';
+    localStorage.removeItem('wolfstack_dc_bg_image');
+    applyDcBackground();
+}
+
+function updateBgBrightness(val) {
+    dcBgBrightness = parseInt(val, 10);
+    localStorage.setItem('wolfstack_dc_bg_brightness', val);
+    const el = document.getElementById('dc-bg-bright-val');
+    if (el) el.textContent = val + '%';
+    applyDcBackground();
+}
+
+function updateBgBlur(val) {
+    dcBgBlur = parseInt(val, 10);
+    localStorage.setItem('wolfstack_dc_bg_blur', val);
+    const el = document.getElementById('dc-bg-blur-val');
+    if (el) el.textContent = val + 'px';
+    applyDcBackground();
+}
+
+function applyDcBackground() {
+    let bgEl = document.getElementById('dc-bg-overlay');
+    if (!dcBgImage) {
+        if (bgEl) bgEl.remove();
+        return;
+    }
+    if (!bgEl) {
+        bgEl = document.createElement('div');
+        bgEl.id = 'dc-bg-overlay';
+        const main = document.querySelector('.main-content');
+        if (main) main.insertBefore(bgEl, main.firstChild);
+    }
+    bgEl.style.cssText = `
+        position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+        background-image: url(${dcBgImage});
+        background-size: cover; background-position: center;
+        filter: brightness(${dcBgBrightness / 100}) blur(${dcBgBlur}px);
+        z-index: 0; pointer-events: none;
+    `;
+}
+
+function initDcLayoutToolbar() {
+    // Restore layout button label
+    const icon = document.getElementById('dc-layout-icon');
+    const label = document.getElementById('dc-layout-label');
+    if (dcLayout === 'serverroom') {
+        if (icon) icon.textContent = '▥';
+        if (label) label.textContent = 'Server Room';
+    }
+    // Restore compact toggle
+    const ct = document.getElementById('dc-compact-toggle');
+    if (ct) ct.checked = dcCompact;
+    // Restore background sliders
+    const brSlider = document.getElementById('dc-bg-brightness');
+    const brVal = document.getElementById('dc-bg-bright-val');
+    if (brSlider) brSlider.value = dcBgBrightness;
+    if (brVal) brVal.textContent = dcBgBrightness + '%';
+    const blSlider = document.getElementById('dc-bg-blur');
+    const blVal = document.getElementById('dc-bg-blur-val');
+    if (blSlider) blSlider.value = dcBgBlur;
+    if (blVal) blVal.textContent = dcBgBlur + 'px';
+    // Apply background
+    applyDcBackground();
+}
+
+// Close layout/bg dropdowns when clicking outside
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('#dc-layout-toolbar')) {
+        const dd = document.getElementById('dc-layout-dropdown');
+        const bgp = document.getElementById('dc-bg-panel');
+        if (dd) dd.style.display = 'none';
+        if (bgp) bgp.style.display = 'none';
+    }
+});
+
 // ─── Modal Dialog (replaces alert()) ───
 function showModal(message, title) {
     title = title || 'WolfStack';
@@ -572,9 +710,9 @@ function renderDatacenterOverview() {
         const isPve = node.node_type === 'proxmox';
         const pveBadge = isPve ? '<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:rgba(99,102,241,0.15);color:var(--accent-light);margin-left:4px;">PVE</span>' : '';
 
-        // If offline or no metrics
+        // If offline or no metrics — always critical (red glow)
         if (!m || !node.online) {
-            return `<div class="card dc-compact-card" style="cursor:pointer;opacity:0.7;" onclick="selectServerView('${node.id}', 'dashboard')">
+            return `<div class="card dc-compact-card dc-card-critical" style="cursor:pointer;opacity:0.7;" onclick="selectServerView('${node.id}', 'dashboard')">
                 <div style="display:flex;align-items:center;gap:6px;padding:10px 12px;">
                     <span class="server-dot offline" style="flex-shrink:0;"></span>
                     <span style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${node.hostname}</span>
@@ -588,14 +726,30 @@ function renderDatacenterOverview() {
         const memPct = m.memory_percent.toFixed(1);
         const root = m.disks?.find(d => d.mount_point === '/') || m.disks?.[0];
         const diskPct = root ? root.usage_percent.toFixed(1) : '—';
+        const cpuNum = parseFloat(cpuPct) || 0;
+        const memNum = parseFloat(memPct) || 0;
         const diskNum = parseFloat(diskPct) || 0;
+        const isCritical = cpuNum > 90 || memNum > 90 || diskNum > 90;
+        const criticalClass = isCritical ? ' dc-card-critical' : '';
 
-        const metricBar = (label, pct, color) => `
-            <div style="display:flex;align-items:center;gap:6px;">
+        const metricBar = (label, pct, color) => {
+            const pctNum = parseFloat(pct) || 0;
+            if (dcCompact) {
+                // LED dot mode
+                const ledColor = pctNum > 90 ? 'var(--danger)' : pctNum > 70 ? 'var(--warning)' : 'var(--success)';
+                const ledGlow = pctNum > 90 ? 'rgba(239,68,68,0.4)' : pctNum > 70 ? 'rgba(245,158,11,0.3)' : 'rgba(16,185,129,0.3)';
+                return `<div style="display:flex;align-items:center;gap:6px;" title="${label}: ${pct}%">
+                    <span style="font-size:10px;color:var(--text-muted);width:28px;text-transform:uppercase;">${label}</span>
+                    <span class="dc-led" style="background:${ledColor};box-shadow:0 0 6px ${ledGlow};"></span>
+                    <span style="font-size:11px;font-weight:600;color:var(--text-secondary);font-family:'JetBrains Mono',monospace;">${pct}%</span>
+                </div>`;
+            }
+            return `<div style="display:flex;align-items:center;gap:6px;">
                 <span style="font-size:10px;color:var(--text-muted);width:28px;text-transform:uppercase;">${label}</span>
-                <div class="progress-bar" style="flex:1;height:6px;"><div class="fill ${progressClass(parseFloat(pct) || 0)}" style="width:${pct}%"></div></div>
+                <div class="progress-bar" style="flex:1;height:6px;"><div class="fill ${progressClass(pctNum)}" style="width:${pct}%"></div></div>
                 <span style="font-size:11px;font-weight:600;color:${color};width:40px;text-align:right;font-family:'JetBrains Mono',monospace;">${pct}%</span>
             </div>`;
+        };
 
         const components = isPve
             ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(99,102,241,0.1);color:var(--accent-light);">${node.vm_count || 0} VMs</span><span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(99,102,241,0.1);color:var(--accent-light);">${node.lxc_count || 0} CTs</span>`
@@ -603,7 +757,7 @@ function renderDatacenterOverview() {
                 `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'};color:${c.running ? 'var(--success)' : 'var(--danger)'};">${c.component}</span>`
             ).join('');
 
-        return `<div class="card dc-compact-card" style="cursor:pointer;" onclick="selectServerView('${node.id}', 'dashboard')">
+        return `<div class="card dc-compact-card${criticalClass}" style="cursor:pointer;" onclick="selectServerView('${node.id}', 'dashboard')">
             <div style="display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:1px solid var(--border);">
                 <span class="server-dot online" style="flex-shrink:0;"></span>
                 <span style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${node.hostname}</span>
@@ -622,57 +776,83 @@ function renderDatacenterOverview() {
         </div>`;
     };
 
-    let html = '';
-
     // 1. Group nodes
     const wsNodes = nodes.filter(n => n.node_type !== 'proxmox');
     const pveNodes = nodes.filter(n => n.node_type === 'proxmox');
 
-    // 2. Render WolfStack Clusters
+    // 2. Cluster grouping — WolfStack
     const wsClusters = {};
     wsNodes.forEach(n => {
         const key = n.cluster_name || "WolfStack";
         if (!wsClusters[key]) wsClusters[key] = [];
         wsClusters[key].push(n);
     });
-
-    // Sort WolfStack clusters: "WolfStack" first, then alphabetical
     const wsKeys = Object.keys(wsClusters).sort((a, b) => {
         if (a === 'WolfStack') return -1;
         if (b === 'WolfStack') return 1;
         return a.localeCompare(b);
     });
 
-    wsKeys.forEach(clusterName => {
-        const clusterNodes = wsClusters[clusterName];
-        html += `<div style="grid-column:1/-1; margin-bottom:4px; display:flex; align-items:baseline; ${html ? 'border-top:1px solid var(--border); padding-top:12px; margin-top:8px;' : ''}">
-            <h3 style="margin:0; font-size:14px; font-weight:600;">${clusterName}</h3>
-            <span style="margin-left:8px; font-size:11px; color:var(--text-muted); font-weight:400;">${clusterNodes.length} nodes</span>
-        </div>`;
-        html += clusterNodes.map(renderCard).join('');
-    });
-
-    // 3. Render PVE Clusters
+    // 3. Cluster grouping — PVE
     const pveClusters = {};
     pveNodes.forEach(n => {
-        const key = n.pve_cluster_name || n.cluster_name || n.address; // Group by name or address
+        const key = n.pve_cluster_name || n.cluster_name || n.address;
         if (!pveClusters[key]) pveClusters[key] = [];
         pveClusters[key].push(n);
     });
-
-    // Sort PVE clusters alphabetically
     const pveKeys = Object.keys(pveClusters).sort((a, b) => a.localeCompare(b));
 
-    pveKeys.forEach(clusterName => {
-        const clusterNodes = pveClusters[clusterName];
-        html += `<div style="grid-column:1/-1; margin-bottom:4px; display:flex; align-items:baseline; ${html ? 'border-top:1px solid var(--border); padding-top:12px; margin-top:8px;' : ''}">
-            <h3 style="margin:0; font-size:14px; font-weight:600;"><span style="display:inline-block;width:14px;height:14px;vertical-align:middle;margin-right:4px;opacity:0.9;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="2" width="18" height="6" rx="1"/><rect x="3" y="10" width="18" height="6" rx="1"/><rect x="3" y="18" width="18" height="4" rx="1"/><circle cx="7" cy="5" r="1" fill="currentColor"/><circle cx="7" cy="13" r="1" fill="currentColor"/><circle cx="7" cy="20" r="1" fill="currentColor"/></svg></span> ${clusterName}</h3>
-            <span style="margin-left:8px; font-size:11px; color:var(--text-muted); font-weight:400;">${clusterNodes.length} nodes</span>
-        </div>`;
-        html += clusterNodes.map(renderCard).join('');
-    });
+    const pveIcon = '<span style="display:inline-block;width:14px;height:14px;vertical-align:middle;margin-right:4px;opacity:0.9;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="2" width="18" height="6" rx="1"/><rect x="3" y="10" width="18" height="6" rx="1"/><rect x="3" y="18" width="18" height="4" rx="1"/><circle cx="7" cy="5" r="1" fill="currentColor"/><circle cx="7" cy="13" r="1" fill="currentColor"/><circle cx="7" cy="20" r="1" fill="currentColor"/></svg></span>';
 
-    container.innerHTML = html;
+    // 4. Render based on layout mode
+    if (dcLayout === 'serverroom') {
+        // Server Room: vertical columns per cluster, horizontal scroll
+        container.style.cssText = 'display:flex; gap:16px; overflow-x:auto; align-items:flex-start; padding-bottom:8px;';
+        container.classList.add('dc-serverroom-scroll');
+
+        const renderColumn = (clusterName, clusterNodes, isPve) => {
+            const icon = isPve ? pveIcon : '';
+            let col = `<div class="dc-serverroom-column">`;
+            col += `<div class="dc-serverroom-header">${icon}${clusterName}<span style="font-size:10px;color:var(--text-muted);font-weight:400;margin-left:auto;">${clusterNodes.length}</span></div>`;
+            col += clusterNodes.map(renderCard).join('');
+            col += `</div>`;
+            return col;
+        };
+
+        let html = '';
+        wsKeys.forEach(clusterName => {
+            html += renderColumn(clusterName, wsClusters[clusterName], false);
+        });
+        pveKeys.forEach(clusterName => {
+            html += renderColumn(clusterName, pveClusters[clusterName], true);
+        });
+        container.innerHTML = html;
+    } else {
+        // Grid: default left-to-right auto-fill grid
+        container.style.cssText = 'display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:10px;';
+        container.classList.remove('dc-serverroom-scroll');
+
+        let html = '';
+        wsKeys.forEach(clusterName => {
+            const clusterNodes = wsClusters[clusterName];
+            html += `<div style="grid-column:1/-1; margin-bottom:4px; display:flex; align-items:baseline; ${html ? 'border-top:1px solid var(--border); padding-top:12px; margin-top:8px;' : ''}">
+                <h3 style="margin:0; font-size:14px; font-weight:600;">${clusterName}</h3>
+                <span style="margin-left:8px; font-size:11px; color:var(--text-muted); font-weight:400;">${clusterNodes.length} nodes</span>
+            </div>`;
+            html += clusterNodes.map(renderCard).join('');
+        });
+
+        pveKeys.forEach(clusterName => {
+            const clusterNodes = pveClusters[clusterName];
+            html += `<div style="grid-column:1/-1; margin-bottom:4px; display:flex; align-items:baseline; ${html ? 'border-top:1px solid var(--border); padding-top:12px; margin-top:8px;' : ''}">
+                <h3 style="margin:0; font-size:14px; font-weight:600;">${pveIcon} ${clusterName}</h3>
+                <span style="margin-left:8px; font-size:11px; color:var(--text-muted); font-weight:400;">${clusterNodes.length} nodes</span>
+            </div>`;
+            html += clusterNodes.map(renderCard).join('');
+        });
+
+        container.innerHTML = html;
+    }
 
     // Initialize Map
     setTimeout(() => { updateMap(nodes); applyMapCollapse(); }, 100);
@@ -15112,8 +15292,9 @@ async function deleteWolfRunPortForward(serviceId, ruleId) {
     }
 }
 
-// Apply saved theme immediately on load
+// Apply saved theme and dashboard layout immediately on load
 initTheme();
+initDcLayoutToolbar();
 
 // ─── Storage Providers ───
 

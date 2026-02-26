@@ -215,6 +215,64 @@
                     </div>
                 </div>
 
+                <!-- Dashboard Layout Toolbar -->
+                <div id="dc-layout-toolbar" class="dc-layout-toolbar">
+                    <button id="dc-layout-btn" class="btn" onclick="toggleLayoutDropdown()" style="display:flex;align-items:center;gap:6px;font-size:12px;padding:5px 12px;">
+                        <span id="dc-layout-icon">⊞</span>
+                        <span id="dc-layout-label">Grid</span>
+                        <span style="font-size:10px;color:var(--text-muted);">▼</span>
+                    </button>
+                    <button id="dc-bg-btn" class="btn" onclick="toggleBgSettingsPanel()" style="display:flex;align-items:center;gap:6px;font-size:12px;padding:5px 12px;" title="Background Settings">
+                        🖼️ Background
+                    </button>
+                    <!-- Layout Dropdown Panel -->
+                    <div id="dc-layout-dropdown" class="dc-layout-dropdown" style="display:none;">
+                        <div style="margin-bottom:10px;">
+                            <div class="dc-layout-dropdown-title">Layout</div>
+                            <div style="display:flex;gap:8px;">
+                                <div class="dc-layout-option" data-layout="grid" onclick="setDcLayout('grid')">
+                                    <div class="dc-layout-option-icon">⊞</div>
+                                    <div class="dc-layout-option-label">Grid</div>
+                                </div>
+                                <div class="dc-layout-option" data-layout="serverroom" onclick="setDcLayout('serverroom')">
+                                    <div class="dc-layout-option-icon">▥</div>
+                                    <div class="dc-layout-option-label">Server Room</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div style="border-top:1px solid var(--border);padding-top:10px;">
+                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text-secondary);">
+                                <input type="checkbox" id="dc-compact-toggle" onchange="toggleDcCompact(this.checked)">
+                                Compact Mode (LED indicators)
+                            </label>
+                        </div>
+                    </div>
+                    <!-- Background Settings Panel -->
+                    <div id="dc-bg-panel" class="dc-layout-dropdown" style="display:none;width:260px;left:auto;">
+                        <div style="margin-bottom:10px;">
+                            <div class="dc-layout-dropdown-title">Background Image</div>
+                            <div style="display:flex;gap:6px;margin-top:6px;">
+                                <label class="btn" style="font-size:11px;padding:4px 10px;cursor:pointer;">
+                                    Upload <input type="file" id="dc-bg-upload" accept="image/*" onchange="handleBgUpload(this)" style="display:none;">
+                                </label>
+                                <button class="btn" style="font-size:11px;padding:4px 10px;" onclick="clearBgImage()">Clear</button>
+                            </div>
+                        </div>
+                        <div style="border-top:1px solid var(--border);padding-top:8px;margin-bottom:8px;">
+                            <label style="font-size:11px;color:var(--text-secondary);display:flex;justify-content:space-between;">
+                                Brightness <span id="dc-bg-bright-val">100%</span>
+                            </label>
+                            <input type="range" id="dc-bg-brightness" min="0" max="100" value="100" oninput="updateBgBrightness(this.value)">
+                        </div>
+                        <div style="border-top:1px solid var(--border);padding-top:8px;">
+                            <label style="font-size:11px;color:var(--text-secondary);display:flex;justify-content:space-between;">
+                                Blur <span id="dc-bg-blur-val">0px</span>
+                            </label>
+                            <input type="range" id="dc-bg-blur" min="0" max="20" value="0" oninput="updateBgBlur(this.value)">
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Server cards grid -->
                 <div id="datacenter-servers" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:10px;"></div>
             </div>

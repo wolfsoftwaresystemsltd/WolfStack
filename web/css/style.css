@@ -2081,6 +2081,185 @@ body.sidebar-collapsed .main-content {
     border-color: var(--border-light);
 }
 
+/* ─── Dashboard Layout Toolbar ─── */
+.dc-layout-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    position: relative;
+}
+
+.dc-layout-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 4px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow-lg);
+    padding: 12px;
+    z-index: 100;
+    min-width: 220px;
+}
+
+.dc-layout-dropdown-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+}
+
+.dc-layout-option {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 16px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: var(--transition);
+    flex: 1;
+}
+
+.dc-layout-option:hover {
+    border-color: var(--border-light);
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.dc-layout-option.active {
+    border-color: var(--accent);
+    background: var(--accent-glow);
+}
+
+.dc-layout-option-icon {
+    font-size: 20px;
+    line-height: 1;
+}
+
+.dc-layout-option-label {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+/* ─── Server Room Layout ─── */
+.dc-serverroom-column {
+    min-width: 280px;
+    max-width: 320px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.dc-serverroom-header {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    padding: 8px 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* ─── LED Dot (Compact Mode) ─── */
+.dc-led {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+/* ─── Critical Card Red Glow ─── */
+.dc-card-critical {
+    border-color: var(--danger) !important;
+    box-shadow: 0 0 12px rgba(239, 68, 68, 0.3), 0 0 4px rgba(239, 68, 68, 0.15) !important;
+    animation: dc-critical-pulse 2s ease-in-out infinite;
+}
+
+.dc-card-critical:hover {
+    box-shadow: 0 0 20px rgba(239, 68, 68, 0.4), 0 0 8px rgba(239, 68, 68, 0.2) !important;
+}
+
+@keyframes dc-critical-pulse {
+    0%, 100% { box-shadow: 0 0 12px rgba(239, 68, 68, 0.3), 0 0 4px rgba(239, 68, 68, 0.15); }
+    50% { box-shadow: 0 0 18px rgba(239, 68, 68, 0.45), 0 0 6px rgba(239, 68, 68, 0.25); }
+}
+
+/* ─── Background Overlay ─── */
+#dc-bg-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-size: cover;
+    background-position: center;
+    z-index: 0;
+    pointer-events: none;
+}
+
+/* ─── Layout Dropdown Range Sliders ─── */
+.dc-layout-dropdown input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    background: var(--bg-input);
+    border-radius: 2px;
+    outline: none;
+    margin-top: 4px;
+    width: 100%;
+}
+
+.dc-layout-dropdown input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+}
+
+.dc-layout-dropdown input[type="range"]::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: none;
+}
+
+/* ─── Server Room Scrollbar ─── */
+.dc-serverroom-scroll::-webkit-scrollbar {
+    height: 6px;
+}
+
+.dc-serverroom-scroll::-webkit-scrollbar-track {
+    background: var(--bg-secondary);
+    border-radius: 3px;
+}
+
+.dc-serverroom-scroll::-webkit-scrollbar-thumb {
+    background: var(--border-light);
+    border-radius: 3px;
+}
+
+.dc-serverroom-scroll::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted);
+}
+
 /* ─── Responsive ─── */
 @media (max-width: 1024px) {
     .sidebar {
