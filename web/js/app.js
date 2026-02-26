@@ -12899,9 +12899,10 @@ async function scanGlobalWolfNet() {
     await Promise.all(wsNodes.map(function (node) { return scanNode(node); }));
     if (btn) { btn.disabled = false; btn.innerHTML = '\uD83D\uDD0D Scan'; }
 
-    // Show fleet containers section
+    // Show fleet containers section and auto-load
     var fleetSection = document.getElementById('gwn-fleet-section');
     if (fleetSection) fleetSection.style.display = '';
+    loadFleetContainers();
 }
 
 function filterGlobalWolfNet() {
@@ -12921,35 +12922,43 @@ async function loadFleetContainers() {
 
     // Build table with placeholder rows
     var html = '<table class="data-table" id="fleet-table"><thead><tr>';
-    html += '<th>Node</th><th>Type</th><th>Name</th><th>Status</th><th>IP Address</th><th>CPU</th><th>Memory</th><th>Disk</th>';
+    html += '<th>Node</th><th>Type</th><th>Name</th><th>Status</th><th>IP Address</th><th>Autostart</th>';
     html += '</tr></thead><tbody id="fleet-tbody">';
     wsNodes.forEach(function (n) {
         var safeId = (n.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
-        html += '<tr id="fleet-ph-' + safeId + '" style="color:var(--text-muted);"><td>' + escapeHtml(n.hostname || n.id || 'local') + '</td><td colspan="7"><span style="display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,0.15);border-top-color:var(--text-muted);border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Loading...</td></tr>';
+        html += '<tr id="fleet-ph-' + safeId + '" style="color:var(--text-muted);"><td>' + escapeHtml(n.hostname || n.id || 'local') + '</td><td colspan="5"><span style="display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,0.15);border-top-color:var(--text-muted);border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Loading...</td></tr>';
     });
     html += '</tbody></table>';
     content.innerHTML = html;
 
-    function makeBar(pct, color) {
-        return '<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:' + Math.min(pct, 100) + '%;height:100%;background:' + color + ';border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">' + pct + '%</span></div>';
+    function barSeg(icon, pctVal, color, label) {
+        return '<div style="flex:1;display:flex;align-items:center;gap:6px;min-width:0;">' +
+            '<span>' + icon + '</span>' +
+            '<div style="flex:1;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">' +
+                '<div style="width:' + pctVal + '%;height:100%;background:' + color + ';border-radius:4px;transition:width 0.3s;"></div>' +
+            '</div>' +
+            '<span style="white-space:nowrap;">' + label + '</span>' +
+        '</div>';
     }
 
-    function cpuBar(pct) {
-        var c = pct > 80 ? '#ef4444' : pct > 50 ? '#f59e0b' : '#10b981';
-        return makeBar(Math.round(pct * 10) / 10, c);
-    }
-
-    function memBar(used, limit) {
-        var pct = limit ? Math.min(Math.round((used / limit) * 100), 100) : 0;
-        var c = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#10b981';
-        return '<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:' + pct + '%;height:100%;background:' + c + ';border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">' + formatBytes(used) + ' / ' + formatBytes(limit) + '</span></div>';
-    }
-
-    function diskBar(used, total) {
-        if (!total) return '-';
-        var pct = Math.round((used / total) * 100);
-        var c = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#10b981';
-        return '<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:' + pct + '%;height:100%;background:' + c + ';border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">' + formatBytes(used) + ' / ' + formatBytes(total) + '</span></div>';
+    function makeStatsSubRow(cpuPct, cpuLabel, memPct, memLabel, diskPct, diskLabel) {
+        var segs = [];
+        if (cpuPct >= 0) {
+            var cc = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#f59e0b' : '#10b981';
+            segs.push(barSeg('⚡', cpuPct, cc, cpuLabel));
+        }
+        if (memPct >= 0) {
+            var mc = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
+            segs.push(barSeg('🧠', memPct, mc, memLabel));
+        }
+        if (diskPct >= 0) {
+            var dc = diskPct > 90 ? '#ef4444' : diskPct > 70 ? '#f59e0b' : '#10b981';
+            segs.push(barSeg('💾', diskPct, dc, diskLabel));
+        }
+        if (segs.length === 0) return '';
+        return '<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="6" style="padding:4px 16px 6px 24px;border-top:none;">' +
+            '<div style="display:flex;align-items:center;gap:16px;font-size:11px;">' + segs.join('') + '</div>' +
+        '</td></tr>';
     }
 
     async function scanNodeContainers(node) {
@@ -12960,11 +12969,18 @@ async function loadFleetContainers() {
         var safeId = (node.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
         var rowsAdded = false;
 
-        function addRow(html) {
+        function addRows(mainHtml, subRowHtml) {
             if (!tbody) return;
             var tr = document.createElement('tr');
-            tr.innerHTML = html;
+            tr.innerHTML = mainHtml;
             tbody.appendChild(tr);
+            if (subRowHtml) {
+                var sr = document.createElement('tr');
+                sr.className = 'storage-sub-row';
+                sr.style.background = 'var(--bg-secondary)';
+                sr.innerHTML = subRowHtml;
+                tbody.appendChild(sr);
+            }
             rowsAdded = true;
         }
 
@@ -12981,10 +12997,22 @@ async function loadFleetContainers() {
                 list.forEach(function (c) {
                     var s = statsMap[c.name] || {};
                     var stateColor = c.state === 'running' ? '#10b981' : c.state === 'paused' ? '#f59e0b' : '#6b7280';
-                    var cpuHtml = s.cpu_percent !== undefined ? cpuBar(s.cpu_percent) : '-';
-                    var memHtml = s.memory_usage ? memBar(s.memory_usage, s.memory_limit) : '-';
-                    var diskHtml = c.disk_usage !== undefined && c.disk_total ? diskBar(c.disk_usage, c.disk_total) : '-';
-                    addRow('<td>' + escapeHtml(serverName) + '</td><td>🐳 Docker</td><td><strong>' + escapeHtml(c.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || c.status || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + cpuHtml + '</td><td>' + memHtml + '</td><td>' + diskHtml + '</td>');
+                    var cpuP = s.cpu_percent !== undefined ? Math.min(s.cpu_percent, 100) : -1;
+                    var memP = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
+                    var diskP = (c.disk_usage !== undefined && c.disk_total) ? Math.round((c.disk_usage / c.disk_total) * 100) : -1;
+                    var sub = makeStatsSubRow(
+                        cpuP, cpuP >= 0 ? (s.cpu_percent.toFixed(1) + '%') : '',
+                        memP, memP >= 0 ? (formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memP + '%)') : '',
+                        diskP, diskP >= 0 ? (formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + diskP + '%)') : ''
+                    );
+                    var main = '<td>' + escapeHtml(serverName) + '</td><td>🐳 Docker</td><td><strong>' + escapeHtml(c.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || c.status || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + (c.autostart ? '✓' : '') + '</td>';
+                    // Use innerHTML directly for sub-row since it contains <tr>
+                    if (!tbody) return;
+                    var tr = document.createElement('tr');
+                    tr.innerHTML = main;
+                    tbody.appendChild(tr);
+                    if (sub) { tbody.insertAdjacentHTML('beforeend', sub); }
+                    rowsAdded = true;
                 });
             }
         } catch (e) { }
@@ -13002,10 +13030,21 @@ async function loadFleetContainers() {
                 list.forEach(function (c) {
                     var s = statsMap[c.name] || {};
                     var stateColor = c.state === 'running' ? '#10b981' : c.state === 'frozen' ? '#f59e0b' : '#6b7280';
-                    var cpuHtml = s.cpu_percent !== undefined ? cpuBar(s.cpu_percent) : '-';
-                    var memHtml = s.memory_usage ? memBar(s.memory_usage, s.memory_limit) : '-';
-                    var diskHtml = c.disk_usage !== undefined && c.disk_total ? diskBar(c.disk_usage, c.disk_total) : '-';
-                    addRow('<td>' + escapeHtml(serverName) + '</td><td>📦 LXC</td><td><strong>' + escapeHtml(c.hostname || c.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + cpuHtml + '</td><td>' + memHtml + '</td><td>' + diskHtml + '</td>');
+                    var cpuP = s.cpu_percent !== undefined ? Math.min(s.cpu_percent, 100) : -1;
+                    var memP = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
+                    var diskP = (c.disk_usage !== undefined && c.disk_total) ? Math.round((c.disk_usage / c.disk_total) * 100) : -1;
+                    var sub = makeStatsSubRow(
+                        cpuP, cpuP >= 0 ? (s.cpu_percent.toFixed(1) + '%') : '',
+                        memP, memP >= 0 ? (formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memP + '%)') : '',
+                        diskP, diskP >= 0 ? (formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + diskP + '%)') : ''
+                    );
+                    var main = '<td>' + escapeHtml(serverName) + '</td><td>📦 LXC</td><td><strong>' + escapeHtml(c.hostname || c.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + (c.autostart ? '✓' : '') + '</td>';
+                    if (!tbody) return;
+                    var tr = document.createElement('tr');
+                    tr.innerHTML = main;
+                    tbody.appendChild(tr);
+                    if (sub) { tbody.insertAdjacentHTML('beforeend', sub); }
+                    rowsAdded = true;
                 });
             }
         } catch (e) { }
@@ -13019,7 +13058,25 @@ async function loadFleetContainers() {
                     var stateColor = v.running ? '#10b981' : '#6b7280';
                     var statusText = v.running ? 'running' : 'stopped';
                     var ip = v.wolfnet_ip || '-';
-                    addRow('<td>' + escapeHtml(serverName) + '</td><td>🖥️ VM</td><td><strong>' + escapeHtml(v.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + statusText + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(ip) + '</td><td>' + v.cpus + ' vCPU</td><td>' + v.memory_mb + ' MB</td><td>' + (v.disk_size_gb || '?') + ' GiB</td>');
+                    var sub = makeStatsSubRow(
+                        -1, '',
+                        -1, '',
+                        -1, ''
+                    );
+                    // VMs show static allocation in the sub-row
+                    var vmSub = '<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="6" style="padding:4px 16px 6px 24px;border-top:none;">' +
+                        '<div style="display:flex;align-items:center;gap:16px;font-size:11px;">' +
+                            '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span>⚡</span><span>' + v.cpus + ' vCPU</span></div>' +
+                            '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span>🧠</span><span>' + v.memory_mb + ' MB</span></div>' +
+                            '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span>💾</span><span>' + (v.disk_size_gb || '?') + ' GiB</span></div>' +
+                        '</div></td></tr>';
+                    var main = '<td>' + escapeHtml(serverName) + '</td><td>🖥️ VM</td><td><strong>' + escapeHtml(v.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + statusText + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(ip) + '</td><td>' + (v.auto_start ? '✓' : '') + '</td>';
+                    if (!tbody) return;
+                    var tr = document.createElement('tr');
+                    tr.innerHTML = main;
+                    tbody.appendChild(tr);
+                    tbody.insertAdjacentHTML('beforeend', vmSub);
+                    rowsAdded = true;
                 });
             }
         } catch (e) { }
@@ -13032,13 +13089,13 @@ async function loadFleetContainers() {
         if (!rowsAdded && tbody) {
             var tr = document.createElement('tr');
             tr.style.color = 'var(--text-muted)';
-            tr.innerHTML = '<td>' + escapeHtml(serverName) + '</td><td colspan="7">No containers or VMs</td>';
+            tr.innerHTML = '<td>' + escapeHtml(serverName) + '</td><td colspan="5">No containers or VMs</td>';
             tbody.appendChild(tr);
         }
     }
 
     await Promise.all(wsNodes.map(function (node) { return scanNodeContainers(node); }));
-    if (btn) { btn.disabled = false; btn.innerHTML = '📦 Load Containers'; }
+    if (btn) { btn.disabled = false; btn.innerHTML = '📦 Refresh'; }
 }
 
 
