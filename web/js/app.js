@@ -12947,13 +12947,107 @@ function filterGlobalWolfNet() {
 
 // ─── Fleet Containers (lazy loaded) ───
 
+// Fleet API URL builder — constructs proxy URL for remote nodes
+function fleetApiUrl(nodeId, path) {
+    if (!nodeId || nodeId === 'local') return path;
+    var node = (typeof allNodes !== 'undefined') ? allNodes.find(function (n) { return n.id === nodeId; }) : null;
+    if (!node || node.is_self) return path;
+    var cleanPath = path.replace(/^\/api\//, '');
+    return '/api/nodes/' + encodeURIComponent(nodeId) + '/proxy/' + cleanPath;
+}
+
+// Set currentNodeId for fleet context (used by modal functions like settings, volumes, browse)
+function fleetSetContext(nodeId) {
+    if (!nodeId || nodeId === 'local') { currentNodeId = null; return; }
+    var node = (typeof allNodes !== 'undefined') ? allNodes.find(function (n) { return n.id === nodeId; }) : null;
+    currentNodeId = (node && node.is_self) ? null : nodeId;
+}
+
+// Fleet console opener — routes through node proxy for remote nodes
+function fleetOpenConsole(nodeId, type, name) {
+    var url = '/console.html?type=' + encodeURIComponent(type) + '&name=' + encodeURIComponent(name);
+    if (nodeId && nodeId !== 'local') {
+        var node = allNodes.find(function (n) { return n.id === nodeId; });
+        if (node && !node.is_self) url += '&node_id=' + encodeURIComponent(nodeId);
+    }
+    window.open(url, 'console_' + name, 'width=960,height=600,menubar=no,toolbar=no');
+}
+
+// Fleet VNC opener — connects to the correct host for remote VMs
+function fleetOpenVnc(nodeId, name, wsPort) {
+    var host = window.location.hostname;
+    if (nodeId && nodeId !== 'local') {
+        var node = allNodes.find(function (n) { return n.id === nodeId; });
+        if (node && !node.is_self) host = node.address;
+    }
+    window.open('/vnc.html?name=' + encodeURIComponent(name) + '&port=' + wsPort + '&host=' + encodeURIComponent(host),
+        'vnc_' + name, 'width=1024,height=768,menubar=no,toolbar=no');
+}
+
+// Fleet logs viewer — fetches logs via node proxy
+async function fleetViewLogs(nodeId, runtime, name) {
+    var modal = document.getElementById('container-detail-modal');
+    var title = document.getElementById('container-detail-title');
+    var body = document.getElementById('container-detail-body');
+    if (!modal) return;
+    title.textContent = name + ' — Logs';
+    body.innerHTML = '<p style="color:var(--text-muted);">Loading logs...</p>';
+    modal.classList.add('active');
+    try {
+        var resp = await fetch(fleetApiUrl(nodeId, '/api/containers/' + runtime + '/' + encodeURIComponent(name) + '/logs'), { credentials: 'include' });
+        var data = await resp.json();
+        var logs = data.logs || [];
+        body.innerHTML = '<pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:\'JetBrains Mono\',monospace;font-size:12px;max-height:400px;overflow-y:auto;color:var(--text-primary);white-space:pre-wrap;word-break:break-all;">' + (logs.length > 0 ? escapeHtml(logs.join('\n')) : 'No logs available') + '</pre>';
+    } catch (e) {
+        body.innerHTML = '<p style="color:#ef4444;">Failed to load logs: ' + escapeHtml(e.message) + '</p>';
+    }
+}
+
+// Fleet VM logs viewer
+async function fleetShowVmLogs(nodeId, name) {
+    var modal = document.getElementById('container-detail-modal');
+    var title = document.getElementById('container-detail-title');
+    var body = document.getElementById('container-detail-body');
+    if (!modal) return;
+    title.textContent = 'VM Logs: ' + name;
+    body.innerHTML = '<p style="color:var(--text-muted);">Loading...</p>';
+    modal.classList.add('active');
+    try {
+        var resp = await fetch(fleetApiUrl(nodeId, '/api/vms/' + encodeURIComponent(name) + '/logs'), { credentials: 'include' });
+        var data = await resp.json();
+        var entries = Array.isArray(data) ? data : (data.logs || data.entries || []);
+        var text = entries.length > 0 ? entries.map(function (e) { return typeof e === 'string' ? e : JSON.stringify(e); }).join('\n') : JSON.stringify(data, null, 2);
+        body.innerHTML = '<pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:\'JetBrains Mono\',monospace;font-size:12px;max-height:400px;overflow-y:auto;color:var(--text-primary);white-space:pre-wrap;word-break:break-all;">' + escapeHtml(text) + '</pre>';
+    } catch (e) {
+        body.innerHTML = '<p style="color:#ef4444;">Failed to load logs: ' + escapeHtml(e.message) + '</p>';
+    }
+}
+
+// Fleet delete VM
+async function fleetDeleteVm(nodeId, name) {
+    if (!confirm('Delete VM "' + name + '"? This will delete the disk image permanently.')) return;
+    activityStart();
+    try {
+        var resp = await fetch(fleetApiUrl(nodeId, '/api/vms/' + encodeURIComponent(name)), { method: 'DELETE', credentials: 'include' });
+        if (resp.ok) {
+            showToast('VM deleted', 'success');
+            setTimeout(loadFleetContainers, 1000);
+        } else {
+            var data = await resp.json();
+            showToast(data.error || 'Failed to delete VM', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    } finally {
+        activityStop();
+    }
+}
+
 async function fleetAction(nodeId, runtime, container, action, btn) {
     if ((action === 'remove' || action === 'destroy') && !confirm((runtime === 'docker' ? 'Remove' : 'Destroy') + " '" + container + "'? This cannot be undone.")) return;
 
     activityStart();
-    var isLocal = !nodeId || nodeId === 'local';
-    var urlBase = isLocal ? '/api/' : '/api/nodes/' + encodeURIComponent(nodeId) + '/proxy/';
-    var endpoint = runtime === 'vm' ? (urlBase + 'vms/' + encodeURIComponent(container) + '/action') : (urlBase + 'containers/' + runtime + '/' + encodeURIComponent(container) + '/action');
+    var endpoint = fleetApiUrl(nodeId, runtime === 'vm' ? ('/api/vms/' + encodeURIComponent(container) + '/action') : ('/api/containers/' + runtime + '/' + encodeURIComponent(container) + '/action'));
 
     var row = btn ? btn.closest('tr') : null;
     var buttons = row ? row.querySelectorAll('button') : [];
@@ -12987,12 +13081,28 @@ async function loadFleetContainers() {
 
     var wsNodes = (typeof allNodes !== 'undefined' && allNodes.length) ? allNodes : [{ id: 'local', hostname: 'local', is_self: true, cluster_name: 'WolfStack' }];
 
-    var html = '<table class="data-table" id="fleet-table"><thead><tr>';
-    html += '<th>Node</th><th>Type</th><th>Name</th><th>Status</th><th>IP Address</th><th>Actions</th>';
-    html += '</tr></thead><tbody id="fleet-tbody">';
+    // Group nodes by cluster
+    var clusters = {};
     wsNodes.forEach(function (n) {
-        var safeId = (n.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
-        html += '<tr id="fleet-ph-' + safeId + '" style="color:var(--text-muted);"><td>' + escapeHtml(n.hostname || n.id || 'local') + '</td><td colspan="5"><span style="display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,0.15);border-top-color:var(--text-muted);border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Loading...</td></tr>';
+        var cn = n.cluster_name || 'Default';
+        if (!clusters[cn]) clusters[cn] = [];
+        clusters[cn].push(n);
+    });
+
+    // Build table with cluster→server hierarchy
+    var html = '<table class="data-table" id="fleet-table"><thead><tr>';
+    html += '<th>Type</th><th>Name</th><th>Status</th><th>IP Address</th><th>Actions</th>';
+    html += '</tr></thead><tbody id="fleet-tbody">';
+    var clusterNames = Object.keys(clusters);
+    clusterNames.forEach(function (cn) {
+        if (clusterNames.length > 1) {
+            html += '<tr class="fleet-cluster-header"><td colspan="5" style="background:var(--bg-tertiary);font-weight:bold;padding:10px 16px;font-size:14px;border-bottom:2px solid var(--border);">🏢 ' + escapeHtml(cn) + '</td></tr>';
+        }
+        clusters[cn].forEach(function (n) {
+            var safeId = (n.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
+            html += '<tr class="fleet-server-header" id="fleet-server-' + safeId + '"><td colspan="5" style="background:var(--bg-secondary);padding:8px 16px' + (clusterNames.length > 1 ? ' 8px 32px' : '') + ';font-weight:600;border-bottom:1px solid var(--border);">🖥️ ' + escapeHtml(n.hostname || n.id || 'local') + (n.address ? ' <span style="color:var(--text-muted);font-weight:normal;font-size:12px;">(' + escapeHtml(n.address) + ')</span>' : '') + '</td></tr>';
+            html += '<tr id="fleet-ph-' + safeId + '" style="color:var(--text-muted);"><td colspan="5" style="padding:12px 16px 12px 48px;"><span style="display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,0.15);border-top-color:var(--text-muted);border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Loading containers &amp; VMs...</td></tr>';
+        });
     });
     html += '</tbody></table>';
     content.innerHTML = html;
@@ -13025,7 +13135,7 @@ async function loadFleetContainers() {
             segs.push(barSeg('💾', diskPct, dc, diskLabel));
         }
         if (segs.length === 0) return '';
-        return '<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="6" style="padding:4px 16px 6px 24px;border-top:none;">' +
+        return '<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="5" style="padding:4px 16px 6px 48px;border-top:none;">' +
             '<div style="display:flex;align-items:center;gap:16px;font-size:11px;">' + segs.join('') + '</div>' +
         '</td></tr>';
     }
@@ -13034,55 +13144,94 @@ async function loadFleetContainers() {
         var r = state === 'running', p = state === 'paused';
         var nid = escapeHtml(nodeId || 'local');
         var eName = name.replace(/'/g, "\\'");
-        if (r) return '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>' +
-            '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'stop\',this)" title="Stop">⏹️</button>' +
-            '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'restart\',this)" title="Restart">🔄</button>' +
-            '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'pause\',this)" title="Pause">⏸️</button>';
-        if (p) return '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'unpause\',this)" title="Unpause">▶️</button>';
-        return '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>' +
-            '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop">⏹️</button>' +
-            '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart">🔄</button>' +
-            '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'remove\',this)" title="Remove">🗑️</button>';
+        var h = '';
+        // Control buttons
+        if (r) {
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'stop\',this)" title="Stop">⏹️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'restart\',this)" title="Restart">🔄</button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'pause\',this)" title="Pause">⏸️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenConsole(\'' + nid + '\',\'docker\',\'' + eName + '\')" title="Console">💻</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Remove">🗑️</button>';
+        } else if (p) {
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'unpause\',this)" title="Unpause">▶️</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console">💻</button>';
+        } else {
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop">⏹️</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart">🔄</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console">💻</button>';
+            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'remove\',this)" title="Remove">🗑️</button>';
+        }
+        // Management buttons
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetViewLogs(\'' + nid + '\',\'docker\',\'' + eName + '\')" title="Logs">📜</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');viewDockerVolumes(\'' + eName + '\')" title="Volumes">📁</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');browseContainerFiles(\'docker\',\'' + eName + '\')" title="Browse Files">📂</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openDockerSettings(\'' + eName + '\')" title="Settings">⚙️</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');cloneDockerContainer(\'' + eName + '\')" title="Clone">📋</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');migrateDockerContainer(\'' + eName + '\')" title="Migrate">🚀</button>';
+        return h;
     }
 
-    function lxcButtons(nodeId, name, state) {
+    function lxcButtons(nodeId, name, state, storagePath) {
         var r = state === 'running';
         var nid = escapeHtml(nodeId || 'local');
         var eName = name.replace(/'/g, "\\'");
-        if (r) return '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>' +
-            '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'stop\',this)" title="Stop">⏹️</button>' +
-            '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'restart\',this)" title="Restart">🔄</button>' +
-            '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'freeze\',this)" title="Freeze">⏸️</button>';
-        return '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>' +
-            '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop">⏹️</button>' +
-            '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart">🔄</button>' +
-            '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'destroy\',this)" title="Destroy">🗑️</button>';
+        var ePath = (storagePath || '').replace(/'/g, "\\'");
+        var h = '';
+        // Control buttons
+        if (r) {
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'stop\',this)" title="Stop">⏹️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'restart\',this)" title="Restart">🔄</button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'freeze\',this)" title="Freeze">⏸️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenConsole(\'' + nid + '\',\'lxc\',\'' + eName + '\')" title="Console">💻</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Destroy">🗑️</button>';
+        } else {
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop">⏹️</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart">🔄</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console">💻</button>';
+            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'destroy\',this)" title="Destroy">🗑️</button>';
+        }
+        // Management buttons
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetViewLogs(\'' + nid + '\',\'lxc\',\'' + eName + '\')" title="Logs">📜</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');browseContainerFiles(\'lxc\',\'' + eName + '\',\'' + ePath + '\')" title="Browse Files">📂</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openLxcSettings(\'' + eName + '\')" title="Settings">⚙️</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');cloneLxcContainer(\'' + eName + '\')" title="Clone">📋</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');migrateLxcContainer(\'' + eName + '\')" title="Migrate">🚀</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');exportLxcContainer(\'' + eName + '\')" title="Export">📦</button>';
+        return h;
     }
 
-    function vmButtons(nodeId, name, running) {
+    function vmButtons(nodeId, vm) {
         var nid = escapeHtml(nodeId || 'local');
-        var eName = name.replace(/'/g, "\\'");
-        if (running) return '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'stop\',this)" title="Stop">⏹️</button>';
-        return '<button class="btn btn-sm" style="' + BS + 'color:#22c55e;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>';
+        var eName = vm.name.replace(/'/g, "\\'");
+        var h = '';
+        if (vm.running) {
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'stop\',this)" title="Stop">⏹️</button>';
+            if (vm.vnc_ws_port) {
+                h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenVnc(\'' + nid + '\',\'' + eName + '\',' + vm.vnc_ws_port + ')" title="VNC Console">🖥️</button>';
+            }
+        } else {
+            h += '<button class="btn btn-sm" style="' + BS + 'color:#22c55e;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop">⏹️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');showVmSettings(\'' + eName + '\')" title="Settings">⚙️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetDeleteVm(\'' + nid + '\',\'' + eName + '\')" title="Delete">🗑️</button>';
+        }
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetShowVmLogs(\'' + nid + '\',\'' + eName + '\')" title="Logs">📋</button>';
+        return h;
     }
 
     async function scanNodeContainers(node) {
         var isLocal = !!node.is_self;
         var urlBase = isLocal ? '/api/' : '/api/nodes/' + encodeURIComponent(node.id) + '/proxy/';
-        var serverName = node.hostname || node.id || 'local';
         var nodeId = node.id || 'local';
         var tbody = document.getElementById('fleet-tbody');
         var safeId = (node.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
-        var rowsAdded = false;
-
-        function appendContainer(mainHtml, subHtml) {
-            if (!tbody) return;
-            var tr = document.createElement('tr');
-            tr.innerHTML = mainHtml;
-            tbody.appendChild(tr);
-            if (subHtml) tbody.insertAdjacentHTML('beforeend', subHtml);
-            rowsAdded = true;
-        }
+        var ph = document.getElementById('fleet-ph-' + safeId);
+        var rowsHtml = '';
 
         // Docker containers + stats
         try {
@@ -13105,8 +13254,7 @@ async function loadFleetContainers() {
                         memP, memP >= 0 ? (formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memP + '%)') : '',
                         diskP, diskP >= 0 ? (formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + diskP + '%)') : ''
                     );
-                    var main = '<td>' + escapeHtml(serverName) + '</td><td>🐳 Docker</td><td><strong>' + escapeHtml(c.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || c.status || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td style="white-space:nowrap;">' + dockerButtons(nodeId, c.name, c.state) + '</td>';
-                    appendContainer(main, sub);
+                    rowsHtml += '<tr><td>🐳 Docker</td><td><strong>' + escapeHtml(c.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || c.status || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + dockerButtons(nodeId, c.name, c.state) + '</td></tr>' + sub;
                 });
             }
         } catch (e) { }
@@ -13132,8 +13280,7 @@ async function loadFleetContainers() {
                         memP, memP >= 0 ? (formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memP + '%)') : '',
                         diskP, diskP >= 0 ? (formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + diskP + '%)') : ''
                     );
-                    var main = '<td>' + escapeHtml(serverName) + '</td><td>📦 LXC</td><td><strong>' + escapeHtml(c.hostname || c.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td style="white-space:nowrap;">' + lxcButtons(nodeId, c.name, c.state) + '</td>';
-                    appendContainer(main, sub);
+                    rowsHtml += '<tr><td>📦 LXC</td><td><strong>' + escapeHtml(c.hostname || c.name) + '</strong>' + (c.hostname ? '<div style="font-size:11px;color:var(--text-muted);">CT ' + escapeHtml(c.name) + '</div>' : '') + '</td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + lxcButtons(nodeId, c.name, c.state, c.storage_path) + '</td></tr>' + sub;
                 });
             }
         } catch (e) { }
@@ -13147,32 +13294,30 @@ async function loadFleetContainers() {
                     var stateColor = v.running ? '#10b981' : '#6b7280';
                     var statusText = v.running ? 'running' : 'stopped';
                     var ip = v.wolfnet_ip || '-';
-                    var vmSub = '<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="6" style="padding:4px 16px 6px 24px;border-top:none;">' +
+                    var vmSub = '<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="5" style="padding:4px 16px 6px 48px;border-top:none;">' +
                         '<div style="display:flex;align-items:center;gap:16px;font-size:11px;">' +
                             '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span>⚡</span><span>' + v.cpus + ' vCPU</span></div>' +
                             '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span>🧠</span><span>' + v.memory_mb + ' MB</span></div>' +
                             '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span>💾</span><span>' + (v.disk_size_gb || '?') + ' GiB</span></div>' +
                         '</div></td></tr>';
-                    var main = '<td>' + escapeHtml(serverName) + '</td><td>🖥️ VM</td><td><strong>' + escapeHtml(v.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + statusText + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(ip) + '</td><td style="white-space:nowrap;">' + vmButtons(nodeId, v.name, v.running) + '</td>';
-                    appendContainer(main, vmSub);
+                    rowsHtml += '<tr><td>🖥️ VM</td><td><strong>' + escapeHtml(v.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + statusText + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(ip) + '</td><td>' + vmButtons(nodeId, v) + '</td></tr>' + vmSub;
                 });
             }
         } catch (e) { }
 
-        // Remove placeholder
-        var ph = document.getElementById('fleet-ph-' + safeId);
-        if (ph) ph.remove();
-
-        if (!rowsAdded && tbody) {
-            var tr = document.createElement('tr');
-            tr.style.color = 'var(--text-muted)';
-            tr.innerHTML = '<td>' + escapeHtml(serverName) + '</td><td colspan="5">No containers or VMs</td>';
-            tbody.appendChild(tr);
+        // Replace placeholder with actual rows
+        if (ph) {
+            if (rowsHtml) {
+                ph.insertAdjacentHTML('afterend', rowsHtml);
+            } else {
+                ph.insertAdjacentHTML('afterend', '<tr style="color:var(--text-muted);"><td colspan="5" style="padding:8px 16px 8px 48px;">No containers or VMs on this node</td></tr>');
+            }
+            ph.remove();
         }
     }
 
     await Promise.all(wsNodes.map(function (node) { return scanNodeContainers(node); }));
-    if (btn) { btn.disabled = false; btn.innerHTML = '📦 Refresh'; }
+    if (btn) { btn.disabled = false; btn.innerHTML = '🔄 Refresh'; }
 }
 
 
