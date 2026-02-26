@@ -12911,6 +12911,33 @@ function filterGlobalWolfNet() {
 
 // ─── Fleet Containers (lazy loaded) ───
 
+async function fleetAction(nodeId, runtime, container, action, btn) {
+    if ((action === 'remove' || action === 'destroy') && !confirm((runtime === 'docker' ? 'Remove' : 'Destroy') + " '" + container + "'? This cannot be undone.")) return;
+    var isLocal = !nodeId || nodeId === 'local';
+    var urlBase = isLocal ? '/api/' : '/api/nodes/' + encodeURIComponent(nodeId) + '/proxy/';
+    var endpoint = runtime === 'vm' ? (urlBase + 'vms/' + encodeURIComponent(container) + '/action') : (urlBase + 'containers/' + runtime + '/' + encodeURIComponent(container) + '/action');
+
+    var row = btn ? btn.closest('tr') : null;
+    var buttons = row ? row.querySelectorAll('button') : [];
+    buttons.forEach(function (b) { b.disabled = true; b.style.opacity = '0.4'; b.style.pointerEvents = 'none'; });
+    if (btn) btn.innerHTML = '<span style="display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;"></span>';
+
+    try {
+        var resp = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ action: action }) });
+        var data = await resp.json();
+        if (resp.ok) {
+            showToast(action + ' ' + container + ': OK', 'success');
+            setTimeout(loadFleetContainers, 1000);
+        } else {
+            showToast(data.error || 'Failed to ' + action, 'error');
+            buttons.forEach(function (b) { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+        buttons.forEach(function (b) { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
+    }
+}
+
 async function loadFleetContainers() {
     var btn = document.getElementById('fleet-load-btn');
     var content = document.getElementById('fleet-containers-content');
@@ -12920,9 +12947,8 @@ async function loadFleetContainers() {
 
     var wsNodes = (typeof allNodes !== 'undefined' && allNodes.length) ? allNodes : [{ id: 'local', hostname: 'local', is_self: true, cluster_name: 'WolfStack' }];
 
-    // Build table with placeholder rows
     var html = '<table class="data-table" id="fleet-table"><thead><tr>';
-    html += '<th>Node</th><th>Type</th><th>Name</th><th>Status</th><th>IP Address</th><th>Autostart</th>';
+    html += '<th>Node</th><th>Type</th><th>Name</th><th>Status</th><th>IP Address</th><th>Actions</th>';
     html += '</tr></thead><tbody id="fleet-tbody">';
     wsNodes.forEach(function (n) {
         var safeId = (n.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
@@ -12930,6 +12956,9 @@ async function loadFleetContainers() {
     });
     html += '</tbody></table>';
     content.innerHTML = html;
+
+    var BS = 'margin:2px;font-size:18px;line-height:1;padding:3px 5px;';
+    var DS = 'margin:2px;font-size:18px;line-height:1;padding:3px 5px;opacity:0.4;cursor:not-allowed;pointer-events:none;';
 
     function barSeg(icon, pctVal, color, label) {
         return '<div style="flex:1;display:flex;align-items:center;gap:6px;min-width:0;">' +
@@ -12961,26 +12990,57 @@ async function loadFleetContainers() {
         '</td></tr>';
     }
 
+    function dockerButtons(nodeId, name, state) {
+        var r = state === 'running', p = state === 'paused';
+        var nid = escapeHtml(nodeId || 'local');
+        var eName = name.replace(/'/g, "\\'");
+        if (r) return '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>' +
+            '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'stop\',this)" title="Stop">⏹️</button>' +
+            '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'restart\',this)" title="Restart">🔄</button>' +
+            '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'pause\',this)" title="Pause">⏸️</button>';
+        if (p) return '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'unpause\',this)" title="Unpause">▶️</button>';
+        return '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>' +
+            '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop">⏹️</button>' +
+            '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart">🔄</button>' +
+            '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'remove\',this)" title="Remove">🗑️</button>';
+    }
+
+    function lxcButtons(nodeId, name, state) {
+        var r = state === 'running';
+        var nid = escapeHtml(nodeId || 'local');
+        var eName = name.replace(/'/g, "\\'");
+        if (r) return '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>' +
+            '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'stop\',this)" title="Stop">⏹️</button>' +
+            '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'restart\',this)" title="Restart">🔄</button>' +
+            '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'freeze\',this)" title="Freeze">⏸️</button>';
+        return '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>' +
+            '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop">⏹️</button>' +
+            '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart">🔄</button>' +
+            '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'destroy\',this)" title="Destroy">🗑️</button>';
+    }
+
+    function vmButtons(nodeId, name, running) {
+        var nid = escapeHtml(nodeId || 'local');
+        var eName = name.replace(/'/g, "\\'");
+        if (running) return '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'stop\',this)" title="Stop">⏹️</button>';
+        return '<button class="btn btn-sm" style="' + BS + 'color:#22c55e;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>';
+    }
+
     async function scanNodeContainers(node) {
         var isLocal = !!node.is_self;
         var urlBase = isLocal ? '/api/' : '/api/nodes/' + encodeURIComponent(node.id) + '/proxy/';
         var serverName = node.hostname || node.id || 'local';
+        var nodeId = node.id || 'local';
         var tbody = document.getElementById('fleet-tbody');
         var safeId = (node.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
         var rowsAdded = false;
 
-        function addRows(mainHtml, subRowHtml) {
+        function appendContainer(mainHtml, subHtml) {
             if (!tbody) return;
             var tr = document.createElement('tr');
             tr.innerHTML = mainHtml;
             tbody.appendChild(tr);
-            if (subRowHtml) {
-                var sr = document.createElement('tr');
-                sr.className = 'storage-sub-row';
-                sr.style.background = 'var(--bg-secondary)';
-                sr.innerHTML = subRowHtml;
-                tbody.appendChild(sr);
-            }
+            if (subHtml) tbody.insertAdjacentHTML('beforeend', subHtml);
             rowsAdded = true;
         }
 
@@ -13005,14 +13065,8 @@ async function loadFleetContainers() {
                         memP, memP >= 0 ? (formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memP + '%)') : '',
                         diskP, diskP >= 0 ? (formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + diskP + '%)') : ''
                     );
-                    var main = '<td>' + escapeHtml(serverName) + '</td><td>🐳 Docker</td><td><strong>' + escapeHtml(c.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || c.status || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + (c.autostart ? '✓' : '') + '</td>';
-                    // Use innerHTML directly for sub-row since it contains <tr>
-                    if (!tbody) return;
-                    var tr = document.createElement('tr');
-                    tr.innerHTML = main;
-                    tbody.appendChild(tr);
-                    if (sub) { tbody.insertAdjacentHTML('beforeend', sub); }
-                    rowsAdded = true;
+                    var main = '<td>' + escapeHtml(serverName) + '</td><td>🐳 Docker</td><td><strong>' + escapeHtml(c.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || c.status || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td style="white-space:nowrap;">' + dockerButtons(nodeId, c.name, c.state) + '</td>';
+                    appendContainer(main, sub);
                 });
             }
         } catch (e) { }
@@ -13038,13 +13092,8 @@ async function loadFleetContainers() {
                         memP, memP >= 0 ? (formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memP + '%)') : '',
                         diskP, diskP >= 0 ? (formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + diskP + '%)') : ''
                     );
-                    var main = '<td>' + escapeHtml(serverName) + '</td><td>📦 LXC</td><td><strong>' + escapeHtml(c.hostname || c.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + (c.autostart ? '✓' : '') + '</td>';
-                    if (!tbody) return;
-                    var tr = document.createElement('tr');
-                    tr.innerHTML = main;
-                    tbody.appendChild(tr);
-                    if (sub) { tbody.insertAdjacentHTML('beforeend', sub); }
-                    rowsAdded = true;
+                    var main = '<td>' + escapeHtml(serverName) + '</td><td>📦 LXC</td><td><strong>' + escapeHtml(c.hostname || c.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td style="white-space:nowrap;">' + lxcButtons(nodeId, c.name, c.state) + '</td>';
+                    appendContainer(main, sub);
                 });
             }
         } catch (e) { }
@@ -13058,25 +13107,14 @@ async function loadFleetContainers() {
                     var stateColor = v.running ? '#10b981' : '#6b7280';
                     var statusText = v.running ? 'running' : 'stopped';
                     var ip = v.wolfnet_ip || '-';
-                    var sub = makeStatsSubRow(
-                        -1, '',
-                        -1, '',
-                        -1, ''
-                    );
-                    // VMs show static allocation in the sub-row
                     var vmSub = '<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="6" style="padding:4px 16px 6px 24px;border-top:none;">' +
                         '<div style="display:flex;align-items:center;gap:16px;font-size:11px;">' +
                             '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span>⚡</span><span>' + v.cpus + ' vCPU</span></div>' +
                             '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span>🧠</span><span>' + v.memory_mb + ' MB</span></div>' +
                             '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span>💾</span><span>' + (v.disk_size_gb || '?') + ' GiB</span></div>' +
                         '</div></td></tr>';
-                    var main = '<td>' + escapeHtml(serverName) + '</td><td>🖥️ VM</td><td><strong>' + escapeHtml(v.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + statusText + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(ip) + '</td><td>' + (v.auto_start ? '✓' : '') + '</td>';
-                    if (!tbody) return;
-                    var tr = document.createElement('tr');
-                    tr.innerHTML = main;
-                    tbody.appendChild(tr);
-                    tbody.insertAdjacentHTML('beforeend', vmSub);
-                    rowsAdded = true;
+                    var main = '<td>' + escapeHtml(serverName) + '</td><td>🖥️ VM</td><td><strong>' + escapeHtml(v.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + statusText + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(ip) + '</td><td style="white-space:nowrap;">' + vmButtons(nodeId, v.name, v.running) + '</td>';
+                    appendContainer(main, vmSub);
                 });
             }
         } catch (e) { }
@@ -13085,7 +13123,6 @@ async function loadFleetContainers() {
         var ph = document.getElementById('fleet-ph-' + safeId);
         if (ph) ph.remove();
 
-        // If no rows were added for this node, show a "no data" row
         if (!rowsAdded && tbody) {
             var tr = document.createElement('tr');
             tr.style.color = 'var(--text-muted)';
