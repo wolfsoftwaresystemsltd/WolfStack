@@ -17,6 +17,43 @@ let diskHistory = {}; // mount_point -> array of {timestamp, usage_percent}
 const MAX_HISTORY = 300; // 10 minutes at 2s intervals
 let displayRange = 150; // default 5 minutes (150 samples at 2s)
 
+// ─── Sidebar Toggle ───
+function toggleSidebar() {
+    document.body.classList.toggle('sidebar-collapsed');
+    const collapsed = document.body.classList.contains('sidebar-collapsed');
+    localStorage.setItem('wolfstack_sidebar_collapsed', collapsed ? '1' : '0');
+    // Invalidate map size after transition
+    setTimeout(() => { if (worldMap) worldMap.invalidateSize(); }, 350);
+}
+
+// Restore sidebar state on load
+if (localStorage.getItem('wolfstack_sidebar_collapsed') === '1') {
+    document.body.classList.add('sidebar-collapsed');
+}
+
+// ─── Map Collapse Toggle ───
+let mapCollapsed = localStorage.getItem('wolfstack_map_collapsed') !== '0'; // default collapsed
+
+function toggleMapCollapse() {
+    mapCollapsed = !mapCollapsed;
+    localStorage.setItem('wolfstack_map_collapsed', mapCollapsed ? '1' : '0');
+    applyMapCollapse();
+}
+
+function applyMapCollapse() {
+    const wrap = document.getElementById('world-map-wrap');
+    const icon = document.getElementById('map-toggle-icon');
+    if (!wrap) return;
+    if (mapCollapsed) {
+        wrap.style.height = '0';
+        if (icon) icon.style.transform = 'rotate(-90deg)';
+    } else {
+        wrap.style.height = '220px';
+        if (icon) icon.style.transform = 'rotate(0deg)';
+        setTimeout(() => { if (worldMap) worldMap.invalidateSize(); }, 350);
+    }
+}
+
 // ─── Modal Dialog (replaces alert()) ───
 function showModal(message, title) {
     title = title || 'WolfStack';
@@ -529,25 +566,20 @@ function renderDatacenterOverview() {
         return;
     }
 
-    // Helper to render a single node card
+    // Helper to render a single compact node card
     const renderCard = (node) => {
         const m = node.metrics;
         const isPve = node.node_type === 'proxmox';
-        const nodeIcon = isPve ? '<span style="display:inline-block;width:14px;height:14px;vertical-align:middle;opacity:0.9;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><circle cx="12" cy="10" r="1" fill="currentColor"/></svg></span>' : '🖥️';
-        const pveBadge = isPve ? ' <span style="font-size:10px; padding:1px 6px; border-radius:3px; background:rgba(99,102,241,0.15); color:var(--accent-light); margin-left:6px;">PVE</span>' : '';
+        const pveBadge = isPve ? '<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:rgba(99,102,241,0.15);color:var(--accent-light);margin-left:4px;">PVE</span>' : '';
 
         // If offline or no metrics
         if (!m || !node.online) {
-            return `<div class="card" style="cursor:pointer; opacity:0.8;" onclick="selectServerView('${node.id}', 'dashboard')">
-                <div class="card-header">
-                    <h3>
-                        <span class="server-dot offline" style="display:inline-block; vertical-align:middle; margin-right:8px;"></span>
-                        ${nodeIcon} ${node.hostname}${pveBadge}
-                    </h3>
-                    <div style="color:var(--text-muted); font-size:12px;">${node.address}:${node.port}</div>
-                </div>
-                <div class="card-body" style="text-align:center; color:var(--text-muted); padding:30px;">
-                    ● Offline / No Data
+            return `<div class="card dc-compact-card" style="cursor:pointer;opacity:0.7;" onclick="selectServerView('${node.id}', 'dashboard')">
+                <div style="display:flex;align-items:center;gap:6px;padding:10px 12px;">
+                    <span class="server-dot offline" style="flex-shrink:0;"></span>
+                    <span style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${node.hostname}</span>
+                    ${pveBadge}
+                    <span style="margin-left:auto;font-size:11px;color:var(--danger);">Offline</span>
                 </div>
             </div>`;
         }
@@ -556,47 +588,36 @@ function renderDatacenterOverview() {
         const memPct = m.memory_percent.toFixed(1);
         const root = m.disks?.find(d => d.mount_point === '/') || m.disks?.[0];
         const diskPct = root ? root.usage_percent.toFixed(1) : '—';
+        const diskNum = parseFloat(diskPct) || 0;
 
-        return `<div class="card" style="cursor:pointer;" onclick="selectServerView('${node.id}', 'dashboard')">
-            <div class="card-header">
-                <h3>
-                    <span class="server-dot online" style="display:inline-block; vertical-align:middle; margin-right:8px;"></span>
-                    ${nodeIcon} ${node.hostname}${pveBadge}${node.is_self ? ' <span style="color:var(--accent-light); font-size:12px;">(this)</span>' : ''}
-                </h3>
-                <div style="display:flex; align-items:center; gap:10px;">
-                    <span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(16,185,129,0.1); color:var(--success); font-family:'JetBrains Mono',monospace;">
-                        ▲ ${formatUptimeShort(m.uptime_secs)}
-                    </span>
-                    <span style="color:var(--text-muted); font-size:12px;">${node.address}:${node.port}</span>
-                </div>
+        const metricBar = (label, pct, color) => `
+            <div style="display:flex;align-items:center;gap:6px;">
+                <span style="font-size:10px;color:var(--text-muted);width:28px;text-transform:uppercase;">${label}</span>
+                <div class="progress-bar" style="flex:1;height:6px;"><div class="fill ${progressClass(parseFloat(pct) || 0)}" style="width:${pct}%"></div></div>
+                <span style="font-size:11px;font-weight:600;color:${color};width:40px;text-align:right;font-family:'JetBrains Mono',monospace;">${pct}%</span>
+            </div>`;
+
+        const components = isPve
+            ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(99,102,241,0.1);color:var(--accent-light);">${node.vm_count || 0} VMs</span><span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(99,102,241,0.1);color:var(--accent-light);">${node.lxc_count || 0} CTs</span>`
+            : node.components.filter(c => c.installed).map(c =>
+                `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'};color:${c.running ? 'var(--success)' : 'var(--danger)'};">${c.component}</span>`
+            ).join('');
+
+        return `<div class="card dc-compact-card" style="cursor:pointer;" onclick="selectServerView('${node.id}', 'dashboard')">
+            <div style="display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:1px solid var(--border);">
+                <span class="server-dot online" style="flex-shrink:0;"></span>
+                <span style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${node.hostname}</span>
+                ${pveBadge}
+                ${node.is_self ? '<span style="color:var(--accent-light);font-size:10px;">(this)</span>' : ''}
+                <span style="margin-left:auto;font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(16,185,129,0.1);color:var(--success);font-family:\'JetBrains Mono\',monospace;white-space:nowrap;">▲ ${formatUptimeShort(m.uptime_secs)}</span>
             </div>
-            <div class="card-body">
-                <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; text-align:center;">
-                    <div>
-                        <div style="font-size:24px; font-weight:700; color:var(--accent-light);">${cpuPct}%</div>
-                        <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">CPU</div>
-                        <div class="progress-bar" style="margin-top:6px;"><div class="fill ${progressClass(m.cpu_usage_percent)}" style="width:${cpuPct}%"></div></div>
-                        <canvas id="spark-cpu-${node.id}" width="80" height="24" style="margin-top:4px; width:100%; height:24px;"></canvas>
-                    </div>
-                    <div>
-                        <div style="font-size:24px; font-weight:700; color:var(--success);">${memPct}%</div>
-                        <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">Memory</div>
-                        <div class="progress-bar" style="margin-top:6px;"><div class="fill ${progressClass(m.memory_percent)}" style="width:${memPct}%"></div></div>
-                        <canvas id="spark-mem-${node.id}" width="80" height="24" style="margin-top:4px; width:100%; height:24px;"></canvas>
-                    </div>
-                    <div>
-                        <div style="font-size:24px; font-weight:700; color:var(--warning);">${diskPct}%</div>
-                        <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">Disk</div>
-                        <div class="progress-bar" style="margin-top:6px;"><div class="fill ${progressClass(parseFloat(diskPct) || 0)}" style="width:${diskPct}%"></div></div>
-                    </div>
-                </div>
-                <div style="margin-top:12px; display:flex; gap:6px; flex-wrap:wrap;">
-                    ${isPve
-                ? `<span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(99,102,241,0.1); color:var(--accent-light);">🖥️ ${node.vm_count || 0} VMs</span><span style="font-size:11px; padding:2px 8px; border-radius:4px; background:rgba(99,102,241,0.1); color:var(--accent-light);">📦 ${node.lxc_count || 0} CTs</span>`
-                : node.components.filter(c => c.installed).map(c =>
-                    `<span style="font-size:11px; padding:2px 8px; border-radius:4px; background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'}; color:${c.running ? 'var(--success)' : 'var(--danger)'};">${c.component}</span>`
-                ).join('')}
-                </div>
+            <div style="padding:8px 12px;display:flex;flex-direction:column;gap:4px;">
+                ${metricBar('CPU', cpuPct, 'var(--accent-light)')}
+                ${metricBar('Mem', memPct, 'var(--success)')}
+                ${metricBar('Disk', diskPct, 'var(--warning)')}
+            </div>
+            <div style="padding:4px 12px 8px;display:flex;gap:4px;flex-wrap:wrap;">
+                ${components}
             </div>
         </div>`;
     };
@@ -624,9 +645,9 @@ function renderDatacenterOverview() {
 
     wsKeys.forEach(clusterName => {
         const clusterNodes = wsClusters[clusterName];
-        html += `<div style="grid-column:1/-1; margin-bottom:8px; display:flex; align-items:baseline; ${html ? 'border-top:1px solid var(--border); padding-top:24px; margin-top:24px;' : ''}">
-            <h3 style="margin:0; font-size:20px;">${clusterName}</h3>
-            <span style="margin-left:10px; font-size:12px; color:var(--text-muted); font-weight:400;">WolfStack cluster — ${clusterNodes.length} nodes</span>
+        html += `<div style="grid-column:1/-1; margin-bottom:4px; display:flex; align-items:baseline; ${html ? 'border-top:1px solid var(--border); padding-top:12px; margin-top:8px;' : ''}">
+            <h3 style="margin:0; font-size:14px; font-weight:600;">${clusterName}</h3>
+            <span style="margin-left:8px; font-size:11px; color:var(--text-muted); font-weight:400;">${clusterNodes.length} nodes</span>
         </div>`;
         html += clusterNodes.map(renderCard).join('');
     });
@@ -644,30 +665,17 @@ function renderDatacenterOverview() {
 
     pveKeys.forEach(clusterName => {
         const clusterNodes = pveClusters[clusterName];
-        html += `<div style="grid-column:1/-1; margin-bottom:8px; display:flex; align-items:baseline; ${html ? 'border-top:1px solid var(--border); padding-top:24px; margin-top:24px;' : ''}">
-            <h3 style="margin:0; font-size:20px;"><span style="display:inline-block;width:20px;height:20px;vertical-align:middle;margin-right:4px;opacity:0.9;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="2" width="18" height="6" rx="1"/><rect x="3" y="10" width="18" height="6" rx="1"/><rect x="3" y="18" width="18" height="4" rx="1"/><circle cx="7" cy="5" r="1" fill="currentColor"/><circle cx="7" cy="13" r="1" fill="currentColor"/><circle cx="7" cy="20" r="1" fill="currentColor"/></svg></span> ${clusterName}</h3>
-            <span style="margin-left:10px; font-size:12px; color:var(--text-muted); font-weight:400;">Proxmox cluster — ${clusterNodes.length} nodes</span>
+        html += `<div style="grid-column:1/-1; margin-bottom:4px; display:flex; align-items:baseline; ${html ? 'border-top:1px solid var(--border); padding-top:12px; margin-top:8px;' : ''}">
+            <h3 style="margin:0; font-size:14px; font-weight:600;"><span style="display:inline-block;width:14px;height:14px;vertical-align:middle;margin-right:4px;opacity:0.9;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="2" width="18" height="6" rx="1"/><rect x="3" y="10" width="18" height="6" rx="1"/><rect x="3" y="18" width="18" height="4" rx="1"/><circle cx="7" cy="5" r="1" fill="currentColor"/><circle cx="7" cy="13" r="1" fill="currentColor"/><circle cx="7" cy="20" r="1" fill="currentColor"/></svg></span> ${clusterName}</h3>
+            <span style="margin-left:8px; font-size:11px; color:var(--text-muted); font-weight:400;">${clusterNodes.length} nodes</span>
         </div>`;
         html += clusterNodes.map(renderCard).join('');
     });
 
-
-
     container.innerHTML = html;
 
-    // Add Patreon support card after server cards
-    container.innerHTML += `<div class="card" style="cursor:pointer; border: 1px dashed var(--border-color); display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:180px;" onclick="window.open('https://www.patreon.com/15362110/join', '_blank')">
-        <div style="font-size:40px; margin-bottom:12px;">❤️</div>
-        <h3 style="margin:0 0 8px 0; font-size:16px; color:var(--text-primary);">Support WolfStack</h3>
-        <p style="margin:0; color:var(--text-muted); font-size:13px; text-align:center; padding:0 20px;">Help us build amazing open source infrastructure tools</p>
-        <div style="margin-top:12px; padding:6px 16px; border-radius:6px; background:linear-gradient(135deg, #ff424d, #f96854); color:white; font-size:13px; font-weight:600;">Join on Patreon</div>
-    </div>`;
-
-    // Draw sparklines on server cards
-    setTimeout(() => drawServerSparklines(nodes), 50);
-
     // Initialize Map
-    setTimeout(() => updateMap(nodes), 100);
+    setTimeout(() => { updateMap(nodes); applyMapCollapse(); }, 100);
 }
 
 // ─── Sparkline mini-charts for datacenter cards ───

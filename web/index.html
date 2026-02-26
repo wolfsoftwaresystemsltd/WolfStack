@@ -114,7 +114,10 @@
     <main class="main-content">
         <!-- Top Bar -->
         <header class="top-bar">
-            <h2 id="page-title">Dashboard</h2>
+            <div style="display:flex; align-items:center;">
+                <button class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle Sidebar">☰</button>
+                <h2 id="page-title">Dashboard</h2>
+            </div>
             <div class="top-bar-actions" style="display:flex; align-items:center; gap:12px;">
                 <span id="hostname-display" style="color: var(--text-secondary); font-size: 13px;"></span>
                 <div style="display:flex; gap:8px; align-items:center; margin-left:8px;">
@@ -167,15 +170,20 @@
             <div id="page-datacenter" class="page-view">
 
                 <!-- World Map -->
-                <div class="card" style="margin-bottom: 24px; overflow: hidden;">
-                    <div class="card-header">
+                <div class="card" id="map-card" style="margin-bottom: 12px; overflow: hidden;">
+                    <div class="card-header" style="cursor:pointer;" onclick="toggleMapCollapse()">
                         <h3>🌍 Global Infrastructure</h3>
-                        <div style="font-size: 12px; color: var(--text-muted);">Live Server Locations</div>
+                        <div style="display:flex; align-items:center; gap:10px;">
+                            <span style="font-size: 12px; color: var(--text-muted);">Live Server Locations</span>
+                            <span id="map-toggle-icon" style="font-size:12px; color:var(--text-muted); transition:transform 0.3s ease;">▼</span>
+                        </div>
                     </div>
-                    <div id="world-map" style="height: 380px; width: 100%; border: none; border-radius: 0;"></div>
+                    <div id="world-map-wrap" style="height:0; overflow:hidden; transition:height 0.3s ease;">
+                        <div id="world-map" style="height: 220px; width: 100%; border: none; border-radius: 0;"></div>
+                    </div>
                 </div>
 
-                <div class="stats-grid" style="margin-bottom: 20px;">
+                <div class="stats-grid" style="margin-bottom: 10px; grid-template-columns: repeat(4, 1fr); gap: 10px;">
                     <div class="stat-card">
                         <div class="stat-header">
                             <span class="stat-label">Total Servers</span>
@@ -208,7 +216,7 @@
                 </div>
 
                 <!-- Server cards grid -->
-                <div id="datacenter-servers" class="grid-2" style="gap: 20px;"></div>
+                <div id="datacenter-servers" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:10px;"></div>
             </div>
 
             <!-- ═══ Dashboard Page (per-server) ═══ -->
