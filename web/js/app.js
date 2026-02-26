@@ -6304,15 +6304,21 @@ function renderDockerContainers(containers) {
         const memPct = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
         const memColor = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
 
-        const cpuBar = cpuPct >= 0 ? `<span>⚡</span><div style="flex:1;max-width:120px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;"><div style="width:${cpuPct}%;height:100%;background:${cpuColor};border-radius:4px;transition:width 0.3s;"></div></div><span style="min-width:40px;">${s.cpu_percent.toFixed(1)}%</span>` : '';
-        const memBar = memPct >= 0 ? `<span>🧠</span><div style="flex:1;max-width:120px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;"><div style="width:${memPct}%;height:100%;background:${memColor};border-radius:4px;transition:width 0.3s;"></div></div><span style="min-width:90px;">${formatBytes(s.memory_usage)} / ${formatBytes(s.memory_limit)}</span>` : '';
-        const diskBar = hasStorage ? `<span>💾</span><div style="flex:1;max-width:120px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;"><div style="width:${pct}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.3s;"></div></div><span style="min-width:90px;">${formatBytes(c.disk_usage)} / ${formatBytes(c.disk_total)} (${pct}%)</span>${fsLabel}${pathLabel}` : '';
-
-        const statsItems = [cpuBar, memBar, diskBar].filter(b => b);
-        const statsSubRow = statsItems.length > 0 ? `<tr class="storage-sub-row" data-stats="${c.name}" style="background:var(--bg-secondary);"><td colspan="7" style="padding:4px 16px 6px 24px;border-top:none;">
-            <div style="display:flex;align-items:center;gap:16px;font-size:11px;flex-wrap:wrap;">
-                ${statsItems.map(b => `<div style="display:flex;align-items:center;gap:6px;">${b}</div>`).join('')}
+        const barRow = (icon, pctVal, color, label) => `<div style="display:flex;align-items:center;gap:8px;font-size:11px;">
+            <span>${icon}</span>
+            <div style="flex:1;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">
+                <div style="width:${pctVal}%;height:100%;background:${color};border-radius:4px;transition:width 0.3s;"></div>
             </div>
+            <span style="white-space:nowrap;">${label}</span>
+        </div>`;
+
+        const statsLines = [];
+        if (cpuPct >= 0) statsLines.push(barRow('⚡', cpuPct, cpuColor, s.cpu_percent.toFixed(1) + '%'));
+        if (memPct >= 0) statsLines.push(barRow('🧠', memPct, memColor, formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memPct + '%)'));
+        if (hasStorage) statsLines.push(barRow('💾', pct, barColor, formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + pct + '%)') + (fsLabel || '') + (pathLabel || ''));
+
+        const statsSubRow = statsLines.length > 0 ? `<tr class="storage-sub-row" data-stats="${c.name}" style="background:var(--bg-secondary);"><td colspan="7" style="padding:4px 16px 6px 24px;border-top:none;">
+            ${statsLines.join('')}
         </td></tr>` : '';
 
         return `<tr data-name="${c.name}">
@@ -6849,15 +6855,21 @@ function renderLxcContainers(containers, stats) {
         const memPct = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
         const memColor = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
 
-        const cpuBar = cpuPct >= 0 ? `<span>⚡</span><div style="flex:1;max-width:120px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;"><div style="width:${cpuPct}%;height:100%;background:${cpuColor};border-radius:4px;transition:width 0.3s;"></div></div><span style="min-width:40px;">${s.cpu_percent.toFixed(1)}%</span>` : '';
-        const memBar = memPct >= 0 ? `<span>🧠</span><div style="flex:1;max-width:120px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;"><div style="width:${memPct}%;height:100%;background:${memColor};border-radius:4px;transition:width 0.3s;"></div></div><span style="min-width:90px;">${formatBytes(s.memory_usage)} / ${formatBytes(s.memory_limit)}</span>` : '';
-        const diskBar = hasStorage ? `<span>💾</span><div style="flex:1;max-width:120px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;"><div style="width:${pct}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.3s;"></div></div><span style="min-width:90px;">${formatBytes(c.disk_usage)} / ${formatBytes(c.disk_total)} (${pct}%)</span>${fsLabel}${pathLabel}` : '';
-
-        const statsItems = [cpuBar, memBar, diskBar].filter(b => b);
-        const statsSubRow = statsItems.length > 0 ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="6" style="padding:4px 16px 6px 24px;border-top:none;">
-            <div style="display:flex;align-items:center;gap:16px;font-size:11px;flex-wrap:wrap;">
-                ${statsItems.map(b => `<div style="display:flex;align-items:center;gap:6px;">${b}</div>`).join('')}
+        const barRow = (icon, pctVal, color, label) => `<div style="display:flex;align-items:center;gap:8px;font-size:11px;">
+            <span>${icon}</span>
+            <div style="flex:1;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">
+                <div style="width:${pctVal}%;height:100%;background:${color};border-radius:4px;transition:width 0.3s;"></div>
             </div>
+            <span style="white-space:nowrap;">${label}</span>
+        </div>`;
+
+        const statsLines = [];
+        if (cpuPct >= 0) statsLines.push(barRow('⚡', cpuPct, cpuColor, s.cpu_percent.toFixed(1) + '%'));
+        if (memPct >= 0) statsLines.push(barRow('🧠', memPct, memColor, formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memPct + '%)'));
+        if (hasStorage) statsLines.push(barRow('💾', pct, barColor, formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + pct + '%)') + (fsLabel || '') + (pathLabel || ''));
+
+        const statsSubRow = statsLines.length > 0 ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="6" style="padding:4px 16px 6px 24px;border-top:none;">
+            ${statsLines.join('')}
         </td></tr>` : '';
 
         return `<tr>
