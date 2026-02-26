@@ -6263,24 +6263,16 @@ async function refreshDockerStats() {
         return;
     }
     try {
-        const resp = await fetch(apiUrl('/api/containers/docker/stats'));
-        const stats = await resp.json();
+        const [containersResp, statsResp] = await Promise.all([
+            fetch(apiUrl('/api/containers/docker')),
+            fetch(apiUrl('/api/containers/docker/stats')),
+        ]);
+        const containers = await containersResp.json();
+        const stats = await statsResp.json();
         dockerStats = {};
         stats.forEach(s => { dockerStats[s.name] = s; });
+        renderDockerContainers(containers);
         renderDockerStats(stats);
-
-        // Update stats in table rows
-        const rows = document.querySelectorAll('#docker-containers-table tr[data-name]');
-        rows.forEach(row => {
-            const name = row.dataset.name;
-            const s = dockerStats[name];
-            if (s) {
-                const cpuCell = row.querySelector('.cpu-cell');
-                const memCell = row.querySelector('.mem-cell');
-                if (cpuCell) { const cp = Math.min(s.cpu_percent, 100); const cc = cp > 80 ? '#ef4444' : cp > 50 ? '#f59e0b' : '#10b981'; cpuCell.innerHTML = `<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:${cp}%;height:100%;background:${cc};border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">${s.cpu_percent.toFixed(1)}%</span></div>`; }
-                if (memCell) { const mp = s.memory_limit ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : 0; const mc = mp > 90 ? '#ef4444' : mp > 70 ? '#f59e0b' : '#10b981'; memCell.innerHTML = `<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:${mp}%;height:100%;background:${mc};border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">${formatBytes(s.memory_usage)}${s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : ''}</span></div>`; }
-            }
-        });
     } catch (e) { /* silent */ }
 }
 
@@ -6307,14 +6299,19 @@ function renderDockerContainers(containers) {
         const barColor = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#10b981';
         const fsLabel = c.fs_type ? `<span style="color:var(--text-muted);font-size:10px;margin-left:8px;">${c.fs_type}</span>` : '';
         const pathLabel = c.storage_path ? `<span style="color:var(--text-muted);font-size:10px;" title="${c.storage_path}">${c.storage_path.length > 30 ? '...' + c.storage_path.slice(-27) : c.storage_path}</span>` : '';
-        const storageSubRow = hasStorage ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="9" style="padding:4px 16px 6px 24px;border-top:none;">
-            <div style="display:flex;align-items:center;gap:8px;font-size:11px;">
-                <span>💾</span>
-                <div style="flex:1;max-width:220px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">
-                    <div style="width:${pct}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.3s;"></div>
-                </div>
-                <span style="min-width:110px;">${formatBytes(c.disk_usage)} / ${formatBytes(c.disk_total)} (${pct}%)</span>
-                ${fsLabel}${pathLabel}
+        const cpuPct = s.cpu_percent !== undefined ? Math.min(s.cpu_percent, 100) : -1;
+        const cpuColor = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#f59e0b' : '#10b981';
+        const memPct = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
+        const memColor = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
+
+        const cpuBar = cpuPct >= 0 ? `<span>⚡</span><div style="flex:1;max-width:120px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;"><div style="width:${cpuPct}%;height:100%;background:${cpuColor};border-radius:4px;transition:width 0.3s;"></div></div><span style="min-width:40px;">${s.cpu_percent.toFixed(1)}%</span>` : '';
+        const memBar = memPct >= 0 ? `<span>🧠</span><div style="flex:1;max-width:120px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;"><div style="width:${memPct}%;height:100%;background:${memColor};border-radius:4px;transition:width 0.3s;"></div></div><span style="min-width:90px;">${formatBytes(s.memory_usage)} / ${formatBytes(s.memory_limit)}</span>` : '';
+        const diskBar = hasStorage ? `<span>💾</span><div style="flex:1;max-width:120px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;"><div style="width:${pct}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.3s;"></div></div><span style="min-width:90px;">${formatBytes(c.disk_usage)} / ${formatBytes(c.disk_total)} (${pct}%)</span>${fsLabel}${pathLabel}` : '';
+
+        const statsItems = [cpuBar, memBar, diskBar].filter(b => b);
+        const statsSubRow = statsItems.length > 0 ? `<tr class="storage-sub-row" data-stats="${c.name}" style="background:var(--bg-secondary);"><td colspan="7" style="padding:4px 16px 6px 24px;border-top:none;">
+            <div style="display:flex;align-items:center;gap:16px;font-size:11px;flex-wrap:wrap;">
+                ${statsItems.map(b => `<div style="display:flex;align-items:center;gap:6px;">${b}</div>`).join('')}
             </div>
         </td></tr>` : '';
 
@@ -6323,8 +6320,6 @@ function renderDockerContainers(containers) {
             <td>${c.image}</td>
             <td><span style="color:${stateColor}">●</span> ${c.status}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
-            <td class="cpu-cell">${s.cpu_percent !== undefined ? (() => { const cp = Math.min(s.cpu_percent, 100); const cc = cp > 80 ? '#ef4444' : cp > 50 ? '#f59e0b' : '#10b981'; return `<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:${cp}%;height:100%;background:${cc};border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">${s.cpu_percent.toFixed(1)}%</span></div>`; })() : '-'}</td>
-            <td class="mem-cell">${s.memory_usage ? (() => { const mp = s.memory_limit ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : 0; const mc = mp > 90 ? '#ef4444' : mp > 70 ? '#f59e0b' : '#10b981'; return `<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:${mp}%;height:100%;background:${mc};border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">${formatBytes(s.memory_usage)}${s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : ''}</span></div>`; })() : '-'}</td>
             <td style="font-size:11px;">${ports}</td>
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleDockerAutostart('${c.id}', this.checked)"></td>
             <td style="white-space:nowrap;">
@@ -6352,7 +6347,7 @@ function renderDockerContainers(containers) {
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>
             </td>
-        </tr>${storageSubRow}`;
+        </tr>${statsSubRow}`;
     }).join('');
 }
 
@@ -6849,14 +6844,19 @@ function renderLxcContainers(containers, stats) {
         const barColor = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#10b981';
         const fsLabel = c.fs_type ? `<span style="color:var(--text-muted);font-size:10px;margin-left:8px;">${c.fs_type}</span>` : '';
         const pathLabel = c.storage_path ? `<span style="color:var(--text-muted);font-size:10px;" title="${c.storage_path}">${c.storage_path.length > 30 ? '...' + c.storage_path.slice(-27) : c.storage_path}</span>` : '';
-        const storageSubRow = hasStorage ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="8" style="padding:4px 16px 6px 24px;border-top:none;">
-            <div style="display:flex;align-items:center;gap:8px;font-size:11px;">
-                <span>💾</span>
-                <div style="flex:1;max-width:220px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">
-                    <div style="width:${pct}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.3s;"></div>
-                </div>
-                <span style="min-width:110px;">${formatBytes(c.disk_usage)} / ${formatBytes(c.disk_total)} (${pct}%)</span>
-                ${fsLabel}${pathLabel}
+        const cpuPct = s.cpu_percent !== undefined ? Math.min(s.cpu_percent, 100) : -1;
+        const cpuColor = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#f59e0b' : '#10b981';
+        const memPct = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
+        const memColor = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
+
+        const cpuBar = cpuPct >= 0 ? `<span>⚡</span><div style="flex:1;max-width:120px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;"><div style="width:${cpuPct}%;height:100%;background:${cpuColor};border-radius:4px;transition:width 0.3s;"></div></div><span style="min-width:40px;">${s.cpu_percent.toFixed(1)}%</span>` : '';
+        const memBar = memPct >= 0 ? `<span>🧠</span><div style="flex:1;max-width:120px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;"><div style="width:${memPct}%;height:100%;background:${memColor};border-radius:4px;transition:width 0.3s;"></div></div><span style="min-width:90px;">${formatBytes(s.memory_usage)} / ${formatBytes(s.memory_limit)}</span>` : '';
+        const diskBar = hasStorage ? `<span>💾</span><div style="flex:1;max-width:120px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;"><div style="width:${pct}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.3s;"></div></div><span style="min-width:90px;">${formatBytes(c.disk_usage)} / ${formatBytes(c.disk_total)} (${pct}%)</span>${fsLabel}${pathLabel}` : '';
+
+        const statsItems = [cpuBar, memBar, diskBar].filter(b => b);
+        const statsSubRow = statsItems.length > 0 ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="6" style="padding:4px 16px 6px 24px;border-top:none;">
+            <div style="display:flex;align-items:center;gap:16px;font-size:11px;flex-wrap:wrap;">
+                ${statsItems.map(b => `<div style="display:flex;align-items:center;gap:6px;">${b}</div>`).join('')}
             </div>
         </td></tr>` : '';
 
@@ -6865,8 +6865,6 @@ function renderLxcContainers(containers, stats) {
             <td style="font-size:12px;color:var(--text-secondary);">${c.version || '<span style="color:var(--text-muted)">—</span>'}</td>
             <td><span style="color:${stateColor}">●</span> ${c.state}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
-            <td>${s.cpu_percent !== undefined ? (() => { const cp = Math.min(s.cpu_percent, 100); const cc = cp > 80 ? '#ef4444' : cp > 50 ? '#f59e0b' : '#10b981'; return `<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:${cp}%;height:100%;background:${cc};border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">${s.cpu_percent.toFixed(1)}%</span></div>`; })() : '-'}</td>
-            <td>${s.memory_usage ? (() => { const mp = s.memory_limit ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : 0; const mc = mp > 90 ? '#ef4444' : mp > 70 ? '#f59e0b' : '#10b981'; return `<div style="display:flex;align-items:center;gap:6px;"><div style="width:60px;height:6px;background:var(--bg-tertiary,#333);border-radius:3px;overflow:hidden;"><div style="width:${mp}%;height:100%;background:${mc};border-radius:3px;transition:width 0.3s;"></div></div><span style="font-size:11px;white-space:nowrap;">${formatBytes(s.memory_usage)}${s.memory_limit ? ' / ' + formatBytes(s.memory_limit) : ''}</span></div>`; })() : '-'}</td>
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleLxcAutostart('${c.name}', this.checked)"></td>
             <td style="white-space:nowrap;">
                 <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'start', this)"` : ''} title="Start">▶️</button>
@@ -6882,7 +6880,7 @@ function renderLxcContainers(containers, stats) {
                 <button class="btn btn-sm" style="${btnStyle}" onclick="migrateLxcContainer('${c.name}')" title="Migrate">🚀</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="exportLxcContainer('${c.name}')" title="Export">📦</button>
             </td>
-        </tr>${storageSubRow}`;
+        </tr>${statsSubRow}`;
     }).join('');
 }
 
