@@ -3414,6 +3414,7 @@ async function createVm() {
 }
 
 async function vmAction(name, action, btn) {
+    activityStart();
     const row = btn?.closest('tr');
     const buttons = row ? row.querySelectorAll('button') : [];
     buttons.forEach(b => { b.disabled = true; b.style.opacity = '0.4'; b.style.pointerEvents = 'none'; });
@@ -3437,6 +3438,8 @@ async function vmAction(name, action, btn) {
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
         buttons.forEach(b => { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
+    } finally {
+        activityStop();
     }
 }
 
@@ -4854,6 +4857,33 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); wolfDialogOk(); }
     if (e.key === 'Escape') { e.preventDefault(); wolfDialogCancel(); }
 });
+
+// ─── Activity Indicator (pulsing red dot, bottom-left) ───
+let _activityCount = 0;
+function activityStart() {
+    _activityCount++;
+    let dot = document.getElementById('activity-dot');
+    if (!dot) {
+        dot = document.createElement('div');
+        dot.id = 'activity-dot';
+        dot.style.cssText = 'position:fixed;bottom:16px;left:16px;width:12px;height:12px;border-radius:50%;background:#ef4444;z-index:99999;animation:activityPulse 1s ease-in-out infinite;pointer-events:none;';
+        document.body.appendChild(dot);
+        if (!document.getElementById('activity-pulse-style')) {
+            var style = document.createElement('style');
+            style.id = 'activity-pulse-style';
+            style.textContent = '@keyframes activityPulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.4;transform:scale(0.7);}}';
+            document.head.appendChild(style);
+        }
+    }
+    dot.style.display = '';
+}
+function activityStop() {
+    _activityCount = Math.max(0, _activityCount - 1);
+    if (_activityCount === 0) {
+        var dot = document.getElementById('activity-dot');
+        if (dot) dot.style.display = 'none';
+    }
+}
 
 // ─── Toast Notifications ───
 function showToast(message, type = 'info') {
@@ -6447,6 +6477,7 @@ async function deleteDockerImage(id, name) {
 async function dockerAction(container, action, btn) {
     if (action === 'remove' && !confirm(`Remove container '${container}'? This cannot be undone.`)) return;
 
+    activityStart();
     const row = btn?.closest('tr');
     const buttons = row ? row.querySelectorAll('button') : [];
     buttons.forEach(b => { b.disabled = true; b.style.opacity = '0.4'; b.style.pointerEvents = 'none'; });
@@ -6469,6 +6500,8 @@ async function dockerAction(container, action, btn) {
     } catch (e) {
         showToast(`Failed: ${e.message}`, 'error');
         buttons.forEach(b => { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
+    } finally {
+        activityStop();
     }
 }
 
@@ -6899,6 +6932,7 @@ function renderLxcContainers(containers, stats) {
 async function lxcAction(container, action, btn) {
     if (action === 'destroy' && !confirm(`Destroy LXC container '${container}'? This cannot be undone.`)) return;
 
+    activityStart();
     const row = btn?.closest('tr');
     const buttons = row ? row.querySelectorAll('button') : [];
     buttons.forEach(b => { b.disabled = true; b.style.opacity = '0.4'; b.style.pointerEvents = 'none'; });
@@ -6921,6 +6955,8 @@ async function lxcAction(container, action, btn) {
     } catch (e) {
         showToast(`Failed: ${e.message}`, 'error');
         buttons.forEach(b => { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
+    } finally {
+        activityStop();
     }
 }
 
@@ -12913,6 +12949,8 @@ function filterGlobalWolfNet() {
 
 async function fleetAction(nodeId, runtime, container, action, btn) {
     if ((action === 'remove' || action === 'destroy') && !confirm((runtime === 'docker' ? 'Remove' : 'Destroy') + " '" + container + "'? This cannot be undone.")) return;
+
+    activityStart();
     var isLocal = !nodeId || nodeId === 'local';
     var urlBase = isLocal ? '/api/' : '/api/nodes/' + encodeURIComponent(nodeId) + '/proxy/';
     var endpoint = runtime === 'vm' ? (urlBase + 'vms/' + encodeURIComponent(container) + '/action') : (urlBase + 'containers/' + runtime + '/' + encodeURIComponent(container) + '/action');
@@ -12935,6 +12973,8 @@ async function fleetAction(nodeId, runtime, container, action, btn) {
     } catch (e) {
         showToast('Failed: ' + e.message, 'error');
         buttons.forEach(function (b) { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
+    } finally {
+        activityStop();
     }
 }
 
