@@ -6304,7 +6304,7 @@ function renderDockerContainers(containers) {
         const memPct = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
         const memColor = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
 
-        const barRow = (icon, pctVal, color, label) => `<div style="display:flex;align-items:center;gap:8px;font-size:11px;">
+        const barSeg = (icon, pctVal, color, label) => `<div style="flex:1;display:flex;align-items:center;gap:6px;min-width:0;">
             <span>${icon}</span>
             <div style="flex:1;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">
                 <div style="width:${pctVal}%;height:100%;background:${color};border-radius:4px;transition:width 0.3s;"></div>
@@ -6312,13 +6312,13 @@ function renderDockerContainers(containers) {
             <span style="white-space:nowrap;">${label}</span>
         </div>`;
 
-        const statsLines = [];
-        if (cpuPct >= 0) statsLines.push(barRow('⚡', cpuPct, cpuColor, s.cpu_percent.toFixed(1) + '%'));
-        if (memPct >= 0) statsLines.push(barRow('🧠', memPct, memColor, formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memPct + '%)'));
-        if (hasStorage) statsLines.push(barRow('💾', pct, barColor, formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + pct + '%)') + (fsLabel || '') + (pathLabel || ''));
+        const statsSegs = [];
+        if (cpuPct >= 0) statsSegs.push(barSeg('⚡', cpuPct, cpuColor, s.cpu_percent.toFixed(1) + '%'));
+        if (memPct >= 0) statsSegs.push(barSeg('🧠', memPct, memColor, formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memPct + '%)'));
+        if (hasStorage) statsSegs.push(barSeg('💾', pct, barColor, formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + pct + '%)'));
 
-        const statsSubRow = statsLines.length > 0 ? `<tr class="storage-sub-row" data-stats="${c.name}" style="background:var(--bg-secondary);"><td colspan="7" style="padding:4px 16px 6px 24px;border-top:none;">
-            ${statsLines.join('')}
+        const statsSubRow = statsSegs.length > 0 ? `<tr class="storage-sub-row" data-stats="${c.name}" style="background:var(--bg-secondary);"><td colspan="7" style="padding:4px 16px 6px 24px;border-top:none;">
+            <div style="display:flex;align-items:center;gap:16px;font-size:11px;">${statsSegs.join('')}</div>
         </td></tr>` : '';
 
         return `<tr data-name="${c.name}">
@@ -6855,7 +6855,7 @@ function renderLxcContainers(containers, stats) {
         const memPct = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
         const memColor = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
 
-        const barRow = (icon, pctVal, color, label) => `<div style="display:flex;align-items:center;gap:8px;font-size:11px;">
+        const barSeg = (icon, pctVal, color, label) => `<div style="flex:1;display:flex;align-items:center;gap:6px;min-width:0;">
             <span>${icon}</span>
             <div style="flex:1;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">
                 <div style="width:${pctVal}%;height:100%;background:${color};border-radius:4px;transition:width 0.3s;"></div>
@@ -6863,13 +6863,13 @@ function renderLxcContainers(containers, stats) {
             <span style="white-space:nowrap;">${label}</span>
         </div>`;
 
-        const statsLines = [];
-        if (cpuPct >= 0) statsLines.push(barRow('⚡', cpuPct, cpuColor, s.cpu_percent.toFixed(1) + '%'));
-        if (memPct >= 0) statsLines.push(barRow('🧠', memPct, memColor, formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memPct + '%)'));
-        if (hasStorage) statsLines.push(barRow('💾', pct, barColor, formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + pct + '%)') + (fsLabel || '') + (pathLabel || ''));
+        const statsSegs = [];
+        if (cpuPct >= 0) statsSegs.push(barSeg('⚡', cpuPct, cpuColor, s.cpu_percent.toFixed(1) + '%'));
+        if (memPct >= 0) statsSegs.push(barSeg('🧠', memPct, memColor, formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memPct + '%)'));
+        if (hasStorage) statsSegs.push(barSeg('💾', pct, barColor, formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + pct + '%)'));
 
-        const statsSubRow = statsLines.length > 0 ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="6" style="padding:4px 16px 6px 24px;border-top:none;">
-            ${statsLines.join('')}
+        const statsSubRow = statsSegs.length > 0 ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="6" style="padding:4px 16px 6px 24px;border-top:none;">
+            <div style="display:flex;align-items:center;gap:16px;font-size:11px;">${statsSegs.join('')}</div>
         </td></tr>` : '';
 
         return `<tr>
