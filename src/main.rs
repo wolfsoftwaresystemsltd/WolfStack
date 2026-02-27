@@ -1014,7 +1014,7 @@ async fn main() -> std::io::Result<()> {
         });
 
         if let Some(ssl_builder) = ssl_builder {
-            let (ref cert_path, ref key_path) = tls_paths.as_ref().unwrap();
+            let (cert_path, key_path) = tls_paths.as_ref().unwrap();
             info!("  🔒 TLS enabled");
             info!("     Cert: {}", cert_path);
             info!("     Key:  {}", key_path);

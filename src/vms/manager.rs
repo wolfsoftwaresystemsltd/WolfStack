@@ -105,7 +105,7 @@ impl VmConfig {
 
 fn generate_mac() -> String {
     let mut rng = rand::thread_rng();
-    format!("52:54:00:{:02x}:{:02x}:{:02x}", rng.gen::<u8>(), rng.gen::<u8>(), rng.gen::<u8>())
+    format!("52:54:00:{:02x}:{:02x}:{:02x}", rng.r#gen::<u8>(), rng.r#gen::<u8>(), rng.r#gen::<u8>())
 }
 
 pub struct VmManager {

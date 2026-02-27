@@ -562,7 +562,7 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
         // If cluster name changed, rename all cluster-scoped data to match.
         // All nodes in the cluster share the same name, so wolfrun services,
         // status pages, monitors, and incidents must all follow the rename.
-        if let (Some(ref old_name), Some(ref new_name)) = (&old_cluster_name, &cluster_name) {
+        if let (Some(old_name), Some(new_name)) = (&old_cluster_name, &cluster_name) {
             if old_name != new_name {
                 // Rename status page monitors, pages, and incidents
                 let mut config = state.statuspage.config.write().unwrap();

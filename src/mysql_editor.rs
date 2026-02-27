@@ -90,7 +90,7 @@ fn detailed_mysql_error(e: &mysql_async::Error) -> String {
             format!("MySQL error {}: {} (SQLSTATE {})",
                 server_err.code, server_err.message, server_err.state)
         }
-        mysql_async::Error::Io(ref io_err) => {
+        mysql_async::Error::Io(io_err) => {
             format!("I/O error: {}", io_err)
         }
         other => {

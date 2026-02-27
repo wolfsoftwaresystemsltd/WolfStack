@@ -41,7 +41,7 @@ pub fn validate_cluster_secret(provided: &str, expected: &str) -> bool {
 
 // Link against libcrypt for password verification
 #[link(name = "crypt")]
-extern "C" {
+unsafe extern "C" {
     fn crypt(key: *const libc::c_char, salt: *const libc::c_char) -> *mut libc::c_char;
 }
 
