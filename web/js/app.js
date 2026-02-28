@@ -16,6 +16,7 @@ let netHistory = []; // { timestamp, rx_bytes, tx_bytes } — cumulative
 let diskHistory = {}; // mount_point -> array of {timestamp, usage_percent}
 const MAX_HISTORY = 300; // 10 minutes at 2s intervals
 let displayRange = 150; // default 5 minutes (150 samples at 2s)
+let currentConfiguratorTarget = null; // null = host, {runtime:'docker'|'lxc', target:'name'} for containers
 
 // ─── Sidebar Toggle ───
 function toggleSidebar() {
@@ -258,6 +259,13 @@ function apiUrl(path) {
     // Proxy through local server — strip leading /api/ from path
     const cleanPath = path.replace(/^\/api\//, '');
     return `/api/nodes/${currentNodeId}/proxy/${cleanPath}`;
+}
+
+function configuratorApiUrl(path) {
+    const base = apiUrl(path);
+    if (!currentConfiguratorTarget) return base;
+    const sep = base.includes('?') ? '&' : '?';
+    return `${base}${sep}runtime=${encodeURIComponent(currentConfiguratorTarget.runtime)}&target=${encodeURIComponent(currentConfiguratorTarget.target)}`;
 }
 
 // ─── Page Navigation ───
@@ -5162,6 +5170,7 @@ function showToast(message, type = 'info') {
 // ─── Component Detail ───
 async function openComponentDetail(name) {
     currentComponent = name;
+    currentConfiguratorTarget = null; // reset container target when switching components
     // Show the component-detail page directly
     document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
     const el = document.getElementById('page-component-detail');
@@ -5304,7 +5313,10 @@ function hasConfigurator(componentName) {
     return CONFIGURATOR_COMPONENTS.includes((componentName || '').toLowerCase());
 }
 
-function loadConfigurator(name) {
+async function loadConfigurator(name) {
+    // Build target selector dropdown in configurator header
+    await buildConfiguratorTargetSelector(name);
+
     const lower = (name || '').toLowerCase();
     switch (lower) {
         case 'wolfproxy': loadNginxConfigurator(); break;
@@ -5312,6 +5324,63 @@ function loadConfigurator(name) {
         case 'wolfdisk':  loadTomlConfigurator('wolfdisk', 'WolfDisk'); break;
         case 'wolfscale': loadTomlConfigurator('wolfscale', 'WolfScale'); break;
     }
+}
+
+async function buildConfiguratorTargetSelector(componentName) {
+    let containers = [];
+    try {
+        const resp = await fetch(apiUrl('/api/containers/running'));
+        if (resp.ok) containers = await resp.json();
+    } catch (e) { /* host-only mode */ }
+
+    const titleEl = document.getElementById('configurator-title');
+
+    // Add target badge next to title if targeting a container
+    let targetBadge = '';
+    if (currentConfiguratorTarget) {
+        const icon = currentConfiguratorTarget.runtime === 'docker' ? '🐳' : '📦';
+        targetBadge = ` <span style="font-size:12px; background:var(--accent); color:#fff; padding:2px 8px; border-radius:10px; font-weight:500; vertical-align:middle;">${icon} ${escapeHtml(currentConfiguratorTarget.target)}</span>`;
+    }
+
+    // Build dropdown options
+    let options = `<option value="host" ${!currentConfiguratorTarget ? 'selected' : ''}>This Host</option>`;
+    for (const c of containers) {
+        const icon = c.runtime === 'docker' ? '🐳' : '📦';
+        const val = `${c.runtime}:${c.name}`;
+        const selected = currentConfiguratorTarget &&
+            currentConfiguratorTarget.runtime === c.runtime &&
+            currentConfiguratorTarget.target === c.name ? 'selected' : '';
+        options += `<option value="${escapeHtml(val)}" ${selected}>${icon} ${escapeHtml(c.name)}</option>`;
+    }
+
+    // Only show selector if there are containers available
+    if (containers.length > 0) {
+        const selector = document.createElement('div');
+        selector.id = 'configurator-target-selector';
+        selector.style.cssText = 'display:flex; align-items:center; gap:6px; margin-left:12px;';
+        selector.innerHTML = `
+            <label style="font-size:12px; color:var(--text-muted); white-space:nowrap;">Target:</label>
+            <select class="form-control" style="font-size:12px; padding:2px 8px; width:auto; min-width:120px;"
+                onchange="onConfiguratorTargetChange(this.value, '${escapeHtml(componentName)}')">
+                ${options}
+            </select>`;
+
+        // Insert selector after title, before header-actions
+        const header = titleEl.parentElement;
+        const existing = document.getElementById('configurator-target-selector');
+        if (existing) existing.remove();
+        titleEl.after(selector);
+    }
+}
+
+function onConfiguratorTargetChange(value, componentName) {
+    if (value === 'host') {
+        currentConfiguratorTarget = null;
+    } else {
+        const [runtime, ...nameParts] = value.split(':');
+        currentConfiguratorTarget = { runtime, target: nameParts.join(':') };
+    }
+    loadConfigurator(componentName);
 }
 
 // ── Nginx Configurator (WolfProxy) ──
@@ -5328,7 +5397,7 @@ async function loadNginxConfigurator() {
     body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading sites...</div>';
 
     try {
-        const resp = await fetch(apiUrl('/api/configurator/nginx/sites'));
+        const resp = await fetch(configuratorApiUrl('/api/configurator/nginx/sites'));
         if (handleAuthError(resp)) return;
         const data = await resp.json();
         if (data.error) { body.innerHTML = `<div style="color:var(--danger);">${escapeHtml(data.error)}</div>`; return; }
@@ -5379,7 +5448,7 @@ function renderNginxSitesList(sites) {
 async function nginxToggleSite(name, enable) {
     const action = enable ? 'enable' : 'disable';
     try {
-        const resp = await fetch(apiUrl(`/api/configurator/nginx/sites/${encodeURIComponent(name)}/${action}`), { method: 'POST' });
+        const resp = await fetch(configuratorApiUrl(`/api/configurator/nginx/sites/${encodeURIComponent(name)}/${action}`), { method: 'POST' });
         const data = await resp.json();
         if (resp.ok) {
             showToast(data.message || `Site ${action}d`, 'success');
@@ -5397,7 +5466,7 @@ async function nginxEditSite(name) {
     body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading...</div>';
 
     try {
-        const resp = await fetch(apiUrl(`/api/configurator/nginx/sites/${encodeURIComponent(name)}`));
+        const resp = await fetch(configuratorApiUrl(`/api/configurator/nginx/sites/${encodeURIComponent(name)}`));
         const data = await resp.json();
         if (data.error) { showToast(data.error, 'error'); loadNginxConfigurator(); return; }
 
@@ -5420,7 +5489,7 @@ async function nginxEditSite(name) {
 async function nginxSaveSite(name) {
     const content = document.getElementById('nginx-site-editor').value;
     try {
-        const resp = await fetch(apiUrl(`/api/configurator/nginx/sites/${encodeURIComponent(name)}`), {
+        const resp = await fetch(configuratorApiUrl(`/api/configurator/nginx/sites/${encodeURIComponent(name)}`), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ content })
@@ -5440,7 +5509,7 @@ async function nginxDeleteSite(name) {
     const ok = await wolfConfirm(`Delete nginx site "${name}"? This cannot be undone.`, 'Delete Site');
     if (!ok) return;
     try {
-        const resp = await fetch(apiUrl(`/api/configurator/nginx/sites/${encodeURIComponent(name)}`), { method: 'DELETE' });
+        const resp = await fetch(configuratorApiUrl(`/api/configurator/nginx/sites/${encodeURIComponent(name)}`), { method: 'DELETE' });
         const data = await resp.json();
         if (resp.ok) {
             showToast(data.message || 'Site deleted', 'success');
@@ -5534,7 +5603,7 @@ async function nginxGenerateAndPreview() {
     if (!params.server_name) { showToast('Server name is required', 'error'); return; }
 
     try {
-        const resp = await fetch(apiUrl('/api/configurator/nginx/generate'), {
+        const resp = await fetch(configuratorApiUrl('/api/configurator/nginx/generate'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(params)
@@ -5559,7 +5628,7 @@ async function nginxSaveNewSite() {
     if (!serverName || !content) { showToast('No config to save', 'error'); return; }
 
     try {
-        const resp = await fetch(apiUrl('/api/configurator/nginx/sites'), {
+        const resp = await fetch(configuratorApiUrl('/api/configurator/nginx/sites'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: filename, content })
@@ -5579,7 +5648,7 @@ async function nginxSaveNewSite() {
 async function nginxTestConfig() {
     showToast('Testing nginx configuration...', 'info');
     try {
-        const resp = await fetch(apiUrl('/api/configurator/nginx/test'), { method: 'POST' });
+        const resp = await fetch(configuratorApiUrl('/api/configurator/nginx/test'), { method: 'POST' });
         const data = await resp.json();
         const output = escapeHtml(data.output || '');
         if (data.success) {
@@ -5596,7 +5665,7 @@ async function nginxReloadService() {
     const ok = await wolfConfirm('Reload nginx? This will test the configuration first.', 'Reload Nginx');
     if (!ok) return;
     try {
-        const resp = await fetch(apiUrl('/api/configurator/nginx/reload'), { method: 'POST' });
+        const resp = await fetch(configuratorApiUrl('/api/configurator/nginx/reload'), { method: 'POST' });
         const data = await resp.json();
         if (resp.ok) {
             showToast(data.message || 'Nginx reloaded', 'success');
@@ -5623,7 +5692,7 @@ async function loadApacheConfigurator() {
     body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading virtual hosts...</div>';
 
     try {
-        const resp = await fetch(apiUrl('/api/configurator/apache/sites'));
+        const resp = await fetch(configuratorApiUrl('/api/configurator/apache/sites'));
         if (handleAuthError(resp)) return;
         const data = await resp.json();
         if (data.error) { body.innerHTML = `<div style="color:var(--danger);">${escapeHtml(data.error)}</div>`; return; }
@@ -5674,7 +5743,7 @@ function renderApacheSitesList(sites) {
 async function apacheToggleSite(name, enable) {
     const action = enable ? 'enable' : 'disable';
     try {
-        const resp = await fetch(apiUrl(`/api/configurator/apache/sites/${encodeURIComponent(name)}/${action}`), { method: 'POST' });
+        const resp = await fetch(configuratorApiUrl(`/api/configurator/apache/sites/${encodeURIComponent(name)}/${action}`), { method: 'POST' });
         const data = await resp.json();
         if (resp.ok) {
             showToast(data.message || `Site ${action}d`, 'success');
@@ -5692,7 +5761,7 @@ async function apacheEditSite(name) {
     body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading...</div>';
 
     try {
-        const resp = await fetch(apiUrl(`/api/configurator/apache/sites/${encodeURIComponent(name)}`));
+        const resp = await fetch(configuratorApiUrl(`/api/configurator/apache/sites/${encodeURIComponent(name)}`));
         const data = await resp.json();
         if (data.error) { showToast(data.error, 'error'); loadApacheConfigurator(); return; }
 
@@ -5715,7 +5784,7 @@ async function apacheEditSite(name) {
 async function apacheSaveSite(name) {
     const content = document.getElementById('apache-site-editor').value;
     try {
-        const resp = await fetch(apiUrl(`/api/configurator/apache/sites/${encodeURIComponent(name)}`), {
+        const resp = await fetch(configuratorApiUrl(`/api/configurator/apache/sites/${encodeURIComponent(name)}`), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ content })
@@ -5735,7 +5804,7 @@ async function apacheDeleteSite(name) {
     const ok = await wolfConfirm(`Delete Apache virtual host "${name}"? This cannot be undone.`, 'Delete VHost');
     if (!ok) return;
     try {
-        const resp = await fetch(apiUrl(`/api/configurator/apache/sites/${encodeURIComponent(name)}`), { method: 'DELETE' });
+        const resp = await fetch(configuratorApiUrl(`/api/configurator/apache/sites/${encodeURIComponent(name)}`), { method: 'DELETE' });
         const data = await resp.json();
         if (resp.ok) {
             showToast(data.message || 'VHost deleted', 'success');
@@ -5835,7 +5904,7 @@ async function apacheGenerateAndPreview() {
     if (!params.server_name) { showToast('Server name is required', 'error'); return; }
 
     try {
-        const resp = await fetch(apiUrl('/api/configurator/apache/generate'), {
+        const resp = await fetch(configuratorApiUrl('/api/configurator/apache/generate'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(params)
@@ -5860,7 +5929,7 @@ async function apacheSaveNewVhost() {
     if (!serverName || !content) { showToast('No config to save', 'error'); return; }
 
     try {
-        const resp = await fetch(apiUrl('/api/configurator/apache/sites'), {
+        const resp = await fetch(configuratorApiUrl('/api/configurator/apache/sites'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: filename, content })
@@ -5880,7 +5949,7 @@ async function apacheSaveNewVhost() {
 async function apacheTestConfig() {
     showToast('Testing Apache configuration...', 'info');
     try {
-        const resp = await fetch(apiUrl('/api/configurator/apache/test'), { method: 'POST' });
+        const resp = await fetch(configuratorApiUrl('/api/configurator/apache/test'), { method: 'POST' });
         const data = await resp.json();
         const output = escapeHtml(data.output || '');
         if (data.success) {
@@ -5897,7 +5966,7 @@ async function apacheReloadService() {
     const ok = await wolfConfirm('Reload Apache? This will test the configuration first.', 'Reload Apache');
     if (!ok) return;
     try {
-        const resp = await fetch(apiUrl('/api/configurator/apache/reload'), { method: 'POST' });
+        const resp = await fetch(configuratorApiUrl('/api/configurator/apache/reload'), { method: 'POST' });
         const data = await resp.json();
         if (resp.ok) {
             showToast(data.message || 'Apache reloaded', 'success');
@@ -5919,7 +5988,7 @@ async function apacheShowModules() {
     `;
 
     try {
-        const resp = await fetch(apiUrl('/api/configurator/apache/modules'));
+        const resp = await fetch(configuratorApiUrl('/api/configurator/apache/modules'));
         if (handleAuthError(resp)) return;
         const data = await resp.json();
         if (data.error) { body.innerHTML = `<div style="color:var(--danger);">${escapeHtml(data.error)}</div>`; return; }
@@ -5958,7 +6027,7 @@ async function apacheShowModules() {
 async function apacheToggleModule(name, enable) {
     const action = enable ? 'enable' : 'disable';
     try {
-        const resp = await fetch(apiUrl(`/api/configurator/apache/modules/${encodeURIComponent(name)}/${action}`), { method: 'POST' });
+        const resp = await fetch(configuratorApiUrl(`/api/configurator/apache/modules/${encodeURIComponent(name)}/${action}`), { method: 'POST' });
         const data = await resp.json();
         if (resp.ok) {
             showToast(data.message || `Module ${action}d`, 'success');
@@ -6055,7 +6124,7 @@ async function loadTomlConfigurator(component, displayName) {
     body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading configuration...</div>';
 
     try {
-        const resp = await fetch(apiUrl(`/api/configurator/toml/${component}/structured`));
+        const resp = await fetch(configuratorApiUrl(`/api/configurator/toml/${component}/structured`));
         if (handleAuthError(resp)) return;
         const data = await resp.json();
         if (data.error) {
@@ -6187,7 +6256,7 @@ async function tomlSaveStructured(component) {
 
     showToast('Saving configuration...', 'info');
     try {
-        const resp = await fetch(apiUrl(`/api/configurator/toml/${component}/structured`), {
+        const resp = await fetch(configuratorApiUrl(`/api/configurator/toml/${component}/structured`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(config),

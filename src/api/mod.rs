@@ -8542,10 +8542,37 @@ pub async fn statuspage_public_page(state: web::Data<AppState>, path: web::Path<
 
 // ─── Configurator API ───
 
+/// Query parameters for targeting a container or the host
+#[derive(Debug, Deserialize)]
+pub struct ConfiguratorTarget {
+    pub runtime: Option<String>,
+    pub target: Option<String>,
+}
+
+/// Parse query params into an ExecTarget
+fn parse_exec_target(query: &web::Query<ConfiguratorTarget>) -> Result<crate::configurator::ExecTarget, HttpResponse> {
+    use crate::configurator::ExecTarget;
+    match (query.runtime.as_deref(), query.target.as_deref()) {
+        (None, None) | (Some("host"), _) => Ok(ExecTarget::Host),
+        (Some("docker"), Some(name)) if !name.is_empty() => Ok(ExecTarget::Docker(name.to_string())),
+        (Some("lxc"), Some(name)) if !name.is_empty() => Ok(ExecTarget::Lxc(name.to_string())),
+        (Some(rt), None) | (Some(rt), Some("")) => Err(HttpResponse::BadRequest().json(
+            serde_json::json!({"error": format!("runtime '{}' requires a 'target' parameter", rt)})
+        )),
+        (Some(rt), _) => Err(HttpResponse::BadRequest().json(
+            serde_json::json!({"error": format!("Unsupported runtime: '{}'", rt)})
+        )),
+        (None, Some(_)) => Err(HttpResponse::BadRequest().json(
+            serde_json::json!({"error": "'target' requires a 'runtime' parameter"})
+        )),
+    }
+}
+
 /// GET /api/configurator/nginx/sites — list all nginx sites
-pub async fn nginx_list_sites(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+pub async fn nginx_list_sites(req: HttpRequest, state: web::Data<AppState>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    match web::block(|| crate::configurator::nginx::list_sites()).await {
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
+    match web::block(move || crate::configurator::nginx::list_sites(&target)).await {
         Ok(Ok(sites)) => HttpResponse::Ok().json(serde_json::json!({ "sites": sites })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8553,10 +8580,11 @@ pub async fn nginx_list_sites(req: HttpRequest, state: web::Data<AppState>) -> H
 }
 
 /// GET /api/configurator/nginx/sites/{name} — read a site config
-pub async fn nginx_read_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn nginx_read_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let name = path.into_inner();
-    match web::block(move || crate::configurator::nginx::read_site(&name)).await {
+    match web::block(move || crate::configurator::nginx::read_site(&target, &name)).await {
         Ok(Ok(content)) => HttpResponse::Ok().json(serde_json::json!({ "content": content })),
         Ok(Err(e)) => HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8570,14 +8598,15 @@ pub struct SiteConfigRequest {
 }
 
 /// POST /api/configurator/nginx/sites — create a new site
-pub async fn nginx_create_site(req: HttpRequest, state: web::Data<AppState>, body: web::Json<SiteConfigRequest>) -> HttpResponse {
+pub async fn nginx_create_site(req: HttpRequest, state: web::Data<AppState>, body: web::Json<SiteConfigRequest>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let name = match &body.name {
         Some(n) => n.clone(),
         None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Name is required" })),
     };
     let content = body.content.clone();
-    match web::block(move || crate::configurator::nginx::save_site(&name, &content)).await {
+    match web::block(move || crate::configurator::nginx::save_site(&target, &name, &content)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8585,11 +8614,12 @@ pub async fn nginx_create_site(req: HttpRequest, state: web::Data<AppState>, bod
 }
 
 /// PUT /api/configurator/nginx/sites/{name} — update a site config
-pub async fn nginx_update_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<SiteConfigRequest>) -> HttpResponse {
+pub async fn nginx_update_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<SiteConfigRequest>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let name = path.into_inner();
     let content = body.content.clone();
-    match web::block(move || crate::configurator::nginx::save_site(&name, &content)).await {
+    match web::block(move || crate::configurator::nginx::save_site(&target, &name, &content)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8597,10 +8627,11 @@ pub async fn nginx_update_site(req: HttpRequest, state: web::Data<AppState>, pat
 }
 
 /// DELETE /api/configurator/nginx/sites/{name} — delete a site
-pub async fn nginx_delete_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn nginx_delete_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let name = path.into_inner();
-    match web::block(move || crate::configurator::nginx::delete_site(&name)).await {
+    match web::block(move || crate::configurator::nginx::delete_site(&target, &name)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8608,10 +8639,11 @@ pub async fn nginx_delete_site(req: HttpRequest, state: web::Data<AppState>, pat
 }
 
 /// POST /api/configurator/nginx/sites/{name}/enable
-pub async fn nginx_enable_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn nginx_enable_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let name = path.into_inner();
-    match web::block(move || crate::configurator::nginx::enable_site(&name)).await {
+    match web::block(move || crate::configurator::nginx::enable_site(&target, &name)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8619,10 +8651,11 @@ pub async fn nginx_enable_site(req: HttpRequest, state: web::Data<AppState>, pat
 }
 
 /// POST /api/configurator/nginx/sites/{name}/disable
-pub async fn nginx_disable_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn nginx_disable_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let name = path.into_inner();
-    match web::block(move || crate::configurator::nginx::disable_site(&name)).await {
+    match web::block(move || crate::configurator::nginx::disable_site(&target, &name)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8630,18 +8663,20 @@ pub async fn nginx_disable_site(req: HttpRequest, state: web::Data<AppState>, pa
 }
 
 /// POST /api/configurator/nginx/test — run nginx -t
-pub async fn nginx_test_config(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+pub async fn nginx_test_config(req: HttpRequest, state: web::Data<AppState>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    match web::block(|| crate::configurator::nginx::test_config()).await {
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
+    match web::block(move || crate::configurator::nginx::test_config(&target)).await {
         Ok(result) => HttpResponse::Ok().json(result),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
     }
 }
 
 /// POST /api/configurator/nginx/reload — reload nginx
-pub async fn nginx_reload(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+pub async fn nginx_reload(req: HttpRequest, state: web::Data<AppState>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    match web::block(|| crate::configurator::nginx::reload()).await {
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
+    match web::block(move || crate::configurator::nginx::reload(&target)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8649,9 +8684,10 @@ pub async fn nginx_reload(req: HttpRequest, state: web::Data<AppState>) -> HttpR
 }
 
 /// GET /api/configurator/nginx/error-log — recent error log
-pub async fn nginx_error_log(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+pub async fn nginx_error_log(req: HttpRequest, state: web::Data<AppState>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    match web::block(|| crate::configurator::nginx::error_log(100)).await {
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
+    match web::block(move || crate::configurator::nginx::error_log(&target, 100)).await {
         Ok(lines) => HttpResponse::Ok().json(serde_json::json!({ "lines": lines })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
     }
@@ -8667,9 +8703,10 @@ pub async fn nginx_generate_config(req: HttpRequest, state: web::Data<AppState>,
 // ─── Apache Configurator API ───
 
 /// GET /api/configurator/apache/sites — list all Apache vhosts
-pub async fn apache_list_sites(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+pub async fn apache_list_sites(req: HttpRequest, state: web::Data<AppState>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    match web::block(|| crate::configurator::apache::list_sites()).await {
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
+    match web::block(move || crate::configurator::apache::list_sites(&target)).await {
         Ok(Ok(sites)) => HttpResponse::Ok().json(serde_json::json!({ "sites": sites })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8677,10 +8714,11 @@ pub async fn apache_list_sites(req: HttpRequest, state: web::Data<AppState>) -> 
 }
 
 /// GET /api/configurator/apache/sites/{name} — read a vhost config
-pub async fn apache_read_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn apache_read_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let name = path.into_inner();
-    match web::block(move || crate::configurator::apache::read_site(&name)).await {
+    match web::block(move || crate::configurator::apache::read_site(&target, &name)).await {
         Ok(Ok(content)) => HttpResponse::Ok().json(serde_json::json!({ "content": content })),
         Ok(Err(e)) => HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8688,14 +8726,15 @@ pub async fn apache_read_site(req: HttpRequest, state: web::Data<AppState>, path
 }
 
 /// POST /api/configurator/apache/sites — create a new vhost
-pub async fn apache_create_site(req: HttpRequest, state: web::Data<AppState>, body: web::Json<SiteConfigRequest>) -> HttpResponse {
+pub async fn apache_create_site(req: HttpRequest, state: web::Data<AppState>, body: web::Json<SiteConfigRequest>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let name = match &body.name {
         Some(n) => n.clone(),
         None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Name is required" })),
     };
     let content = body.content.clone();
-    match web::block(move || crate::configurator::apache::save_site(&name, &content)).await {
+    match web::block(move || crate::configurator::apache::save_site(&target, &name, &content)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8703,11 +8742,12 @@ pub async fn apache_create_site(req: HttpRequest, state: web::Data<AppState>, bo
 }
 
 /// PUT /api/configurator/apache/sites/{name} — update a vhost config
-pub async fn apache_update_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<SiteConfigRequest>) -> HttpResponse {
+pub async fn apache_update_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<SiteConfigRequest>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let name = path.into_inner();
     let content = body.content.clone();
-    match web::block(move || crate::configurator::apache::save_site(&name, &content)).await {
+    match web::block(move || crate::configurator::apache::save_site(&target, &name, &content)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8715,10 +8755,11 @@ pub async fn apache_update_site(req: HttpRequest, state: web::Data<AppState>, pa
 }
 
 /// DELETE /api/configurator/apache/sites/{name} — delete a vhost
-pub async fn apache_delete_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn apache_delete_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let name = path.into_inner();
-    match web::block(move || crate::configurator::apache::delete_site(&name)).await {
+    match web::block(move || crate::configurator::apache::delete_site(&target, &name)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8726,10 +8767,11 @@ pub async fn apache_delete_site(req: HttpRequest, state: web::Data<AppState>, pa
 }
 
 /// POST /api/configurator/apache/sites/{name}/enable
-pub async fn apache_enable_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn apache_enable_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let name = path.into_inner();
-    match web::block(move || crate::configurator::apache::enable_site(&name)).await {
+    match web::block(move || crate::configurator::apache::enable_site(&target, &name)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8737,10 +8779,11 @@ pub async fn apache_enable_site(req: HttpRequest, state: web::Data<AppState>, pa
 }
 
 /// POST /api/configurator/apache/sites/{name}/disable
-pub async fn apache_disable_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn apache_disable_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let name = path.into_inner();
-    match web::block(move || crate::configurator::apache::disable_site(&name)).await {
+    match web::block(move || crate::configurator::apache::disable_site(&target, &name)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8748,9 +8791,10 @@ pub async fn apache_disable_site(req: HttpRequest, state: web::Data<AppState>, p
 }
 
 /// GET /api/configurator/apache/modules — list Apache modules
-pub async fn apache_list_modules(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+pub async fn apache_list_modules(req: HttpRequest, state: web::Data<AppState>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    match web::block(|| crate::configurator::apache::list_modules()).await {
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
+    match web::block(move || crate::configurator::apache::list_modules(&target)).await {
         Ok(Ok(mods)) => HttpResponse::Ok().json(serde_json::json!({ "modules": mods })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8758,10 +8802,11 @@ pub async fn apache_list_modules(req: HttpRequest, state: web::Data<AppState>) -
 }
 
 /// POST /api/configurator/apache/modules/{name}/enable
-pub async fn apache_enable_module(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn apache_enable_module(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let name = path.into_inner();
-    match web::block(move || crate::configurator::apache::enable_module(&name)).await {
+    match web::block(move || crate::configurator::apache::enable_module(&target, &name)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8769,10 +8814,11 @@ pub async fn apache_enable_module(req: HttpRequest, state: web::Data<AppState>, 
 }
 
 /// POST /api/configurator/apache/modules/{name}/disable
-pub async fn apache_disable_module(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn apache_disable_module(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let name = path.into_inner();
-    match web::block(move || crate::configurator::apache::disable_module(&name)).await {
+    match web::block(move || crate::configurator::apache::disable_module(&target, &name)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8780,18 +8826,20 @@ pub async fn apache_disable_module(req: HttpRequest, state: web::Data<AppState>,
 }
 
 /// POST /api/configurator/apache/test — run apachectl configtest
-pub async fn apache_test_config(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+pub async fn apache_test_config(req: HttpRequest, state: web::Data<AppState>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    match web::block(|| crate::configurator::apache::test_config()).await {
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
+    match web::block(move || crate::configurator::apache::test_config(&target)).await {
         Ok(result) => HttpResponse::Ok().json(result),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
     }
 }
 
 /// POST /api/configurator/apache/reload — reload Apache
-pub async fn apache_reload(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+pub async fn apache_reload(req: HttpRequest, state: web::Data<AppState>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    match web::block(|| crate::configurator::apache::reload()).await {
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
+    match web::block(move || crate::configurator::apache::reload(&target)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8799,9 +8847,10 @@ pub async fn apache_reload(req: HttpRequest, state: web::Data<AppState>) -> Http
 }
 
 /// GET /api/configurator/apache/error-log — recent error log
-pub async fn apache_error_log(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+pub async fn apache_error_log(req: HttpRequest, state: web::Data<AppState>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    match web::block(|| crate::configurator::apache::error_log(100)).await {
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
+    match web::block(move || crate::configurator::apache::error_log(&target, 100)).await {
         Ok(lines) => HttpResponse::Ok().json(serde_json::json!({ "lines": lines })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
     }
@@ -8817,10 +8866,11 @@ pub async fn apache_generate_config(req: HttpRequest, state: web::Data<AppState>
 // ─── TOML Configurator API ───
 
 /// GET /api/configurator/toml/{component}/structured — parsed config as JSON
-pub async fn toml_get_structured(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn toml_get_structured(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let component = path.into_inner();
-    match web::block(move || crate::configurator::toml_editor::parse_config(&component)).await {
+    match web::block(move || crate::configurator::toml_editor::parse_config(&target, &component)).await {
         Ok(Ok(data)) => HttpResponse::Ok().json(data),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -8828,11 +8878,12 @@ pub async fn toml_get_structured(req: HttpRequest, state: web::Data<AppState>, p
 }
 
 /// POST /api/configurator/toml/{component}/structured — save JSON as TOML
-pub async fn toml_save_structured(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<serde_json::Value>) -> HttpResponse {
+pub async fn toml_save_structured(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<serde_json::Value>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
     let component = path.into_inner();
     let data = body.into_inner();
-    match web::block(move || crate::configurator::toml_editor::save_config(&component, &data)).await {
+    match web::block(move || crate::configurator::toml_editor::save_config(&target, &component, &data)).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),

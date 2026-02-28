@@ -4,11 +4,11 @@
 
 //! Structured TOML editor for WolfDisk and WolfScale configuration
 
-use std::process::Command;
 use crate::installer::Component;
+use super::ExecTarget;
 
 /// Parse a TOML config file into a JSON value for form rendering
-pub fn parse_config(component: &str) -> Result<serde_json::Value, String> {
+pub fn parse_config(target: &ExecTarget, component: &str) -> Result<serde_json::Value, String> {
     let comp = match component.to_lowercase().as_str() {
         "wolfdisk" => Component::WolfDisk,
         "wolfscale" => Component::WolfScale,
@@ -18,8 +18,7 @@ pub fn parse_config(component: &str) -> Result<serde_json::Value, String> {
     let config_path = comp.config_path()
         .ok_or_else(|| format!("No config path for {}", component))?;
 
-    let content = std::fs::read_to_string(config_path)
-        .map_err(|e| format!("Failed to read {}: {}", config_path, e))?;
+    let content = target.read_file(config_path)?;
 
     let toml_value: toml::Value = content.parse()
         .map_err(|e| format!("Failed to parse TOML: {}", e))?;
@@ -30,7 +29,7 @@ pub fn parse_config(component: &str) -> Result<serde_json::Value, String> {
 }
 
 /// Save a structured JSON config back as TOML
-pub fn save_config(component: &str, data: &serde_json::Value) -> Result<String, String> {
+pub fn save_config(target: &ExecTarget, component: &str, data: &serde_json::Value) -> Result<String, String> {
     let comp = match component.to_lowercase().as_str() {
         "wolfdisk" => Component::WolfDisk,
         "wolfscale" => Component::WolfScale,
@@ -47,30 +46,10 @@ pub fn save_config(component: &str, data: &serde_json::Value) -> Result<String, 
     let toml_string = toml::to_string_pretty(&toml_value)
         .map_err(|e| format!("Failed to serialize TOML: {}", e))?;
 
-    // Write via sudo tee
-    let mut child = Command::new("sudo")
-        .args(["tee", config_path])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to write config: {}", e))?;
+    target.write_file(config_path, &toml_string)?;
 
-    if let Some(ref mut stdin) = child.stdin {
-        use std::io::Write;
-        stdin.write_all(toml_string.as_bytes())
-            .map_err(|e| format!("Failed to write config content: {}", e))?;
-    }
-
-    let output = child.wait_with_output()
-        .map_err(|e| format!("Failed to wait for write: {}", e))?;
-
-    if output.status.success() {
-        Ok(format!("Configuration saved to {}. Restart {} to apply changes.",
-            config_path, comp.service_name()))
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
+    Ok(format!("Configuration saved to {}. Restart {} to apply changes.",
+        config_path, comp.service_name()))
 }
 
 /// Validate a TOML string (parse it and check for errors)
