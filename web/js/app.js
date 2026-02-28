@@ -5217,6 +5217,34 @@ async function openComponentDetail(name) {
 }
 
 async function refreshComponentDetail(name) {
+    const isContainer = !!currentConfiguratorTarget;
+
+    // Host-only sections (status, actions, raw config, logs)
+    const statsGrid = document.getElementById('detail-stats-grid');
+    const actionsBar = document.getElementById('detail-actions-bar');
+    const configSection = document.getElementById('detail-config-section');
+    const logsSection = document.getElementById('detail-logs-section');
+
+    if (isContainer) {
+        // Hide host-only sections when targeting a container
+        if (statsGrid) statsGrid.style.display = 'none';
+        if (actionsBar) actionsBar.style.display = 'none';
+        if (configSection) configSection.style.display = 'none';
+        if (logsSection) logsSection.style.display = 'none';
+
+        // Just load the configurator — reads from the container via ExecTarget
+        const cfgSection = document.getElementById('detail-configurator-section');
+        if (cfgSection && hasConfigurator(name)) {
+            cfgSection.style.display = '';
+            loadConfigurator(name);
+        }
+        return;
+    }
+
+    // Host mode — show all sections and fetch host data
+    if (statsGrid) statsGrid.style.display = '';
+    if (actionsBar) actionsBar.style.display = '';
+
     try {
         const resp = await fetch(apiUrl(`/api/components/${name}/detail`));
         if (handleAuthError(resp)) return;
@@ -5260,7 +5288,6 @@ async function refreshComponentDetail(name) {
         document.getElementById('detail-btn-stop').style.display = d.running ? '' : 'none';
 
         // Config
-        const configSection = document.getElementById('detail-config-section');
         if (d.config_path && d.config !== null) {
             configSection.style.display = '';
             document.getElementById('detail-config-path').textContent = d.config_path;
@@ -5274,6 +5301,7 @@ async function refreshComponentDetail(name) {
         }
 
         // Logs
+        if (logsSection) logsSection.style.display = '';
         const logsEl = document.getElementById('detail-logs');
         if (d.logs && d.logs.length > 0) {
             logsEl.innerHTML = d.logs.map(line => {
@@ -5456,7 +5484,24 @@ function onConfiguratorTargetChange(value, componentName) {
         const [runtime, ...nameParts] = value.split(':');
         currentConfiguratorTarget = { runtime, target: nameParts.join(':') };
     }
-    loadConfigurator(componentName);
+    // Toggle host-only sections visibility
+    const isContainer = !!currentConfiguratorTarget;
+    const hide = isContainer ? 'none' : '';
+    const statsGrid = document.getElementById('detail-stats-grid');
+    const actionsBar = document.getElementById('detail-actions-bar');
+    const configSection = document.getElementById('detail-config-section');
+    const logsSection = document.getElementById('detail-logs-section');
+    if (statsGrid) statsGrid.style.display = hide;
+    if (actionsBar) actionsBar.style.display = hide;
+    if (configSection) configSection.style.display = hide;
+    if (logsSection) logsSection.style.display = hide;
+
+    if (!isContainer) {
+        // Switching back to host — reload everything including host data
+        refreshComponentDetail(componentName);
+    } else {
+        loadConfigurator(componentName);
+    }
 }
 
 // ── Nginx Configurator (WolfProxy) ──
