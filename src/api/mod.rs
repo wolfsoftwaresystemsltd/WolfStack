@@ -6684,6 +6684,32 @@ pub async fn appstore_install(
     }
 }
 
+/// POST /api/appstore/apps/{id}/prepare-install — generate install script for live terminal
+pub async fn appstore_prepare_install(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<AppInstallRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let mut inputs = body.inputs.clone();
+    inputs.insert("CONTAINER_NAME".to_string(), body.container_name.clone());
+
+    let target = body.target.clone();
+    let container_name = body.container_name.clone();
+
+    match web::block(move || {
+        appstore::prepare_install(&id, &target, &container_name, &inputs)
+    }).await {
+        Ok(Ok((session_id, _script_path))) => HttpResponse::Ok().json(serde_json::json!({
+            "session_id": session_id,
+        })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Internal error: {}", e) })),
+    }
+}
+
 /// GET /api/appstore/installed — list installed apps
 pub async fn appstore_installed(
     req: HttpRequest,
@@ -9054,6 +9080,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/appstore/apps", web::get().to(appstore_list))
         .route("/api/appstore/apps/{id}", web::get().to(appstore_get))
         .route("/api/appstore/apps/{id}/install", web::post().to(appstore_install))
+        .route("/api/appstore/apps/{id}/prepare-install", web::post().to(appstore_prepare_install))
         .route("/api/appstore/installed", web::get().to(appstore_installed))
         .route("/api/appstore/installed/{id}", web::delete().to(appstore_uninstall))
         // System

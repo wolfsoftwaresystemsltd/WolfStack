@@ -166,6 +166,27 @@ async fn console_session(
                 }
             }
         }
+        "appstore-install" => {
+            // App store install — name is the session ID from prepare-install API
+            let script_path = format!("/tmp/wolfstack-appinstall-{}.sh", name);
+            if !std::path::Path::new(&script_path).exists() {
+                let _ = session.text(format!(
+                    "\r\n\x1b[31mInstall script not found: {}\r\nDid you call prepare-install first?\x1b[0m\r\n",
+                    script_path
+                )).await;
+                let _ = session.close(None).await;
+                return;
+            }
+            cmd.arg(format!(
+                "bash {} ; EXIT_CODE=$?; rm -f {} ; \
+                 if [ $EXIT_CODE -ne 0 ]; then \
+                   echo '' ; echo -e '\\x1b[1;31m━━━ Installation failed (exit code '$EXIT_CODE') ━━━\\x1b[0m' ; \
+                   echo -e '\\x1b[0;90mScroll up to see the error details.\\x1b[0m' ; \
+                 fi ; \
+                 echo '' ; echo -e '\\x1b[0;90mYou can close this terminal now.\\x1b[0m'",
+                script_path, script_path
+            ));
+        }
         _ => {
             let _ = session.text("\r\n\x1b[31mUnknown container type\x1b[0m\r\n").await;
             let _ = session.close(None).await;

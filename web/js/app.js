@@ -14697,47 +14697,20 @@ async function executeAppStoreInstall() {
     // Determine the install URL based on selected host
     const selectedNodeId = document.getElementById('appstore-install-host').value;
     const selectedNode = allNodes.find(n => n.id === selectedNodeId);
-    const hostName = selectedNode ? selectedNode.hostname : 'this server';
-    const targetLabel = appStoreInstallTarget === 'docker' ? '🐳 Docker' : appStoreInstallTarget === 'lxc' ? '📦 LXC' : '🖥️ Host';
     const appName = (appStoreApps.find(a => a.id === appStoreInstallAppId) || {}).name || appStoreInstallAppId;
 
-    // Close the install modal and show progress overlay
     closeAppStoreInstallModal();
 
-    const progressOverlay = document.createElement('div');
-    progressOverlay.className = 'modal-overlay active';
-    progressOverlay.style.cssText = 'display:flex; z-index:10001;';
-    progressOverlay.innerHTML = `
-        <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:420px; width:90%; text-align:center; box-shadow:0 20px 60px rgba(0,0,0,0.5); animation:modalSlideIn 0.3s ease;">
-            <div style="width:64px; height:64px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; margin:0 auto 20px;"></div>
-            <h3 style="color:var(--text-primary); font-size:18px; margin-bottom:6px; font-weight:700;">Installing ${escapeHtml(appName)}</h3>
-            <p style="color:var(--text-secondary); font-size:13px; margin-bottom:20px;">Deploying to <strong>${escapeHtml(hostName)}</strong> via ${targetLabel}</p>
-            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:20px; text-align:left;">
-                <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-                    <span style="color:var(--text-muted); font-size:12px;">Container</span>
-                    <span style="color:var(--text-primary); font-size:12px; font-weight:600;">${escapeHtml(name)}</span>
-                </div>
-                <div style="display:flex; justify-content:space-between;">
-                    <span style="color:var(--text-muted); font-size:12px;">Status</span>
-                    <span id="install-progress-status" style="color:var(--accent-light); font-size:12px; font-weight:600;">⏳ Pulling image & configuring…</span>
-                </div>
-            </div>
-            <div style="height:4px; background:var(--bg-secondary); border-radius:4px; overflow:hidden;">
-                <div style="height:100%; width:30%; background:linear-gradient(90deg,var(--accent),var(--accent-light)); border-radius:4px; animation:progressPulse 1.5s ease-in-out infinite;"></div>
-            </div>
-            <p style="color:var(--text-muted); font-size:11px; margin-top:12px;">This may take a minute depending on image size…</p>
-        </div>`;
-    document.body.appendChild(progressOverlay);
-
     try {
-        let installUrl;
+        // Call prepare-install to generate the install script
+        let prepareUrl;
         if (!selectedNode || selectedNode.is_self) {
-            installUrl = `/api/appstore/apps/${appStoreInstallAppId}/install`;
+            prepareUrl = `/api/appstore/apps/${appStoreInstallAppId}/prepare-install`;
         } else {
-            installUrl = `/api/nodes/${selectedNodeId}/proxy/appstore/apps/${appStoreInstallAppId}/install`;
+            prepareUrl = `/api/nodes/${selectedNodeId}/proxy/appstore/apps/${appStoreInstallAppId}/prepare-install`;
         }
 
-        const res = await fetch(installUrl, {
+        const res = await fetch(prepareUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -14747,47 +14720,24 @@ async function executeAppStoreInstall() {
             }),
         });
         const data = await res.json().catch(() => ({}));
-        progressOverlay.remove();
 
-        if (res.ok) {
-            const message = data.message || 'App deployed successfully';
-            const alertOverlay = document.createElement('div');
-            alertOverlay.className = 'modal-overlay active';
-            alertOverlay.style.cssText = 'display:flex; z-index:10001;';
-            alertOverlay.innerHTML = `
-                <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:440px; width:90%; text-align:center; box-shadow:0 20px 60px rgba(0,0,0,0.5); animation: modalSlideIn 0.3s ease;">
-                    <div style="width:72px; height:72px; background:linear-gradient(135deg, #10b981, #34d399); border-radius:50%; display:flex; align-items:center; justify-content:center; margin:0 auto 20px; font-size:36px; box-shadow:0 4px 20px rgba(16,185,129,0.4);">✅</div>
-                    <h3 style="color:var(--text-primary); font-size:20px; margin-bottom:8px; font-weight:700;">Deployed Successfully</h3>
-                    <p style="color:var(--text-secondary); font-size:14px; margin-bottom:20px; line-height:1.6;">${escapeHtml(message)}</p>
-                    <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:24px; text-align:left;">
-                        <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
-                            <span style="color:var(--text-muted); font-size:12px;">Container</span>
-                            <span style="color:var(--text-primary); font-size:12px; font-weight:600;">${escapeHtml(name)}</span>
-                        </div>
-                        <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
-                            <span style="color:var(--text-muted); font-size:12px;">Host</span>
-                            <span style="color:var(--text-primary); font-size:12px; font-weight:600;">${escapeHtml(hostName)}</span>
-                        </div>
-                        <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
-                            <span style="color:var(--text-muted); font-size:12px;">Target</span>
-                            <span style="color:var(--text-primary); font-size:12px; font-weight:600;">${targetLabel}</span>
-                        </div>
-                        <div style="display:flex; justify-content:space-between;">
-                            <span style="color:var(--text-muted); font-size:12px;">Status</span>
-                            <span style="color:#f59e0b; font-size:12px; font-weight:600;">⏸ Stopped — ready to start</span>
-                        </div>
-                    </div>
-                    <button onclick="this.closest('.modal-overlay').remove()" style="background:linear-gradient(135deg, #10b981, #34d399); color:white; border:none; padding:10px 40px; border-radius:10px; font-size:14px; font-weight:600; cursor:pointer; font-family:inherit; transition:transform 0.15s, box-shadow 0.15s; box-shadow:0 4px 15px rgba(16,185,129,0.3);"
-                        onmouseover="this.style.transform='translateY(-1px)'; this.style.boxShadow='0 6px 20px rgba(16,185,129,0.4)'"
-                        onmouseout="this.style.transform=''; this.style.boxShadow='0 4px 15px rgba(16,185,129,0.3)'">👍 Got it</button>
-                </div>
-            `;
-            document.body.appendChild(alertOverlay);
-        } else {
-            showToast(data.error || `Installation failed (HTTP ${res.status})`, 'error');
+        if (!res.ok) {
+            showToast(data.error || `Failed to prepare install (HTTP ${res.status})`, 'error');
+            return;
         }
+
+        // Open a live terminal showing the install
+        const sessionId = data.session_id;
+        if (!selectedNode || selectedNode.is_self) {
+            openConsole('appstore-install', sessionId);
+        } else {
+            // For remote nodes, route through the remote console proxy
+            let url = `/console.html?type=appstore-install&name=${encodeURIComponent(sessionId)}&node_id=${encodeURIComponent(selectedNodeId)}`;
+            window.open(url, 'appstore_install_' + sessionId, 'width=960,height=600,menubar=no,toolbar=no,scrollbars=yes,resizable=yes');
+        }
+
+        showToast(`Installation terminal opened for ${appName}`, 'success');
     } catch (e) {
-        progressOverlay.remove();
         showToast('Installation failed: ' + e.message, 'error');
     }
 }

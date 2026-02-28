@@ -109,10 +109,15 @@ pub struct InstalledApp {
 const INSTALLED_FILE: &str = "/etc/wolfstack/appstore/installed.json";
 
 fn load_installed() -> Vec<InstalledApp> {
-    std::fs::read_to_string(INSTALLED_FILE)
+    let mut installed: Vec<InstalledApp> = std::fs::read_to_string(INSTALLED_FILE)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    // Merge any pending installs from terminal-based installations
+    merge_pending_installs(&mut installed);
+
+    installed
 }
 
 fn save_installed(apps: &[InstalledApp]) {
@@ -444,6 +449,317 @@ fn chrono_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     format!("{}", secs)
+}
+
+/// Shell-escape a string for safe inclusion in a bash script
+fn shell_escape(s: &str) -> String {
+    if s.is_empty() { return "''".to_string(); }
+    // If safe characters only, return as-is
+    if s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@,+".contains(c)) {
+        return s.to_string();
+    }
+    // Otherwise, single-quote it (escaping any embedded single quotes)
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+// ─── Pending install registration ───
+
+const PENDING_DIR: &str = "/etc/wolfstack/appstore/pending";
+
+/// Merge any pending install registrations into the installed list.
+/// Called automatically by load_installed().
+fn merge_pending_installs(installed: &mut Vec<InstalledApp>) {
+    let pending_dir = std::path::Path::new(PENDING_DIR);
+    if !pending_dir.is_dir() { return; }
+
+    let entries: Vec<_> = match std::fs::read_dir(pending_dir) {
+        Ok(e) => e.filter_map(|e| e.ok()).collect(),
+        Err(_) => return,
+    };
+
+    let mut changed = false;
+    for entry in entries {
+        let path = entry.path();
+        if path.extension().map_or(true, |e| e != "json") { continue; }
+
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(app) = serde_json::from_str::<InstalledApp>(&content) {
+                // Avoid duplicates
+                if !installed.iter().any(|a| a.install_id == app.install_id) {
+                    installed.push(app);
+                    changed = true;
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    if changed {
+        save_installed(installed);
+    }
+}
+
+// ─── Live terminal install: script generation ───
+
+/// Prepare an install script for live terminal execution.
+/// Returns (session_id, script_path) on success.
+pub fn prepare_install(
+    app_id: &str,
+    target: &str,
+    container_name: &str,
+    user_inputs: &HashMap<String, String>,
+) -> Result<(String, String), String> {
+    let app = get_app(app_id).ok_or_else(|| format!("App '{}' not found", app_id))?;
+
+    let session_id = format!("{}_{}", app_id, chrono_timestamp());
+    let script_path = format!("/tmp/wolfstack-appinstall-{}.sh", session_id);
+
+    let mut script = String::from("#!/bin/bash\nset -e\nexport DEBIAN_FRONTEND=noninteractive\n\n");
+
+    let mut sidecar_names: Vec<String> = Vec::new();
+
+    match target {
+        "docker" => {
+            let docker = app.docker.as_ref()
+                .ok_or("This app doesn't support Docker installation")?;
+
+            let wolfnet_ip = crate::containers::next_available_wolfnet_ip();
+
+            script.push_str(&format!(
+                "echo -e '\\033[1;36m━━━ Installing {} via Docker ━━━\\033[0m'\n\n",
+                app.name
+            ));
+
+            // Sidecars first
+            for sidecar in &docker.sidecars {
+                let sidecar_name = format!("{}-{}", container_name, sidecar.name_suffix);
+                let env = substitute_inputs(&sidecar.env, user_inputs);
+
+                script.push_str(&format!(
+                    "echo -e '\\033[1;33m▸ Pulling sidecar image: {}\\033[0m'\n",
+                    sidecar.image
+                ));
+                script.push_str(&format!("docker pull {}\n\n", shell_escape(&sidecar.image)));
+
+                script.push_str(&format!(
+                    "echo -e '\\033[1;33m▸ Creating sidecar container: {}\\033[0m'\n",
+                    sidecar_name
+                ));
+
+                let mut create_args = format!("docker create --name {} -it --restart unless-stopped", shell_escape(&sidecar_name));
+                for p in &sidecar.ports {
+                    create_args.push_str(&format!(" -p {}", shell_escape(p)));
+                }
+                for e in &env {
+                    create_args.push_str(&format!(" -e {}", shell_escape(e)));
+                }
+                for v in &sidecar.volumes {
+                    create_args.push_str(&format!(" -v {}", shell_escape(v)));
+                }
+                create_args.push_str(&format!(" {}", shell_escape(&sidecar.image)));
+                script.push_str(&format!("{}\n\n", create_args));
+
+                sidecar_names.push(sidecar_name);
+            }
+
+            // Main image
+            script.push_str(&format!(
+                "echo -e '\\033[1;33m▸ Pulling image: {}\\033[0m'\n",
+                docker.image
+            ));
+            script.push_str(&format!("docker pull {}\n\n", shell_escape(&docker.image)));
+
+            // Create main container
+            script.push_str(&format!(
+                "echo -e '\\033[1;33m▸ Creating container: {}\\033[0m'\n",
+                container_name
+            ));
+
+            let env = substitute_inputs(&docker.env, user_inputs);
+            let mut create_args = format!("docker create --name {} -it --restart unless-stopped", shell_escape(container_name));
+            for p in &docker.ports {
+                create_args.push_str(&format!(" -p {}", shell_escape(p)));
+            }
+            for e in &env {
+                create_args.push_str(&format!(" -e {}", shell_escape(e)));
+            }
+            for v in &docker.volumes {
+                create_args.push_str(&format!(" -v {}", shell_escape(v)));
+            }
+            if let Some(ref ip) = wolfnet_ip {
+                create_args.push_str(&format!(" --label wolfnet.ip={}", ip));
+            }
+            create_args.push_str(&format!(" {}", shell_escape(&docker.image)));
+            script.push_str(&format!("{}\n\n", create_args));
+
+            if let Some(ref ip) = wolfnet_ip {
+                script.push_str(&format!(
+                    "echo -e '\\033[0;36m  WolfNet IP: {}\\033[0m'\n",
+                    ip
+                ));
+            }
+        }
+        "lxc" => {
+            let lxc = app.lxc.as_ref()
+                .ok_or("This app doesn't support LXC installation")?;
+
+            let wolfnet_ip = crate::containers::next_available_wolfnet_ip();
+
+            script.push_str(&format!(
+                "echo -e '\\033[1;36m━━━ Installing {} via LXC ━━━\\033[0m'\n\n",
+                app.name
+            ));
+
+            // Create container
+            script.push_str(&format!(
+                "echo -e '\\033[1;33m▸ Creating LXC container: {}\\033[0m'\n",
+                container_name
+            ));
+            script.push_str(&format!(
+                "lxc-create -t download -n {} -- -d {} -r {} -a {}\n\n",
+                shell_escape(container_name),
+                shell_escape(&lxc.distribution),
+                shell_escape(&lxc.release),
+                shell_escape(&lxc.architecture),
+            ));
+
+            // Write WolfNet IP
+            if let Some(ref ip) = wolfnet_ip {
+                script.push_str(&format!(
+                    "mkdir -p /var/lib/lxc/{}/.wolfnet\n",
+                    shell_escape(container_name)
+                ));
+                script.push_str(&format!(
+                    "echo {} > /var/lib/lxc/{}/.wolfnet/ip\n\n",
+                    shell_escape(ip), shell_escape(container_name)
+                ));
+            }
+
+            // Start container
+            script.push_str(&format!(
+                "echo -e '\\033[1;33m▸ Starting container...\\033[0m'\n"
+            ));
+            script.push_str(&format!("lxc-start -n {}\n", shell_escape(container_name)));
+            script.push_str("echo 'Waiting for container to boot...'\nsleep 3\n\n");
+
+            // Setup commands
+            let commands = substitute_inputs(&lxc.setup_commands, user_inputs);
+            if !commands.is_empty() {
+                script.push_str("echo -e '\\033[1;33m▸ Running setup commands...\\033[0m'\n");
+                for cmd in &commands {
+                    script.push_str(&format!(
+                        "echo -e '\\033[0;90m  $ {}\\033[0m'\n",
+                        cmd.replace('\'', "'\\''")
+                    ));
+                    script.push_str(&format!(
+                        "lxc-attach -n {} -- sh -c {}\n",
+                        shell_escape(container_name), shell_escape(cmd)
+                    ));
+                }
+                script.push('\n');
+            }
+
+            // Stop container
+            script.push_str(&format!(
+                "echo -e '\\033[1;33m▸ Stopping container...\\033[0m'\n"
+            ));
+            script.push_str(&format!("lxc-stop -n {} 2>/dev/null || true\n\n", shell_escape(container_name)));
+
+            if let Some(ref ip) = wolfnet_ip {
+                script.push_str(&format!(
+                    "echo -e '\\033[0;36m  WolfNet IP: {}\\033[0m'\n",
+                    ip
+                ));
+            }
+        }
+        "bare" => {
+            let bare = app.bare_metal.as_ref()
+                .ok_or("This app doesn't support bare metal installation")?;
+
+            script.push_str(&format!(
+                "echo -e '\\033[1;36m━━━ Installing {} on this host ━━━\\033[0m'\n\n",
+                app.name
+            ));
+
+            // Detect distro and install packages
+            let is_debian = std::path::Path::new("/etc/debian_version").exists();
+            let packages = if is_debian { &bare.packages_debian } else { &bare.packages_redhat };
+            let pkg_cmd = if is_debian { "apt-get" } else { "dnf" };
+
+            if !packages.is_empty() {
+                script.push_str("echo -e '\\033[1;33m▸ Installing packages...\\033[0m'\n");
+                let pkg_list: Vec<String> = packages.iter().map(|p| shell_escape(p)).collect();
+                script.push_str(&format!("{} install -y {}\n\n", pkg_cmd, pkg_list.join(" ")));
+            }
+
+            // Post-install commands
+            let commands = substitute_inputs(&bare.post_install, user_inputs);
+            if !commands.is_empty() {
+                script.push_str("echo -e '\\033[1;33m▸ Running post-install configuration...\\033[0m'\n");
+                for cmd in &commands {
+                    script.push_str(&format!(
+                        "echo -e '\\033[0;90m  $ {}\\033[0m'\n",
+                        cmd.replace('\'', "'\\''")
+                    ));
+                    script.push_str(&format!("sh -c {}\n", shell_escape(cmd)));
+                }
+                script.push('\n');
+            }
+
+            // Enable service
+            if let Some(ref service) = bare.service {
+                script.push_str(&format!(
+                    "echo -e '\\033[1;33m▸ Enabling service: {}\\033[0m'\n",
+                    service
+                ));
+                script.push_str(&format!("systemctl enable --now {}\n\n", shell_escape(service)));
+            }
+        }
+        _ => return Err(format!("Unknown install target: {}", target)),
+    }
+
+    // Register the installation by writing a pending file
+    let installed_app = InstalledApp {
+        install_id: session_id.clone(),
+        app_id: app_id.to_string(),
+        app_name: app.name.clone(),
+        target: target.to_string(),
+        container_name: Some(container_name.to_string()),
+        installed_at: chrono_timestamp(),
+        sidecar_names,
+    };
+    let pending_json = serde_json::to_string_pretty(&installed_app).unwrap_or_default();
+
+    script.push_str(&format!(
+        "# Register the installation\nmkdir -p {}\n", PENDING_DIR
+    ));
+    script.push_str(&format!(
+        "cat > {}/{}.json << 'WOLFSTACK_REGISTER'\n{}\nWOLFSTACK_REGISTER\n\n",
+        PENDING_DIR, session_id, pending_json
+    ));
+
+    script.push_str("echo ''\n");
+    script.push_str("echo -e '\\033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\033[0m'\n");
+    script.push_str(&format!(
+        "echo -e '\\033[1;32m  ✅ {} installed successfully!\\033[0m'\n",
+        app.name
+    ));
+    script.push_str("echo -e '\\033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\033[0m'\n");
+    script.push_str(&format!(
+        "echo -e '\\033[0;36m  Container is stopped — start it when ready.\\033[0m'\n"
+    ));
+    script.push_str("echo -e '\\033[0;90m  You can close this terminal now.\\033[0m'\n");
+
+    // Write the script
+    std::fs::write(&script_path, &script)
+        .map_err(|e| format!("Failed to write install script: {}", e))?;
+
+    // Make executable
+    let _ = std::process::Command::new("chmod")
+        .args(["+x", &script_path])
+        .output();
+
+    Ok((session_id, script_path))
 }
 
 // ─── Built-in Catalogue ───
