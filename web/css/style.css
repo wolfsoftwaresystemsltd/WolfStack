@@ -691,7 +691,7 @@ body.sidebar-collapsed .main-content {
     padding: 14px 16px;
     display: flex;
     flex-direction: column;
-    align-items: center;
+    align-items: flex-start;
     gap: 4px;
     border-bottom: 1px solid var(--border);
 }
