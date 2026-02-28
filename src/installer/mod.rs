@@ -276,7 +276,7 @@ fn install_wolf_component(component: Component, _distro: DistroFamily) -> Result
         Component::WolfNet => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh",
         Component::WolfProxy => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfproxy/install.sh",
         Component::WolfServe => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfserve/install.sh",
-        Component::WolfDisk => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh",
+        Component::WolfDisk => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/setup.sh",
         Component::WolfScale => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh",
         _ => return Err("Unknown component".to_string()),
     };
