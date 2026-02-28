@@ -1227,6 +1227,26 @@ function handleAuthError(resp) {
     return false;
 }
 
+// Session check — redirect to login if session is gone (e.g. after upgrade/restart)
+let _sessionCheckFails = 0;
+async function checkSession() {
+    try {
+        const resp = await fetch('/api/nodes', { method: 'GET' });
+        if (resp.status === 401) {
+            window.location.href = '/login.html';
+            return;
+        }
+        _sessionCheckFails = 0;
+    } catch (e) {
+        _sessionCheckFails++;
+        // After 3 consecutive network errors (server restarting), redirect to login
+        if (_sessionCheckFails >= 3) {
+            window.location.href = '/login.html';
+        }
+    }
+}
+checkSession();
+
 // ─── Metrics Polling ───
 async function fetchMetrics() {
     try {
@@ -1893,6 +1913,7 @@ function initCharts() {
 async function fetchNodes() {
     try {
         const resp = await fetch('/api/nodes');
+        if (handleAuthError(resp)) return;
         const data = await resp.json();
         // Support both new { version, nodes } format and legacy array format
         const nodes = Array.isArray(data) ? data : (data.nodes || []);
@@ -1964,6 +1985,8 @@ async function fetchNodes() {
         }
     } catch (e) {
         console.error('Failed to fetch nodes:', e);
+        _sessionCheckFails++;
+        if (_sessionCheckFails >= 3) window.location.href = '/login.html';
     }
 }
 
