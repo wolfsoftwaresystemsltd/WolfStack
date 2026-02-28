@@ -764,7 +764,7 @@ function renderDatacenterOverview() {
         const components = isPve
             ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(99,102,241,0.1);color:var(--accent-light);">${node.vm_count || 0} VMs</span><span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(99,102,241,0.1);color:var(--accent-light);">${node.lxc_count || 0} CTs</span>`
             : node.components.filter(c => c.installed).map(c =>
-                `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'};color:${c.running ? 'var(--success)' : 'var(--danger)'};">${c.component}</span>`
+                `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'};color:${c.running ? 'var(--success)' : 'var(--danger)'};" ${hasConfigurator(c.component) ? 'title="Configurator available — click Components to configure"' : ''}>${c.component}${hasConfigurator(c.component) ? ' ⚙️' : ''}</span>`
             ).join('');
 
         if (dcCompact) {
@@ -2044,16 +2044,21 @@ function renderServices(components) {
     table.innerHTML = components.filter(c => c.installed).map(c => {
         const statusColor = c.running ? 'var(--success)' : 'var(--danger)';
         const statusText = c.running ? 'Active' : 'Inactive';
+        const configureBtn = hasConfigurator(c.component)
+            ? `<button class="btn btn-sm" onclick="openComponentDetail('${c.component}')" title="Open configurator">⚙️ Configure</button>`
+            : '';
         return `
             <tr>
                 <td>
                     <span style="margin-right: 8px;">${componentIcons[c.component] || '📦'}</span>
                     ${c.component}
+                    ${hasConfigurator(c.component) ? '<span style="font-size:11px; opacity:0.6;" title="Configurator available">⚙️</span>' : ''}
                 </td>
                 <td><span style="color: ${statusColor};">● ${statusText}</span></td>
                 <td>${c.enabled ? '✓ Yes' : '✗ No'}</td>
                 <td style="color: var(--text-muted);">${c.version || '—'}</td>
                 <td>
+                    ${configureBtn}
                     ${c.running ?
                 `<button class="btn btn-sm" onclick="serviceAction('${c.component}', 'restart')">Restart</button>
                          <button class="btn btn-danger btn-sm" onclick="serviceAction('${c.component}', 'stop')">Stop</button>` :
@@ -5167,6 +5172,7 @@ async function refreshComponentDetail(name) {
         document.getElementById('detail-restarts').textContent = d.unit_info?.restart_count || '0';
 
         // Action buttons
+        document.getElementById('detail-btn-configure').style.display = hasConfigurator(name) ? '' : 'none';
         document.getElementById('detail-btn-start').style.display = d.running ? 'none' : '';
         document.getElementById('detail-btn-restart').style.display = d.running ? '' : 'none';
         document.getElementById('detail-btn-stop').style.display = d.running ? '' : 'none';
