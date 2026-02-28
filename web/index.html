@@ -9,7 +9,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WolfStack — Server Management</title>
     <meta name="description" content="WolfStack server management dashboard for the Wolf software suite">
-    <link rel="icon" type="image/svg+xml" href="https://wolf.uk.com/wp-content/uploads/2026/01/Group-9.svg">
+    <link rel="icon" type="image/png" href="images/wolfstack-icon.png">
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#6366f1">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="apple-touch-icon" href="images/wolfstack-icon-192.png">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
@@ -49,11 +54,10 @@
     <!-- Sidebar Navigation -->
     <aside class="sidebar">
         <div class="sidebar-logo">
-            <div class="logo-icon"><img src="https://wolf.uk.com/wp-content/uploads/2026/01/Group-9.svg" alt="Wolf"
-                    style="width:36px;height:36px;"></div>
+            <div><img src="images/wolfstack-logo.png" alt="WolfStack"
+                    style="height:32px;"></div>
             <div>
-                <h1>WolfStack</h1>
-                <span class="version">v10.1.0</span>
+                <span class="version">v11.21.0</span>
             </div>
         </div>
         <nav class="sidebar-nav">
@@ -4908,6 +4912,11 @@ region = us-east-1"></textarea>
                     }
                 }).catch(function () { });
             })();
+        </script>
+        <script>
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register('/sw.js').catch(function() {});
+            }
         </script>
 
 </body>
