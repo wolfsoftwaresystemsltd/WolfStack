@@ -5416,40 +5416,46 @@ function nginxNewSiteForm() {
             <button class="btn btn-sm" onclick="loadNginxConfigurator()">← Back</button>
             <h4 style="margin:0;">Create New Nginx Site</h4>
         </div>
+        <p style="color:var(--text-muted); font-size:12px; margin-bottom:16px;">Create a new nginx server block. Fill in the details below and click Generate to preview the configuration before saving.</p>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; max-width:700px;">
             <div class="form-group">
                 <label style="font-weight:600; margin-bottom:4px; display:block;">Server Name</label>
                 <input type="text" class="form-control" id="nginx-server-name" placeholder="example.com">
+                <small style="color:var(--text-muted);">The domain name this site responds to (e.g. example.com or app.example.com)</small>
             </div>
             <div class="form-group">
                 <label style="font-weight:600; margin-bottom:4px; display:block;">Listen Port</label>
                 <input type="number" class="form-control" id="nginx-listen-port" value="80" style="width:120px;">
+                <small style="color:var(--text-muted);">Port to listen on — 80 for HTTP, 443 for HTTPS</small>
             </div>
             <div class="form-group" style="grid-column:span 2;">
                 <label style="font-weight:600; margin-bottom:4px; display:block;">Proxy Pass (upstream URL)</label>
                 <input type="text" class="form-control" id="nginx-proxy-pass" placeholder="http://localhost:3000">
-                <small style="color:var(--text-muted);">Leave empty for static file serving</small>
+                <small style="color:var(--text-muted);">Forward requests to a backend application (e.g. http://localhost:3000). Leave empty if serving static files directly</small>
             </div>
             <div class="form-group" style="grid-column:span 2;">
                 <label style="font-weight:600; margin-bottom:4px; display:block;">Document Root (for static sites)</label>
                 <input type="text" class="form-control" id="nginx-root" placeholder="/var/www/html">
-                <small style="color:var(--text-muted);">Only used if Proxy Pass is empty</small>
+                <small style="color:var(--text-muted);">Directory containing your website files. Only used when Proxy Pass is empty</small>
             </div>
             <div class="form-group" style="grid-column:span 2;">
                 <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
                     <input type="checkbox" id="nginx-ssl-toggle" onchange="document.getElementById('nginx-ssl-fields').style.display = this.checked ? '' : 'none'">
-                    <span style="font-weight:600;">Enable SSL</span>
+                    <span style="font-weight:600;">Enable SSL/HTTPS</span>
                 </label>
+                <small style="color:var(--text-muted);">Enables HTTPS with TLS encryption. Requires an SSL certificate — use Certbot (Let's Encrypt) for free certificates</small>
             </div>
-            <div id="nginx-ssl-fields" style="display:none; grid-column:span 2; display:none;">
+            <div id="nginx-ssl-fields" style="display:none; grid-column:span 2;">
                 <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
                     <div class="form-group">
                         <label style="font-weight:600; margin-bottom:4px; display:block;">SSL Certificate Path</label>
                         <input type="text" class="form-control" id="nginx-ssl-cert" placeholder="/etc/letsencrypt/live/example.com/fullchain.pem">
+                        <small style="color:var(--text-muted);">Full path to your SSL certificate file (fullchain.pem for Let's Encrypt)</small>
                     </div>
                     <div class="form-group">
                         <label style="font-weight:600; margin-bottom:4px; display:block;">SSL Key Path</label>
                         <input type="text" class="form-control" id="nginx-ssl-key" placeholder="/etc/letsencrypt/live/example.com/privkey.pem">
+                        <small style="color:var(--text-muted);">Full path to your SSL private key file (privkey.pem for Let's Encrypt)</small>
                     </div>
                 </div>
             </div>
@@ -5459,7 +5465,8 @@ function nginxNewSiteForm() {
             <button class="btn" onclick="loadNginxConfigurator()">Cancel</button>
         </div>
         <div id="nginx-preview-section" style="display:none; margin-top:20px;">
-            <h4 style="margin-bottom:8px;">Generated Configuration</h4>
+            <h4 style="margin-bottom:4px;">Generated Configuration</h4>
+            <p style="color:var(--text-muted); font-size:12px; margin-bottom:8px;">Review the generated nginx config below. You can edit it before saving. The file will be saved to /etc/nginx/sites-available/.</p>
             <textarea id="nginx-generated-config" class="config-editor" spellcheck="false" style="min-height:250px;"></textarea>
             <div style="display:flex; gap:8px; margin-top:12px;">
                 <button class="btn btn-primary" onclick="nginxSaveNewSite()">Save Site</button>
@@ -5704,43 +5711,51 @@ function apacheNewVhostForm() {
             <button class="btn btn-sm" onclick="loadApacheConfigurator()">← Back</button>
             <h4 style="margin:0;">Create New Apache Virtual Host</h4>
         </div>
+        <p style="color:var(--text-muted); font-size:12px; margin-bottom:16px;">Create a new Apache virtual host. Fill in the details below and click Generate to preview the configuration before saving.</p>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; max-width:700px;">
             <div class="form-group">
                 <label style="font-weight:600; margin-bottom:4px; display:block;">Server Name</label>
                 <input type="text" class="form-control" id="apache-server-name" placeholder="example.com">
+                <small style="color:var(--text-muted);">The domain name this virtual host responds to (e.g. example.com)</small>
             </div>
             <div class="form-group">
                 <label style="font-weight:600; margin-bottom:4px; display:block;">Listen Port</label>
                 <input type="number" class="form-control" id="apache-listen-port" value="80" style="width:120px;">
+                <small style="color:var(--text-muted);">Port to listen on — 80 for HTTP, 443 for HTTPS</small>
             </div>
             <div class="form-group">
                 <label style="font-weight:600; margin-bottom:4px; display:block;">Server Admin</label>
                 <input type="text" class="form-control" id="apache-server-admin" placeholder="admin@example.com">
+                <small style="color:var(--text-muted);">Admin email shown in error pages</small>
             </div>
             <div class="form-group">
                 <label style="font-weight:600; margin-bottom:4px; display:block;">Document Root</label>
                 <input type="text" class="form-control" id="apache-document-root" placeholder="/var/www/html">
+                <small style="color:var(--text-muted);">Directory containing your website files</small>
             </div>
             <div class="form-group" style="grid-column:span 2;">
                 <label style="font-weight:600; margin-bottom:4px; display:block;">Proxy Pass (upstream URL)</label>
                 <input type="text" class="form-control" id="apache-proxy-pass" placeholder="http://localhost:3000">
-                <small style="color:var(--text-muted);">Leave empty for static file serving</small>
+                <small style="color:var(--text-muted);">Forward requests to a backend application (e.g. http://localhost:3000). Requires mod_proxy enabled. Leave empty if serving static files</small>
             </div>
             <div class="form-group" style="grid-column:span 2;">
                 <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
                     <input type="checkbox" id="apache-ssl-toggle" onchange="document.getElementById('apache-ssl-fields').style.display = this.checked ? '' : 'none'">
-                    <span style="font-weight:600;">Enable SSL</span>
+                    <span style="font-weight:600;">Enable SSL/HTTPS</span>
                 </label>
+                <small style="color:var(--text-muted);">Enables HTTPS encryption. Requires mod_ssl enabled and an SSL certificate</small>
             </div>
             <div id="apache-ssl-fields" style="display:none; grid-column:span 2;">
                 <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
                     <div class="form-group">
                         <label style="font-weight:600; margin-bottom:4px; display:block;">SSL Certificate Path</label>
                         <input type="text" class="form-control" id="apache-ssl-cert" placeholder="/etc/letsencrypt/live/example.com/fullchain.pem">
+                        <small style="color:var(--text-muted);">Full path to your SSL certificate file</small>
                     </div>
                     <div class="form-group">
                         <label style="font-weight:600; margin-bottom:4px; display:block;">SSL Key Path</label>
                         <input type="text" class="form-control" id="apache-ssl-key" placeholder="/etc/letsencrypt/live/example.com/privkey.pem">
+                        <small style="color:var(--text-muted);">Full path to your SSL private key file</small>
                     </div>
                 </div>
             </div>
@@ -5750,7 +5765,8 @@ function apacheNewVhostForm() {
             <button class="btn" onclick="loadApacheConfigurator()">Cancel</button>
         </div>
         <div id="apache-preview-section" style="display:none; margin-top:20px;">
-            <h4 style="margin-bottom:8px;">Generated Configuration</h4>
+            <h4 style="margin-bottom:4px;">Generated Configuration</h4>
+            <p style="color:var(--text-muted); font-size:12px; margin-bottom:8px;">Review the generated Apache config below. You can edit it before saving. The file will be saved to sites-available.</p>
             <textarea id="apache-generated-config" class="config-editor" spellcheck="false" style="min-height:250px;"></textarea>
             <div style="display:flex; gap:8px; margin-top:12px;">
                 <button class="btn btn-primary" onclick="apacheSaveNewVhost()">Save VHost</button>
@@ -5916,65 +5932,65 @@ async function apacheToggleModule(name, enable) {
 function getTomlSchema(component) {
     if (component === 'wolfdisk') {
         return [
-            { key: 'node', label: 'Node', fields: [
-                { key: 'id', label: 'Node ID', type: 'string', placeholder: 'node-1', help: 'Unique identifier for this node' },
-                { key: 'role', label: 'Role', type: 'select', options: ['auto', 'leader', 'follower', 'client'] },
-                { key: 'bind', label: 'Bind Address', type: 'string', placeholder: '0.0.0.0:9500' },
-                { key: 'data_dir', label: 'Data Directory', type: 'string', placeholder: '/var/lib/wolfdisk' },
+            { key: 'node', label: 'Node', description: 'Identity and network settings for this WolfDisk node in the cluster.', fields: [
+                { key: 'id', label: 'Node ID', type: 'string', placeholder: 'node-1', help: 'Unique name for this node — must be different on each server in the cluster' },
+                { key: 'role', label: 'Role', type: 'select', options: ['auto', 'leader', 'follower', 'client'], help: 'auto: automatically elect leader/follower roles. leader: force this node as leader. follower: read-only replica. client: mount-only, no local storage' },
+                { key: 'bind', label: 'Bind Address', type: 'string', placeholder: '0.0.0.0:9500', help: 'IP and port this node listens on. Use 0.0.0.0 to listen on all interfaces, or a specific IP to restrict access' },
+                { key: 'data_dir', label: 'Data Directory', type: 'string', placeholder: '/var/lib/wolfdisk', help: 'Where WolfDisk stores its chunk data, index, and WAL files on disk' },
             ]},
-            { key: 'cluster', label: 'Cluster', fields: [
-                { key: 'peers', label: 'Cluster Peers', type: 'array', help: 'One host:port per line' },
-                { key: 'discovery', label: 'Discovery Address', type: 'string', placeholder: 'udp://0.0.0.0:9501' },
+            { key: 'cluster', label: 'Cluster', description: 'How this node discovers and connects to other WolfDisk nodes.', fields: [
+                { key: 'peers', label: 'Cluster Peers', type: 'array', help: 'List of other WolfDisk nodes to connect to (one host:port per line, e.g. 192.168.1.10:9500). Leave empty if using auto-discovery' },
+                { key: 'discovery', label: 'Discovery Address', type: 'string', placeholder: 'udp://0.0.0.0:9501', help: 'UDP multicast address for automatic peer discovery on the local network. Nodes on the same subnet will find each other automatically' },
             ]},
-            { key: 'replication', label: 'Replication', fields: [
-                { key: 'mode', label: 'Replication Mode', type: 'select', options: ['shared', 'replicated'] },
-                { key: 'factor', label: 'Replication Factor', type: 'number', default: 3 },
-                { key: 'chunk_size', label: 'Chunk Size (bytes)', type: 'number', default: 4194304, help: '4MB = 4194304' },
+            { key: 'replication', label: 'Replication', description: 'Controls how data is replicated and split across nodes for redundancy and performance.', fields: [
+                { key: 'mode', label: 'Replication Mode', type: 'select', options: ['shared', 'replicated'], help: 'shared: chunks are distributed across nodes (more space, less redundancy). replicated: every node has a full copy (more redundancy, uses more disk)' },
+                { key: 'factor', label: 'Replication Factor', type: 'number', default: 3, help: 'How many copies of each chunk to keep across the cluster. Higher = more fault tolerance but uses more disk space' },
+                { key: 'chunk_size', label: 'Chunk Size (bytes)', type: 'number', default: 4194304, help: 'Size of each data chunk in bytes. Default 4MB (4194304). Larger chunks = fewer metadata lookups, smaller chunks = less wasted space' },
             ]},
-            { key: 'mount', label: 'Mount', fields: [
-                { key: 'path', label: 'Mount Path', type: 'string', placeholder: '/mnt/wolfdisk' },
-                { key: 'allow_other', label: 'Allow Other Users', type: 'boolean', default: true },
+            { key: 'mount', label: 'Mount', description: 'FUSE mount settings — this is where the distributed filesystem appears as a local directory.', fields: [
+                { key: 'path', label: 'Mount Path', type: 'string', placeholder: '/mnt/wolfdisk', help: 'Local directory where WolfDisk will be mounted. Applications read/write files here as if it were a normal folder' },
+                { key: 'allow_other', label: 'Allow Other Users', type: 'boolean', default: true, help: 'Allow users other than root to access the mount. Required for most applications and containers to use the filesystem' },
             ]},
         ];
     }
     if (component === 'wolfscale') {
         return [
-            { key: 'node', label: 'Node', fields: [
-                { key: 'id', label: 'Node ID', type: 'string', placeholder: 'node-1' },
-                { key: 'bind_address', label: 'Bind Address', type: 'string', placeholder: '0.0.0.0:7654' },
-                { key: 'data_dir', label: 'Data Directory', type: 'string', placeholder: '/var/lib/wolfscale' },
+            { key: 'node', label: 'Node', description: 'Identity and network settings for this WolfScale node.', fields: [
+                { key: 'id', label: 'Node ID', type: 'string', placeholder: 'node-1', help: 'Unique name for this node — must be different on each server in the cluster' },
+                { key: 'bind_address', label: 'Bind Address', type: 'string', placeholder: '0.0.0.0:7654', help: 'IP and port for Raft consensus communication between cluster nodes' },
+                { key: 'data_dir', label: 'Data Directory', type: 'string', placeholder: '/var/lib/wolfscale', help: 'Where WolfScale stores its Raft log, snapshots, and metadata on disk' },
             ]},
-            { key: 'database', label: 'Database', fields: [
-                { key: 'host', label: 'MariaDB Host', type: 'string', placeholder: 'localhost' },
-                { key: 'port', label: 'Port', type: 'number', default: 3306 },
-                { key: 'user', label: 'User', type: 'string', placeholder: 'wolfscale' },
-                { key: 'password', label: 'Password', type: 'password' },
-                { key: 'database', label: 'Database', type: 'string', help: 'Leave empty for server-wide replication' },
-                { key: 'pool_size', label: 'Pool Size', type: 'number', default: 10 },
-                { key: 'connect_timeout_secs', label: 'Connect Timeout (s)', type: 'number', default: 30 },
+            { key: 'database', label: 'Database', description: 'Connection to the local MariaDB/MySQL instance that WolfScale replicates.', fields: [
+                { key: 'host', label: 'MariaDB Host', type: 'string', placeholder: 'localhost', help: 'Hostname or IP of the MariaDB server to replicate. Usually localhost if running on the same machine' },
+                { key: 'port', label: 'Port', type: 'number', default: 3306, help: 'MariaDB port number (default 3306)' },
+                { key: 'user', label: 'User', type: 'string', placeholder: 'wolfscale', help: 'MariaDB user with replication privileges (REPLICATION SLAVE, REPLICATION CLIENT). Create with: GRANT ALL ON *.* TO wolfscale@localhost' },
+                { key: 'password', label: 'Password', type: 'password', help: 'Password for the MariaDB replication user' },
+                { key: 'database', label: 'Database', type: 'string', help: 'Specific database to replicate. Leave empty to replicate all databases on the server' },
+                { key: 'pool_size', label: 'Pool Size', type: 'number', default: 10, help: 'Number of persistent connections to keep open to MariaDB. Increase if you see connection pool exhaustion under load' },
+                { key: 'connect_timeout_secs', label: 'Connect Timeout (s)', type: 'number', default: 30, help: 'How long to wait for a MariaDB connection before timing out' },
             ]},
-            { key: 'wal', label: 'Write-Ahead Log', fields: [
-                { key: 'batch_size', label: 'Batch Size', type: 'number', default: 1000 },
-                { key: 'flush_interval_ms', label: 'Flush Interval (ms)', type: 'number', default: 100 },
-                { key: 'compression', label: 'Enable Compression', type: 'boolean', default: true },
-                { key: 'segment_size_mb', label: 'Segment Size (MB)', type: 'number', default: 64 },
-                { key: 'retention_hours', label: 'Retention (hours)', type: 'number', default: 168 },
-                { key: 'fsync', label: 'Fsync (Durable Writes)', type: 'boolean', default: true },
+            { key: 'wal', label: 'Write-Ahead Log', description: 'WAL ensures durability — every write is logged before being applied. These settings affect write performance and crash recovery.', fields: [
+                { key: 'batch_size', label: 'Batch Size', type: 'number', default: 1000, help: 'Maximum number of SQL statements to batch together before flushing. Higher = better throughput, but more data at risk during a crash' },
+                { key: 'flush_interval_ms', label: 'Flush Interval (ms)', type: 'number', default: 100, help: 'How often to flush batched writes to disk in milliseconds. Lower = less data loss risk, higher = better performance' },
+                { key: 'compression', label: 'Enable Compression', type: 'boolean', default: true, help: 'Compress WAL segments to save disk space. Slight CPU overhead but significantly reduces storage usage' },
+                { key: 'segment_size_mb', label: 'Segment Size (MB)', type: 'number', default: 64, help: 'Maximum size of each WAL segment file before rotating to a new one' },
+                { key: 'retention_hours', label: 'Retention (hours)', type: 'number', default: 168, help: 'How long to keep old WAL segments (default 168 = 7 days). Needed for nodes that go offline temporarily to catch up' },
+                { key: 'fsync', label: 'Fsync (Durable Writes)', type: 'boolean', default: true, help: 'Force writes to be flushed to physical disk. Disabling improves performance but risks data loss on power failure' },
             ]},
-            { key: 'cluster', label: 'Cluster', fields: [
-                { key: 'peers', label: 'Cluster Peers', type: 'array', help: 'One host:port per line' },
-                { key: 'heartbeat_interval_ms', label: 'Heartbeat Interval (ms)', type: 'number', default: 500 },
-                { key: 'election_timeout_ms', label: 'Election Timeout (ms)', type: 'number', default: 2000 },
-                { key: 'max_batch_entries', label: 'Max Batch Entries', type: 'number', default: 1000 },
+            { key: 'cluster', label: 'Cluster', description: 'Raft consensus settings for multi-node replication. These control leader election and data synchronization between nodes.', fields: [
+                { key: 'peers', label: 'Cluster Peers', type: 'array', help: 'Other WolfScale nodes in the cluster (one host:port per line, e.g. 192.168.1.10:7654). Leave empty for a single-node setup' },
+                { key: 'heartbeat_interval_ms', label: 'Heartbeat Interval (ms)', type: 'number', default: 500, help: 'How often the leader sends heartbeats to followers. Lower = faster failure detection, but more network traffic' },
+                { key: 'election_timeout_ms', label: 'Election Timeout (ms)', type: 'number', default: 2000, help: 'How long a follower waits without a heartbeat before starting a new leader election. Must be greater than heartbeat interval' },
+                { key: 'max_batch_entries', label: 'Max Batch Entries', type: 'number', default: 1000, help: 'Maximum Raft log entries to send in a single replication batch' },
             ]},
-            { key: 'api', label: 'HTTP API', fields: [
-                { key: 'enabled', label: 'Enable HTTP API', type: 'boolean', default: true },
-                { key: 'bind_address', label: 'API Bind Address', type: 'string', placeholder: '0.0.0.0:8080' },
-                { key: 'cors_enabled', label: 'Enable CORS', type: 'boolean', default: false },
+            { key: 'api', label: 'HTTP API', description: 'REST API for monitoring cluster health, triggering failovers, and querying node status.', fields: [
+                { key: 'enabled', label: 'Enable HTTP API', type: 'boolean', default: true, help: 'Enable the HTTP management API. Used by WolfStack dashboard to monitor this node' },
+                { key: 'bind_address', label: 'API Bind Address', type: 'string', placeholder: '0.0.0.0:8080', help: 'IP and port for the HTTP API. Use 0.0.0.0 to allow remote access, or 127.0.0.1 for local-only' },
+                { key: 'cors_enabled', label: 'Enable CORS', type: 'boolean', default: false, help: 'Allow cross-origin requests to the API. Only needed if accessing the API directly from a browser on a different domain' },
             ]},
-            { key: 'logging', label: 'Logging', fields: [
-                { key: 'level', label: 'Log Level', type: 'select', options: ['trace', 'debug', 'info', 'warn', 'error'] },
-                { key: 'format', label: 'Format', type: 'select', options: ['pretty', 'json', 'compact'] },
+            { key: 'logging', label: 'Logging', description: 'Log output settings for debugging and monitoring.', fields: [
+                { key: 'level', label: 'Log Level', type: 'select', options: ['trace', 'debug', 'info', 'warn', 'error'], help: 'Minimum severity to log. info is recommended for production. Use debug or trace to diagnose issues' },
+                { key: 'format', label: 'Format', type: 'select', options: ['pretty', 'json', 'compact'], help: 'pretty: human-readable with colors. json: structured JSON for log aggregation tools. compact: minimal one-line format' },
             ]},
         ];
     }
@@ -6022,8 +6038,12 @@ function renderTomlForm(component, config) {
 
     let html = '';
     for (const section of sections) {
+        const sectionDesc = section.description
+            ? `<p style="color:var(--text-muted); font-size:12px; margin:4px 0 12px 0;">${escapeHtml(section.description)}</p>`
+            : '';
         html += `<div style="margin-bottom:24px; border-bottom:1px solid var(--border); padding-bottom:16px;">
-            <h4 style="margin-bottom:12px; color:var(--accent-light); font-size:14px;">[${escapeHtml(section.key)}] ${escapeHtml(section.label || '')}</h4>
+            <h4 style="margin-bottom:4px; color:var(--accent-light); font-size:14px;">[${escapeHtml(section.key)}] ${escapeHtml(section.label || '')}</h4>
+            ${sectionDesc}
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px 20px;">`;
 
         for (const field of section.fields) {
