@@ -692,8 +692,12 @@ body.sidebar-collapsed .main-content {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    gap: 4px;
+    gap: 2px;
     border-bottom: 1px solid var(--border);
+}
+.sidebar-logo img {
+    width: 100%;
+    height: auto;
 }
 
 .sidebar-logo .logo-icon {
