@@ -2126,79 +2126,17 @@ async function doInstallComponent(name, overlay) {
     if (!selected) return;
 
     const target = selected.value;
-    const confirmBtn = document.getElementById('install-confirm-btn');
-    if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = 'Installing...'; }
+    overlay.remove();
 
-    const targetLabel = target === 'host' ? 'this host' : target.split(':')[1];
-
-    // Replace dialog content with progress spinner + elapsed timer
-    const card = overlay.querySelector('div');
-    card.innerHTML = `
-        <div style="text-align:center; padding:8px;">
-            <div style="width:56px; height:56px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; margin:0 auto 20px;"></div>
-            <h3 style="color:var(--text-primary); font-size:17px; margin-bottom:8px; font-weight:700;">Installing ${escapeHtml(name)}</h3>
-            <p style="color:var(--text-secondary); font-size:13px; margin-bottom:4px;">Installing on ${escapeHtml(targetLabel)}...</p>
-            <p id="install-elapsed" style="color:var(--text-muted); font-size:12px; margin-bottom:4px; font-family:monospace;">Elapsed: 0:00</p>
-            <p id="install-stage" style="color:var(--text-muted); font-size:11px; margin-bottom:12px;">Downloading and running setup script...</p>
-            <div style="height:4px; background:var(--bg-secondary); border-radius:4px; overflow:hidden; margin-bottom:16px;">
-                <div style="height:100%; width:30%; background:linear-gradient(90deg,var(--accent),var(--accent-light)); border-radius:4px; animation:progressPulse 1.5s ease-in-out infinite;"></div>
-            </div>
-            <p style="color:var(--text-muted); font-size:11px;">This typically takes 1-3 minutes. Installing packages, configuring services...</p>
-        </div>`;
-
-    // Elapsed time counter
-    const startTime = Date.now();
-    const stageEl = document.getElementById('install-stage');
-    const elapsedTimer = setInterval(() => {
-        const el = document.getElementById('install-elapsed');
-        if (!el) { clearInterval(elapsedTimer); return; }
-        const secs = Math.floor((Date.now() - startTime) / 1000);
-        const m = Math.floor(secs / 60);
-        const s = secs % 60;
-        el.textContent = `Elapsed: ${m}:${s.toString().padStart(2, '0')}`;
-        // Update stage hints based on elapsed time
-        if (stageEl) {
-            if (secs > 120) stageEl.textContent = 'Still working — large packages can take a while...';
-            else if (secs > 60) stageEl.textContent = 'Configuring and starting services...';
-            else if (secs > 20) stageEl.textContent = 'Installing packages and dependencies...';
-        }
-    }, 1000);
-
-    try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 600000); // 10 min safety timeout
-
-        let resp;
-        if (target === 'host') {
-            resp = await fetch(apiUrl(`/api/components/${name}/install`), { method: 'POST', signal: controller.signal });
-        } else {
-            const [runtime, container] = target.split(':');
-            resp = await fetch(apiUrl('/api/containers/install-component'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ runtime, container, component: name }),
-                signal: controller.signal
-            });
-        }
-        clearTimeout(timeout);
-        clearInterval(elapsedTimer);
-        const data = await resp.json();
-        overlay.remove();
-        if (resp.ok) {
-            showToast(data.message || `${name} installed successfully`, 'success');
-        } else {
-            showToast(data.error || 'Installation failed', 'error');
-        }
-        loadComponents();
-    } catch (e) {
-        clearInterval(elapsedTimer);
-        overlay.remove();
-        if (e.name === 'AbortError') {
-            showToast('Installation timed out — the install may still be running in the background. Check the container logs.', 'error');
-        } else {
-            showToast('Failed: ' + e.message, 'error');
-        }
+    // Build console name: "component" for host, "component@runtime:container" for containers
+    let consoleName = name;
+    if (target !== 'host') {
+        consoleName = `${name}@${target}`;
     }
+
+    // Open a live terminal window showing the install in real-time
+    openConsole('install', consoleName);
+    showToast(`Installation terminal opened for ${name}`, 'success');
 }
 
 async function serviceAction(service, action) {
