@@ -100,10 +100,10 @@ async fn console_session(
                 "wolfnet" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh",
                 "wolfproxy" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfproxy/install.sh",
                 "wolfserve" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfserve/install.sh",
-                "wolfdisk" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh",
+                "wolfdisk" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/setup.sh",
                 "wolfscale" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh",
                 "mariadb" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/main/mariadb_setup.sh",
-                "certbot" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/main/certbot_setup.sh",
+                "certbot" => "__inline_certbot__",
                 _ => {
                     let _ = session.text(format!("\r\n\x1b[31mUnknown component: {}\x1b[0m\r\n", component)).await;
                     let _ = session.close(None).await;
@@ -111,16 +111,36 @@ async fn console_session(
                 }
             };
 
+            // Certbot installs via package manager directly; other components use a remote script
+            let certbot_inline = "if command -v apt-get >/dev/null 2>&1; then \
+                apt-get update -qq && apt-get install -y certbot; \
+                elif command -v dnf >/dev/null 2>&1; then \
+                dnf install -y certbot; \
+                elif command -v zypper >/dev/null 2>&1; then \
+                zypper install -y certbot; \
+                else echo 'Unsupported package manager' && exit 1; fi";
+            let is_inline = install_script == "__inline_certbot__";
+
             match target {
                 None | Some("host") => {
                     // Install on host
-                    cmd.arg(format!(
-                        "echo '\\x1b[1;36mInstalling {} on this host...\\x1b[0m' && \
-                         export DEBIAN_FRONTEND=noninteractive && \
-                         curl -fsSL '{}' | bash; \
-                         echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
-                        component, install_script
-                    ));
+                    if is_inline {
+                        cmd.arg(format!(
+                            "echo '\\x1b[1;36mInstalling {} on this host...\\x1b[0m' && \
+                             export DEBIAN_FRONTEND=noninteractive && \
+                             {}; \
+                             echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
+                            component, certbot_inline
+                        ));
+                    } else {
+                        cmd.arg(format!(
+                            "echo '\\x1b[1;36mInstalling {} on this host...\\x1b[0m' && \
+                             export DEBIAN_FRONTEND=noninteractive && \
+                             curl -fsSL '{}' | bash; \
+                             echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
+                            component, install_script
+                        ));
+                    }
                 }
                 Some(target_str) => {
                     // target_str is "docker:name" or "lxc:name"
@@ -129,28 +149,48 @@ async fn console_session(
                         let container = &target_str[idx+1..];
                         match runtime {
                             "docker" => {
-                                cmd.arg(format!(
-                                    "echo '\\x1b[1;36mInstalling {} in Docker container {}...\\x1b[0m' && \
-                                     docker exec -e DEBIAN_FRONTEND=noninteractive -e TERM=xterm-256color -it {} sh -c \
-                                     'apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || \
-                                      yum install -y -q curl 2>/dev/null || \
-                                      apk add --quiet curl 2>/dev/null || true && \
-                                      curl -fsSL \"{}\" | bash'; \
-                                     echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
-                                    component, container, container, install_script
-                                ));
+                                if is_inline {
+                                    cmd.arg(format!(
+                                        "echo '\\x1b[1;36mInstalling {} in Docker container {}...\\x1b[0m' && \
+                                         docker exec -e DEBIAN_FRONTEND=noninteractive -e TERM=xterm-256color -it {} sh -c \
+                                         '{}'; \
+                                         echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
+                                        component, container, container, certbot_inline
+                                    ));
+                                } else {
+                                    cmd.arg(format!(
+                                        "echo '\\x1b[1;36mInstalling {} in Docker container {}...\\x1b[0m' && \
+                                         docker exec -e DEBIAN_FRONTEND=noninteractive -e TERM=xterm-256color -it {} sh -c \
+                                         'apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || \
+                                          yum install -y -q curl 2>/dev/null || \
+                                          apk add --quiet curl 2>/dev/null || true && \
+                                          curl -fsSL \"{}\" | bash'; \
+                                         echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
+                                        component, container, container, install_script
+                                    ));
+                                }
                             }
                             "lxc" => {
-                                cmd.arg(format!(
-                                    "echo '\\x1b[1;36mInstalling {} in LXC container {}...\\x1b[0m' && \
-                                     lxc-attach -n {} --set-var TERM=xterm-256color --set-var DEBIAN_FRONTEND=noninteractive -- sh -c \
-                                     'apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || \
-                                      yum install -y -q curl 2>/dev/null || \
-                                      apk add --quiet curl 2>/dev/null || true && \
-                                      curl -fsSL \"{}\" | bash'; \
-                                     echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
-                                    component, container, container, install_script
-                                ));
+                                if is_inline {
+                                    cmd.arg(format!(
+                                        "echo '\\x1b[1;36mInstalling {} in LXC container {}...\\x1b[0m' && \
+                                         lxc-attach -n {} --set-var TERM=xterm-256color --set-var DEBIAN_FRONTEND=noninteractive -- sh -c \
+                                         '{}'; \
+                                         echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
+                                        component, container, container, certbot_inline
+                                    ));
+                                } else {
+                                    cmd.arg(format!(
+                                        "echo '\\x1b[1;36mInstalling {} in LXC container {}...\\x1b[0m' && \
+                                         lxc-attach -n {} --set-var TERM=xterm-256color --set-var DEBIAN_FRONTEND=noninteractive -- sh -c \
+                                         'apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || \
+                                          yum install -y -q curl 2>/dev/null || \
+                                          apk add --quiet curl 2>/dev/null || true && \
+                                          curl -fsSL \"{}\" | bash'; \
+                                         echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
+                                        component, container, container, install_script
+                                    ));
+                                }
                             }
                             _ => {
                                 let _ = session.text(format!("\r\n\x1b[31mUnsupported runtime: {}\x1b[0m\r\n", runtime)).await;
