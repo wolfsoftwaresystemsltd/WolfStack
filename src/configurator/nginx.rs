@@ -268,6 +268,54 @@ pub fn error_log(target: &ExecTarget, lines: usize) -> Vec<String> {
     }
 }
 
+/// Bootstrap nginx — install it and create a default config if not present
+pub fn bootstrap_nginx(target: &ExecTarget) -> Result<String, String> {
+    // Install nginx if not present
+    if !is_nginx_installed(target) {
+        let distro = target.detect_distro();
+        let install_cmd = match distro {
+            DistroFamily::Debian => "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y nginx",
+            DistroFamily::RedHat => "dnf install -y nginx",
+            DistroFamily::Suse => "zypper install -y nginx",
+            DistroFamily::Unknown => "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y nginx",
+        };
+        target.exec(install_cmd)
+            .map_err(|e| format!("Failed to install nginx: {}", e))?;
+    }
+
+    // Ensure directories exist
+    let paths = nginx_paths(target);
+    let _ = target.exec(&format!("mkdir -p '{}'", paths.sites_available));
+    if let Some(enabled) = paths.sites_enabled {
+        let _ = target.exec(&format!("mkdir -p '{}'", enabled));
+    }
+
+    // Create a default site config only if no configs exist yet
+    let existing = target.list_dir(paths.sites_available).unwrap_or_default();
+    let has_configs = existing.iter().any(|f| !f.starts_with('.'));
+    if !has_configs {
+        let default_config = "server {\n    listen 80 default_server;\n    listen [::]:80 default_server;\n    server_name _;\n\n    root /var/www/html;\n    index index.html index.htm;\n\n    location / {\n        try_files $uri $uri/ =404;\n    }\n}\n";
+        let config_name = if paths.is_debian { "default" } else { "default.conf" };
+        let config_path = format!("{}/{}", paths.sites_available, config_name);
+        target.write_file(&config_path, default_config)?;
+
+        // Enable on Debian
+        if paths.is_debian {
+            if let Some(enabled_dir) = paths.sites_enabled {
+                let enabled_path = format!("{}/{}", enabled_dir, config_name);
+                let _ = target.symlink(&config_path, &enabled_path);
+            }
+        }
+
+        // Create document root
+        let _ = target.exec("mkdir -p /var/www/html");
+
+        Ok("Nginx installed and default site created".to_string())
+    } else {
+        Ok("Nginx installed — existing configuration preserved".to_string())
+    }
+}
+
 /// Generate a basic nginx site config from form parameters
 pub fn generate_site_config(params: &NginxSiteParams) -> String {
     let mut config = String::new();

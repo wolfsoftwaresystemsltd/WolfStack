@@ -364,6 +364,51 @@ pub fn error_log(target: &ExecTarget, lines: usize) -> Vec<String> {
     Vec::new()
 }
 
+/// Bootstrap Apache — install it and create a default config if not present
+pub fn bootstrap_apache(target: &ExecTarget) -> Result<String, String> {
+    if !is_apache_installed(target) {
+        let distro = target.detect_distro();
+        let install_cmd = match distro {
+            DistroFamily::Debian => "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y apache2",
+            DistroFamily::RedHat => "dnf install -y httpd",
+            DistroFamily::Suse => "zypper install -y apache2",
+            DistroFamily::Unknown => "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y apache2",
+        };
+        target.exec(install_cmd)
+            .map_err(|e| format!("Failed to install Apache: {}", e))?;
+    }
+
+    let paths = apache_paths(target);
+
+    // Ensure directories exist
+    let _ = target.exec(&format!("mkdir -p '{}'", paths.sites_available));
+    if paths.is_debian {
+        let _ = target.exec(&format!("mkdir -p '{}'", paths.sites_enabled));
+    }
+
+    // Create default vhost only if no configs exist
+    let existing = target.list_dir(paths.sites_available).unwrap_or_default();
+    let has_configs = existing.iter().any(|f| !f.starts_with('.'));
+    if !has_configs {
+        let default_config = "<VirtualHost *:80>\n    ServerName localhost\n    DocumentRoot /var/www/html\n\n    <Directory /var/www/html>\n        Options Indexes FollowSymLinks\n        AllowOverride All\n        Require all granted\n    </Directory>\n\n    ErrorLog ${APACHE_LOG_DIR}/error.log\n    CustomLog ${APACHE_LOG_DIR}/access.log combined\n</VirtualHost>\n";
+        let config_name = if paths.is_debian { "000-default.conf" } else { "default.conf" };
+        let config_path = format!("{}/{}", paths.sites_available, config_name);
+        target.write_file(&config_path, default_config)?;
+
+        // Enable on Debian
+        if paths.is_debian {
+            let _ = target.exec(&format!("a2ensite '{}'", config_name.replace('\'', "'\\''")));
+        }
+
+        // Create document root
+        let _ = target.exec("mkdir -p /var/www/html");
+
+        Ok("Apache installed and default virtual host created".to_string())
+    } else {
+        Ok("Apache installed — existing configuration preserved".to_string())
+    }
+}
+
 /// Generate a basic Apache vhost config from form parameters
 pub fn generate_vhost_config(params: &ApacheVhostParams) -> String {
     let mut config = String::new();

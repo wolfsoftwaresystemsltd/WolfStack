@@ -52,6 +52,96 @@ pub fn save_config(target: &ExecTarget, component: &str, data: &serde_json::Valu
         config_path, comp.service_name()))
 }
 
+/// Bootstrap a default TOML config for a component — never overwrites existing files
+pub fn bootstrap_config(target: &ExecTarget, component: &str) -> Result<String, String> {
+    let comp = match component.to_lowercase().as_str() {
+        "wolfdisk" => Component::WolfDisk,
+        "wolfscale" => Component::WolfScale,
+        _ => return Err(format!("Unsupported component: {}", component)),
+    };
+
+    let config_path = comp.config_path()
+        .ok_or_else(|| format!("No config path for {}", component))?;
+
+    // Never overwrite existing config
+    if target.path_exists(config_path).unwrap_or(false) {
+        return Ok(format!("Configuration already exists at {}. Not overwriting.", config_path));
+    }
+
+    // Create parent directory
+    if let Some(parent) = std::path::Path::new(config_path).parent() {
+        let _ = target.exec(&format!("mkdir -p '{}'", parent.display()));
+    }
+
+    let default_config = match comp {
+        Component::WolfDisk => r#"# WolfDisk Configuration
+# Auto-generated default — edit as needed
+
+[node]
+id = "node-1"
+role = "auto"
+bind = "0.0.0.0:9500"
+data_dir = "/var/lib/wolfdisk"
+
+[cluster]
+peers = []
+discovery = "udp://0.0.0.0:9501"
+
+[replication]
+mode = "shared"
+factor = 3
+chunk_size = 4194304
+
+[mount]
+path = "/mnt/wolfdisk"
+allow_other = true
+"#,
+        Component::WolfScale => r#"# WolfScale Configuration
+# Auto-generated default — edit as needed
+
+[node]
+id = "node-1"
+bind_address = "0.0.0.0:7654"
+data_dir = "/var/lib/wolfscale"
+
+[database]
+host = "localhost"
+port = 3306
+user = "wolfscale"
+password = ""
+pool_size = 10
+connect_timeout_secs = 30
+
+[wal]
+batch_size = 1000
+flush_interval_ms = 100
+compression = true
+segment_size_mb = 64
+retention_hours = 168
+fsync = true
+
+[cluster]
+peers = []
+heartbeat_interval_ms = 500
+election_timeout_ms = 2000
+max_batch_entries = 1000
+
+[api]
+enabled = true
+bind_address = "0.0.0.0:8080"
+cors_enabled = false
+
+[logging]
+level = "info"
+format = "pretty"
+"#,
+        _ => return Err(format!("No default config template for {}", component)),
+    };
+
+    target.write_file(config_path, default_config)?;
+    Ok(format!("Default configuration created at {}. Edit the values and save.", config_path))
+}
+
 /// Validate a TOML string (parse it and check for errors)
 pub fn validate_toml(content: &str) -> Result<(), String> {
     let _: toml::Value = content.parse()
