@@ -5421,13 +5421,13 @@ pub fn install_component_in_container(
 
             // First ensure curl is available in the container
             let _ = Command::new("docker")
-                .args(["exec", container, "sh", "-c",
+                .args(["exec", "-e", "DEBIAN_FRONTEND=noninteractive", container, "sh", "-c",
                     "apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || yum install -y -q curl 2>/dev/null || apk add --quiet curl 2>/dev/null || true"])
                 .output();
 
-            // Download and run install script
+            // Download and run install script (DEBIAN_FRONTEND=noninteractive prevents dpkg prompts from hanging)
             Command::new("docker")
-                .args(["exec", container, "sh", "-c",
+                .args(["exec", "-e", "DEBIAN_FRONTEND=noninteractive", container, "sh", "-c",
                     &format!("curl -fsSL '{}' | bash", install_script)])
                 .output()
                 .map_err(|e| format!("Failed to exec in container: {}", e))?
@@ -5446,13 +5446,13 @@ pub fn install_component_in_container(
             // First ensure curl is available
             let _ = Command::new("lxc-attach")
                 .args(["-n", container, "--", "sh", "-c",
-                    "apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || yum install -y -q curl 2>/dev/null || apk add --quiet curl 2>/dev/null || true"])
+                    "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || yum install -y -q curl 2>/dev/null || apk add --quiet curl 2>/dev/null || true"])
                 .output();
 
-            // Download and run install script
+            // Download and run install script (DEBIAN_FRONTEND=noninteractive prevents dpkg prompts from hanging)
             Command::new("lxc-attach")
                 .args(["-n", container, "--", "sh", "-c",
-                    &format!("curl -fsSL '{}' | bash", install_script)])
+                    &format!("export DEBIAN_FRONTEND=noninteractive; curl -fsSL '{}' | bash", install_script)])
                 .output()
                 .map_err(|e| format!("Failed to attach to container: {}", e))?
         }
