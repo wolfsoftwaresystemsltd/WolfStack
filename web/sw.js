@@ -1,5 +1,5 @@
 // WolfStack Service Worker — enables PWA install and offline shell
-const CACHE_NAME = 'wolfstack-v11.23.0';
+const CACHE_NAME = 'wolfstack-v11.24.0';
 const SHELL_ASSETS = [
     '/',
     '/index.html',

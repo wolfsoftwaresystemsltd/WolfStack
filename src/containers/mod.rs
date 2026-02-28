@@ -2906,12 +2906,28 @@ pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
                     cfg.nfs_enabled = true;
                 }
 
-                // Resource limits (cgroup v1 and v2)
+                // Resource limits (cgroup v1 and v2) — stored in bytes, convert to MB
                 if key.contains("memory.limit") || key.contains("memory.max") {
-                    cfg.memory_limit = val.to_string();
+                    if let Ok(bytes) = val.parse::<u64>() {
+                        if bytes > 10000 {
+                            cfg.memory_limit = (bytes / (1024 * 1024)).to_string();
+                        } else {
+                            cfg.memory_limit = val.to_string();
+                        }
+                    } else {
+                        cfg.memory_limit = val.to_string();
+                    }
                 }
                 if key.contains("memory.memsw") || key.contains("swap") {
-                    cfg.swap_limit = val.to_string();
+                    if let Ok(bytes) = val.parse::<u64>() {
+                        if bytes > 10000 {
+                            cfg.swap_limit = (bytes / (1024 * 1024)).to_string();
+                        } else {
+                            cfg.swap_limit = val.to_string();
+                        }
+                    } else {
+                        cfg.swap_limit = val.to_string();
+                    }
                 }
                 if key.contains("cpuset.cpus") {
                     cfg.cpus = val.to_string();
@@ -3334,15 +3350,23 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
         }
     }
 
-    // Resources
+    // Resources — cgroup2 memory.max expects bytes, frontend sends MB
     let mem = settings.memory_limit.as_deref().unwrap_or(&current.memory_limit);
     if !mem.is_empty() {
-        preserved.push(format!("lxc.cgroup2.memory.max = {}", mem));
+        let mb = parse_mem_to_mb(mem);
+        if mb > 0 {
+            let bytes = mb * 1024 * 1024;
+            preserved.push(format!("lxc.cgroup2.memory.max = {}", bytes));
+        }
     }
 
     let swap = settings.swap_limit.as_deref().unwrap_or(&current.swap_limit);
     if !swap.is_empty() {
-        preserved.push(format!("lxc.cgroup2.memory.swap.max = {}", swap));
+        let mb = parse_mem_to_mb(swap);
+        if mb > 0 {
+            let bytes = mb * 1024 * 1024;
+            preserved.push(format!("lxc.cgroup2.memory.swap.max = {}", bytes));
+        }
     }
 
     let cpus = settings.cpus.as_deref().unwrap_or(&current.cpus);
@@ -4840,30 +4864,26 @@ pub fn lxc_set_resource_limits(container: &str, memory: Option<&str>, cpus: Opti
         
         if let Some(mem) = memory {
             if !mem.is_empty() {
-                // Convert e.g. "1G" to bytes if needed, but lxc.cgroup.memory.limit_in_bytes often accepts suffixes
-                let limit_line = format!("\nlxc.cgroup.memory.limit_in_bytes = {}\n", mem);
-                if !config.contains("lxc.cgroup.memory.limit_in_bytes") {
-                   config.push_str(&limit_line);
-                   modified = true;
-                   messages.push(format!("Memory limit set to {}", mem));
+                let mb = parse_mem_to_mb(mem);
+                if mb > 0 {
+                    let bytes = mb * 1024 * 1024;
+                    // Use cgroup2 key (cgroup v1 is legacy and fails on modern systems)
+                    let limit_line = format!("\nlxc.cgroup2.memory.max = {}\n", bytes);
+                    if !config.contains("memory.max") && !config.contains("memory.limit_in_bytes") {
+                       config.push_str(&limit_line);
+                       modified = true;
+                       messages.push(format!("Memory limit set to {} MB", mb));
+                    }
                 }
             }
         }
-        
+
         if let Some(cpu) = cpus {
             if !cpu.is_empty() {
-                 // Convert core count to cpuset? Actually easier to use cpu.shares or quota for generic limits
-                 // But typically users want "2 cores" -> cpuset.cpus = 0-1
-                 // Implementing simple cpuset based on count is tricky without knowing topology.
-                 // We'll use cgroup.cpu.max or similar if cgroup2, or shares.
-                 // For now, let's just append the raw value if it's a cpuset, or use shares?
-                 // Let's assume the user input (dropdown) maps to cpuset e.g. "0" or "0-1" in a smarter way?
-                 // The frontend sends "2", "4" etc.
-                 // A safe way is cpu.shares = 1024 * cores.
                  if let Ok(cores) = cpu.parse::<u32>() {
                      let shares = cores * 1024;
-                     let limit_line = format!("\nlxc.cgroup.cpu.shares = {}\n", shares);
-                     if !config.contains("lxc.cgroup.cpu.shares") {
+                     let limit_line = format!("\nlxc.cgroup2.cpu.shares = {}\n", shares);
+                     if !config.contains("cpu.shares") {
                         config.push_str(&limit_line);
                         modified = true;
                          messages.push(format!("CPU shares set to {}", shares));
