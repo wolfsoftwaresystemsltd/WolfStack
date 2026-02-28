@@ -88,6 +88,84 @@ async fn console_session(
             // WolfStack upgrade — re-run the setup script
             cmd.arg("curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/main/setup.sh | bash");
         }
+        "install" => {
+            // Component install — name format: "component" (host) or "component@docker:container" / "component@lxc:container"
+            let (component, target) = if let Some(idx) = name.find('@') {
+                (&name[..idx], Some(&name[idx+1..]))
+            } else {
+                (name.as_str(), None)
+            };
+
+            let install_script = match component {
+                "wolfnet" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh",
+                "wolfproxy" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfProxy/main/setup.sh",
+                "wolfserve" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfServe/main/setup.sh",
+                "wolfdisk" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh",
+                "wolfscale" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh",
+                "mariadb" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/main/mariadb_setup.sh",
+                "certbot" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/main/certbot_setup.sh",
+                _ => {
+                    let _ = session.text(format!("\r\n\x1b[31mUnknown component: {}\x1b[0m\r\n", component)).await;
+                    let _ = session.close(None).await;
+                    return;
+                }
+            };
+
+            match target {
+                None | Some("host") => {
+                    // Install on host
+                    cmd.arg(format!(
+                        "echo '\\x1b[1;36mInstalling {} on this host...\\x1b[0m' && \
+                         export DEBIAN_FRONTEND=noninteractive && \
+                         curl -fsSL '{}' | bash; \
+                         echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
+                        component, install_script
+                    ));
+                }
+                Some(target_str) => {
+                    // target_str is "docker:name" or "lxc:name"
+                    if let Some(idx) = target_str.find(':') {
+                        let runtime = &target_str[..idx];
+                        let container = &target_str[idx+1..];
+                        match runtime {
+                            "docker" => {
+                                cmd.arg(format!(
+                                    "echo '\\x1b[1;36mInstalling {} in Docker container {}...\\x1b[0m' && \
+                                     docker exec -e DEBIAN_FRONTEND=noninteractive -e TERM=xterm-256color -it {} sh -c \
+                                     'apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || \
+                                      yum install -y -q curl 2>/dev/null || \
+                                      apk add --quiet curl 2>/dev/null || true && \
+                                      curl -fsSL \"{}\" | bash'; \
+                                     echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
+                                    component, container, container, install_script
+                                ));
+                            }
+                            "lxc" => {
+                                cmd.arg(format!(
+                                    "echo '\\x1b[1;36mInstalling {} in LXC container {}...\\x1b[0m' && \
+                                     lxc-attach -n {} --set-var TERM=xterm-256color --set-var DEBIAN_FRONTEND=noninteractive -- sh -c \
+                                     'apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || \
+                                      yum install -y -q curl 2>/dev/null || \
+                                      apk add --quiet curl 2>/dev/null || true && \
+                                      curl -fsSL \"{}\" | bash'; \
+                                     echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
+                                    component, container, container, install_script
+                                ));
+                            }
+                            _ => {
+                                let _ = session.text(format!("\r\n\x1b[31mUnsupported runtime: {}\x1b[0m\r\n", runtime)).await;
+                                let _ = session.close(None).await;
+                                return;
+                            }
+                        }
+                    } else {
+                        let _ = session.text("\r\n\x1b[31mInvalid target format. Use: component@runtime:container\x1b[0m\r\n").await;
+                        let _ = session.close(None).await;
+                        return;
+                    }
+                }
+            }
+        }
         _ => {
             let _ = session.text("\r\n\x1b[31mUnknown container type\x1b[0m\r\n").await;
             let _ = session.close(None).await;
