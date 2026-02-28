@@ -5,10 +5,41 @@
 //! Nginx site management for WolfProxy configurator
 
 use serde::Deserialize;
+use crate::installer::DistroFamily;
 use super::{SiteEntry, ConfigTestResult, validate_name, ExecTarget};
 
-const SITES_AVAILABLE: &str = "/etc/nginx/sites-available";
-const SITES_ENABLED: &str = "/etc/nginx/sites-enabled";
+/// Distro-specific nginx paths
+struct NginxPaths {
+    sites_available: &'static str,
+    sites_enabled: Option<&'static str>,
+    is_debian: bool,
+}
+
+fn nginx_paths(target: &ExecTarget) -> NginxPaths {
+    // Check if Debian-style sites-available exists
+    let has_sites_available = target.path_exists("/etc/nginx/sites-available").unwrap_or(false);
+    if has_sites_available {
+        return NginxPaths {
+            sites_available: "/etc/nginx/sites-available",
+            sites_enabled: Some("/etc/nginx/sites-enabled"),
+            is_debian: true,
+        };
+    }
+
+    // Check distro as secondary signal
+    match target.detect_distro() {
+        DistroFamily::Debian => NginxPaths {
+            sites_available: "/etc/nginx/sites-available",
+            sites_enabled: Some("/etc/nginx/sites-enabled"),
+            is_debian: true,
+        },
+        _ => NginxPaths {
+            sites_available: "/etc/nginx/conf.d",
+            sites_enabled: None,
+            is_debian: false,
+        },
+    }
+}
 
 /// Parameters for generating an nginx site config
 #[derive(Debug, Deserialize)]
@@ -26,22 +57,44 @@ pub struct NginxSiteParams {
 
 fn default_listen_port() -> u16 { 80 }
 
-/// List all sites in sites-available with enabled status
+/// List all sites with enabled status
 pub fn list_sites(target: &ExecTarget) -> Result<Vec<SiteEntry>, String> {
-    if !target.path_exists(SITES_AVAILABLE).unwrap_or(false) {
+    let paths = nginx_paths(target);
+
+    if !target.path_exists(paths.sites_available).unwrap_or(false) {
         return Ok(Vec::new());
     }
 
-    let names = target.list_dir(SITES_AVAILABLE)?;
+    let names = target.list_dir(paths.sites_available)?;
 
     let mut sites = Vec::new();
     for name in names {
         if name.starts_with('.') {
             continue;
         }
-        let enabled_path = format!("{}/{}", SITES_ENABLED, name);
-        let enabled = target.path_exists(&enabled_path).unwrap_or(false)
-            || target.is_symlink(&enabled_path).unwrap_or(false);
+
+        let enabled = if paths.is_debian {
+            // Debian: check for symlink in sites-enabled
+            if let Some(enabled_dir) = paths.sites_enabled {
+                let enabled_path = format!("{}/{}", enabled_dir, name);
+                target.path_exists(&enabled_path).unwrap_or(false)
+                    || target.is_symlink(&enabled_path).unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            // RHEL/conf.d: all .conf files are enabled, .conf.disabled are not
+            if name.ends_with(".disabled") {
+                sites.push(SiteEntry {
+                    name: name.trim_end_matches(".disabled").to_string(),
+                    enabled: false,
+                    config_content: None,
+                });
+                continue;
+            }
+            name.ends_with(".conf")
+        };
+
         sites.push(SiteEntry {
             name,
             enabled,
@@ -55,14 +108,27 @@ pub fn list_sites(target: &ExecTarget) -> Result<Vec<SiteEntry>, String> {
 /// Read a single site config
 pub fn read_site(target: &ExecTarget, name: &str) -> Result<String, String> {
     validate_name(name)?;
-    let path = format!("{}/{}", SITES_AVAILABLE, name);
-    target.read_file(&path)
+    let paths = nginx_paths(target);
+
+    let path = format!("{}/{}", paths.sites_available, name);
+    if target.path_exists(&path).unwrap_or(false) {
+        return target.read_file(&path);
+    }
+
+    // Try .disabled suffix (conf.d style)
+    let disabled_path = format!("{}/{}.disabled", paths.sites_available, name);
+    if target.path_exists(&disabled_path).unwrap_or(false) {
+        return target.read_file(&disabled_path);
+    }
+
+    Err(format!("Site {} not found", name))
 }
 
 /// Create or update a site config file
 pub fn save_site(target: &ExecTarget, name: &str, content: &str) -> Result<String, String> {
     validate_name(name)?;
-    let path = format!("{}/{}", SITES_AVAILABLE, name);
+    let paths = nginx_paths(target);
+    let path = format!("{}/{}", paths.sites_available, name);
     target.write_file(&path, content)?;
     Ok(format!("Site {} saved", name))
 }
@@ -70,41 +136,79 @@ pub fn save_site(target: &ExecTarget, name: &str, content: &str) -> Result<Strin
 /// Delete a site config (removes from both available and enabled)
 pub fn delete_site(target: &ExecTarget, name: &str) -> Result<String, String> {
     validate_name(name)?;
+    let paths = nginx_paths(target);
 
-    // Remove from enabled first
-    let enabled_path = format!("{}/{}", SITES_ENABLED, name);
-    if target.path_exists(&enabled_path).unwrap_or(false)
-        || target.is_symlink(&enabled_path).unwrap_or(false)
-    {
-        let _ = target.remove_file(&enabled_path);
+    // Remove from enabled first (Debian)
+    if let Some(enabled_dir) = paths.sites_enabled {
+        let enabled_path = format!("{}/{}", enabled_dir, name);
+        if target.path_exists(&enabled_path).unwrap_or(false)
+            || target.is_symlink(&enabled_path).unwrap_or(false)
+        {
+            let _ = target.remove_file(&enabled_path);
+        }
     }
 
-    // Remove from available
-    let avail_path = format!("{}/{}", SITES_AVAILABLE, name);
-    target.remove_file(&avail_path)?;
+    // Remove from available/conf.d
+    let avail_path = format!("{}/{}", paths.sites_available, name);
+    let disabled_path = format!("{}.disabled", avail_path);
+    let _ = target.remove_file(&avail_path);
+    let _ = target.remove_file(&disabled_path);
     Ok(format!("Site {} deleted", name))
 }
 
-/// Enable a site (create symlink in sites-enabled)
+/// Enable a site
 pub fn enable_site(target: &ExecTarget, name: &str) -> Result<String, String> {
     validate_name(name)?;
-    let avail = format!("{}/{}", SITES_AVAILABLE, name);
-    let enabled = format!("{}/{}", SITES_ENABLED, name);
+    let paths = nginx_paths(target);
 
-    if !target.path_exists(&avail).unwrap_or(false) {
-        return Err(format!("Site {} not found in sites-available", name));
+    if paths.is_debian {
+        let avail = format!("{}/{}", paths.sites_available, name);
+        let enabled_dir = paths.sites_enabled.unwrap_or("/etc/nginx/sites-enabled");
+        let enabled = format!("{}/{}", enabled_dir, name);
+
+        if !target.path_exists(&avail).unwrap_or(false) {
+            return Err(format!("Site {} not found in sites-available", name));
+        }
+        target.symlink(&avail, &enabled)?;
+        Ok(format!("Site {} enabled", name))
+    } else {
+        // conf.d: rename .conf.disabled -> .conf
+        let disabled = format!("{}/{}.disabled", paths.sites_available, name);
+        let enabled = format!("{}/{}", paths.sites_available, name);
+        if target.path_exists(&disabled).unwrap_or(false) {
+            target.exec(&format!("mv '{}' '{}'",
+                disabled.replace('\'', "'\\''"),
+                enabled.replace('\'', "'\\''")))?;
+            Ok(format!("Site {} enabled", name))
+        } else {
+            Ok(format!("Site {} is already enabled", name))
+        }
     }
-
-    target.symlink(&avail, &enabled)?;
-    Ok(format!("Site {} enabled", name))
 }
 
-/// Disable a site (remove symlink from sites-enabled)
+/// Disable a site
 pub fn disable_site(target: &ExecTarget, name: &str) -> Result<String, String> {
     validate_name(name)?;
-    let enabled = format!("{}/{}", SITES_ENABLED, name);
-    target.remove_file(&enabled)?;
-    Ok(format!("Site {} disabled", name))
+    let paths = nginx_paths(target);
+
+    if paths.is_debian {
+        let enabled_dir = paths.sites_enabled.unwrap_or("/etc/nginx/sites-enabled");
+        let enabled = format!("{}/{}", enabled_dir, name);
+        target.remove_file(&enabled)?;
+        Ok(format!("Site {} disabled", name))
+    } else {
+        // conf.d: rename .conf -> .conf.disabled
+        let enabled = format!("{}/{}", paths.sites_available, name);
+        let disabled = format!("{}.disabled", enabled);
+        if target.path_exists(&enabled).unwrap_or(false) {
+            target.exec(&format!("mv '{}' '{}'",
+                enabled.replace('\'', "'\\''"),
+                disabled.replace('\'', "'\\''")))?;
+            Ok(format!("Site {} disabled", name))
+        } else {
+            Ok(format!("Site {} is already disabled", name))
+        }
+    }
 }
 
 /// Run nginx -t to test configuration
