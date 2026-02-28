@@ -57,11 +57,31 @@ pub struct NginxSiteParams {
 
 fn default_listen_port() -> u16 { 80 }
 
+/// Check if nginx is installed on the target
+pub fn is_nginx_installed(target: &ExecTarget) -> bool {
+    // Check for the nginx binary
+    let (_, _, success) = target.exec_full("which nginx 2>/dev/null || command -v nginx 2>/dev/null")
+        .unwrap_or((String::new(), String::new(), false));
+    if success { return true; }
+
+    // Fallback: check if /etc/nginx exists at all
+    target.path_exists("/etc/nginx").unwrap_or(false)
+}
+
 /// List all sites with enabled status
 pub fn list_sites(target: &ExecTarget) -> Result<Vec<SiteEntry>, String> {
+    if !is_nginx_installed(target) {
+        return Err("Nginx is not installed. Install nginx first, then use the configurator to manage sites.".to_string());
+    }
+
     let paths = nginx_paths(target);
 
     if !target.path_exists(paths.sites_available).unwrap_or(false) {
+        // nginx is installed but sites dir doesn't exist yet — create it
+        let _ = target.exec(&format!("mkdir -p '{}'", paths.sites_available));
+        if let Some(enabled) = paths.sites_enabled {
+            let _ = target.exec(&format!("mkdir -p '{}'", enabled));
+        }
         return Ok(Vec::new());
     }
 

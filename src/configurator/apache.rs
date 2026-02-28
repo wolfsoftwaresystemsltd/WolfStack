@@ -67,8 +67,21 @@ pub struct ApacheVhostParams {
 
 fn default_listen_port() -> u16 { 80 }
 
+/// Check if Apache is installed on the target
+pub fn is_apache_installed(target: &ExecTarget) -> bool {
+    let (_, _, success) = target.exec_full("which apache2 2>/dev/null || which httpd 2>/dev/null || command -v apache2 2>/dev/null || command -v httpd 2>/dev/null")
+        .unwrap_or((String::new(), String::new(), false));
+    if success { return true; }
+    target.path_exists("/etc/apache2").unwrap_or(false)
+        || target.path_exists("/etc/httpd").unwrap_or(false)
+}
+
 /// List all sites/vhosts with enabled status
 pub fn list_sites(target: &ExecTarget) -> Result<Vec<SiteEntry>, String> {
+    if !is_apache_installed(target) {
+        return Err("Apache is not installed. Install Apache (apache2/httpd) first, then use the configurator to manage virtual hosts.".to_string());
+    }
+
     let paths = apache_paths(target);
 
     if !target.path_exists(paths.sites_available).unwrap_or(false) {
