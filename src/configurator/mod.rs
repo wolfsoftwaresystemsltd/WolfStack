@@ -9,9 +9,12 @@
 //! - WolfServe (Apache2 vhost and module management)
 //! - WolfDisk / WolfScale (TOML config editing)
 
+pub mod exec_target;
 pub mod nginx;
 pub mod apache;
 pub mod toml_editor;
+
+pub use exec_target::ExecTarget;
 
 use serde::{Deserialize, Serialize};
 

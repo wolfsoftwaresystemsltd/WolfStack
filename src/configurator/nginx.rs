@@ -4,10 +4,8 @@
 
 //! Nginx site management for WolfProxy configurator
 
-use std::path::Path;
-use std::process::Command;
 use serde::Deserialize;
-use super::{SiteEntry, ConfigTestResult, validate_name};
+use super::{SiteEntry, ConfigTestResult, validate_name, ExecTarget};
 
 const SITES_AVAILABLE: &str = "/etc/nginx/sites-available";
 const SITES_ENABLED: &str = "/etc/nginx/sites-enabled";
@@ -29,23 +27,21 @@ pub struct NginxSiteParams {
 fn default_listen_port() -> u16 { 80 }
 
 /// List all sites in sites-available with enabled status
-pub fn list_sites() -> Result<Vec<SiteEntry>, String> {
-    let avail = Path::new(SITES_AVAILABLE);
-    if !avail.exists() {
+pub fn list_sites(target: &ExecTarget) -> Result<Vec<SiteEntry>, String> {
+    if !target.path_exists(SITES_AVAILABLE).unwrap_or(false) {
         return Ok(Vec::new());
     }
 
-    let entries = std::fs::read_dir(avail)
-        .map_err(|e| format!("Failed to read {}: {}", SITES_AVAILABLE, e))?;
+    let names = target.list_dir(SITES_AVAILABLE)?;
 
     let mut sites = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
+    for name in names {
         if name.starts_with('.') {
             continue;
         }
-        let enabled_path = Path::new(SITES_ENABLED).join(&name);
-        let enabled = enabled_path.exists() || enabled_path.is_symlink();
+        let enabled_path = format!("{}/{}", SITES_ENABLED, name);
+        let enabled = target.path_exists(&enabled_path).unwrap_or(false)
+            || target.is_symlink(&enabled_path).unwrap_or(false);
         sites.push(SiteEntry {
             name,
             enabled,
@@ -57,120 +53,67 @@ pub fn list_sites() -> Result<Vec<SiteEntry>, String> {
 }
 
 /// Read a single site config
-pub fn read_site(name: &str) -> Result<String, String> {
+pub fn read_site(target: &ExecTarget, name: &str) -> Result<String, String> {
     validate_name(name)?;
-    let path = Path::new(SITES_AVAILABLE).join(name);
-    std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))
+    let path = format!("{}/{}", SITES_AVAILABLE, name);
+    target.read_file(&path)
 }
 
 /// Create or update a site config file
-pub fn save_site(name: &str, content: &str) -> Result<String, String> {
+pub fn save_site(target: &ExecTarget, name: &str, content: &str) -> Result<String, String> {
     validate_name(name)?;
     let path = format!("{}/{}", SITES_AVAILABLE, name);
-
-    // Write via sudo tee
-    let mut child = Command::new("sudo")
-        .args(["tee", &path])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to write config: {}", e))?;
-
-    if let Some(ref mut stdin) = child.stdin {
-        use std::io::Write;
-        stdin.write_all(content.as_bytes())
-            .map_err(|e| format!("Failed to write config content: {}", e))?;
-    }
-
-    let output = child.wait_with_output()
-        .map_err(|e| format!("Failed to wait for write: {}", e))?;
-
-    if output.status.success() {
-        Ok(format!("Site {} saved", name))
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
+    target.write_file(&path, content)?;
+    Ok(format!("Site {} saved", name))
 }
 
 /// Delete a site config (removes from both available and enabled)
-pub fn delete_site(name: &str) -> Result<String, String> {
+pub fn delete_site(target: &ExecTarget, name: &str) -> Result<String, String> {
     validate_name(name)?;
 
     // Remove from enabled first
     let enabled_path = format!("{}/{}", SITES_ENABLED, name);
-    if Path::new(&enabled_path).exists() || Path::new(&enabled_path).is_symlink() {
-        let _ = Command::new("sudo").args(["rm", "-f", &enabled_path]).output();
+    if target.path_exists(&enabled_path).unwrap_or(false)
+        || target.is_symlink(&enabled_path).unwrap_or(false)
+    {
+        let _ = target.remove_file(&enabled_path);
     }
 
     // Remove from available
     let avail_path = format!("{}/{}", SITES_AVAILABLE, name);
-    let output = Command::new("sudo")
-        .args(["rm", "-f", &avail_path])
-        .output()
-        .map_err(|e| format!("Failed to delete: {}", e))?;
-
-    if output.status.success() {
-        Ok(format!("Site {} deleted", name))
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
+    target.remove_file(&avail_path)?;
+    Ok(format!("Site {} deleted", name))
 }
 
 /// Enable a site (create symlink in sites-enabled)
-pub fn enable_site(name: &str) -> Result<String, String> {
+pub fn enable_site(target: &ExecTarget, name: &str) -> Result<String, String> {
     validate_name(name)?;
     let avail = format!("{}/{}", SITES_AVAILABLE, name);
     let enabled = format!("{}/{}", SITES_ENABLED, name);
 
-    if !Path::new(&avail).exists() {
+    if !target.path_exists(&avail).unwrap_or(false) {
         return Err(format!("Site {} not found in sites-available", name));
     }
 
-    let output = Command::new("sudo")
-        .args(["ln", "-sf", &avail, &enabled])
-        .output()
-        .map_err(|e| format!("Failed to enable site: {}", e))?;
-
-    if output.status.success() {
-        Ok(format!("Site {} enabled", name))
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
+    target.symlink(&avail, &enabled)?;
+    Ok(format!("Site {} enabled", name))
 }
 
 /// Disable a site (remove symlink from sites-enabled)
-pub fn disable_site(name: &str) -> Result<String, String> {
+pub fn disable_site(target: &ExecTarget, name: &str) -> Result<String, String> {
     validate_name(name)?;
     let enabled = format!("{}/{}", SITES_ENABLED, name);
-
-    let output = Command::new("sudo")
-        .args(["rm", "-f", &enabled])
-        .output()
-        .map_err(|e| format!("Failed to disable site: {}", e))?;
-
-    if output.status.success() {
-        Ok(format!("Site {} disabled", name))
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
+    target.remove_file(&enabled)?;
+    Ok(format!("Site {} disabled", name))
 }
 
 /// Run nginx -t to test configuration
-pub fn test_config() -> ConfigTestResult {
-    let output = Command::new("sudo")
-        .args(["nginx", "-t"])
-        .output();
-
-    match output {
-        Ok(o) => {
-            // nginx -t outputs to stderr
-            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-            let combined = if stdout.is_empty() { stderr } else { format!("{}\n{}", stdout, stderr) };
+pub fn test_config(target: &ExecTarget) -> ConfigTestResult {
+    match target.exec_full("nginx -t 2>&1") {
+        Ok((output, stderr, success)) => {
+            let combined = if stderr.is_empty() { output } else { format!("{}\n{}", output, stderr) };
             ConfigTestResult {
-                success: o.status.success(),
+                success,
                 output: combined.trim().to_string(),
             }
         }
@@ -182,39 +125,22 @@ pub fn test_config() -> ConfigTestResult {
 }
 
 /// Reload nginx — runs test first, only reloads if test passes
-pub fn reload() -> Result<String, String> {
-    let test = test_config();
+pub fn reload(target: &ExecTarget) -> Result<String, String> {
+    let test = test_config(target);
     if !test.success {
         return Err(format!("Config test failed, not reloading:\n{}", test.output));
     }
 
-    let output = Command::new("sudo")
-        .args(["systemctl", "reload", "nginx"])
-        .output()
-        .map_err(|e| format!("Failed to reload nginx: {}", e))?;
-
-    if output.status.success() {
-        Ok("Nginx reloaded successfully".to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
+    target.exec("systemctl reload nginx || nginx -s reload")?;
+    Ok("Nginx reloaded successfully".to_string())
 }
 
 /// Read recent nginx error log lines
-pub fn error_log(lines: usize) -> Vec<String> {
-    let n = lines.min(500).to_string();
-    let output = Command::new("sudo")
-        .args(["tail", "-n", &n, "/var/log/nginx/error.log"])
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|l| l.to_string())
-                .collect()
-        }
-        _ => Vec::new(),
+pub fn error_log(target: &ExecTarget, lines: usize) -> Vec<String> {
+    let n = lines.min(500);
+    match target.exec(&format!("tail -n {} /var/log/nginx/error.log 2>/dev/null", n)) {
+        Ok(output) => output.lines().map(|l| l.to_string()).collect(),
+        Err(_) => Vec::new(),
     }
 }
 
