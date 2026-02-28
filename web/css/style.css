@@ -690,8 +690,9 @@ body.sidebar-collapsed .main-content {
 .sidebar-logo {
     padding: 14px 16px;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 10px;
+    gap: 4px;
     border-bottom: 1px solid var(--border);
 }
 
