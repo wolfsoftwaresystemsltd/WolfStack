@@ -5170,7 +5170,13 @@ function showToast(message, type = 'info') {
 // ─── Component Detail ───
 async function openComponentDetail(name) {
     currentComponent = name;
-    currentConfiguratorTarget = null; // reset container target when switching components
+    // If launched from container configurator, use the preset target; otherwise reset
+    if (_configuratorTargetPreset) {
+        currentConfiguratorTarget = _configuratorTargetPreset;
+        _configuratorTargetPreset = null;
+    } else {
+        currentConfiguratorTarget = null;
+    }
     // Show the component-detail page directly
     document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
     const el = document.getElementById('page-component-detail');
@@ -5312,6 +5318,47 @@ const CONFIGURATOR_COMPONENTS = ['wolfproxy', 'wolfserve', 'wolfdisk', 'wolfscal
 function hasConfigurator(componentName) {
     return CONFIGURATOR_COMPONENTS.includes((componentName || '').toLowerCase());
 }
+
+function openContainerConfigurator(runtime, containerName) {
+    const modal = document.getElementById('container-detail-modal');
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+
+    const icon = runtime === 'docker' ? '🐳' : '📦';
+    title.textContent = `${containerName} — Configure`;
+    modal.classList.add('active');
+
+    const components = [
+        { id: 'wolfproxy', name: 'WolfProxy', desc: 'Nginx reverse proxy & site management', icon: '🔀' },
+        { id: 'wolfserve', name: 'WolfServe', desc: 'Apache virtual hosts & modules', icon: '🌐' },
+        { id: 'wolfdisk', name: 'WolfDisk', desc: 'Distributed filesystem configuration', icon: '💾' },
+        { id: 'wolfscale', name: 'WolfScale', desc: 'Database replication configuration', icon: '📊' },
+    ];
+
+    body.innerHTML = `
+        <p style="color:var(--text-muted); font-size:13px; margin-bottom:16px;">Select which component to configure inside ${icon} <strong>${escapeHtml(containerName)}</strong>:</p>
+        <div style="display:grid; gap:8px; max-width:400px;">
+            ${components.map(c => `
+                <button class="btn" style="display:flex; align-items:center; gap:12px; padding:12px 16px; text-align:left; border:1px solid var(--border);"
+                    onclick="launchContainerConfigurator('${runtime}', '${escapeHtml(containerName)}', '${c.id}')">
+                    <span style="font-size:24px;">${c.icon}</span>
+                    <div>
+                        <div style="font-weight:600; font-size:14px;">${c.name}</div>
+                        <div style="font-size:12px; color:var(--text-muted); font-weight:normal;">${c.desc}</div>
+                    </div>
+                </button>
+            `).join('')}
+        </div>
+    `;
+}
+
+function launchContainerConfigurator(runtime, containerName, component) {
+    closeContainerDetail();
+    _configuratorTargetPreset = { runtime, target: containerName };
+    openComponentDetail(component);
+}
+
+let _configuratorTargetPreset = null;
 
 async function loadConfigurator(name) {
     // Build target selector dropdown in configurator header
@@ -7642,6 +7689,7 @@ function renderDockerContainers(containers) {
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewDockerVolumes('${c.name}')" title="Volumes">📁</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="browseContainerFiles('docker', '${c.name}')" title="Browse Files">📂</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openDockerSettings('${c.name}')" title="Settings">⚙️</button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerConfigurator('docker', '${c.name}')" title="Configure">🔧</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>
             </td>
@@ -8183,6 +8231,7 @@ function renderLxcContainers(containers, stats) {
                 <button class="btn btn-sm" style="${btnStyle}" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs">📜</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="browseContainerFiles('lxc', '${c.name}', '${(c.storage_path || '').replace(/'/g, "\\'")}')" title="Browse Files">📂</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcSettings('${c.name}')" title="Settings">⚙️</button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerConfigurator('lxc', '${c.name}')" title="Configure">🔧</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="cloneLxcContainer('${c.name}')" title="Clone">📋</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="migrateLxcContainer('${c.name}')" title="Migrate">🚀</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="exportLxcContainer('${c.name}')" title="Export">📦</button>
@@ -14430,6 +14479,7 @@ async function loadFleetContainers() {
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');viewDockerVolumes(\'' + eName + '\')" title="Volumes">📁</button>';
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');browseContainerFiles(\'docker\',\'' + eName + '\')" title="Browse Files">📂</button>';
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openDockerSettings(\'' + eName + '\')" title="Settings">⚙️</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openContainerConfigurator(\'docker\',\'' + eName + '\')" title="Configure">🔧</button>';
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');cloneDockerContainer(\'' + eName + '\')" title="Clone">📋</button>';
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');migrateDockerContainer(\'' + eName + '\')" title="Migrate">🚀</button>';
         return h;
@@ -14460,6 +14510,7 @@ async function loadFleetContainers() {
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetViewLogs(\'' + nid + '\',\'lxc\',\'' + eName + '\')" title="Logs">📜</button>';
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');browseContainerFiles(\'lxc\',\'' + eName + '\',\'' + ePath + '\')" title="Browse Files">📂</button>';
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openLxcSettings(\'' + eName + '\')" title="Settings">⚙️</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openContainerConfigurator(\'lxc\',\'' + eName + '\')" title="Configure">🔧</button>';
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');cloneLxcContainer(\'' + eName + '\')" title="Clone">📋</button>';
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');migrateLxcContainer(\'' + eName + '\')" title="Migrate">🚀</button>';
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');exportLxcContainer(\'' + eName + '\')" title="Export">📦</button>';
