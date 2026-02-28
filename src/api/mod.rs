@@ -8514,6 +8514,320 @@ pub async fn statuspage_public_page(state: web::Data<AppState>, path: web::Path<
     }
 }
 
+// ─── Configurator API ───
+
+/// GET /api/configurator/nginx/sites — list all nginx sites
+pub async fn nginx_list_sites(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match web::block(|| crate::configurator::nginx::list_sites()).await {
+        Ok(Ok(sites)) => HttpResponse::Ok().json(serde_json::json!({ "sites": sites })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/configurator/nginx/sites/{name} — read a site config
+pub async fn nginx_read_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match web::block(move || crate::configurator::nginx::read_site(&name)).await {
+        Ok(Ok(content)) => HttpResponse::Ok().json(serde_json::json!({ "content": content })),
+        Ok(Err(e)) => HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SiteConfigRequest {
+    pub name: Option<String>,
+    pub content: String,
+}
+
+/// POST /api/configurator/nginx/sites — create a new site
+pub async fn nginx_create_site(req: HttpRequest, state: web::Data<AppState>, body: web::Json<SiteConfigRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = match &body.name {
+        Some(n) => n.clone(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Name is required" })),
+    };
+    let content = body.content.clone();
+    match web::block(move || crate::configurator::nginx::save_site(&name, &content)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// PUT /api/configurator/nginx/sites/{name} — update a site config
+pub async fn nginx_update_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<SiteConfigRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    let content = body.content.clone();
+    match web::block(move || crate::configurator::nginx::save_site(&name, &content)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// DELETE /api/configurator/nginx/sites/{name} — delete a site
+pub async fn nginx_delete_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match web::block(move || crate::configurator::nginx::delete_site(&name)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/configurator/nginx/sites/{name}/enable
+pub async fn nginx_enable_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match web::block(move || crate::configurator::nginx::enable_site(&name)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/configurator/nginx/sites/{name}/disable
+pub async fn nginx_disable_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match web::block(move || crate::configurator::nginx::disable_site(&name)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/configurator/nginx/test — run nginx -t
+pub async fn nginx_test_config(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match web::block(|| crate::configurator::nginx::test_config()).await {
+        Ok(result) => HttpResponse::Ok().json(result),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/configurator/nginx/reload — reload nginx
+pub async fn nginx_reload(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match web::block(|| crate::configurator::nginx::reload()).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/configurator/nginx/error-log — recent error log
+pub async fn nginx_error_log(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match web::block(|| crate::configurator::nginx::error_log(100)).await {
+        Ok(lines) => HttpResponse::Ok().json(serde_json::json!({ "lines": lines })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/configurator/nginx/generate — generate nginx config from form params
+pub async fn nginx_generate_config(req: HttpRequest, state: web::Data<AppState>, body: web::Json<crate::configurator::nginx::NginxSiteParams>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let config = crate::configurator::nginx::generate_site_config(&body);
+    HttpResponse::Ok().json(serde_json::json!({ "config": config }))
+}
+
+// ─── Apache Configurator API ───
+
+/// GET /api/configurator/apache/sites — list all Apache vhosts
+pub async fn apache_list_sites(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match web::block(|| crate::configurator::apache::list_sites()).await {
+        Ok(Ok(sites)) => HttpResponse::Ok().json(serde_json::json!({ "sites": sites })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/configurator/apache/sites/{name} — read a vhost config
+pub async fn apache_read_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match web::block(move || crate::configurator::apache::read_site(&name)).await {
+        Ok(Ok(content)) => HttpResponse::Ok().json(serde_json::json!({ "content": content })),
+        Ok(Err(e)) => HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/configurator/apache/sites — create a new vhost
+pub async fn apache_create_site(req: HttpRequest, state: web::Data<AppState>, body: web::Json<SiteConfigRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = match &body.name {
+        Some(n) => n.clone(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Name is required" })),
+    };
+    let content = body.content.clone();
+    match web::block(move || crate::configurator::apache::save_site(&name, &content)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// PUT /api/configurator/apache/sites/{name} — update a vhost config
+pub async fn apache_update_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<SiteConfigRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    let content = body.content.clone();
+    match web::block(move || crate::configurator::apache::save_site(&name, &content)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// DELETE /api/configurator/apache/sites/{name} — delete a vhost
+pub async fn apache_delete_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match web::block(move || crate::configurator::apache::delete_site(&name)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/configurator/apache/sites/{name}/enable
+pub async fn apache_enable_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match web::block(move || crate::configurator::apache::enable_site(&name)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/configurator/apache/sites/{name}/disable
+pub async fn apache_disable_site(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match web::block(move || crate::configurator::apache::disable_site(&name)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/configurator/apache/modules — list Apache modules
+pub async fn apache_list_modules(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match web::block(|| crate::configurator::apache::list_modules()).await {
+        Ok(Ok(mods)) => HttpResponse::Ok().json(serde_json::json!({ "modules": mods })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/configurator/apache/modules/{name}/enable
+pub async fn apache_enable_module(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match web::block(move || crate::configurator::apache::enable_module(&name)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/configurator/apache/modules/{name}/disable
+pub async fn apache_disable_module(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    match web::block(move || crate::configurator::apache::disable_module(&name)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/configurator/apache/test — run apachectl configtest
+pub async fn apache_test_config(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match web::block(|| crate::configurator::apache::test_config()).await {
+        Ok(result) => HttpResponse::Ok().json(result),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/configurator/apache/reload — reload Apache
+pub async fn apache_reload(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match web::block(|| crate::configurator::apache::reload()).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/configurator/apache/error-log — recent error log
+pub async fn apache_error_log(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match web::block(|| crate::configurator::apache::error_log(100)).await {
+        Ok(lines) => HttpResponse::Ok().json(serde_json::json!({ "lines": lines })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/configurator/apache/generate — generate Apache vhost from form params
+pub async fn apache_generate_config(req: HttpRequest, state: web::Data<AppState>, body: web::Json<crate::configurator::apache::ApacheVhostParams>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let config = crate::configurator::apache::generate_vhost_config(&body);
+    HttpResponse::Ok().json(serde_json::json!({ "config": config }))
+}
+
+// ─── TOML Configurator API ───
+
+/// GET /api/configurator/toml/{component}/structured — parsed config as JSON
+pub async fn toml_get_structured(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let component = path.into_inner();
+    match web::block(move || crate::configurator::toml_editor::parse_config(&component)).await {
+        Ok(Ok(data)) => HttpResponse::Ok().json(data),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/configurator/toml/{component}/structured — save JSON as TOML
+pub async fn toml_save_structured(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let component = path.into_inner();
+    let data = body.into_inner();
+    match web::block(move || crate::configurator::toml_editor::save_config(&component, &data)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct TomlValidateRequest {
+    pub content: String,
+}
+
+/// POST /api/configurator/toml/{component}/validate — validate TOML string
+pub async fn toml_validate(req: HttpRequest, state: web::Data<AppState>, body: web::Json<TomlValidateRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let content = body.content.clone();
+    match crate::configurator::toml_editor::validate_toml(&content) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "valid": true })),
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({ "valid": false, "error": e })),
+    }
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -8782,6 +9096,38 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/wolfrun/services/{id}/portforward", web::get().to(wolfrun_portforward_list))
         .route("/api/wolfrun/services/{id}/portforward", web::post().to(wolfrun_portforward_add))
         .route("/api/wolfrun/services/{id}/portforward/{rule_id}", web::delete().to(wolfrun_portforward_delete))
+        // Configurators
+        // Nginx (WolfProxy)
+        .route("/api/configurator/nginx/sites", web::get().to(nginx_list_sites))
+        .route("/api/configurator/nginx/sites", web::post().to(nginx_create_site))
+        .route("/api/configurator/nginx/sites/{name}", web::get().to(nginx_read_site))
+        .route("/api/configurator/nginx/sites/{name}", web::put().to(nginx_update_site))
+        .route("/api/configurator/nginx/sites/{name}", web::delete().to(nginx_delete_site))
+        .route("/api/configurator/nginx/sites/{name}/enable", web::post().to(nginx_enable_site))
+        .route("/api/configurator/nginx/sites/{name}/disable", web::post().to(nginx_disable_site))
+        .route("/api/configurator/nginx/test", web::post().to(nginx_test_config))
+        .route("/api/configurator/nginx/reload", web::post().to(nginx_reload))
+        .route("/api/configurator/nginx/error-log", web::get().to(nginx_error_log))
+        .route("/api/configurator/nginx/generate", web::post().to(nginx_generate_config))
+        // Apache (WolfServe)
+        .route("/api/configurator/apache/sites", web::get().to(apache_list_sites))
+        .route("/api/configurator/apache/sites", web::post().to(apache_create_site))
+        .route("/api/configurator/apache/sites/{name}", web::get().to(apache_read_site))
+        .route("/api/configurator/apache/sites/{name}", web::put().to(apache_update_site))
+        .route("/api/configurator/apache/sites/{name}", web::delete().to(apache_delete_site))
+        .route("/api/configurator/apache/sites/{name}/enable", web::post().to(apache_enable_site))
+        .route("/api/configurator/apache/sites/{name}/disable", web::post().to(apache_disable_site))
+        .route("/api/configurator/apache/modules", web::get().to(apache_list_modules))
+        .route("/api/configurator/apache/modules/{name}/enable", web::post().to(apache_enable_module))
+        .route("/api/configurator/apache/modules/{name}/disable", web::post().to(apache_disable_module))
+        .route("/api/configurator/apache/test", web::post().to(apache_test_config))
+        .route("/api/configurator/apache/reload", web::post().to(apache_reload))
+        .route("/api/configurator/apache/error-log", web::get().to(apache_error_log))
+        .route("/api/configurator/apache/generate", web::post().to(apache_generate_config))
+        // TOML Editors (WolfDisk, WolfScale)
+        .route("/api/configurator/toml/{component}/structured", web::get().to(toml_get_structured))
+        .route("/api/configurator/toml/{component}/structured", web::post().to(toml_save_structured))
+        .route("/api/configurator/toml/{component}/validate", web::post().to(toml_validate))
         // Node proxy — forward API calls to remote nodes (must be last — wildcard path)
         .route("/api/nodes/{id}/proxy/{path:.*}", web::get().to(node_proxy))
         .route("/api/nodes/{id}/proxy/{path:.*}", web::post().to(node_proxy))

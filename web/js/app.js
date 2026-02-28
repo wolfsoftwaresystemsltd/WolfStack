@@ -5195,6 +5195,14 @@ async function refreshComponentDetail(name) {
         } else {
             logsEl.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 20px;">No logs available</div>';
         }
+        // Load configurator if this component has one
+        const cfgSection = document.getElementById('detail-configurator-section');
+        if (cfgSection && hasConfigurator(name)) {
+            cfgSection.style.display = '';
+            loadConfigurator(name);
+        } else if (cfgSection) {
+            cfgSection.style.display = 'none';
+        }
     } catch (e) {
         console.error('Failed to load component detail:', e);
         showToast('Failed to load component details', 'error');
@@ -5240,6 +5248,911 @@ async function saveConfig() {
         }
     } catch (e) {
         showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+// ─── Component Configurators ───
+
+const CONFIGURATOR_COMPONENTS = ['wolfproxy', 'wolfserve', 'wolfdisk', 'wolfscale'];
+
+function hasConfigurator(componentName) {
+    return CONFIGURATOR_COMPONENTS.includes((componentName || '').toLowerCase());
+}
+
+function loadConfigurator(name) {
+    const lower = (name || '').toLowerCase();
+    switch (lower) {
+        case 'wolfproxy': loadNginxConfigurator(); break;
+        case 'wolfserve': loadApacheConfigurator(); break;
+        case 'wolfdisk':  loadTomlConfigurator('wolfdisk', 'WolfDisk'); break;
+        case 'wolfscale': loadTomlConfigurator('wolfscale', 'WolfScale'); break;
+    }
+}
+
+// ── Nginx Configurator (WolfProxy) ──
+
+async function loadNginxConfigurator() {
+    document.getElementById('configurator-title').textContent = 'Nginx Sites';
+    document.getElementById('configurator-header-actions').innerHTML = `
+        <button class="btn btn-primary btn-sm" onclick="nginxNewSiteForm()">+ New Site</button>
+        <button class="btn btn-sm" onclick="nginxTestConfig()">Test Config</button>
+        <button class="btn btn-success btn-sm" onclick="nginxReloadService()">Reload Nginx</button>
+    `;
+
+    const body = document.getElementById('configurator-body');
+    body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading sites...</div>';
+
+    try {
+        const resp = await fetch(apiUrl('/api/configurator/nginx/sites'));
+        if (handleAuthError(resp)) return;
+        const data = await resp.json();
+        if (data.error) { body.innerHTML = `<div style="color:var(--danger);">${escapeHtml(data.error)}</div>`; return; }
+        renderNginxSitesList(data.sites || []);
+    } catch (e) {
+        body.innerHTML = `<div style="color:var(--danger);">Failed to load nginx sites: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderNginxSitesList(sites) {
+    const body = document.getElementById('configurator-body');
+    if (sites.length === 0) {
+        body.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text-muted);">
+            No nginx sites found in /etc/nginx/sites-available/<br>
+            <button class="btn btn-primary btn-sm" style="margin-top:12px;" onclick="nginxNewSiteForm()">Create First Site</button>
+        </div>`;
+        return;
+    }
+
+    let html = `<table class="data-table" style="width:100%;"><thead><tr>
+        <th>Site</th><th>Status</th><th style="text-align:right;">Actions</th>
+    </tr></thead><tbody>`;
+
+    for (const site of sites) {
+        const statusBadge = site.enabled
+            ? '<span style="color:var(--success);">● Enabled</span>'
+            : '<span style="color:var(--text-muted);">○ Disabled</span>';
+        const toggleBtn = site.enabled
+            ? `<button class="btn btn-sm" onclick="nginxToggleSite('${escapeHtml(site.name)}', false)">Disable</button>`
+            : `<button class="btn btn-success btn-sm" onclick="nginxToggleSite('${escapeHtml(site.name)}', true)">Enable</button>`;
+
+        html += `<tr>
+            <td><code style="font-size:13px;">${escapeHtml(site.name)}</code></td>
+            <td>${statusBadge}</td>
+            <td style="text-align:right;">
+                <div style="display:flex; gap:6px; justify-content:flex-end;">
+                    ${toggleBtn}
+                    <button class="btn btn-sm" onclick="nginxEditSite('${escapeHtml(site.name)}')">Edit</button>
+                    <button class="btn btn-danger btn-sm" onclick="nginxDeleteSite('${escapeHtml(site.name)}')">Delete</button>
+                </div>
+            </td>
+        </tr>`;
+    }
+    html += '</tbody></table>';
+    body.innerHTML = html;
+}
+
+async function nginxToggleSite(name, enable) {
+    const action = enable ? 'enable' : 'disable';
+    try {
+        const resp = await fetch(apiUrl(`/api/configurator/nginx/sites/${encodeURIComponent(name)}/${action}`), { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || `Site ${action}d`, 'success');
+        } else {
+            showToast(data.error || `Failed to ${action} site`, 'error');
+        }
+        loadNginxConfigurator();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function nginxEditSite(name) {
+    const body = document.getElementById('configurator-body');
+    body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading...</div>';
+
+    try {
+        const resp = await fetch(apiUrl(`/api/configurator/nginx/sites/${encodeURIComponent(name)}`));
+        const data = await resp.json();
+        if (data.error) { showToast(data.error, 'error'); loadNginxConfigurator(); return; }
+
+        body.innerHTML = `
+            <div style="margin-bottom:12px; display:flex; align-items:center; gap:12px;">
+                <button class="btn btn-sm" onclick="loadNginxConfigurator()">← Back</button>
+                <h4 style="margin:0;">Editing: ${escapeHtml(name)}</h4>
+            </div>
+            <textarea id="nginx-site-editor" class="config-editor" spellcheck="false" style="min-height:300px;">${escapeHtml(data.content || '')}</textarea>
+            <div style="display:flex; gap:8px; margin-top:12px;">
+                <button class="btn btn-primary" onclick="nginxSaveSite('${escapeHtml(name)}')">Save</button>
+                <button class="btn" onclick="loadNginxConfigurator()">Cancel</button>
+            </div>`;
+    } catch (e) {
+        showToast('Failed to load site: ' + e.message, 'error');
+        loadNginxConfigurator();
+    }
+}
+
+async function nginxSaveSite(name) {
+    const content = document.getElementById('nginx-site-editor').value;
+    try {
+        const resp = await fetch(apiUrl(`/api/configurator/nginx/sites/${encodeURIComponent(name)}`), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content })
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Site saved', 'success');
+        } else {
+            showToast(data.error || 'Save failed', 'error');
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function nginxDeleteSite(name) {
+    const ok = await wolfConfirm(`Delete nginx site "${name}"? This cannot be undone.`, 'Delete Site');
+    if (!ok) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/configurator/nginx/sites/${encodeURIComponent(name)}`), { method: 'DELETE' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Site deleted', 'success');
+        } else {
+            showToast(data.error || 'Delete failed', 'error');
+        }
+        loadNginxConfigurator();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+function nginxNewSiteForm() {
+    const body = document.getElementById('configurator-body');
+    body.innerHTML = `
+        <div style="margin-bottom:12px; display:flex; align-items:center; gap:12px;">
+            <button class="btn btn-sm" onclick="loadNginxConfigurator()">← Back</button>
+            <h4 style="margin:0;">Create New Nginx Site</h4>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; max-width:700px;">
+            <div class="form-group">
+                <label style="font-weight:600; margin-bottom:4px; display:block;">Server Name</label>
+                <input type="text" class="form-control" id="nginx-server-name" placeholder="example.com">
+            </div>
+            <div class="form-group">
+                <label style="font-weight:600; margin-bottom:4px; display:block;">Listen Port</label>
+                <input type="number" class="form-control" id="nginx-listen-port" value="80" style="width:120px;">
+            </div>
+            <div class="form-group" style="grid-column:span 2;">
+                <label style="font-weight:600; margin-bottom:4px; display:block;">Proxy Pass (upstream URL)</label>
+                <input type="text" class="form-control" id="nginx-proxy-pass" placeholder="http://localhost:3000">
+                <small style="color:var(--text-muted);">Leave empty for static file serving</small>
+            </div>
+            <div class="form-group" style="grid-column:span 2;">
+                <label style="font-weight:600; margin-bottom:4px; display:block;">Document Root (for static sites)</label>
+                <input type="text" class="form-control" id="nginx-root" placeholder="/var/www/html">
+                <small style="color:var(--text-muted);">Only used if Proxy Pass is empty</small>
+            </div>
+            <div class="form-group" style="grid-column:span 2;">
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                    <input type="checkbox" id="nginx-ssl-toggle" onchange="document.getElementById('nginx-ssl-fields').style.display = this.checked ? '' : 'none'">
+                    <span style="font-weight:600;">Enable SSL</span>
+                </label>
+            </div>
+            <div id="nginx-ssl-fields" style="display:none; grid-column:span 2; display:none;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+                    <div class="form-group">
+                        <label style="font-weight:600; margin-bottom:4px; display:block;">SSL Certificate Path</label>
+                        <input type="text" class="form-control" id="nginx-ssl-cert" placeholder="/etc/letsencrypt/live/example.com/fullchain.pem">
+                    </div>
+                    <div class="form-group">
+                        <label style="font-weight:600; margin-bottom:4px; display:block;">SSL Key Path</label>
+                        <input type="text" class="form-control" id="nginx-ssl-key" placeholder="/etc/letsencrypt/live/example.com/privkey.pem">
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:16px;">
+            <button class="btn btn-primary" onclick="nginxGenerateAndPreview()">Generate Config</button>
+            <button class="btn" onclick="loadNginxConfigurator()">Cancel</button>
+        </div>
+        <div id="nginx-preview-section" style="display:none; margin-top:20px;">
+            <h4 style="margin-bottom:8px;">Generated Configuration</h4>
+            <textarea id="nginx-generated-config" class="config-editor" spellcheck="false" style="min-height:250px;"></textarea>
+            <div style="display:flex; gap:8px; margin-top:12px;">
+                <button class="btn btn-primary" onclick="nginxSaveNewSite()">Save Site</button>
+                <button class="btn" onclick="loadNginxConfigurator()">Cancel</button>
+            </div>
+        </div>
+    `;
+}
+
+async function nginxGenerateAndPreview() {
+    const params = {
+        server_name: document.getElementById('nginx-server-name').value.trim(),
+        listen_port: parseInt(document.getElementById('nginx-listen-port').value) || 80,
+        ssl: document.getElementById('nginx-ssl-toggle').checked,
+        ssl_cert: document.getElementById('nginx-ssl-cert')?.value.trim() || null,
+        ssl_key: document.getElementById('nginx-ssl-key')?.value.trim() || null,
+        proxy_pass: document.getElementById('nginx-proxy-pass').value.trim() || null,
+        root: document.getElementById('nginx-root').value.trim() || null,
+    };
+
+    if (!params.server_name) { showToast('Server name is required', 'error'); return; }
+
+    try {
+        const resp = await fetch(apiUrl('/api/configurator/nginx/generate'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(params)
+        });
+        const data = await resp.json();
+        if (data.config) {
+            document.getElementById('nginx-generated-config').value = data.config;
+            document.getElementById('nginx-preview-section').style.display = '';
+        } else {
+            showToast(data.error || 'Failed to generate config', 'error');
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function nginxSaveNewSite() {
+    const serverName = document.getElementById('nginx-server-name').value.trim();
+    const content = document.getElementById('nginx-generated-config').value;
+    const filename = serverName.replace(/[^a-zA-Z0-9.-]/g, '_') + '.conf';
+
+    if (!serverName || !content) { showToast('No config to save', 'error'); return; }
+
+    try {
+        const resp = await fetch(apiUrl('/api/configurator/nginx/sites'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: filename, content })
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Site created', 'success');
+            loadNginxConfigurator();
+        } else {
+            showToast(data.error || 'Failed to create site', 'error');
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function nginxTestConfig() {
+    showToast('Testing nginx configuration...', 'info');
+    try {
+        const resp = await fetch(apiUrl('/api/configurator/nginx/test'), { method: 'POST' });
+        const data = await resp.json();
+        const output = escapeHtml(data.output || '');
+        if (data.success) {
+            showModal(`<pre style="white-space:pre-wrap; font-family:var(--font-mono); font-size:13px; color:var(--success);">${output}</pre>`, 'Config Test Passed');
+        } else {
+            showModal(`<pre style="white-space:pre-wrap; font-family:var(--font-mono); font-size:13px; color:var(--danger);">${output}</pre>`, 'Config Test Failed');
+        }
+    } catch (e) {
+        showToast('Test failed: ' + e.message, 'error');
+    }
+}
+
+async function nginxReloadService() {
+    const ok = await wolfConfirm('Reload nginx? This will test the configuration first.', 'Reload Nginx');
+    if (!ok) return;
+    try {
+        const resp = await fetch(apiUrl('/api/configurator/nginx/reload'), { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Nginx reloaded', 'success');
+        } else {
+            showModal(`<pre style="white-space:pre-wrap; font-family:var(--font-mono); font-size:13px; color:var(--danger);">${escapeHtml(data.error || 'Reload failed')}</pre>`, 'Reload Failed');
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+// ── Apache Configurator (WolfServe) ──
+
+async function loadApacheConfigurator() {
+    document.getElementById('configurator-title').textContent = 'Apache Virtual Hosts';
+    document.getElementById('configurator-header-actions').innerHTML = `
+        <button class="btn btn-primary btn-sm" onclick="apacheNewVhostForm()">+ New VHost</button>
+        <button class="btn btn-sm" onclick="apacheShowModules()">Modules</button>
+        <button class="btn btn-sm" onclick="apacheTestConfig()">Test Config</button>
+        <button class="btn btn-success btn-sm" onclick="apacheReloadService()">Reload Apache</button>
+    `;
+
+    const body = document.getElementById('configurator-body');
+    body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading virtual hosts...</div>';
+
+    try {
+        const resp = await fetch(apiUrl('/api/configurator/apache/sites'));
+        if (handleAuthError(resp)) return;
+        const data = await resp.json();
+        if (data.error) { body.innerHTML = `<div style="color:var(--danger);">${escapeHtml(data.error)}</div>`; return; }
+        renderApacheSitesList(data.sites || []);
+    } catch (e) {
+        body.innerHTML = `<div style="color:var(--danger);">Failed to load Apache vhosts: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderApacheSitesList(sites) {
+    const body = document.getElementById('configurator-body');
+    if (sites.length === 0) {
+        body.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text-muted);">
+            No Apache virtual hosts found<br>
+            <button class="btn btn-primary btn-sm" style="margin-top:12px;" onclick="apacheNewVhostForm()">Create First VHost</button>
+        </div>`;
+        return;
+    }
+
+    let html = `<table class="data-table" style="width:100%;"><thead><tr>
+        <th>Virtual Host</th><th>Status</th><th style="text-align:right;">Actions</th>
+    </tr></thead><tbody>`;
+
+    for (const site of sites) {
+        const statusBadge = site.enabled
+            ? '<span style="color:var(--success);">● Enabled</span>'
+            : '<span style="color:var(--text-muted);">○ Disabled</span>';
+        const toggleBtn = site.enabled
+            ? `<button class="btn btn-sm" onclick="apacheToggleSite('${escapeHtml(site.name)}', false)">Disable</button>`
+            : `<button class="btn btn-success btn-sm" onclick="apacheToggleSite('${escapeHtml(site.name)}', true)">Enable</button>`;
+
+        html += `<tr>
+            <td><code style="font-size:13px;">${escapeHtml(site.name)}</code></td>
+            <td>${statusBadge}</td>
+            <td style="text-align:right;">
+                <div style="display:flex; gap:6px; justify-content:flex-end;">
+                    ${toggleBtn}
+                    <button class="btn btn-sm" onclick="apacheEditSite('${escapeHtml(site.name)}')">Edit</button>
+                    <button class="btn btn-danger btn-sm" onclick="apacheDeleteSite('${escapeHtml(site.name)}')">Delete</button>
+                </div>
+            </td>
+        </tr>`;
+    }
+    html += '</tbody></table>';
+    body.innerHTML = html;
+}
+
+async function apacheToggleSite(name, enable) {
+    const action = enable ? 'enable' : 'disable';
+    try {
+        const resp = await fetch(apiUrl(`/api/configurator/apache/sites/${encodeURIComponent(name)}/${action}`), { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || `Site ${action}d`, 'success');
+        } else {
+            showToast(data.error || `Failed to ${action} site`, 'error');
+        }
+        loadApacheConfigurator();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function apacheEditSite(name) {
+    const body = document.getElementById('configurator-body');
+    body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading...</div>';
+
+    try {
+        const resp = await fetch(apiUrl(`/api/configurator/apache/sites/${encodeURIComponent(name)}`));
+        const data = await resp.json();
+        if (data.error) { showToast(data.error, 'error'); loadApacheConfigurator(); return; }
+
+        body.innerHTML = `
+            <div style="margin-bottom:12px; display:flex; align-items:center; gap:12px;">
+                <button class="btn btn-sm" onclick="loadApacheConfigurator()">← Back</button>
+                <h4 style="margin:0;">Editing: ${escapeHtml(name)}</h4>
+            </div>
+            <textarea id="apache-site-editor" class="config-editor" spellcheck="false" style="min-height:300px;">${escapeHtml(data.content || '')}</textarea>
+            <div style="display:flex; gap:8px; margin-top:12px;">
+                <button class="btn btn-primary" onclick="apacheSaveSite('${escapeHtml(name)}')">Save</button>
+                <button class="btn" onclick="loadApacheConfigurator()">Cancel</button>
+            </div>`;
+    } catch (e) {
+        showToast('Failed to load site: ' + e.message, 'error');
+        loadApacheConfigurator();
+    }
+}
+
+async function apacheSaveSite(name) {
+    const content = document.getElementById('apache-site-editor').value;
+    try {
+        const resp = await fetch(apiUrl(`/api/configurator/apache/sites/${encodeURIComponent(name)}`), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content })
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'VHost saved', 'success');
+        } else {
+            showToast(data.error || 'Save failed', 'error');
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function apacheDeleteSite(name) {
+    const ok = await wolfConfirm(`Delete Apache virtual host "${name}"? This cannot be undone.`, 'Delete VHost');
+    if (!ok) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/configurator/apache/sites/${encodeURIComponent(name)}`), { method: 'DELETE' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'VHost deleted', 'success');
+        } else {
+            showToast(data.error || 'Delete failed', 'error');
+        }
+        loadApacheConfigurator();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+function apacheNewVhostForm() {
+    const body = document.getElementById('configurator-body');
+    body.innerHTML = `
+        <div style="margin-bottom:12px; display:flex; align-items:center; gap:12px;">
+            <button class="btn btn-sm" onclick="loadApacheConfigurator()">← Back</button>
+            <h4 style="margin:0;">Create New Apache Virtual Host</h4>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; max-width:700px;">
+            <div class="form-group">
+                <label style="font-weight:600; margin-bottom:4px; display:block;">Server Name</label>
+                <input type="text" class="form-control" id="apache-server-name" placeholder="example.com">
+            </div>
+            <div class="form-group">
+                <label style="font-weight:600; margin-bottom:4px; display:block;">Listen Port</label>
+                <input type="number" class="form-control" id="apache-listen-port" value="80" style="width:120px;">
+            </div>
+            <div class="form-group">
+                <label style="font-weight:600; margin-bottom:4px; display:block;">Server Admin</label>
+                <input type="text" class="form-control" id="apache-server-admin" placeholder="admin@example.com">
+            </div>
+            <div class="form-group">
+                <label style="font-weight:600; margin-bottom:4px; display:block;">Document Root</label>
+                <input type="text" class="form-control" id="apache-document-root" placeholder="/var/www/html">
+            </div>
+            <div class="form-group" style="grid-column:span 2;">
+                <label style="font-weight:600; margin-bottom:4px; display:block;">Proxy Pass (upstream URL)</label>
+                <input type="text" class="form-control" id="apache-proxy-pass" placeholder="http://localhost:3000">
+                <small style="color:var(--text-muted);">Leave empty for static file serving</small>
+            </div>
+            <div class="form-group" style="grid-column:span 2;">
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                    <input type="checkbox" id="apache-ssl-toggle" onchange="document.getElementById('apache-ssl-fields').style.display = this.checked ? '' : 'none'">
+                    <span style="font-weight:600;">Enable SSL</span>
+                </label>
+            </div>
+            <div id="apache-ssl-fields" style="display:none; grid-column:span 2;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+                    <div class="form-group">
+                        <label style="font-weight:600; margin-bottom:4px; display:block;">SSL Certificate Path</label>
+                        <input type="text" class="form-control" id="apache-ssl-cert" placeholder="/etc/letsencrypt/live/example.com/fullchain.pem">
+                    </div>
+                    <div class="form-group">
+                        <label style="font-weight:600; margin-bottom:4px; display:block;">SSL Key Path</label>
+                        <input type="text" class="form-control" id="apache-ssl-key" placeholder="/etc/letsencrypt/live/example.com/privkey.pem">
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:16px;">
+            <button class="btn btn-primary" onclick="apacheGenerateAndPreview()">Generate Config</button>
+            <button class="btn" onclick="loadApacheConfigurator()">Cancel</button>
+        </div>
+        <div id="apache-preview-section" style="display:none; margin-top:20px;">
+            <h4 style="margin-bottom:8px;">Generated Configuration</h4>
+            <textarea id="apache-generated-config" class="config-editor" spellcheck="false" style="min-height:250px;"></textarea>
+            <div style="display:flex; gap:8px; margin-top:12px;">
+                <button class="btn btn-primary" onclick="apacheSaveNewVhost()">Save VHost</button>
+                <button class="btn" onclick="loadApacheConfigurator()">Cancel</button>
+            </div>
+        </div>
+    `;
+}
+
+async function apacheGenerateAndPreview() {
+    const params = {
+        server_name: document.getElementById('apache-server-name').value.trim(),
+        listen_port: parseInt(document.getElementById('apache-listen-port').value) || 80,
+        server_admin: document.getElementById('apache-server-admin').value.trim() || null,
+        document_root: document.getElementById('apache-document-root').value.trim() || null,
+        proxy_pass: document.getElementById('apache-proxy-pass').value.trim() || null,
+        ssl: document.getElementById('apache-ssl-toggle').checked,
+        ssl_cert: document.getElementById('apache-ssl-cert')?.value.trim() || null,
+        ssl_key: document.getElementById('apache-ssl-key')?.value.trim() || null,
+    };
+
+    if (!params.server_name) { showToast('Server name is required', 'error'); return; }
+
+    try {
+        const resp = await fetch(apiUrl('/api/configurator/apache/generate'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(params)
+        });
+        const data = await resp.json();
+        if (data.config) {
+            document.getElementById('apache-generated-config').value = data.config;
+            document.getElementById('apache-preview-section').style.display = '';
+        } else {
+            showToast(data.error || 'Failed to generate config', 'error');
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function apacheSaveNewVhost() {
+    const serverName = document.getElementById('apache-server-name').value.trim();
+    const content = document.getElementById('apache-generated-config').value;
+    const filename = serverName.replace(/[^a-zA-Z0-9.-]/g, '_') + '.conf';
+
+    if (!serverName || !content) { showToast('No config to save', 'error'); return; }
+
+    try {
+        const resp = await fetch(apiUrl('/api/configurator/apache/sites'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: filename, content })
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'VHost created', 'success');
+            loadApacheConfigurator();
+        } else {
+            showToast(data.error || 'Failed to create VHost', 'error');
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function apacheTestConfig() {
+    showToast('Testing Apache configuration...', 'info');
+    try {
+        const resp = await fetch(apiUrl('/api/configurator/apache/test'), { method: 'POST' });
+        const data = await resp.json();
+        const output = escapeHtml(data.output || '');
+        if (data.success) {
+            showModal(`<pre style="white-space:pre-wrap; font-family:var(--font-mono); font-size:13px; color:var(--success);">${output}</pre>`, 'Config Test Passed');
+        } else {
+            showModal(`<pre style="white-space:pre-wrap; font-family:var(--font-mono); font-size:13px; color:var(--danger);">${output}</pre>`, 'Config Test Failed');
+        }
+    } catch (e) {
+        showToast('Test failed: ' + e.message, 'error');
+    }
+}
+
+async function apacheReloadService() {
+    const ok = await wolfConfirm('Reload Apache? This will test the configuration first.', 'Reload Apache');
+    if (!ok) return;
+    try {
+        const resp = await fetch(apiUrl('/api/configurator/apache/reload'), { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Apache reloaded', 'success');
+        } else {
+            showModal(`<pre style="white-space:pre-wrap; font-family:var(--font-mono); font-size:13px; color:var(--danger);">${escapeHtml(data.error || 'Reload failed')}</pre>`, 'Reload Failed');
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function apacheShowModules() {
+    const body = document.getElementById('configurator-body');
+    body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading modules...</div>';
+
+    document.getElementById('configurator-title').textContent = 'Apache Modules';
+    document.getElementById('configurator-header-actions').innerHTML = `
+        <button class="btn btn-sm" onclick="loadApacheConfigurator()">← Back to VHosts</button>
+    `;
+
+    try {
+        const resp = await fetch(apiUrl('/api/configurator/apache/modules'));
+        if (handleAuthError(resp)) return;
+        const data = await resp.json();
+        if (data.error) { body.innerHTML = `<div style="color:var(--danger);">${escapeHtml(data.error)}</div>`; return; }
+
+        const mods = data.modules || [];
+        if (mods.length === 0) {
+            body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">No modules found</div>';
+            return;
+        }
+
+        let html = `<table class="data-table" style="width:100%;"><thead><tr>
+            <th>Module</th><th>Status</th><th style="text-align:right;">Actions</th>
+        </tr></thead><tbody>`;
+
+        for (const mod of mods) {
+            const statusBadge = mod.enabled
+                ? '<span style="color:var(--success);">● Enabled</span>'
+                : '<span style="color:var(--text-muted);">○ Disabled</span>';
+            const toggleBtn = mod.enabled
+                ? `<button class="btn btn-sm" onclick="apacheToggleModule('${escapeHtml(mod.name)}', false)">Disable</button>`
+                : `<button class="btn btn-success btn-sm" onclick="apacheToggleModule('${escapeHtml(mod.name)}', true)">Enable</button>`;
+
+            html += `<tr>
+                <td><code style="font-size:13px;">${escapeHtml(mod.name)}</code></td>
+                <td>${statusBadge}</td>
+                <td style="text-align:right;">${toggleBtn}</td>
+            </tr>`;
+        }
+        html += '</tbody></table>';
+        body.innerHTML = html;
+    } catch (e) {
+        body.innerHTML = `<div style="color:var(--danger);">Failed to load modules: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function apacheToggleModule(name, enable) {
+    const action = enable ? 'enable' : 'disable';
+    try {
+        const resp = await fetch(apiUrl(`/api/configurator/apache/modules/${encodeURIComponent(name)}/${action}`), { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || `Module ${action}d`, 'success');
+        } else {
+            showToast(data.error || `Failed to ${action} module`, 'error');
+        }
+        apacheShowModules();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+// ── TOML Configurator (WolfDisk & WolfScale) ──
+
+function getTomlSchema(component) {
+    if (component === 'wolfdisk') {
+        return [
+            { key: 'node', label: 'Node', fields: [
+                { key: 'id', label: 'Node ID', type: 'string', placeholder: 'node-1', help: 'Unique identifier for this node' },
+                { key: 'role', label: 'Role', type: 'select', options: ['auto', 'leader', 'follower', 'client'] },
+                { key: 'bind', label: 'Bind Address', type: 'string', placeholder: '0.0.0.0:9500' },
+                { key: 'data_dir', label: 'Data Directory', type: 'string', placeholder: '/var/lib/wolfdisk' },
+            ]},
+            { key: 'cluster', label: 'Cluster', fields: [
+                { key: 'peers', label: 'Cluster Peers', type: 'array', help: 'One host:port per line' },
+                { key: 'discovery', label: 'Discovery Address', type: 'string', placeholder: 'udp://0.0.0.0:9501' },
+            ]},
+            { key: 'replication', label: 'Replication', fields: [
+                { key: 'mode', label: 'Replication Mode', type: 'select', options: ['shared', 'replicated'] },
+                { key: 'factor', label: 'Replication Factor', type: 'number', default: 3 },
+                { key: 'chunk_size', label: 'Chunk Size (bytes)', type: 'number', default: 4194304, help: '4MB = 4194304' },
+            ]},
+            { key: 'mount', label: 'Mount', fields: [
+                { key: 'path', label: 'Mount Path', type: 'string', placeholder: '/mnt/wolfdisk' },
+                { key: 'allow_other', label: 'Allow Other Users', type: 'boolean', default: true },
+            ]},
+        ];
+    }
+    if (component === 'wolfscale') {
+        return [
+            { key: 'node', label: 'Node', fields: [
+                { key: 'id', label: 'Node ID', type: 'string', placeholder: 'node-1' },
+                { key: 'bind_address', label: 'Bind Address', type: 'string', placeholder: '0.0.0.0:7654' },
+                { key: 'data_dir', label: 'Data Directory', type: 'string', placeholder: '/var/lib/wolfscale' },
+            ]},
+            { key: 'database', label: 'Database', fields: [
+                { key: 'host', label: 'MariaDB Host', type: 'string', placeholder: 'localhost' },
+                { key: 'port', label: 'Port', type: 'number', default: 3306 },
+                { key: 'user', label: 'User', type: 'string', placeholder: 'wolfscale' },
+                { key: 'password', label: 'Password', type: 'password' },
+                { key: 'database', label: 'Database', type: 'string', help: 'Leave empty for server-wide replication' },
+                { key: 'pool_size', label: 'Pool Size', type: 'number', default: 10 },
+                { key: 'connect_timeout_secs', label: 'Connect Timeout (s)', type: 'number', default: 30 },
+            ]},
+            { key: 'wal', label: 'Write-Ahead Log', fields: [
+                { key: 'batch_size', label: 'Batch Size', type: 'number', default: 1000 },
+                { key: 'flush_interval_ms', label: 'Flush Interval (ms)', type: 'number', default: 100 },
+                { key: 'compression', label: 'Enable Compression', type: 'boolean', default: true },
+                { key: 'segment_size_mb', label: 'Segment Size (MB)', type: 'number', default: 64 },
+                { key: 'retention_hours', label: 'Retention (hours)', type: 'number', default: 168 },
+                { key: 'fsync', label: 'Fsync (Durable Writes)', type: 'boolean', default: true },
+            ]},
+            { key: 'cluster', label: 'Cluster', fields: [
+                { key: 'peers', label: 'Cluster Peers', type: 'array', help: 'One host:port per line' },
+                { key: 'heartbeat_interval_ms', label: 'Heartbeat Interval (ms)', type: 'number', default: 500 },
+                { key: 'election_timeout_ms', label: 'Election Timeout (ms)', type: 'number', default: 2000 },
+                { key: 'max_batch_entries', label: 'Max Batch Entries', type: 'number', default: 1000 },
+            ]},
+            { key: 'api', label: 'HTTP API', fields: [
+                { key: 'enabled', label: 'Enable HTTP API', type: 'boolean', default: true },
+                { key: 'bind_address', label: 'API Bind Address', type: 'string', placeholder: '0.0.0.0:8080' },
+                { key: 'cors_enabled', label: 'Enable CORS', type: 'boolean', default: false },
+            ]},
+            { key: 'logging', label: 'Logging', fields: [
+                { key: 'level', label: 'Log Level', type: 'select', options: ['trace', 'debug', 'info', 'warn', 'error'] },
+                { key: 'format', label: 'Format', type: 'select', options: ['pretty', 'json', 'compact'] },
+            ]},
+        ];
+    }
+    return [];
+}
+
+let tomlRawMode = false;
+
+async function loadTomlConfigurator(component, displayName) {
+    tomlRawMode = false;
+    document.getElementById('configurator-title').textContent = `${displayName} Configuration`;
+    document.getElementById('configurator-header-actions').innerHTML = `
+        <button class="btn btn-primary btn-sm" onclick="tomlSaveStructured('${component}')">Save Configuration</button>
+        <button class="btn btn-sm" onclick="tomlToggleRaw('${component}', '${displayName}')">Raw TOML</button>
+    `;
+
+    const body = document.getElementById('configurator-body');
+    body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Loading configuration...</div>';
+
+    try {
+        const resp = await fetch(apiUrl(`/api/configurator/toml/${component}/structured`));
+        if (handleAuthError(resp)) return;
+        const data = await resp.json();
+        if (data.error) {
+            body.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text-muted);">
+                ${escapeHtml(data.error)}<br>
+                <small>The config file may not exist yet. Install ${displayName} first or create the config manually.</small>
+            </div>`;
+            return;
+        }
+        renderTomlForm(component, data);
+    } catch (e) {
+        body.innerHTML = `<div style="color:var(--danger);">Failed to load config: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderTomlForm(component, config) {
+    const body = document.getElementById('configurator-body');
+    const sections = getTomlSchema(component);
+
+    if (sections.length === 0) {
+        body.innerHTML = '<div style="color:var(--text-muted);">No schema defined for this component</div>';
+        return;
+    }
+
+    let html = '';
+    for (const section of sections) {
+        html += `<div style="margin-bottom:24px; border-bottom:1px solid var(--border); padding-bottom:16px;">
+            <h4 style="margin-bottom:12px; color:var(--accent-light); font-size:14px;">[${escapeHtml(section.key)}] ${escapeHtml(section.label || '')}</h4>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px 20px;">`;
+
+        for (const field of section.fields) {
+            const value = config?.[section.key]?.[field.key];
+            html += renderTomlField(section.key, field, value);
+        }
+        html += '</div></div>';
+    }
+    body.innerHTML = html;
+}
+
+function renderTomlField(section, field, value) {
+    const id = `toml-${section}-${field.key}`;
+    const helpText = field.help ? `<small style="color:var(--text-muted); display:block; margin-top:2px;">${escapeHtml(field.help)}</small>` : '';
+
+    switch (field.type) {
+        case 'string':
+            return `<div class="form-group">
+                <label style="font-weight:600; margin-bottom:4px; display:block; font-size:13px;">${escapeHtml(field.label)}</label>
+                <input type="text" class="form-control" id="${id}" value="${escapeHtml(String(value ?? field.default ?? ''))}"
+                       placeholder="${escapeHtml(field.placeholder || '')}">
+                ${helpText}
+            </div>`;
+        case 'number':
+            return `<div class="form-group">
+                <label style="font-weight:600; margin-bottom:4px; display:block; font-size:13px;">${escapeHtml(field.label)}</label>
+                <input type="number" class="form-control" id="${id}" value="${value ?? field.default ?? ''}" style="width:200px;">
+                ${helpText}
+            </div>`;
+        case 'boolean':
+            const checked = (value !== undefined ? value : field.default) ? 'checked' : '';
+            return `<div class="form-group">
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:13px;">
+                    <input type="checkbox" id="${id}" ${checked}>
+                    <span style="font-weight:600;">${escapeHtml(field.label)}</span>
+                </label>
+                ${helpText}
+            </div>`;
+        case 'array': {
+            const items = Array.isArray(value) ? value.join('\n') : (value || '');
+            return `<div class="form-group" style="grid-column:span 2;">
+                <label style="font-weight:600; margin-bottom:4px; display:block; font-size:13px;">${escapeHtml(field.label)}</label>
+                <textarea class="form-control" id="${id}" rows="3"
+                    style="font-family:var(--font-mono); font-size:12px;">${escapeHtml(String(items))}</textarea>
+                ${helpText}
+            </div>`;
+        }
+        case 'password':
+            return `<div class="form-group">
+                <label style="font-weight:600; margin-bottom:4px; display:block; font-size:13px;">${escapeHtml(field.label)}</label>
+                <input type="password" class="form-control" id="${id}" value="${escapeHtml(String(value ?? ''))}">
+                ${helpText}
+            </div>`;
+        case 'select': {
+            const opts = (field.options || []).map(o =>
+                `<option value="${escapeHtml(o)}" ${String(value ?? field.default) === o ? 'selected' : ''}>${escapeHtml(o)}</option>`
+            ).join('');
+            return `<div class="form-group">
+                <label style="font-weight:600; margin-bottom:4px; display:block; font-size:13px;">${escapeHtml(field.label)}</label>
+                <select class="form-control" id="${id}" style="width:200px;">${opts}</select>
+                ${helpText}
+            </div>`;
+        }
+        default:
+            return '';
+    }
+}
+
+async function tomlSaveStructured(component) {
+    const schema = getTomlSchema(component);
+    const config = {};
+
+    for (const section of schema) {
+        config[section.key] = {};
+        for (const field of section.fields) {
+            const el = document.getElementById(`toml-${section.key}-${field.key}`);
+            if (!el) continue;
+
+            switch (field.type) {
+                case 'boolean':
+                    config[section.key][field.key] = el.checked;
+                    break;
+                case 'number':
+                    if (el.value !== '') config[section.key][field.key] = Number(el.value);
+                    break;
+                case 'array':
+                    config[section.key][field.key] = el.value.split('\n').map(s => s.trim()).filter(Boolean);
+                    break;
+                case 'password':
+                case 'string':
+                default:
+                    if (el.value) config[section.key][field.key] = el.value;
+                    break;
+            }
+        }
+    }
+
+    showToast('Saving configuration...', 'info');
+    try {
+        const resp = await fetch(apiUrl(`/api/configurator/toml/${component}/structured`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Configuration saved', 'success');
+        } else {
+            showToast(data.error || 'Save failed', 'error');
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+function tomlToggleRaw(component, displayName) {
+    tomlRawMode = !tomlRawMode;
+    if (tomlRawMode) {
+        // Switch to raw config editor (already available above in the component detail config section)
+        document.getElementById('configurator-title').textContent = `${displayName} Configuration (Raw TOML)`;
+        document.getElementById('configurator-header-actions').innerHTML = `
+            <button class="btn btn-sm" onclick="loadTomlConfigurator('${component}', '${displayName}')">Form View</button>
+        `;
+        const body = document.getElementById('configurator-body');
+        body.innerHTML = `<div style="color:var(--text-muted); text-align:center; padding:20px;">
+            Use the raw config editor above to edit the TOML file directly.<br>
+            Click "Form View" to return to the structured editor.
+        </div>`;
+    } else {
+        loadTomlConfigurator(component, displayName);
     }
 }
 
