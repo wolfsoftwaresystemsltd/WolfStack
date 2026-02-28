@@ -12,6 +12,8 @@ pub fn parse_config(target: &ExecTarget, component: &str) -> Result<serde_json::
     let comp = match component.to_lowercase().as_str() {
         "wolfdisk" => Component::WolfDisk,
         "wolfscale" => Component::WolfScale,
+        "wolfproxy" => Component::WolfProxy,
+        "wolfserve" => Component::WolfServe,
         _ => return Err(format!("Unsupported component: {}", component)),
     };
 
@@ -33,6 +35,8 @@ pub fn save_config(target: &ExecTarget, component: &str, data: &serde_json::Valu
     let comp = match component.to_lowercase().as_str() {
         "wolfdisk" => Component::WolfDisk,
         "wolfscale" => Component::WolfScale,
+        "wolfproxy" => Component::WolfProxy,
+        "wolfserve" => Component::WolfServe,
         _ => return Err(format!("Unsupported component: {}", component)),
     };
 
@@ -57,6 +61,8 @@ pub fn bootstrap_config(target: &ExecTarget, component: &str) -> Result<String, 
     let comp = match component.to_lowercase().as_str() {
         "wolfdisk" => Component::WolfDisk,
         "wolfscale" => Component::WolfScale,
+        "wolfproxy" => Component::WolfProxy,
+        "wolfserve" => Component::WolfServe,
         _ => return Err(format!("Unsupported component: {}", component)),
     };
 
@@ -134,6 +140,37 @@ cors_enabled = false
 [logging]
 level = "info"
 format = "pretty"
+"#,
+        Component::WolfProxy => r#"# WolfProxy Configuration
+# Auto-generated default — edit as needed
+
+[server]
+bind_address = "0.0.0.0:80"
+bind_address_ssl = "0.0.0.0:443"
+worker_threads = 0
+
+[firewall]
+enabled = false
+rate_limit_rps = 100
+
+[logging]
+level = "info"
+access_log = "/var/log/wolfproxy/access.log"
+error_log = "/var/log/wolfproxy/error.log"
+"#,
+        Component::WolfServe => r#"# WolfServe Configuration
+# Auto-generated default — edit as needed
+
+[server]
+bind_address = "0.0.0.0:80"
+bind_address_ssl = "0.0.0.0:443"
+worker_threads = 0
+document_root = "/var/www/html"
+
+[logging]
+level = "info"
+access_log = "/var/log/wolfserve/access.log"
+error_log = "/var/log/wolfserve/error.log"
 "#,
         _ => return Err(format!("No default config template for {}", component)),
     };
