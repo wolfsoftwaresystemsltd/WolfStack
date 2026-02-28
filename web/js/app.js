@@ -2017,6 +2017,7 @@ function renderComponents(components) {
                         <div class="component-desc">${c.version || ''}</div>
                     </div>
                     ${docLink}
+                    ${hasConfigurator(c.component) ? '<span title="Configurator available" style="font-size:14px; opacity:0.7;">⚙️</span>' : ''}
                     <span class="detail-arrow">→</span>
                 </div>
                 <div class="component-status">
