@@ -2980,7 +2980,7 @@ pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
 
 /// Update settings for an LXC container with structured data
 /// Preserves existing config lines that aren't being modified
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct LxcSettingsUpdate {
     // General
     pub hostname: Option<String>,

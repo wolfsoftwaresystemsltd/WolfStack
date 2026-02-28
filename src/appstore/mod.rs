@@ -329,6 +329,20 @@ fn install_lxc(
         let _ = std::fs::write(format!("{}/ip", wolfnet_dir), ip);
     }
 
+    // Apps that need special LXC device access
+    let needs_tun = matches!(app.id.as_str(), "wolfdisk" | "wireguard" | "tailscale");
+    let needs_fuse = matches!(app.id.as_str(), "wolfdisk");
+    if needs_tun || needs_fuse {
+        let settings = crate::containers::LxcSettingsUpdate {
+            tun_enabled: if needs_tun { Some(true) } else { None },
+            fuse_enabled: if needs_fuse { Some(true) } else { None },
+            ..Default::default()
+        };
+        if let Err(e) = crate::containers::lxc_update_settings(container_name, &settings) {
+            eprintln!("Warning: Failed to apply LXC features for {}: {}", container_name, e);
+        }
+    }
+
     // Start the container temporarily to run setup commands
 
     crate::containers::lxc_start(container_name)?;
@@ -2388,8 +2402,8 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 release: "bookworm".into(),
                 architecture: "amd64".into(),
                 setup_commands: vec![
-                    "apt-get update && apt-get install -y curl".into(),
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | bash -s -- --component wolfdisk".into(),
+                    "apt-get update && apt-get install -y curl fuse3".into(),
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/setup.sh | bash".into(),
                     "systemctl enable wolfdisk".into(),
                 ],
             }),
@@ -2397,7 +2411,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 packages_debian: vec![],
                 packages_redhat: vec![],
                 post_install: vec![
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | bash -s -- --component wolfdisk".into(),
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/setup.sh | bash".into(),
                 ],
                 service: Some("wolfdisk".into()),
             }),
