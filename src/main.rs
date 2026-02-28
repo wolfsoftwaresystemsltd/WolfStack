@@ -29,6 +29,7 @@ mod appstore;
 mod alerting;
 mod wolfrun;
 mod statuspage;
+mod configurator;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_files;
