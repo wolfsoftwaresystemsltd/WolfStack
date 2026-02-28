@@ -1334,6 +1334,12 @@ fn write_container_network_config(container: &str, bridge_ip: &str) {
 // ─── Common types ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerService {
+    pub name: String,
+    pub status: String, // "running" or "stopped"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerInfo {
     pub id: String,
     pub name: String,
@@ -1357,6 +1363,8 @@ pub struct ContainerInfo {
     pub fs_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ContainerService>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1392,6 +1400,53 @@ pub struct RuntimeStatus {
     pub version: String,
     pub container_count: usize,
     pub running_count: usize,
+}
+
+// ─── Service detection inside containers ───
+
+/// Detect Wolf ecosystem services (and web servers) running inside a container.
+/// Returns a list of services found with their running status.
+fn detect_container_services(runtime: &str, name: &str) -> Vec<ContainerService> {
+    let script = r#"for s in wolfproxy wolfserve wolfdisk wolfscale nginx apache2 httpd; do
+if command -v "$s" >/dev/null 2>&1 || [ -f "/etc/systemd/system/${s}.service" ] || [ -f "/usr/lib/systemd/system/${s}.service" ]; then
+if systemctl is-active --quiet "$s" 2>/dev/null || pgrep -x "$s" >/dev/null 2>&1; then
+echo "${s}:running"
+else
+echo "${s}:stopped"
+fi
+fi
+done"#;
+
+    let output = match runtime {
+        "docker" => Command::new("docker")
+            .args(["exec", name, "sh", "-c", script])
+            .output(),
+        "lxc" => Command::new("lxc-attach")
+            .args(["-n", name, "--", "sh", "-c", script])
+            .output(),
+        _ => return vec![],
+    };
+
+    output.ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        // Normalize httpd → apache2 for display consistency
+                        let svc_name = if parts[0] == "httpd" { "apache2" } else { parts[0] };
+                        Some(ContainerService {
+                            name: svc_name.to_string(),
+                            status: parts[1].to_string(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ─── Detection ───
@@ -1600,6 +1655,13 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                         .map(|p| get_path_disk_usage(p))
                         .unwrap_or((None, None, None));
 
+                    // Detect Wolf services inside running containers
+                    let services = if state == "running" {
+                        detect_container_services("docker", &name)
+                    } else {
+                        vec![]
+                    };
+
                     ContainerInfo {
                         id: parts.first().unwrap_or(&"").to_string(),
                         name,
@@ -1621,6 +1683,7 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                         disk_total: dt,
                         fs_type: ft,
                         version: None,
+                        services,
                     }
                 })
                 .collect()
@@ -1934,6 +1997,13 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
 
                     let version = lxc_read_os_version(&rootfs_path);
 
+                    // Detect Wolf services inside running containers
+                    let services = if state == "running" {
+                        detect_container_services("lxc", &name)
+                    } else {
+                        vec![]
+                    };
+
                     ContainerInfo {
                         id: name.clone(),
                         name,
@@ -1951,6 +2021,7 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                         disk_total: dt,
                         fs_type: ft,
                         version,
+                        services,
                     }
                 })
                 .collect()
@@ -2081,6 +2152,13 @@ fn pct_list_all() -> Vec<ContainerInfo> {
             let pve_rootfs_path = format!("/var/lib/lxc/{}/rootfs", vmid);
             let version = lxc_read_os_version(&pve_rootfs_path);
 
+            // Detect Wolf services inside running containers
+            let services = if state == "running" {
+                detect_container_services("lxc", &vmid)
+            } else {
+                vec![]
+            };
+
             Some(ContainerInfo {
                 id: vmid.clone(),
                 name: vmid,
@@ -2098,6 +2176,7 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                 disk_total: dt,
                 fs_type: ft,
                 version,
+                services,
             })
         })
         .collect()

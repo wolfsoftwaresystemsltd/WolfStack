@@ -7798,8 +7798,13 @@ function renderDockerContainers(containers) {
             <div style="display:flex;align-items:center;gap:16px;font-size:11px;">${statsSegs.join('')}</div>
         </td></tr>` : '';
 
+        const svcBadges = (c.services && c.services.length > 0) ? '<div style="margin-top:3px;">' + c.services.map(s => {
+            const sColor = s.status === 'running' ? '#10b981' : '#ef4444';
+            return `<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:${sColor}22;color:${sColor};border:1px solid ${sColor}44;margin-right:4px;">${s.name}</span>`;
+        }).join('') + '</div>' : '';
+
         return `<tr data-name="${c.name}">
-            <td><strong>${c.name}</strong><br><span style="font-size:11px;color:var(--text-muted)">${c.id.substring(0, 12)}</span></td>
+            <td><strong>${c.name}</strong>${svcBadges}<br><span style="font-size:11px;color:var(--text-muted)">${c.id.substring(0, 12)}</span></td>
             <td>${c.image}</td>
             <td><span style="color:${stateColor}">●</span> ${c.status}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
@@ -8353,8 +8358,13 @@ function renderLxcContainers(containers, stats) {
             <div style="display:flex;align-items:center;gap:16px;font-size:11px;">${statsSegs.join('')}</div>
         </td></tr>` : '';
 
+        const lxcSvcBadges = (c.services && c.services.length > 0) ? '<div style="margin-top:3px;">' + c.services.map(s => {
+            const sColor = s.status === 'running' ? '#10b981' : '#ef4444';
+            return `<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:${sColor}22;color:${sColor};border:1px solid ${sColor}44;margin-right:4px;">${s.name}</span>`;
+        }).join('') + '</div>' : '';
+
         return `<tr>
-            <td><strong>${c.hostname || c.name}</strong>${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
+            <td><strong>${c.hostname || c.name}</strong>${lxcSvcBadges}${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
             <td style="font-size:12px;color:var(--text-secondary);">${c.version || '<span style="color:var(--text-muted)">—</span>'}</td>
             <td><span style="color:${stateColor}">●</span> ${c.state}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
@@ -14705,7 +14715,8 @@ async function loadFleetContainers() {
                         memP, memP >= 0 ? (formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memP + '%)') : '',
                         diskP, diskP >= 0 ? (formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + diskP + '%)') : ''
                     );
-                    rowsHtml += '<tr><td>🐳 Docker</td><td><strong>' + escapeHtml(c.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || c.status || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + dockerButtons(nodeId, c.name, c.state) + '</td></tr>' + sub;
+                    var dSvcBadges = (c.services && c.services.length > 0) ? '<div style="margin-top:3px;">' + c.services.map(function(s) { var sc = s.status === 'running' ? '#10b981' : '#ef4444'; return '<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:' + sc + '22;color:' + sc + ';border:1px solid ' + sc + '44;margin-right:4px;">' + escapeHtml(s.name) + '</span>'; }).join('') + '</div>' : '';
+                    rowsHtml += '<tr><td>🐳 Docker</td><td><strong>' + escapeHtml(c.name) + '</strong>' + dSvcBadges + '</td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || c.status || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + dockerButtons(nodeId, c.name, c.state) + '</td></tr>' + sub;
                 });
             }
         } catch (e) { }
@@ -14731,7 +14742,8 @@ async function loadFleetContainers() {
                         memP, memP >= 0 ? (formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memP + '%)') : '',
                         diskP, diskP >= 0 ? (formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + diskP + '%)') : ''
                     );
-                    rowsHtml += '<tr><td>📦 LXC</td><td><strong>' + escapeHtml(c.hostname || c.name) + '</strong>' + (c.hostname ? '<div style="font-size:11px;color:var(--text-muted);">CT ' + escapeHtml(c.name) + '</div>' : '') + '</td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + lxcButtons(nodeId, c.name, c.state, c.storage_path) + '</td></tr>' + sub;
+                    var lSvcBadges = (c.services && c.services.length > 0) ? '<div style="margin-top:3px;">' + c.services.map(function(s) { var sc = s.status === 'running' ? '#10b981' : '#ef4444'; return '<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:' + sc + '22;color:' + sc + ';border:1px solid ' + sc + '44;margin-right:4px;">' + escapeHtml(s.name) + '</span>'; }).join('') + '</div>' : '';
+                    rowsHtml += '<tr><td>📦 LXC</td><td><strong>' + escapeHtml(c.hostname || c.name) + '</strong>' + lSvcBadges + (c.hostname ? '<div style="font-size:11px;color:var(--text-muted);">CT ' + escapeHtml(c.name) + '</div>' : '') + '</td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + lxcButtons(nodeId, c.name, c.state, c.storage_path) + '</td></tr>' + sub;
                 });
             }
         } catch (e) { }
