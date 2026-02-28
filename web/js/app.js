@@ -5467,6 +5467,7 @@ async function loadNginxConfigurator() {
         <button class="btn btn-primary btn-sm" onclick="nginxNewSiteForm()">+ New Site</button>
         <button class="btn btn-sm" onclick="nginxTestConfig()">Test Config</button>
         <button class="btn btn-success btn-sm" onclick="nginxReloadService()">Reload Nginx</button>
+        <button class="btn btn-sm" onclick="loadTomlConfigurator('wolfproxy', 'WolfProxy')">WolfProxy Settings</button>
     `;
 
     const body = document.getElementById('configurator-body');
@@ -5477,12 +5478,9 @@ async function loadNginxConfigurator() {
         if (handleAuthError(resp)) return;
         const data = await resp.json();
         if (data.error) {
-            const isNotInstalled = data.error.toLowerCase().includes('not installed');
             body.innerHTML = `<div style="text-align:center;padding:20px;">
                 <div style="color:var(--danger); margin-bottom:12px;">${escapeHtml(data.error)}</div>
-                ${isNotInstalled ? `<button class="btn btn-primary" onclick="nginxBootstrap()">Install Nginx & Create Default Config</button>` : ''}
             </div>`;
-            if (isNotInstalled) document.getElementById('configurator-header-actions').innerHTML = '';
             return;
         }
         renderNginxSitesList(data.sites || []);
@@ -5491,30 +5489,15 @@ async function loadNginxConfigurator() {
     }
 }
 
-async function nginxBootstrap() {
-    const body = document.getElementById('configurator-body');
-    body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Installing Nginx and creating default configuration... This may take a moment.</div>';
-    try {
-        const resp = await fetch(configuratorApiUrl('/api/configurator/nginx/bootstrap'), { method: 'POST' });
-        const data = await resp.json();
-        if (resp.ok) {
-            showToast(data.message || 'Nginx installed', 'success');
-        } else {
-            showToast(data.error || 'Bootstrap failed', 'error');
-        }
-        loadNginxConfigurator();
-    } catch (e) {
-        showToast('Bootstrap failed: ' + e.message, 'error');
-        loadNginxConfigurator();
-    }
-}
-
 function renderNginxSitesList(sites) {
     const body = document.getElementById('configurator-body');
     if (sites.length === 0) {
         body.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text-muted);">
-            No nginx sites found<br>
-            <button class="btn btn-primary btn-sm" style="margin-top:12px;" onclick="nginxNewSiteForm()">Create First Site</button>
+            No nginx sites configured yet<br>
+            <div style="display:flex; gap:8px; justify-content:center; margin-top:12px;">
+                <button class="btn btn-primary btn-sm" onclick="nginxBootstrap()">Create Default Config</button>
+                <button class="btn btn-sm" onclick="nginxNewSiteForm()">Create Custom Site</button>
+            </div>
         </div>`;
         return;
     }
@@ -5545,6 +5528,24 @@ function renderNginxSitesList(sites) {
     }
     html += '</tbody></table>';
     body.innerHTML = html;
+}
+
+async function nginxBootstrap() {
+    const body = document.getElementById('configurator-body');
+    body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Creating default configuration...</div>';
+    try {
+        const resp = await fetch(configuratorApiUrl('/api/configurator/nginx/bootstrap'), { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Default config created', 'success');
+        } else {
+            showToast(data.error || 'Failed to create config', 'error');
+        }
+        loadNginxConfigurator();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+        loadNginxConfigurator();
+    }
 }
 
 async function nginxToggleSite(name, enable) {
@@ -5788,6 +5789,7 @@ async function loadApacheConfigurator() {
         <button class="btn btn-sm" onclick="apacheShowModules()">Modules</button>
         <button class="btn btn-sm" onclick="apacheTestConfig()">Test Config</button>
         <button class="btn btn-success btn-sm" onclick="apacheReloadService()">Reload Apache</button>
+        <button class="btn btn-sm" onclick="loadTomlConfigurator('wolfserve', 'WolfServe')">WolfServe Settings</button>
     `;
 
     const body = document.getElementById('configurator-body');
@@ -5798,12 +5800,9 @@ async function loadApacheConfigurator() {
         if (handleAuthError(resp)) return;
         const data = await resp.json();
         if (data.error) {
-            const isNotInstalled = data.error.toLowerCase().includes('not installed');
             body.innerHTML = `<div style="text-align:center;padding:20px;">
                 <div style="color:var(--danger); margin-bottom:12px;">${escapeHtml(data.error)}</div>
-                ${isNotInstalled ? `<button class="btn btn-primary" onclick="apacheBootstrap()">Install Apache & Create Default Config</button>` : ''}
             </div>`;
-            if (isNotInstalled) document.getElementById('configurator-header-actions').innerHTML = '';
             return;
         }
         renderApacheSitesList(data.sites || []);
@@ -5812,30 +5811,15 @@ async function loadApacheConfigurator() {
     }
 }
 
-async function apacheBootstrap() {
-    const body = document.getElementById('configurator-body');
-    body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Installing Apache and creating default configuration... This may take a moment.</div>';
-    try {
-        const resp = await fetch(configuratorApiUrl('/api/configurator/apache/bootstrap'), { method: 'POST' });
-        const data = await resp.json();
-        if (resp.ok) {
-            showToast(data.message || 'Apache installed', 'success');
-        } else {
-            showToast(data.error || 'Bootstrap failed', 'error');
-        }
-        loadApacheConfigurator();
-    } catch (e) {
-        showToast('Bootstrap failed: ' + e.message, 'error');
-        loadApacheConfigurator();
-    }
-}
-
 function renderApacheSitesList(sites) {
     const body = document.getElementById('configurator-body');
     if (sites.length === 0) {
         body.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text-muted);">
-            No Apache virtual hosts found<br>
-            <button class="btn btn-primary btn-sm" style="margin-top:12px;" onclick="apacheNewVhostForm()">Create First VHost</button>
+            No Apache virtual hosts configured yet<br>
+            <div style="display:flex; gap:8px; justify-content:center; margin-top:12px;">
+                <button class="btn btn-primary btn-sm" onclick="apacheBootstrap()">Create Default Config</button>
+                <button class="btn btn-sm" onclick="apacheNewVhostForm()">Create Custom VHost</button>
+            </div>
         </div>`;
         return;
     }
@@ -5866,6 +5850,24 @@ function renderApacheSitesList(sites) {
     }
     html += '</tbody></table>';
     body.innerHTML = html;
+}
+
+async function apacheBootstrap() {
+    const body = document.getElementById('configurator-body');
+    body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Creating default configuration...</div>';
+    try {
+        const resp = await fetch(configuratorApiUrl('/api/configurator/apache/bootstrap'), { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Default config created', 'success');
+        } else {
+            showToast(data.error || 'Failed to create config', 'error');
+        }
+        loadApacheConfigurator();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+        loadApacheConfigurator();
+    }
 }
 
 async function apacheToggleSite(name, enable) {
@@ -6235,6 +6237,39 @@ function getTomlSchema(component) {
             ]},
         ];
     }
+    if (component === 'wolfproxy') {
+        return [
+            { key: 'server', label: 'Server', description: 'Core reverse proxy server settings.', fields: [
+                { key: 'bind_address', label: 'Bind Address', type: 'string', placeholder: '0.0.0.0:80', help: 'IP and port for HTTP traffic' },
+                { key: 'bind_address_ssl', label: 'SSL Bind Address', type: 'string', placeholder: '0.0.0.0:443', help: 'IP and port for HTTPS traffic' },
+                { key: 'worker_threads', label: 'Worker Threads', type: 'number', default: 0, help: 'Number of worker threads (0 = auto-detect based on CPU cores)' },
+            ]},
+            { key: 'firewall', label: 'Firewall', description: 'Built-in firewall and rate limiting settings.', fields: [
+                { key: 'enabled', label: 'Enable Firewall', type: 'boolean', default: false, help: 'Enable the built-in request firewall' },
+                { key: 'rate_limit_rps', label: 'Rate Limit (req/s)', type: 'number', default: 100, help: 'Maximum requests per second per IP before throttling' },
+            ]},
+            { key: 'logging', label: 'Logging', description: 'Log output settings.', fields: [
+                { key: 'level', label: 'Log Level', type: 'select', options: ['trace', 'debug', 'info', 'warn', 'error'], help: 'Minimum severity to log' },
+                { key: 'access_log', label: 'Access Log', type: 'string', placeholder: '/var/log/wolfproxy/access.log', help: 'Path for HTTP access log' },
+                { key: 'error_log', label: 'Error Log', type: 'string', placeholder: '/var/log/wolfproxy/error.log', help: 'Path for error log' },
+            ]},
+        ];
+    }
+    if (component === 'wolfserve') {
+        return [
+            { key: 'server', label: 'Server', description: 'Core web server settings.', fields: [
+                { key: 'bind_address', label: 'Bind Address', type: 'string', placeholder: '0.0.0.0:80', help: 'IP and port for HTTP traffic' },
+                { key: 'bind_address_ssl', label: 'SSL Bind Address', type: 'string', placeholder: '0.0.0.0:443', help: 'IP and port for HTTPS traffic' },
+                { key: 'worker_threads', label: 'Worker Threads', type: 'number', default: 0, help: 'Number of worker threads (0 = auto-detect based on CPU cores)' },
+                { key: 'document_root', label: 'Document Root', type: 'string', placeholder: '/var/www/html', help: 'Default document root for serving files' },
+            ]},
+            { key: 'logging', label: 'Logging', description: 'Log output settings.', fields: [
+                { key: 'level', label: 'Log Level', type: 'select', options: ['trace', 'debug', 'info', 'warn', 'error'], help: 'Minimum severity to log' },
+                { key: 'access_log', label: 'Access Log', type: 'string', placeholder: '/var/log/wolfserve/access.log', help: 'Path for HTTP access log' },
+                { key: 'error_log', label: 'Error Log', type: 'string', placeholder: '/var/log/wolfserve/error.log', help: 'Path for error log' },
+            ]},
+        ];
+    }
     return [];
 }
 
@@ -6243,7 +6278,10 @@ let tomlRawMode = false;
 async function loadTomlConfigurator(component, displayName) {
     tomlRawMode = false;
     document.getElementById('configurator-title').textContent = `${displayName} Configuration`;
+    const backBtn = component === 'wolfproxy' ? `<button class="btn btn-sm" onclick="loadNginxConfigurator()">← Nginx Sites</button>`
+        : component === 'wolfserve' ? `<button class="btn btn-sm" onclick="loadApacheConfigurator()">← Apache VHosts</button>` : '';
     document.getElementById('configurator-header-actions').innerHTML = `
+        ${backBtn}
         <button class="btn btn-primary btn-sm" onclick="tomlSaveStructured('${component}')">Save Configuration</button>
         <button class="btn btn-sm" onclick="tomlToggleRaw('${component}', '${displayName}')">Raw TOML</button>
     `;

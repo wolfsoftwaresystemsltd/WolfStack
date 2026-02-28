@@ -68,23 +68,16 @@ pub struct ApacheVhostParams {
 fn default_listen_port() -> u16 { 80 }
 
 /// Check if Apache is installed on the target
-pub fn is_apache_installed(target: &ExecTarget) -> bool {
-    let (_, _, success) = target.exec_full("which apache2 2>/dev/null || which httpd 2>/dev/null || command -v apache2 2>/dev/null || command -v httpd 2>/dev/null")
-        .unwrap_or((String::new(), String::new(), false));
-    if success { return true; }
-    target.path_exists("/etc/apache2").unwrap_or(false)
-        || target.path_exists("/etc/httpd").unwrap_or(false)
-}
-
 /// List all sites/vhosts with enabled status
 pub fn list_sites(target: &ExecTarget) -> Result<Vec<SiteEntry>, String> {
-    if !is_apache_installed(target) {
-        return Err("Apache is not installed. Install Apache (apache2/httpd) first, then use the configurator to manage virtual hosts.".to_string());
-    }
-
     let paths = apache_paths(target);
 
     if !target.path_exists(paths.sites_available).unwrap_or(false) {
+        // Sites dir doesn't exist yet — create it and return empty
+        let _ = target.exec(&format!("mkdir -p '{}'", paths.sites_available));
+        if paths.is_debian {
+            let _ = target.exec(&format!("mkdir -p '{}'", paths.sites_enabled));
+        }
         return Ok(Vec::new());
     }
 
@@ -365,19 +358,8 @@ pub fn error_log(target: &ExecTarget, lines: usize) -> Vec<String> {
 }
 
 /// Bootstrap Apache — install it and create a default config if not present
+/// Bootstrap apache — create directories and a default vhost config if not present
 pub fn bootstrap_apache(target: &ExecTarget) -> Result<String, String> {
-    if !is_apache_installed(target) {
-        let distro = target.detect_distro();
-        let install_cmd = match distro {
-            DistroFamily::Debian => "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y apache2",
-            DistroFamily::RedHat => "dnf install -y httpd",
-            DistroFamily::Suse => "zypper install -y apache2",
-            DistroFamily::Unknown => "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y apache2",
-        };
-        target.exec(install_cmd)
-            .map_err(|e| format!("Failed to install Apache: {}", e))?;
-    }
-
     let paths = apache_paths(target);
 
     // Ensure directories exist
@@ -395,17 +377,9 @@ pub fn bootstrap_apache(target: &ExecTarget) -> Result<String, String> {
         let config_path = format!("{}/{}", paths.sites_available, config_name);
         target.write_file(&config_path, default_config)?;
 
-        // Enable on Debian
-        if paths.is_debian {
-            let _ = target.exec(&format!("a2ensite '{}'", config_name.replace('\'', "'\\''")));
-        }
-
-        // Create document root
-        let _ = target.exec("mkdir -p /var/www/html");
-
-        Ok("Apache installed and default virtual host created".to_string())
+        Ok("Default virtual host configuration created".to_string())
     } else {
-        Ok("Apache installed — existing configuration preserved".to_string())
+        Ok("Configuration already exists — not overwriting".to_string())
     }
 }
 

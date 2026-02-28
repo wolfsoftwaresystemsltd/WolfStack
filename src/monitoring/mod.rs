@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use sysinfo::{System, Disks, Networks};
-use std::time::Instant;
+
 
 /// Snapshot of system metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,7 +63,6 @@ pub struct SystemMonitor {
     sys: System,
     disks: Disks,
     networks: Networks,
-    started: Instant,
 }
 
 impl SystemMonitor {
@@ -77,7 +76,6 @@ impl SystemMonitor {
             sys,
             disks,
             networks,
-            started: Instant::now(),
         }
     }
 
@@ -132,7 +130,7 @@ impl SystemMonitor {
 
         SystemMetrics {
             hostname: System::host_name().unwrap_or_else(|| "unknown".to_string()),
-            uptime_secs: self.started.elapsed().as_secs(),
+            uptime_secs: System::uptime(),
             cpu_usage_percent: cpu_usage,
             cpu_count: self.sys.cpus().len(),
             cpu_model,
