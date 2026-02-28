@@ -2071,26 +2071,92 @@ function renderServices(components) {
 }
 
 async function installComponent(name) {
-    // Show a progress overlay during component install
+    // Fetch running containers to offer as install targets
+    let containers = [];
+    try {
+        const resp = await fetch(apiUrl('/api/containers/running'));
+        if (resp.ok) containers = await resp.json();
+    } catch (e) { /* ignore — just offer host install */ }
+
+    // Build target selection dialog
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay active';
     overlay.style.cssText = 'display:flex; z-index:10001;';
+
+    const cName = name.charAt(0).toUpperCase() + name.slice(1);
+    let targetOptions = `
+        <div style="text-align:left; margin-bottom:16px;">
+            <label style="display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid var(--border); border-radius:8px; cursor:pointer; margin-bottom:8px; background:var(--bg-secondary);">
+                <input type="radio" name="install-target" value="host" checked>
+                <div>
+                    <div style="font-weight:600; font-size:14px;">This Host</div>
+                    <div style="font-size:12px; color:var(--text-muted);">Install directly on the server's operating system</div>
+                </div>
+            </label>`;
+
+    for (const c of containers) {
+        const icon = c.runtime === 'docker' ? '🐳' : '📦';
+        const label = c.image ? `${c.name} (${c.image})` : c.name;
+        targetOptions += `
+            <label style="display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid var(--border); border-radius:8px; cursor:pointer; margin-bottom:8px;">
+                <input type="radio" name="install-target" value="${escapeHtml(c.runtime)}:${escapeHtml(c.name)}">
+                <div>
+                    <div style="font-weight:600; font-size:14px;">${icon} ${escapeHtml(label)}</div>
+                    <div style="font-size:12px; color:var(--text-muted);">${escapeHtml(c.runtime)} container</div>
+                </div>
+            </label>`;
+    }
+    targetOptions += '</div>';
+
     overlay.innerHTML = `
-        <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:380px; width:90%; text-align:center; box-shadow:0 20px 60px rgba(0,0,0,0.5); animation:modalSlideIn 0.3s ease;">
+        <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:460px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.5); animation:modalSlideIn 0.3s ease;">
+            <h3 style="color:var(--text-primary); font-size:17px; margin-bottom:4px; font-weight:700;">Install ${escapeHtml(cName)}</h3>
+            <p style="color:var(--text-secondary); font-size:13px; margin-bottom:16px;">Choose where to install this component:</p>
+            ${targetOptions}
+            <div style="display:flex; gap:8px; justify-content:flex-end;">
+                <button class="btn btn-sm" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+                <button class="btn btn-primary btn-sm" id="install-confirm-btn" onclick="doInstallComponent('${escapeHtml(name)}', this.closest('.modal-overlay'))">Install</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+}
+
+async function doInstallComponent(name, overlay) {
+    const selected = overlay.querySelector('input[name="install-target"]:checked');
+    if (!selected) return;
+
+    const target = selected.value;
+    const confirmBtn = document.getElementById('install-confirm-btn');
+    if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = 'Installing...'; }
+
+    // Replace dialog content with progress spinner
+    const card = overlay.querySelector('div');
+    card.innerHTML = `
+        <div style="text-align:center;">
             <div style="width:56px; height:56px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; margin:0 auto 20px;"></div>
             <h3 style="color:var(--text-primary); font-size:17px; margin-bottom:8px; font-weight:700;">Installing ${escapeHtml(name)}</h3>
-            <p style="color:var(--text-secondary); font-size:13px; margin-bottom:16px;">This may take a minute…</p>
+            <p style="color:var(--text-secondary); font-size:13px; margin-bottom:8px;">${target === 'host' ? 'Installing on this host...' : `Installing in ${escapeHtml(target.split(':')[1])}...`}</p>
             <div style="height:4px; background:var(--bg-secondary); border-radius:4px; overflow:hidden;">
                 <div style="height:100%; width:30%; background:linear-gradient(90deg,var(--accent),var(--accent-light)); border-radius:4px; animation:progressPulse 1.5s ease-in-out infinite;"></div>
             </div>
         </div>`;
-    document.body.appendChild(overlay);
+
     try {
-        const resp = await fetch(apiUrl(`/api/components/${name}/install`), { method: 'POST' });
+        let resp;
+        if (target === 'host') {
+            resp = await fetch(apiUrl(`/api/components/${name}/install`), { method: 'POST' });
+        } else {
+            const [runtime, container] = target.split(':');
+            resp = await fetch(apiUrl('/api/containers/install-component'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ runtime, container, component: name })
+            });
+        }
         const data = await resp.json();
         overlay.remove();
         if (resp.ok) {
-            showToast(`✅ ${name} installed successfully`, 'success');
+            showToast(data.message || `${name} installed successfully`, 'success');
         } else {
             showToast(data.error || 'Installation failed', 'error');
         }
