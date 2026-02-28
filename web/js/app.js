@@ -5507,7 +5507,7 @@ function onConfiguratorTargetChange(value, componentName) {
 // ── Nginx Configurator (WolfProxy) ──
 
 async function loadNginxConfigurator() {
-    document.getElementById('configurator-title').textContent = 'Nginx Sites';
+    document.getElementById('configurator-title').textContent = 'Nginx / WolfProxy Sites';
     document.getElementById('configurator-header-actions').innerHTML = `
         <button class="btn btn-primary btn-sm" onclick="nginxNewSiteForm()">+ New Site</button>
         <button class="btn btn-sm" onclick="nginxTestConfig()">Test Config</button>
@@ -5828,7 +5828,7 @@ async function nginxReloadService() {
 // ── Apache Configurator (WolfServe) ──
 
 async function loadApacheConfigurator() {
-    document.getElementById('configurator-title').textContent = 'Apache Virtual Hosts';
+    document.getElementById('configurator-title').textContent = 'Apache / WolfServe Virtual Hosts';
     document.getElementById('configurator-header-actions').innerHTML = `
         <button class="btn btn-primary btn-sm" onclick="apacheNewVhostForm()">+ New VHost</button>
         <button class="btn btn-sm" onclick="apacheShowModules()">Modules</button>
@@ -5997,7 +5997,7 @@ function apacheNewVhostForm() {
     body.innerHTML = `
         <div style="margin-bottom:12px; display:flex; align-items:center; gap:12px;">
             <button class="btn btn-sm" onclick="loadApacheConfigurator()">← Back</button>
-            <h4 style="margin:0;">Create New Apache Virtual Host</h4>
+            <h4 style="margin:0;">Create New Virtual Host</h4>
         </div>
         <p style="color:var(--text-muted); font-size:12px; margin-bottom:16px;">Create a new Apache virtual host. Fill in the details below and click Generate to preview the configuration before saving.</p>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; max-width:700px;">
@@ -6323,8 +6323,8 @@ let tomlRawMode = false;
 async function loadTomlConfigurator(component, displayName) {
     tomlRawMode = false;
     document.getElementById('configurator-title').textContent = `${displayName} Configuration`;
-    const backBtn = component === 'wolfproxy' ? `<button class="btn btn-sm" onclick="loadNginxConfigurator()">← Nginx Sites</button>`
-        : component === 'wolfserve' ? `<button class="btn btn-sm" onclick="loadApacheConfigurator()">← Apache VHosts</button>` : '';
+    const backBtn = component === 'wolfproxy' ? `<button class="btn btn-sm" onclick="loadNginxConfigurator()">← Nginx / WolfProxy Sites</button>`
+        : component === 'wolfserve' ? `<button class="btn btn-sm" onclick="loadApacheConfigurator()">← Apache / WolfServe VHosts</button>` : '';
     document.getElementById('configurator-header-actions').innerHTML = `
         ${backBtn}
         <button class="btn btn-primary btn-sm" onclick="tomlSaveStructured('${component}')">Save Configuration</button>
