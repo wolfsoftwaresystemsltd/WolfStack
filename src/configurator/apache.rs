@@ -308,24 +308,35 @@ pub fn disable_module(target: &ExecTarget, name: &str) -> Result<String, String>
 }
 
 /// Run apachectl configtest
+/// Run config test — tries apache first, falls back to wolfserve
 pub fn test_config(target: &ExecTarget) -> ConfigTestResult {
     let paths = apache_paths(target);
-    match target.exec_full(&format!("{} configtest 2>&1", paths.config_test_cmd)) {
-        Ok((output, stderr, success)) => {
-            let combined = if stderr.is_empty() { output } else { format!("{}\n{}", output, stderr) };
-            ConfigTestResult {
-                success,
-                output: combined.trim().to_string(),
-            }
-        }
-        Err(e) => ConfigTestResult {
-            success: false,
-            output: format!("Failed to run {} configtest: {}", paths.config_test_cmd, e),
-        },
+
+    // Try apache configtest first
+    if let Ok((output, stderr, success)) = target.exec_full(&format!("{} configtest 2>&1", paths.config_test_cmd)) {
+        let combined = if stderr.is_empty() { output } else { format!("{}\n{}", output, stderr) };
+        return ConfigTestResult {
+            success,
+            output: combined.trim().to_string(),
+        };
+    }
+
+    // Fall back to wolfserve --test
+    if let Ok((output, stderr, success)) = target.exec_full("wolfserve --test 2>&1") {
+        let combined = if stderr.is_empty() { output } else { format!("{}\n{}", output, stderr) };
+        return ConfigTestResult {
+            success,
+            output: combined.trim().to_string(),
+        };
+    }
+
+    ConfigTestResult {
+        success: false,
+        output: "Neither apache nor wolfserve found to test configuration".to_string(),
     }
 }
 
-/// Reload Apache — runs test first, only reloads if test passes
+/// Reload apache/wolfserve — runs test first, only reloads if test passes
 pub fn reload(target: &ExecTarget) -> Result<String, String> {
     let test = test_config(target);
     if !test.success {
@@ -333,9 +344,13 @@ pub fn reload(target: &ExecTarget) -> Result<String, String> {
     }
 
     let paths = apache_paths(target);
-    target.exec(&format!("systemctl reload {} || {} -k graceful",
-        paths.service_name, paths.config_test_cmd))?;
-    Ok(format!("{} reloaded successfully", paths.service_name))
+    let reload_result = target.exec(&format!(
+        "systemctl reload {} 2>/dev/null || {} -k graceful 2>/dev/null || systemctl reload wolfserve 2>/dev/null || systemctl restart wolfserve",
+        paths.service_name, paths.config_test_cmd));
+    match reload_result {
+        Ok(_) => Ok("Configuration reloaded successfully".to_string()),
+        Err(e) => Err(format!("Failed to reload: {}", e)),
+    }
 }
 
 /// Read recent Apache error log lines

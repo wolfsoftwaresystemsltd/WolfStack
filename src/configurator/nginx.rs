@@ -216,32 +216,45 @@ pub fn disable_site(target: &ExecTarget, name: &str) -> Result<String, String> {
     }
 }
 
-/// Run nginx -t to test configuration
+/// Run config test — tries nginx -t first, falls back to wolfproxy --test
 pub fn test_config(target: &ExecTarget) -> ConfigTestResult {
-    match target.exec_full("nginx -t 2>&1") {
-        Ok((output, stderr, success)) => {
-            let combined = if stderr.is_empty() { output } else { format!("{}\n{}", output, stderr) };
-            ConfigTestResult {
-                success,
-                output: combined.trim().to_string(),
-            }
-        }
-        Err(e) => ConfigTestResult {
-            success: false,
-            output: format!("Failed to run nginx -t: {}", e),
-        },
+    // Try nginx -t first
+    if let Ok((output, stderr, success)) = target.exec_full("nginx -t 2>&1") {
+        let combined = if stderr.is_empty() { output } else { format!("{}\n{}", output, stderr) };
+        return ConfigTestResult {
+            success,
+            output: combined.trim().to_string(),
+        };
+    }
+
+    // Fall back to wolfproxy --test
+    if let Ok((output, stderr, success)) = target.exec_full("wolfproxy --test 2>&1") {
+        let combined = if stderr.is_empty() { output } else { format!("{}\n{}", output, stderr) };
+        return ConfigTestResult {
+            success,
+            output: combined.trim().to_string(),
+        };
+    }
+
+    ConfigTestResult {
+        success: false,
+        output: "Neither nginx nor wolfproxy found to test configuration".to_string(),
     }
 }
 
-/// Reload nginx — runs test first, only reloads if test passes
+/// Reload nginx/wolfproxy — runs test first, only reloads if test passes
 pub fn reload(target: &ExecTarget) -> Result<String, String> {
     let test = test_config(target);
     if !test.success {
         return Err(format!("Config test failed, not reloading:\n{}", test.output));
     }
 
-    target.exec("systemctl reload nginx || nginx -s reload")?;
-    Ok("Nginx reloaded successfully".to_string())
+    // Try nginx first, then wolfproxy
+    let reload_result = target.exec("systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || systemctl reload wolfproxy 2>/dev/null || systemctl restart wolfproxy");
+    match reload_result {
+        Ok(_) => Ok("Configuration reloaded successfully".to_string()),
+        Err(e) => Err(format!("Failed to reload: {}", e)),
+    }
 }
 
 /// Read recent nginx error log lines

@@ -272,18 +272,26 @@ fn install_certbot(distro: DistroFamily) -> Result<String, String> {
 }
 
 fn install_wolf_component(component: Component, _distro: DistroFamily) -> Result<String, String> {
-    // Wolf components are installed from GitHub releases
-    let repo = match component {
-        Component::WolfNet | Component::WolfDisk | Component::WolfScale =>
-            "wolfsoftwaresystemsltd/WolfScale",
-        Component::WolfProxy => "wolfsoftwaresystemsltd/WolfProxy",
-        Component::WolfServe => "wolfsoftwaresystemsltd/WolfServe",
+    let install_url = match component {
+        Component::WolfNet => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh",
+        Component::WolfProxy => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfproxy/install.sh",
+        Component::WolfServe => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfserve/install.sh",
+        Component::WolfDisk => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh",
+        Component::WolfScale => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh",
         _ => return Err("Unknown component".to_string()),
     };
 
+    let output = Command::new("bash")
+        .args(["-c", &format!("curl -fsSL '{}' | bash", install_url)])
+        .output()
+        .map_err(|e| format!("Failed to run install script: {}", e))?;
 
-    // TODO: Download and install from GitHub releases
-    Ok(format!("{} installation queued from {}", component.name(), repo))
+    if output.status.success() {
+        Ok(format!("{} installed successfully", component.name()))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("Install failed: {}", stderr))
+    }
 }
 
 /// Start a service

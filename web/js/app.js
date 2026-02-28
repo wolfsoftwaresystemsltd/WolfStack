@@ -5466,7 +5466,7 @@ async function loadNginxConfigurator() {
     document.getElementById('configurator-header-actions').innerHTML = `
         <button class="btn btn-primary btn-sm" onclick="nginxNewSiteForm()">+ New Site</button>
         <button class="btn btn-sm" onclick="nginxTestConfig()">Test Config</button>
-        <button class="btn btn-success btn-sm" onclick="nginxReloadService()">Reload Nginx</button>
+        <button class="btn btn-success btn-sm" onclick="nginxReloadService()">Reload</button>
         <button class="btn btn-sm" onclick="loadTomlConfigurator('wolfproxy', 'WolfProxy')">WolfProxy Settings</button>
     `;
 
@@ -5765,7 +5765,7 @@ async function nginxTestConfig() {
 }
 
 async function nginxReloadService() {
-    const ok = await wolfConfirm('Reload nginx? This will test the configuration first.', 'Reload Nginx');
+    const ok = await wolfConfirm('Reload configuration? This will test the configuration first.', 'Reload');
     if (!ok) return;
     try {
         const resp = await fetch(configuratorApiUrl('/api/configurator/nginx/reload'), { method: 'POST' });
@@ -5788,7 +5788,7 @@ async function loadApacheConfigurator() {
         <button class="btn btn-primary btn-sm" onclick="apacheNewVhostForm()">+ New VHost</button>
         <button class="btn btn-sm" onclick="apacheShowModules()">Modules</button>
         <button class="btn btn-sm" onclick="apacheTestConfig()">Test Config</button>
-        <button class="btn btn-success btn-sm" onclick="apacheReloadService()">Reload Apache</button>
+        <button class="btn btn-success btn-sm" onclick="apacheReloadService()">Reload</button>
         <button class="btn btn-sm" onclick="loadTomlConfigurator('wolfserve', 'WolfServe')">WolfServe Settings</button>
     `;
 
@@ -11015,8 +11015,8 @@ async function saveVmSettings(name) {
 
 const installCmds = {
     wolfnet: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh | sudo bash',
-    wolfproxy: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfProxy/main/setup.sh | sudo bash',
-    wolfserve: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfServe/main/setup.sh | sudo bash',
+    wolfproxy: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfproxy/install.sh | sudo bash',
+    wolfserve: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfserve/install.sh | sudo bash',
     wolfdisk: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | sudo bash',
     wolfscale: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh | sudo bash',
 };

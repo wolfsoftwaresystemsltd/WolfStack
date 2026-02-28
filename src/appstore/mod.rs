@@ -1274,7 +1274,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 architecture: "amd64".into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl".into(),
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfProxy/main/setup.sh | bash".into(),
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfproxy/install.sh | bash".into(),
                     "systemctl enable wolfproxy".into(),
                 ],
             }),
@@ -1282,7 +1282,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 packages_debian: vec![],
                 packages_redhat: vec![],
                 post_install: vec![
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfProxy/main/setup.sh | bash".into(),
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfproxy/install.sh | bash".into(),
                 ],
                 service: Some("wolfproxy".into()),
             }),
@@ -2449,7 +2449,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 architecture: "amd64".into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl".into(),
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfServe/main/setup.sh | bash".into(),
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfserve/install.sh | bash".into(),
                     "systemctl enable wolfserve".into(),
                 ],
             }),
@@ -2457,7 +2457,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 packages_debian: vec![],
                 packages_redhat: vec![],
                 post_install: vec![
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfServe/main/setup.sh | bash".into(),
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfserve/install.sh | bash".into(),
                 ],
                 service: Some("wolfserve".into()),
             }),
