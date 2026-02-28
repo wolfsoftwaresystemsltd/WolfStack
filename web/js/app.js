@@ -1993,6 +1993,12 @@ const componentIcons = {
     wolfdisk: '💾', wolfscale: '⚖️', mariadb: '🗄️', certbot: '🔒'
 };
 
+const componentDisplayNames = {
+    wolfproxy: 'WolfProxy / Nginx', wolfserve: 'WolfServe / Apache',
+    wolfdisk: 'WolfDisk', wolfscale: 'WolfScale',
+    wolfnet: 'WolfNet', mariadb: 'MariaDB', certbot: 'Certbot'
+};
+
 const componentDocs = {
     wolfnet: 'https://wolfstack.org/wolfnet.html',
     wolfproxy: 'https://wolfstack.org/wolfproxy.html',
@@ -2021,7 +2027,7 @@ function renderComponents(components) {
                 <div class="component-header">
                     <div class="component-icon">${icon}</div>
                     <div style="flex: 1;">
-                        <div class="component-name">${c.component.charAt(0).toUpperCase() + c.component.slice(1)}</div>
+                        <div class="component-name">${componentDisplayNames[c.component] || c.component.charAt(0).toUpperCase() + c.component.slice(1)}</div>
                         <div class="component-desc">${c.version || ''}</div>
                     </div>
                     ${docLink}
@@ -5182,7 +5188,7 @@ async function openComponentDetail(name) {
     const el = document.getElementById('page-component-detail');
     if (el) el.style.display = 'block';
     currentPage = 'component-detail';
-    const cName = name.charAt(0).toUpperCase() + name.slice(1);
+    const cName = componentDisplayNames[name] || name.charAt(0).toUpperCase() + name.slice(1);
     document.getElementById('page-title').textContent = cName;
     await refreshComponentDetail(name);
 }
@@ -5329,8 +5335,8 @@ function openContainerConfigurator(runtime, containerName) {
     modal.classList.add('active');
 
     const components = [
-        { id: 'wolfproxy', name: 'WolfProxy', desc: 'Nginx reverse proxy & site management', icon: '🔀' },
-        { id: 'wolfserve', name: 'WolfServe', desc: 'Apache virtual hosts & modules', icon: '🌐' },
+        { id: 'wolfproxy', name: 'WolfProxy / Nginx', desc: 'Nginx reverse proxy & site management', icon: '🔀' },
+        { id: 'wolfserve', name: 'WolfServe / Apache', desc: 'Apache virtual hosts & modules', icon: '🌐' },
         { id: 'wolfdisk', name: 'WolfDisk', desc: 'Distributed filesystem configuration', icon: '💾' },
         { id: 'wolfscale', name: 'WolfScale', desc: 'Database replication configuration', icon: '📊' },
     ];
@@ -5447,10 +5453,36 @@ async function loadNginxConfigurator() {
         const resp = await fetch(configuratorApiUrl('/api/configurator/nginx/sites'));
         if (handleAuthError(resp)) return;
         const data = await resp.json();
-        if (data.error) { body.innerHTML = `<div style="color:var(--danger);">${escapeHtml(data.error)}</div>`; return; }
+        if (data.error) {
+            const isNotInstalled = data.error.toLowerCase().includes('not installed');
+            body.innerHTML = `<div style="text-align:center;padding:20px;">
+                <div style="color:var(--danger); margin-bottom:12px;">${escapeHtml(data.error)}</div>
+                ${isNotInstalled ? `<button class="btn btn-primary" onclick="nginxBootstrap()">Install Nginx & Create Default Config</button>` : ''}
+            </div>`;
+            if (isNotInstalled) document.getElementById('configurator-header-actions').innerHTML = '';
+            return;
+        }
         renderNginxSitesList(data.sites || []);
     } catch (e) {
         body.innerHTML = `<div style="color:var(--danger);">Failed to load nginx sites: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function nginxBootstrap() {
+    const body = document.getElementById('configurator-body');
+    body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Installing Nginx and creating default configuration... This may take a moment.</div>';
+    try {
+        const resp = await fetch(configuratorApiUrl('/api/configurator/nginx/bootstrap'), { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Nginx installed', 'success');
+        } else {
+            showToast(data.error || 'Bootstrap failed', 'error');
+        }
+        loadNginxConfigurator();
+    } catch (e) {
+        showToast('Bootstrap failed: ' + e.message, 'error');
+        loadNginxConfigurator();
     }
 }
 
@@ -5458,7 +5490,7 @@ function renderNginxSitesList(sites) {
     const body = document.getElementById('configurator-body');
     if (sites.length === 0) {
         body.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text-muted);">
-            No nginx sites found in /etc/nginx/sites-available/<br>
+            No nginx sites found<br>
             <button class="btn btn-primary btn-sm" style="margin-top:12px;" onclick="nginxNewSiteForm()">Create First Site</button>
         </div>`;
         return;
@@ -5742,10 +5774,36 @@ async function loadApacheConfigurator() {
         const resp = await fetch(configuratorApiUrl('/api/configurator/apache/sites'));
         if (handleAuthError(resp)) return;
         const data = await resp.json();
-        if (data.error) { body.innerHTML = `<div style="color:var(--danger);">${escapeHtml(data.error)}</div>`; return; }
+        if (data.error) {
+            const isNotInstalled = data.error.toLowerCase().includes('not installed');
+            body.innerHTML = `<div style="text-align:center;padding:20px;">
+                <div style="color:var(--danger); margin-bottom:12px;">${escapeHtml(data.error)}</div>
+                ${isNotInstalled ? `<button class="btn btn-primary" onclick="apacheBootstrap()">Install Apache & Create Default Config</button>` : ''}
+            </div>`;
+            if (isNotInstalled) document.getElementById('configurator-header-actions').innerHTML = '';
+            return;
+        }
         renderApacheSitesList(data.sites || []);
     } catch (e) {
         body.innerHTML = `<div style="color:var(--danger);">Failed to load Apache vhosts: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function apacheBootstrap() {
+    const body = document.getElementById('configurator-body');
+    body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">Installing Apache and creating default configuration... This may take a moment.</div>';
+    try {
+        const resp = await fetch(configuratorApiUrl('/api/configurator/apache/bootstrap'), { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Apache installed', 'success');
+        } else {
+            showToast(data.error || 'Bootstrap failed', 'error');
+        }
+        loadApacheConfigurator();
+    } catch (e) {
+        showToast('Bootstrap failed: ' + e.message, 'error');
+        loadApacheConfigurator();
     }
 }
 
@@ -6175,15 +6233,34 @@ async function loadTomlConfigurator(component, displayName) {
         if (handleAuthError(resp)) return;
         const data = await resp.json();
         if (data.error) {
-            body.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text-muted);">
-                ${escapeHtml(data.error)}<br>
-                <small>The config file may not exist yet. Install ${displayName} first or create the config manually.</small>
+            body.innerHTML = `<div style="text-align:center;padding:20px;">
+                <div style="color:var(--text-muted); margin-bottom:12px;">${escapeHtml(data.error)}</div>
+                <button class="btn btn-primary" onclick="tomlBootstrap('${component}', '${displayName}')">Create Default ${displayName} Configuration</button>
             </div>`;
+            document.getElementById('configurator-header-actions').innerHTML = '';
             return;
         }
         renderTomlForm(component, data);
     } catch (e) {
         body.innerHTML = `<div style="color:var(--danger);">Failed to load config: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function tomlBootstrap(component, displayName) {
+    const body = document.getElementById('configurator-body');
+    body.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text-muted);">Creating default ${displayName} configuration...</div>`;
+    try {
+        const resp = await fetch(configuratorApiUrl(`/api/configurator/toml/${component}/bootstrap`), { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(data.message || 'Configuration created', 'success');
+        } else {
+            showToast(data.error || 'Bootstrap failed', 'error');
+        }
+        loadTomlConfigurator(component, displayName);
+    } catch (e) {
+        showToast('Bootstrap failed: ' + e.message, 'error');
+        loadTomlConfigurator(component, displayName);
     }
 }
 

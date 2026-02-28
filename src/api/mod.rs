@@ -8700,6 +8700,17 @@ pub async fn nginx_generate_config(req: HttpRequest, state: web::Data<AppState>,
     HttpResponse::Ok().json(serde_json::json!({ "config": config }))
 }
 
+/// POST /api/configurator/nginx/bootstrap — install nginx and create default config
+pub async fn nginx_bootstrap(req: HttpRequest, state: web::Data<AppState>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
+    match web::block(move || crate::configurator::nginx::bootstrap_nginx(&target)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
 // ─── Apache Configurator API ───
 
 /// GET /api/configurator/apache/sites — list all Apache vhosts
@@ -8863,6 +8874,17 @@ pub async fn apache_generate_config(req: HttpRequest, state: web::Data<AppState>
     HttpResponse::Ok().json(serde_json::json!({ "config": config }))
 }
 
+/// POST /api/configurator/apache/bootstrap — install Apache and create default config
+pub async fn apache_bootstrap(req: HttpRequest, state: web::Data<AppState>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
+    match web::block(move || crate::configurator::apache::bootstrap_apache(&target)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
 // ─── TOML Configurator API ───
 
 /// GET /api/configurator/toml/{component}/structured — parsed config as JSON
@@ -8902,6 +8924,18 @@ pub async fn toml_validate(req: HttpRequest, state: web::Data<AppState>, body: w
     match crate::configurator::toml_editor::validate_toml(&content) {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "valid": true })),
         Err(e) => HttpResponse::Ok().json(serde_json::json!({ "valid": false, "error": e })),
+    }
+}
+
+/// POST /api/configurator/toml/{component}/bootstrap — create default TOML config
+pub async fn toml_bootstrap(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<ConfiguratorTarget>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
+    let component = path.into_inner();
+    match web::block(move || crate::configurator::toml_editor::bootstrap_config(&target, &component)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
     }
 }
 
@@ -9187,6 +9221,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/configurator/nginx/reload", web::post().to(nginx_reload))
         .route("/api/configurator/nginx/error-log", web::get().to(nginx_error_log))
         .route("/api/configurator/nginx/generate", web::post().to(nginx_generate_config))
+        .route("/api/configurator/nginx/bootstrap", web::post().to(nginx_bootstrap))
         // Apache (WolfServe)
         .route("/api/configurator/apache/sites", web::get().to(apache_list_sites))
         .route("/api/configurator/apache/sites", web::post().to(apache_create_site))
@@ -9202,10 +9237,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/configurator/apache/reload", web::post().to(apache_reload))
         .route("/api/configurator/apache/error-log", web::get().to(apache_error_log))
         .route("/api/configurator/apache/generate", web::post().to(apache_generate_config))
+        .route("/api/configurator/apache/bootstrap", web::post().to(apache_bootstrap))
         // TOML Editors (WolfDisk, WolfScale)
         .route("/api/configurator/toml/{component}/structured", web::get().to(toml_get_structured))
         .route("/api/configurator/toml/{component}/structured", web::post().to(toml_save_structured))
         .route("/api/configurator/toml/{component}/validate", web::post().to(toml_validate))
+        .route("/api/configurator/toml/{component}/bootstrap", web::post().to(toml_bootstrap))
         // Node proxy — forward API calls to remote nodes (must be last — wildcard path)
         .route("/api/nodes/{id}/proxy/{path:.*}", web::get().to(node_proxy))
         .route("/api/nodes/{id}/proxy/{path:.*}", web::post().to(node_proxy))
