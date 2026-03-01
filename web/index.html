@@ -2736,6 +2736,21 @@
                                 </div>
                             </div>
                         </div>
+
+                        <!-- Icon Toggle -->
+                        <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border);">
+                            <div style="display:flex;align-items:center;justify-content:space-between;">
+                                <div>
+                                    <h4 style="margin:0 0 4px 0; font-size:16px; font-weight:600;">Icons &amp; Emoji</h4>
+                                    <p style="font-size:13px; color:var(--text-muted); margin:0;">Hide all emoji and icons throughout the interface. Buttons and navigation will use text labels instead.</p>
+                                </div>
+                                <label style="position:relative;display:inline-block;width:48px;height:26px;flex-shrink:0;margin-left:16px;cursor:pointer;">
+                                    <input type="checkbox" id="toggle-icons" onchange="toggleIcons(this.checked)" style="opacity:0;width:0;height:0;">
+                                    <span style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:var(--border);border-radius:13px;transition:.3s;"></span>
+                                    <span style="position:absolute;top:3px;left:3px;width:20px;height:20px;background:var(--text-primary);border-radius:50%;transition:.3s;"></span>
+                                </label>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- ─── Alerting Tab ─── -->
