@@ -586,6 +586,45 @@
     color: #e8a0a0;
 }
 
+/* ─── No Icons Mode ─── */
+[data-no-icons] .icon {
+    display: none !important;
+}
+
+/* Sidebar nav: show text labels from title attribute when icons hidden */
+[data-no-icons] .sidebar-nav .nav-item {
+    width: auto !important;
+    padding: 4px 10px !important;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+[data-no-icons] .sidebar-nav .nav-item::after {
+    content: attr(title);
+}
+
+/* Sidebar footer buttons: show text from title attribute */
+[data-no-icons] .sidebar-icon-buttons .btn-icon {
+    font-size: 0 !important;
+    padding: 6px 10px !important;
+    width: auto !important;
+}
+
+[data-no-icons] .sidebar-icon-buttons .btn-icon::after {
+    content: attr(title);
+    font-size: 12px;
+    font-weight: 500;
+}
+
+/* Toggle switch styling */
+#toggle-icons:checked + span {
+    background: var(--accent) !important;
+}
+
+#toggle-icons:checked + span + span {
+    transform: translateX(22px);
+}
+
 /* ─── Settings Page Tabs ─── */
 .settings-tabs {
     display: flex;

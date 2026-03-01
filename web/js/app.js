@@ -15427,6 +15427,83 @@ function applyTheme(themeId) {
 function initTheme() {
     const saved = localStorage.getItem('wolfstack-theme') || 'dark';
     applyTheme(saved);
+    initIconToggle();
+}
+
+// ─── Icon Toggle System ───
+const EMOJI_RE = /[\u{1F300}-\u{1F9FF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}\u{2700}-\u{27BF}\u{2300}-\u{23FF}\u{2B50}\u{2B55}\u{25AA}-\u{25FE}\u{2934}-\u{2935}\u{3030}\u{303D}\u{3297}\u{3299}\u{FE0F}\u{200D}]+/gu;
+
+function toggleIcons(hide) {
+    if (hide) {
+        document.documentElement.setAttribute('data-no-icons', '');
+        localStorage.setItem('wolfstack-no-icons', '1');
+        stripEmojisFromDOM();
+        observeForEmoji();
+    } else {
+        localStorage.removeItem('wolfstack-no-icons');
+        // Emoji text has been stripped from the DOM so a reload is needed to restore them
+        location.reload();
+    }
+}
+
+function initIconToggle() {
+    const hide = localStorage.getItem('wolfstack-no-icons') === '1';
+    const cb = document.getElementById('toggle-icons');
+    if (cb) cb.checked = hide;
+    if (hide) {
+        document.documentElement.setAttribute('data-no-icons', '');
+        stripEmojisFromDOM();
+        observeForEmoji();
+    }
+}
+
+function stripEmojisFromDOM() {
+    if (!document.documentElement.hasAttribute('data-no-icons')) return;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (EMOJI_RE.test(node.nodeValue)) {
+            node.nodeValue = node.nodeValue.replace(EMOJI_RE, '').replace(/^\s+/, '');
+        }
+    }
+    // Clean emoji from input placeholders
+    document.querySelectorAll('input[placeholder]').forEach(el => {
+        if (EMOJI_RE.test(el.placeholder)) {
+            el.placeholder = el.placeholder.replace(EMOJI_RE, '').replace(/^\s+/, '');
+        }
+    });
+}
+
+let _emojiObserver = null;
+function observeForEmoji() {
+    if (_emojiObserver) return;
+    _emojiObserver = new MutationObserver((mutations) => {
+        if (!document.documentElement.hasAttribute('data-no-icons')) return;
+        for (const m of mutations) {
+            for (const node of m.addedNodes) {
+                if (node.nodeType === Node.TEXT_NODE && EMOJI_RE.test(node.nodeValue)) {
+                    node.nodeValue = node.nodeValue.replace(EMOJI_RE, '').replace(/^\s+/, '');
+                } else if (node.nodeType === Node.ELEMENT_NODE) {
+                    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, null);
+                    while (walker.nextNode()) {
+                        const t = walker.currentNode;
+                        if (EMOJI_RE.test(t.nodeValue)) {
+                            t.nodeValue = t.nodeValue.replace(EMOJI_RE, '').replace(/^\s+/, '');
+                        }
+                    }
+                    // Hide .icon spans in new content
+                    node.querySelectorAll?.('.icon')?.forEach(el => el.style.display = 'none');
+                    // Clean placeholders
+                    node.querySelectorAll?.('input[placeholder]')?.forEach(el => {
+                        if (EMOJI_RE.test(el.placeholder)) {
+                            el.placeholder = el.placeholder.replace(EMOJI_RE, '').replace(/^\s+/, '');
+                        }
+                    });
+                }
+            }
+        }
+    });
+    _emojiObserver.observe(document.body, { childList: true, subtree: true });
 }
 
 function switchSettingsTab(tabName) {
