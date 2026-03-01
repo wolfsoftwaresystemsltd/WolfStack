@@ -851,6 +851,12 @@ impl VmManager {
 
     /// Create and configure a TAP interface
     fn setup_tap(&self, tap: &str) -> Result<(), String> {
+        // Clean up any stale TAP from a previous crash or host restart first,
+        // otherwise `ip tuntap add` can fail with EBUSY if the interface exists
+        // in a half-dead state (e.g. after unclean shutdown / reboot).
+        let _ = Command::new("ip").args(["link", "set", tap, "down"]).output();
+        let _ = Command::new("ip").args(["tuntap", "del", "dev", tap, "mode", "tap"]).output();
+
         // Create TAP device
         let output = Command::new("ip")
             .args(["tuntap", "add", "dev", tap, "mode", "tap"])
@@ -859,7 +865,6 @@ impl VmManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // Ignore "already exists"
             if !stderr.contains("EEXIST") && !stderr.contains("File exists") {
                 return Err(format!("TAP creation failed: {}", stderr));
             }
