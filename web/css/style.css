@@ -457,6 +457,111 @@
     --shadow-glow: 0 0 30px rgba(220, 38, 38, 0.2);
 }
 
+/* ─── TTY Theme — classic green phosphor terminal ─── */
+[data-theme="tty"] {
+    --bg-primary: #000000;
+    --bg-secondary: #050505;
+    --bg-card: #0a0a0a;
+    --bg-card-hover: #0f0f0f;
+    --bg-input: #000000;
+    --border: #1a3318;
+    --border-light: #264022;
+    --text-primary: #33ff00;
+    --text-secondary: #22aa00;
+    --text-muted: #156600;
+    --accent: #33ff00;
+    --accent-light: #66ff44;
+    --accent-glow: rgba(51, 255, 0, 0.12);
+    --success: #33ff00;
+    --success-bg: rgba(51, 255, 0, 0.08);
+    --warning: #ccff00;
+    --warning-bg: rgba(204, 255, 0, 0.08);
+    --danger: #ff3300;
+    --danger-bg: rgba(255, 51, 0, 0.08);
+    --info: #00ccff;
+    --info-bg: rgba(0, 204, 255, 0.08);
+    --gradient-main: linear-gradient(135deg, #22aa00 0%, #33ff00 50%, #66ff44 100%);
+    --gradient-success: linear-gradient(135deg, #22aa00 0%, #33ff00 100%);
+    --gradient-danger: linear-gradient(135deg, #cc2200 0%, #ff3300 100%);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.8);
+    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.9);
+    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.95);
+    --shadow-glow: 0 0 30px rgba(51, 255, 0, 0.08);
+    --radius: 0px;
+    --radius-sm: 0px;
+    --radius-lg: 0px;
+}
+
+[data-theme="tty"] body {
+    font-family: 'JetBrains Mono', 'Courier New', 'Lucida Console', monospace;
+    background: #000000;
+    background-image:
+        repeating-linear-gradient(
+            0deg,
+            transparent,
+            transparent 2px,
+            rgba(51, 255, 0, 0.015) 2px,
+            rgba(51, 255, 0, 0.015) 4px
+        );
+    background-attachment: fixed;
+    text-shadow: 0 0 4px rgba(51, 255, 0, 0.4);
+}
+
+[data-theme="tty"] .sidebar {
+    background: rgba(0, 0, 0, 0.95);
+    border-right: 1px solid #1a3318;
+}
+
+[data-theme="tty"] .top-bar {
+    background: rgba(0, 0, 0, 0.95);
+    border-bottom: 1px solid #1a3318;
+}
+
+[data-theme="tty"] .log-viewer {
+    background: #000000;
+    color: #33ff00;
+}
+
+[data-theme="tty"] .card,
+[data-theme="tty"] .stat-card {
+    border: 1px solid #1a3318;
+    border-radius: 0;
+}
+
+[data-theme="tty"] .btn-primary,
+[data-theme="tty"] .btn {
+    border-radius: 0;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+[data-theme="tty"] input,
+[data-theme="tty"] select,
+[data-theme="tty"] textarea {
+    border-radius: 0;
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+}
+
+[data-theme="tty"] .modal-content {
+    border-radius: 0;
+    border: 1px solid #33ff00;
+    box-shadow: 0 0 20px rgba(51, 255, 0, 0.1), 0 0 60px rgba(0, 0, 0, 0.8);
+}
+
+[data-theme="tty"] ::selection {
+    background: #33ff00;
+    color: #000000;
+}
+
+[data-theme="tty"] ::-webkit-scrollbar-thumb {
+    background: #1a3318;
+    border-radius: 0;
+}
+
+[data-theme="tty"] ::-webkit-scrollbar-track {
+    background: #000000;
+}
+
 [data-theme="deepred"] body {
     background:
         radial-gradient(ellipse at 20% 15%, rgba(120, 20, 30, 0.25) 0%, transparent 50%),
