@@ -8,7 +8,6 @@
 use actix_web::{web, HttpRequest, HttpResponse, Error};
 use actix_ws::Message;
 use futures::StreamExt;
-use std::process::Command;
 use tokio_tungstenite::tungstenite;
 use tracing::error;
 
@@ -18,7 +17,6 @@ use super::AppState;
 /// WebSocket endpoint: /ws/pve-console/{node_id}/{vmid}
 /// Connects to a Proxmox VE terminal through the termproxy API.
 /// vmid=0 means "node shell" (PVE host terminal), vmid>0 means guest console.
-/// node_id="self" means connect to local PVE via pvesh (for WolfStack nodes running on Proxmox).
 pub async fn pve_console_ws(
     req: HttpRequest,
     stream: web::Payload,
@@ -31,14 +29,6 @@ pub async fn pve_console_ws(
         Ok(v) => v,
         Err(_) => return Ok(HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid VMID" }))),
     };
-
-    // "self" node — local Proxmox via pvesh (no API token needed)
-    if node_id == "self" {
-        if !crate::containers::is_proxmox() {
-            return Ok(HttpResponse::BadRequest().json(serde_json::json!({ "error": "Not a Proxmox host" })));
-        }
-        return pve_console_local(req, stream, vmid).await;
-    }
 
     // Look up the PVE node
     let node = match state.cluster.get_node(&node_id) {
@@ -91,104 +81,6 @@ pub async fn pve_console_ws(
 
     // Spawn the bridge task
     actix_rt::spawn(pve_bridge(session, msg_stream, address, port, pve_name, term_port, ticket, token, fp, vmid, guest_type));
-
-    Ok(res)
-}
-
-/// Handle PVE console for the local Proxmox host using pvesh (no API token needed)
-async fn pve_console_local(
-    req: HttpRequest,
-    stream: web::Payload,
-    vmid: u64,
-) -> Result<HttpResponse, Error> {
-    // Get local PVE node name
-    let pve_node = Command::new("hostname").output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|_| "localhost".to_string());
-
-    // Determine guest type (qemu or lxc) via pvesh
-    let guest_type = if vmid == 0 {
-        "node".to_string()
-    } else {
-        let qemu_check = Command::new("pvesh")
-            .args(["get", &format!("/nodes/{}/qemu/{}/status/current", pve_node, vmid), "--output-format", "json"])
-            .output();
-        if qemu_check.map(|o| o.status.success()).unwrap_or(false) {
-            "qemu".to_string()
-        } else {
-            "lxc".to_string()
-        }
-    };
-
-    // Get termproxy ticket via pvesh
-    let termproxy_path = if guest_type == "node" {
-        format!("/nodes/{}/termproxy", pve_node)
-    } else {
-        format!("/nodes/{}/{}/{}/termproxy", pve_node, guest_type, vmid)
-    };
-
-    let tp_output = Command::new("pvesh")
-        .args(["create", &termproxy_path, "--output-format", "json"])
-        .output();
-
-    let tp_data = match tp_output {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            serde_json::from_str::<serde_json::Value>(&text)
-                .map_err(|e| format!("Failed to parse termproxy response: {}", e))
-        }
-        Ok(o) => Err(format!("pvesh termproxy failed: {}", String::from_utf8_lossy(&o.stderr).trim())),
-        Err(e) => Err(format!("Failed to run pvesh: {}", e)),
-    };
-
-    let tp_data = match tp_data {
-        Ok(d) => d,
-        Err(e) => {
-            error!("Local PVE termproxy failed: {}", e);
-            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })));
-        }
-    };
-
-    let term_port = tp_data.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-    let ticket = tp_data.get("ticket").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let user = tp_data.get("user").and_then(|v| v.as_str()).unwrap_or("root@pam").to_string();
-
-    if term_port == 0 || ticket.is_empty() {
-        return Ok(HttpResponse::InternalServerError().json(serde_json::json!({ "error": "Invalid termproxy response" })));
-    }
-
-    // PVE API ticket for WebSocket auth — create one via pvesh
-    let ticket_output = Command::new("pvesh")
-        .args(["create", "/access/ticket", "--username", &user, "--output-format", "json"])
-        .output();
-
-    // Use PVEAuthCookie for WS auth instead of API token
-    let auth_cookie = match ticket_output {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                v.get("ticket").and_then(|t| t.as_str()).unwrap_or("").to_string()
-            } else {
-                String::new()
-            }
-        }
-        _ => String::new(),
-    };
-
-    let (res, session, msg_stream) = actix_ws::handle(&req, stream)?;
-
-    // Connect to local PVE at localhost:8006
-    let token = if !auth_cookie.is_empty() {
-        format!("PVEAuthCookie={}", auth_cookie)
-    } else {
-        String::new()
-    };
-
-    actix_rt::spawn(pve_bridge(
-        session, msg_stream,
-        "127.0.0.1".to_string(), 8006,
-        pve_node, term_port, ticket, token, None, vmid, guest_type,
-    ));
 
     Ok(res)
 }
@@ -249,17 +141,13 @@ async fn pve_bridge(
     let ws_request = match tungstenite::client::IntoClientRequest::into_client_request(pve_ws_url.as_str()) {
         Ok(mut req) => {
             // Add PVE auth — API token or auth cookie
-            if token.starts_with("PVEAuthCookie=") {
-                let cookie_val = token.strip_prefix("PVEAuthCookie=").unwrap_or("");
-                req.headers_mut().insert("Cookie", format!("PVEAuthCookie={}", cookie_val).parse().unwrap());
-            } else if !token.is_empty() {
-                let auth = if token.starts_with("PVEAPIToken=") {
-                    token.clone()
-                } else {
-                    format!("PVEAPIToken={}", token)
-                };
-                req.headers_mut().insert("Authorization", auth.parse().unwrap());
-            }
+            // Add PVE API auth header
+            let auth = if token.starts_with("PVEAPIToken=") {
+                token.clone()
+            } else {
+                format!("PVEAPIToken={}", token)
+            };
+            req.headers_mut().insert("Authorization", auth.parse().unwrap());
             req
         }
         Err(e) => {

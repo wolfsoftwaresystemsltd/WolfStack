@@ -10709,7 +10709,7 @@ function openVmConsole(name) {
 }
 
 function openPveVmConsole(vmid, displayName) {
-    // For remote Proxmox nodes, use PVE console proxy
+    // For dedicated PVE nodes (added with API token), use PVE console proxy
     if (currentNodeId) {
         const node = allNodes.find(n => n.id === currentNodeId);
         if (node && node.node_type === 'proxmox') {
@@ -10717,7 +10717,7 @@ function openPveVmConsole(vmid, displayName) {
             return;
         }
     }
-    // Local Proxmox node — use qm terminal via PTY console
+    // WolfStack nodes on Proxmox — use pvesh termproxy via remote console
     openConsole('pve-vm', vmid);
 }
 

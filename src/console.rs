@@ -80,6 +80,22 @@ async fn console_session(
             let serial_sock = format!("/var/lib/wolfstack/vms/{}.serial.sock", name);
             cmd.arg(format!("socat -,raw,echo=0 UNIX-CONNECT:{}", serial_sock));
         }
+        "pve-vm" => {
+            // Proxmox VM console via termproxy — get ticket with pvesh, connect directly to the port
+            cmd.arg(format!(
+                r#"NODE=$(hostname) && \
+                GT="qemu" && \
+                pvesh get "/nodes/$NODE/qemu/{vmid}/status/current" --output-format json >/dev/null 2>&1 || GT="lxc" && \
+                RESP=$(pvesh create "/nodes/$NODE/$GT/{vmid}/termproxy" --output-format json 2>&1) && \
+                PORT=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['port'])" 2>/dev/null) && \
+                TICKET=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['ticket'])" 2>/dev/null) && \
+                USER=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('user','root@pam'))" 2>/dev/null) && \
+                if [ -z "$PORT" ] || [ -z "$TICKET" ]; then echo "Failed to get termproxy ticket: $RESP"; exit 1; fi && \
+                exec socat STDIO tcp:localhost:$PORT,connect-timeout=3,crlf && \
+                sleep 0.1"#,
+                vmid = name
+            ));
+        }
         "host" => {
             // Host shell — open an interactive login bash/sh session on this machine
             cmd.arg("if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi");
@@ -391,12 +407,7 @@ async fn remote_console_bridge(
             format!("%{:02X}", b)
         }
     }).collect();
-    // For Proxmox VM consoles, route to the PVE console endpoint on the remote node
-    let ws_path = if ctype == "pve-vm" {
-        format!("/ws/pve-console/self/{}", encoded_name)
-    } else {
-        format!("/ws/console/{}/{}", ctype, encoded_name)
-    };
+    let ws_path = format!("/ws/console/{}/{}", ctype, encoded_name);
     let internal_port = remote_port + 1;
 
     // URLs to try in order: wss main, ws internal, ws main
