@@ -10,6 +10,7 @@
 #
 # Usage: curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash
 #        curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/beta/setup.sh | sudo bash -s -- --beta
+#        sudo bash setup.sh --install-dir /mnt/usb      # build & install from external drive
 #
 
 set -e
@@ -25,10 +26,16 @@ prompt_read() {
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 BRANCH="master"
-for arg in "$@"; do
-    case "$arg" in
+CUSTOM_INSTALL_DIR=""
+while [ $# -gt 0 ]; do
+    case "$1" in
         --beta) BRANCH="beta" ;;
+        --install-dir|--install)
+            shift
+            CUSTOM_INSTALL_DIR="$1"
+            ;;
     esac
+    shift
 done
 
 # Allow git to operate on repos owned by other users (setup.sh runs as root
@@ -37,12 +44,35 @@ export GIT_CONFIG_COUNT=1
 export GIT_CONFIG_KEY_0=safe.directory
 export GIT_CONFIG_VALUE_0="*"
 
+# ─── Custom install directory (for low-disk devices like Raspberry Pi) ───────
+if [ -n "$CUSTOM_INSTALL_DIR" ]; then
+    # If given a block device, mount it
+    if [ -b "$CUSTOM_INSTALL_DIR" ]; then
+        MOUNT_DEV="$CUSTOM_INSTALL_DIR"
+        CUSTOM_INSTALL_DIR="/mnt/wolfstack-build"
+        mkdir -p "$CUSTOM_INSTALL_DIR"
+        if ! mountpoint -q "$CUSTOM_INSTALL_DIR" 2>/dev/null; then
+            echo "Mounting $MOUNT_DEV at $CUSTOM_INSTALL_DIR..."
+            mount "$MOUNT_DEV" "$CUSTOM_INSTALL_DIR"
+        fi
+    fi
+    mkdir -p "$CUSTOM_INSTALL_DIR"
+
+    # Redirect Rust toolchain + build cache to external drive
+    export RUSTUP_HOME="$CUSTOM_INSTALL_DIR/.rustup"
+    export CARGO_HOME="$CUSTOM_INSTALL_DIR/.cargo"
+    export PATH="$CARGO_HOME/bin:$PATH"
+fi
+
 echo ""
 echo "  🐺 WolfStack Installer"
 echo "  ─────────────────────────────────────"
 echo "  Server Management Platform"
 if [ "$BRANCH" != "master" ]; then
     echo "  Branch: $BRANCH"
+fi
+if [ -n "$CUSTOM_INSTALL_DIR" ]; then
+    echo "  Install dir: $CUSTOM_INSTALL_DIR"
 fi
 echo ""
 
@@ -265,7 +295,7 @@ if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev
     fi
 
     # Always update WolfNet when WolfStack updates
-    WOLFNET_SRC_DIR="/opt/wolfnet-src"
+    WOLFNET_SRC_DIR="${CUSTOM_INSTALL_DIR:-/opt}/wolfnet-src"
     if [ -d "$WOLFNET_SRC_DIR" ]; then
         echo "  Updating WolfNet..."
         cd "$WOLFNET_SRC_DIR"
@@ -284,10 +314,17 @@ if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev
         fi
 
         # Rebuild
-        export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
+        export PATH="${CARGO_HOME:-$REAL_HOME/.cargo}/bin:/usr/local/bin:/usr/bin:$PATH"
         if command -v cargo &> /dev/null; then
             cd "$WOLFNET_SRC_DIR/wolfnet"
-            if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
+            if [ -n "$CUSTOM_INSTALL_DIR" ]; then
+                chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" 2>/dev/null || true
+                if [ "$REAL_USER" != "root" ]; then
+                    su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' PATH='$CARGO_HOME/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
+                else
+                    cargo build --release
+                fi
+            elif [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
                 chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
                 su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
             else
@@ -314,7 +351,7 @@ elif command -v wolfnet &> /dev/null; then
     echo "✓ WolfNet installed (not running)"
 
     # Always update WolfNet when WolfStack updates
-    WOLFNET_SRC_DIR="/opt/wolfnet-src"
+    WOLFNET_SRC_DIR="${CUSTOM_INSTALL_DIR:-/opt}/wolfnet-src"
     if [ -d "$WOLFNET_SRC_DIR" ]; then
         echo "  Updating WolfNet..."
         cd "$WOLFNET_SRC_DIR"
@@ -332,10 +369,17 @@ elif command -v wolfnet &> /dev/null; then
             cd "$WOLFNET_SRC_DIR"
         fi
 
-        export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
+        export PATH="${CARGO_HOME:-$REAL_HOME/.cargo}/bin:/usr/local/bin:/usr/bin:$PATH"
         if command -v cargo &> /dev/null; then
             cd "$WOLFNET_SRC_DIR/wolfnet"
-            if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
+            if [ -n "$CUSTOM_INSTALL_DIR" ]; then
+                chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" 2>/dev/null || true
+                if [ "$REAL_USER" != "root" ]; then
+                    su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' PATH='$CARGO_HOME/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
+                else
+                    cargo build --release
+                fi
+            elif [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
                 chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
                 su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
             else
@@ -403,7 +447,7 @@ else
 
     # Download WolfNet source
     echo "  Downloading WolfNet..."
-    WOLFNET_SRC_DIR="/opt/wolfnet-src"
+    WOLFNET_SRC_DIR="${CUSTOM_INSTALL_DIR:-/opt}/wolfnet-src"
     if [ -d "$WOLFNET_SRC_DIR" ]; then
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
         cd "$WOLFNET_SRC_DIR" && git fetch origin && git reset --hard origin/main
@@ -414,22 +458,29 @@ else
     fi
 
     # Ensure Rust is available for building WolfNet
-    export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
+    export PATH="${CARGO_HOME:-$REAL_HOME/.cargo}/bin:/usr/local/bin:/usr/bin:$PATH"
 
     if ! command -v cargo &> /dev/null; then
         echo "  Installing Rust first..."
-        if [ "$REAL_USER" = "root" ]; then
+        if [ -n "$CUSTOM_INSTALL_DIR" ] || [ "$REAL_USER" = "root" ]; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         else
             su - "$REAL_USER" -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
         fi
-        export PATH="$REAL_HOME/.cargo/bin:$PATH"
+        export PATH="${CARGO_HOME:-$REAL_HOME/.cargo}/bin:$PATH"
     fi
 
     # Build WolfNet
     echo "  Building WolfNet..."
     cd "$WOLFNET_SRC_DIR/wolfnet"
-    if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
+    if [ -n "$CUSTOM_INSTALL_DIR" ]; then
+        chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" 2>/dev/null || true
+        if [ "$REAL_USER" != "root" ]; then
+            su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' PATH='$CARGO_HOME/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
+        else
+            cargo build --release
+        fi
+    elif [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
         chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
         su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
     else
@@ -581,7 +632,7 @@ fi
 
 
 # ─── Install Rust if not present ────────────────────────────────────────────
-CARGO_BIN="$REAL_HOME/.cargo/bin/cargo"
+CARGO_BIN="${CARGO_HOME:-$REAL_HOME/.cargo}/bin/cargo"
 
 if [ -f "$CARGO_BIN" ]; then
     echo "✓ Rust already installed"
@@ -590,8 +641,12 @@ elif command -v cargo &> /dev/null; then
     echo "✓ Rust already installed (system-wide)"
 else
     echo ""
-    echo "Installing Rust for user '$REAL_USER'..."
-    if [ "$REAL_USER" = "root" ]; then
+    if [ -n "$CUSTOM_INSTALL_DIR" ]; then
+        echo "Installing Rust to $CUSTOM_INSTALL_DIR..."
+    else
+        echo "Installing Rust for user '$REAL_USER'..."
+    fi
+    if [ -n "$CUSTOM_INSTALL_DIR" ] || [ "$REAL_USER" = "root" ]; then
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     else
         su - "$REAL_USER" -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
@@ -600,7 +655,7 @@ else
 fi
 
 # Ensure cargo is found
-export PATH="$REAL_HOME/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
+export PATH="${CARGO_HOME:-$REAL_HOME/.cargo}/bin:/usr/local/bin:/usr/bin:$PATH"
 
 if ! command -v cargo &> /dev/null; then
     echo "✗ cargo not found after installation. Check Rust install."
@@ -610,7 +665,7 @@ fi
 echo "✓ Using cargo: $(command -v cargo)"
 
 # ─── Clone or update repository ─────────────────────────────────────────────
-INSTALL_DIR="/opt/wolfstack-src"
+INSTALL_DIR="${CUSTOM_INSTALL_DIR:-/opt}/wolfstack-src"
 echo ""
 echo "Cloning WolfStack repository..."
 
@@ -638,7 +693,15 @@ rm -rf target/release/wolfstack target/release/.fingerprint/wolfstack-*
 echo ""
 echo "Building WolfStack (this may take a few minutes)..."
 
-if [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
+if [ -n "$CUSTOM_INSTALL_DIR" ]; then
+    # Custom install dir — build directly with CARGO_HOME/RUSTUP_HOME already exported
+    chown -R "$REAL_USER:$REAL_USER" "$INSTALL_DIR" "$CARGO_HOME" "$RUSTUP_HOME" 2>/dev/null || true
+    if [ "$REAL_USER" != "root" ]; then
+        su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' PATH='$CARGO_HOME/bin:\$PATH' && cd $INSTALL_DIR && cargo build --release"
+    else
+        cargo build --release
+    fi
+elif [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
     chown -R "$REAL_USER:$REAL_USER" "$INSTALL_DIR"
     su - "$REAL_USER" -c "cd $INSTALL_DIR && $REAL_HOME/.cargo/bin/cargo build --release"
 else
