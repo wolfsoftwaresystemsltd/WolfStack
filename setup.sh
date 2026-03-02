@@ -14,6 +14,15 @@
 
 set -e
 
+# Helper: read from /dev/tty if available, otherwise return empty (use defaults)
+prompt_read() {
+    if [ -e /dev/tty ] && : < /dev/tty 2>/dev/null; then
+        read "$1" < /dev/tty
+    else
+        eval "$1="
+    fi
+}
+
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 BRANCH="master"
 for arg in "$@"; do
@@ -497,7 +506,7 @@ else
         echo "     Only enable on private LANs (home, office)."
         echo ""
         echo -n "Enable LAN auto-discovery? [y/N]: "
-        read ENABLE_DISCOVERY < /dev/tty
+        prompt_read ENABLE_DISCOVERY
         if [ "$ENABLE_DISCOVERY" = "y" ] || [ "$ENABLE_DISCOVERY" = "Y" ]; then
             WOLFNET_DISCOVERY="true"
         else
@@ -677,12 +686,12 @@ if [ ! -f "/etc/wolfstack/config.toml" ]; then
 
     # Prompt for port
     echo -n "Dashboard port [8553]: "
-    read WS_PORT < /dev/tty
+    prompt_read WS_PORT
     WS_PORT=${WS_PORT:-8553}
 
     # Prompt for bind address
     echo -n "Bind address [0.0.0.0]: "
-    read WS_BIND < /dev/tty
+    prompt_read WS_BIND
     WS_BIND=${WS_BIND:-0.0.0.0}
 
     # Write config
@@ -748,7 +757,7 @@ EOF
     # Enable and optionally start
     echo ""
     echo -n "Start WolfStack now? [Y/n]: "
-    read start_now < /dev/tty
+    prompt_read start_now
     if [ "$start_now" != "n" ] && [ "$start_now" != "N" ]; then
         systemctl enable wolfstack
         systemctl start wolfstack
