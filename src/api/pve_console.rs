@@ -66,7 +66,8 @@ pub async fn pve_vnc_ticket(
 
 /// Create a PVE VNC proxy for a VM and return (port, ticket).
 fn create_vnc_proxy(vmid: u64) -> Result<(u16, String), String> {
-    let pve_node = Command::new("hostname").output()
+    // PVE node names are short hostnames (no FQDN) — use `hostname -s`
+    let pve_node = Command::new("hostname").arg("-s").output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|_| "localhost".to_string());
 
