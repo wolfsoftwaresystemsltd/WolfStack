@@ -58,10 +58,12 @@ if [ -n "$CUSTOM_INSTALL_DIR" ]; then
     fi
     mkdir -p "$CUSTOM_INSTALL_DIR"
 
-    # Redirect Rust toolchain + build cache to external drive
+    # Redirect EVERYTHING to external drive: Rust toolchain, build cache, temp files
     export RUSTUP_HOME="$CUSTOM_INSTALL_DIR/.rustup"
     export CARGO_HOME="$CUSTOM_INSTALL_DIR/.cargo"
+    export TMPDIR="$CUSTOM_INSTALL_DIR/tmp"
     export PATH="$CARGO_HOME/bin:$PATH"
+    mkdir -p "$TMPDIR"
 fi
 
 echo ""
@@ -318,9 +320,9 @@ if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev
         if command -v cargo &> /dev/null; then
             cd "$WOLFNET_SRC_DIR/wolfnet"
             if [ -n "$CUSTOM_INSTALL_DIR" ]; then
-                chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" 2>/dev/null || true
+                chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" "$TMPDIR" 2>/dev/null || true
                 if [ "$REAL_USER" != "root" ]; then
-                    su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' PATH='$CARGO_HOME/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
+                    su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
                 else
                     cargo build --release
                 fi
@@ -373,9 +375,9 @@ elif command -v wolfnet &> /dev/null; then
         if command -v cargo &> /dev/null; then
             cd "$WOLFNET_SRC_DIR/wolfnet"
             if [ -n "$CUSTOM_INSTALL_DIR" ]; then
-                chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" 2>/dev/null || true
+                chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" "$TMPDIR" 2>/dev/null || true
                 if [ "$REAL_USER" != "root" ]; then
-                    su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' PATH='$CARGO_HOME/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
+                    su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
                 else
                     cargo build --release
                 fi
@@ -474,9 +476,9 @@ else
     echo "  Building WolfNet..."
     cd "$WOLFNET_SRC_DIR/wolfnet"
     if [ -n "$CUSTOM_INSTALL_DIR" ]; then
-        chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" 2>/dev/null || true
+        chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" "$TMPDIR" 2>/dev/null || true
         if [ "$REAL_USER" != "root" ]; then
-            su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' PATH='$CARGO_HOME/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
+            su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
         else
             cargo build --release
         fi
@@ -695,9 +697,9 @@ echo "Building WolfStack (this may take a few minutes)..."
 
 if [ -n "$CUSTOM_INSTALL_DIR" ]; then
     # Custom install dir — build directly with CARGO_HOME/RUSTUP_HOME already exported
-    chown -R "$REAL_USER:$REAL_USER" "$INSTALL_DIR" "$CARGO_HOME" "$RUSTUP_HOME" 2>/dev/null || true
+    chown -R "$REAL_USER:$REAL_USER" "$INSTALL_DIR" "$CARGO_HOME" "$RUSTUP_HOME" "$TMPDIR" 2>/dev/null || true
     if [ "$REAL_USER" != "root" ]; then
-        su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' PATH='$CARGO_HOME/bin:\$PATH' && cd $INSTALL_DIR && cargo build --release"
+        su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:\$PATH' && cd $INSTALL_DIR && cargo build --release"
     else
         cargo build --release
     fi
