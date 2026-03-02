@@ -668,6 +668,18 @@ echo "✓ Using cargo: $(command -v cargo)"
 
 # ─── Clone or update repository ─────────────────────────────────────────────
 INSTALL_DIR="${CUSTOM_INSTALL_DIR:-/opt}/wolfstack-src"
+if [ -n "$CUSTOM_INSTALL_DIR" ]; then
+    export CARGO_TARGET_DIR="$CUSTOM_INSTALL_DIR/wolfstack-target"
+    mkdir -p "$CARGO_TARGET_DIR"
+    chown -R "$REAL_USER:$REAL_USER" "$CARGO_TARGET_DIR" 2>/dev/null || true
+    echo ""
+    echo "  External drive build paths:"
+    echo "    Source:    $INSTALL_DIR"
+    echo "    Target:    $CARGO_TARGET_DIR"
+    echo "    Cargo:     $CARGO_HOME"
+    echo "    Rustup:    $RUSTUP_HOME"
+    echo "    Tmpdir:    $TMPDIR"
+fi
 echo ""
 echo "Cloning WolfStack repository..."
 
@@ -689,17 +701,18 @@ echo "  Branch: $BRANCH | Version: $BUILT_VERSION"
 
 # Force full rebuild to ensure the new version takes effect
 echo "  Cleaning previous build..."
-rm -rf target/release/wolfstack target/release/.fingerprint/wolfstack-*
+CLEAN_TARGET="${CARGO_TARGET_DIR:-$INSTALL_DIR/target}"
+rm -rf "$CLEAN_TARGET/release/wolfstack" "$CLEAN_TARGET/release/.fingerprint/wolfstack-"*
 
 # ─── Build WolfStack ────────────────────────────────────────────────────────
 echo ""
 echo "Building WolfStack (this may take a few minutes)..."
 
 if [ -n "$CUSTOM_INSTALL_DIR" ]; then
-    # Custom install dir — build directly with CARGO_HOME/RUSTUP_HOME already exported
-    chown -R "$REAL_USER:$REAL_USER" "$INSTALL_DIR" "$CARGO_HOME" "$RUSTUP_HOME" "$TMPDIR" 2>/dev/null || true
+    # Custom install dir — all build I/O goes to external drive
+    chown -R "$REAL_USER:$REAL_USER" "$INSTALL_DIR" "$CARGO_HOME" "$RUSTUP_HOME" "$TMPDIR" "$CARGO_TARGET_DIR" 2>/dev/null || true
     if [ "$REAL_USER" != "root" ]; then
-        su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:\$PATH' && cd $INSTALL_DIR && cargo build --release"
+        su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' CARGO_TARGET_DIR='$CARGO_TARGET_DIR' PATH='$CARGO_HOME/bin:\$PATH' && cd $INSTALL_DIR && cargo build --release"
     else
         cargo build --release
     fi
@@ -730,7 +743,8 @@ else
     echo "Installing WolfStack..."
 fi
 
-cp "$INSTALL_DIR/target/release/wolfstack" /usr/local/bin/wolfstack
+BUILD_TARGET_DIR="${CARGO_TARGET_DIR:-$INSTALL_DIR/target}"
+cp "$BUILD_TARGET_DIR/release/wolfstack" /usr/local/bin/wolfstack
 chmod +x /usr/local/bin/wolfstack
 echo "✓ wolfstack installed to /usr/local/bin/wolfstack"
 
