@@ -80,6 +80,10 @@ async fn console_session(
             let serial_sock = format!("/var/lib/wolfstack/vms/{}.serial.sock", name);
             cmd.arg(format!("socat -,raw,echo=0 UNIX-CONNECT:{}", serial_sock));
         }
+        "pve-vm" => {
+            // Proxmox VM serial console via qm terminal
+            cmd.arg(format!("qm terminal {}", name));
+        }
         "host" => {
             // Host shell — open an interactive login bash/sh session on this machine
             cmd.arg("if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi");

@@ -2266,7 +2266,7 @@ function renderVms(vms) {
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="showVmLogs('${vm.name}')" title="Logs">📋</button>
                     ${vm.running ?
                 `${vm.vmid
-                    ? `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openPveConsole(currentNodeId, '${vm.vmid}', '${vm.name}')" title="Console">🖥️</button>`
+                    ? `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openPveVmConsole('${vm.vmid}', '${vm.name}')" title="Console">🖥️</button>`
                     : (vm.vnc_ws_port ? `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port})" title="Console">🖥️</button>` : '')}
                          <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="vmAction('${vm.name}', 'stop', this)" title="Stop">⏹️</button>` :
                 `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="showVmSettings('${vm.name}')" title="Settings">⚙️</button>
@@ -10706,6 +10706,19 @@ function openLxcConsole(vmidOrName, displayName) {
 
 function openVmConsole(name) {
     openConsole('vm', name);
+}
+
+function openPveVmConsole(vmid, displayName) {
+    // For remote Proxmox nodes, use PVE console proxy
+    if (currentNodeId) {
+        const node = allNodes.find(n => n.id === currentNodeId);
+        if (node && node.node_type === 'proxmox') {
+            openPveConsole(currentNodeId, vmid, displayName);
+            return;
+        }
+    }
+    // Local Proxmox node — use qm terminal via PTY console
+    openConsole('pve-vm', vmid);
 }
 
 function openPveConsole(nodeId, vmid, displayName) {
