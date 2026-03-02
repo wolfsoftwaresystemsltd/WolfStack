@@ -12467,6 +12467,7 @@ async function importConfigFile(input) {
 // ─── MySQL Database Editor ───
 
 let mysqlCreds = null; // { host, port, user, password }
+let mysqlConnectedNodeId = null; // node ID captured at connect time — never changes mid-session
 let mysqlCurrentDb = null;
 let mysqlCurrentTable = null;
 let mysqlCurrentPage = 0;
@@ -12616,6 +12617,7 @@ async function mysqlConnect() {
 
         if (data.connected) {
             mysqlCreds = { host, port, user, password: pass };
+            mysqlConnectedNodeId = currentNodeId; // lock to current node for entire session
             badge.textContent = `Connected — MySQL ${data.version}`;
             badge.style.background = 'rgba(46,204,113,0.15)';
             badge.style.color = '#2ecc71';
@@ -12653,6 +12655,7 @@ async function mysqlConnect() {
 
 function mysqlDisconnect() {
     mysqlCreds = null;
+    mysqlConnectedNodeId = null;
     mysqlCurrentDb = null;
     mysqlCurrentTable = null;
     mysqlDatabases = [];
@@ -12688,7 +12691,7 @@ async function mysqlLoadDatabases() {
     tree.innerHTML = '<div style="padding:16px; text-align:center; color:var(--text-muted); font-size:12px;">Loading...</div>';
 
     try {
-        const baseUrl = getNodeApiBase(currentNodeId);
+        const baseUrl = getNodeApiBase(mysqlConnectedNodeId);
         const resp = await fetch(`${baseUrl}/mysql/databases`, {
             method: 'POST',
             credentials: 'include',
@@ -12755,7 +12758,7 @@ async function mysqlToggleDb(db) {
     container.innerHTML = '<div style="padding:6px 0; font-size:11px; color:var(--text-muted);">Loading tables...</div>';
 
     try {
-        const baseUrl = getNodeApiBase(currentNodeId);
+        const baseUrl = getNodeApiBase(mysqlConnectedNodeId);
         const resp = await fetch(`${baseUrl}/mysql/tables`, {
             method: 'POST',
             credentials: 'include',
@@ -12831,7 +12834,7 @@ async function mysqlLoadTableData() {
     grid.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);"><div class="spinner-sm"></div> Loading data...</div>';
 
     try {
-        const baseUrl = getNodeApiBase(currentNodeId);
+        const baseUrl = getNodeApiBase(mysqlConnectedNodeId);
         const resp = await fetch(`${baseUrl}/mysql/data`, {
             method: 'POST',
             credentials: 'include',
@@ -12951,7 +12954,7 @@ async function mysqlLoadStructure() {
     const container = document.getElementById('mysql-struct-columns');
     container.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);"><div class="spinner-sm"></div> Loading structure...</div>';
 
-    const baseUrl = getNodeApiBase(currentNodeId);
+    const baseUrl = getNodeApiBase(mysqlConnectedNodeId);
     const url = `${baseUrl}/mysql/query`;
     const structureQuery = `SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '${mysqlCurrentDb.replace(/'/g, "''")}' AND TABLE_NAME = '${mysqlCurrentTable.replace(/'/g, "''")}' ORDER BY ORDINAL_POSITION`;
 
@@ -13079,7 +13082,7 @@ async function mysqlLoadIndexes() {
     container.innerHTML = '<div style="padding:30px; text-align:center; color:var(--text-muted);"><div class="spinner-sm"></div> Loading indexes...</div>';
 
     try {
-        const baseUrl = getNodeApiBase(currentNodeId);
+        const baseUrl = getNodeApiBase(mysqlConnectedNodeId);
         const resp = await fetch(`${baseUrl}/mysql/query`, {
             method: 'POST', credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
@@ -13236,7 +13239,7 @@ async function mysqlLoadTriggers() {
     container.innerHTML = '<div style="padding:30px; text-align:center; color:var(--text-muted);"><div class="spinner-sm"></div> Loading triggers...</div>';
 
     try {
-        const baseUrl = getNodeApiBase(currentNodeId);
+        const baseUrl = getNodeApiBase(mysqlConnectedNodeId);
         const resp = await fetch(`${baseUrl}/mysql/query`, {
             method: 'POST', credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
@@ -13370,7 +13373,7 @@ async function mysqlDropTrigger(triggerName) {
 
 
 async function mysqlAlterTable(sql) {
-    const baseUrl = getNodeApiBase(currentNodeId);
+    const baseUrl = getNodeApiBase(mysqlConnectedNodeId);
     const resp = await fetch(`${baseUrl}/mysql/query`, {
         method: 'POST',
         credentials: 'include',
@@ -13851,7 +13854,7 @@ async function mysqlDoDump(db, includeData, modal) {
     </div>`;
 
     try {
-        const baseUrl = getNodeApiBase(currentNodeId);
+        const baseUrl = getNodeApiBase(mysqlConnectedNodeId);
         const resp = await fetch(`${baseUrl}/mysql/dump`, {
             method: 'POST',
             credentials: 'include',
@@ -13908,7 +13911,7 @@ async function mysqlExecuteQuery() {
     const startTime = performance.now();
 
     try {
-        const baseUrl = getNodeApiBase(currentNodeId);
+        const baseUrl = getNodeApiBase(mysqlConnectedNodeId);
         const resp = await fetch(`${baseUrl}/mysql/query`, {
             method: 'POST',
             credentials: 'include',
