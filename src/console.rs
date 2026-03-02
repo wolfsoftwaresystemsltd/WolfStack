@@ -80,14 +80,6 @@ async fn console_session(
             let serial_sock = format!("/var/lib/wolfstack/vms/{}.serial.sock", name);
             cmd.arg(format!("socat -,raw,echo=0 UNIX-CONNECT:{}", serial_sock));
         }
-        "pve-vm" => {
-            // Proxmox VM serial console via qm terminal
-            cmd.arg(format!(
-                "qm terminal {} 2>&1 || echo -e '\\r\\n\\x1b[31mSerial console not available.\\x1b[0m\\r\\n\
-                 \\x1b[33mAdd a serial port to this VM: qm set {} --serial0 socket\\x1b[0m\\r\\n'",
-                name, name
-            ));
-        }
         "host" => {
             // Host shell — open an interactive login bash/sh session on this machine
             cmd.arg("if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi");
@@ -399,7 +391,12 @@ async fn remote_console_bridge(
             format!("%{:02X}", b)
         }
     }).collect();
-    let ws_path = format!("/ws/console/{}/{}", ctype, encoded_name);
+    // For Proxmox VM consoles, route to the PVE console endpoint on the remote node
+    let ws_path = if ctype == "pve-vm" {
+        format!("/ws/pve-console/self/{}", encoded_name)
+    } else {
+        format!("/ws/console/{}/{}", ctype, encoded_name)
+    };
     let internal_port = remote_port + 1;
 
     // URLs to try in order: wss main, ws internal, ws main
