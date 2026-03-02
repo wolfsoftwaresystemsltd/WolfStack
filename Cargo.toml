@@ -63,6 +63,11 @@ lz4_flex = "0.11"
 # MySQL database editor
 mysql_async = "0.34"
 
+[profile.release]
+strip = "debuginfo"
+codegen-units = 1
+lto = "thin"
+
 [[bin]]
 name = "wolfstack"
 path = "src/main.rs"

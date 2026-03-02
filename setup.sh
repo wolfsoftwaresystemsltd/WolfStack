@@ -713,19 +713,55 @@ rm -rf "$CLEAN_TARGET/release/wolfstack" "$CLEAN_TARGET/release/.fingerprint/wol
 echo ""
 echo "Building WolfStack (this may take a few minutes)..."
 
+# Low-memory systems (< 4GB): create swap and limit parallelism to avoid OOM
+TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+TOTAL_SWAP_KB=$(grep SwapTotal /proc/meminfo | awk '{print $2}')
+TOTAL_AVAILABLE_KB=$((TOTAL_MEM_KB + TOTAL_SWAP_KB))
+CARGO_JOBS=""
+CREATED_SWAP=""
+
+if [ "$TOTAL_AVAILABLE_KB" -lt 4000000 ]; then
+    echo "  Low memory detected ($(( TOTAL_MEM_KB / 1024 ))MB RAM + $(( TOTAL_SWAP_KB / 1024 ))MB swap)"
+    CARGO_JOBS="-j 1"
+
+    # Create a temporary swap file if total memory + swap < 4GB
+    SWAP_DIR="${CUSTOM_INSTALL_DIR:-/var}"
+    SWAP_FILE="$SWAP_DIR/.wolfstack-build-swap"
+    NEEDED_SWAP_MB=$(( (4000000 - TOTAL_AVAILABLE_KB) / 1024 + 512 ))
+    if [ "$NEEDED_SWAP_MB" -gt 4096 ]; then
+        NEEDED_SWAP_MB=4096
+    fi
+
+    echo "  Creating ${NEEDED_SWAP_MB}MB temporary swap file for build..."
+    dd if=/dev/zero of="$SWAP_FILE" bs=1M count="$NEEDED_SWAP_MB" status=none 2>/dev/null && \
+    chmod 600 "$SWAP_FILE" && \
+    mkswap "$SWAP_FILE" >/dev/null 2>&1 && \
+    swapon "$SWAP_FILE" 2>/dev/null && \
+    CREATED_SWAP="$SWAP_FILE" && \
+    echo "  ✓ Temporary swap enabled" || \
+    echo "  ⚠ Could not create swap file (build may be slow or fail)"
+fi
+
 if [ -n "$CUSTOM_INSTALL_DIR" ]; then
     # Custom install dir — all build I/O goes to external drive
     chown -R "$REAL_USER:$REAL_USER" "$INSTALL_DIR" "$CARGO_HOME" "$RUSTUP_HOME" "$TMPDIR" "$CARGO_TARGET_DIR" 2>/dev/null || true
     if [ "$REAL_USER" != "root" ]; then
-        su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' CARGO_TARGET_DIR='$CARGO_TARGET_DIR' PATH='$CARGO_HOME/bin:/usr/local/bin:/usr/bin:\$PATH' && cd $INSTALL_DIR && cargo build --release"
+        su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' CARGO_TARGET_DIR='$CARGO_TARGET_DIR' PATH='$CARGO_HOME/bin:/usr/local/bin:/usr/bin:\$PATH' && cd $INSTALL_DIR && cargo build --release $CARGO_JOBS"
     else
-        cargo build --release
+        cargo build --release $CARGO_JOBS
     fi
 elif [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
     chown -R "$REAL_USER:$REAL_USER" "$INSTALL_DIR"
-    su - "$REAL_USER" -c "cd $INSTALL_DIR && $REAL_HOME/.cargo/bin/cargo build --release"
+    su - "$REAL_USER" -c "cd $INSTALL_DIR && $REAL_HOME/.cargo/bin/cargo build --release $CARGO_JOBS"
 else
-    cargo build --release
+    cargo build --release $CARGO_JOBS
+fi
+
+# Clean up temporary swap file
+if [ -n "$CREATED_SWAP" ]; then
+    swapoff "$CREATED_SWAP" 2>/dev/null
+    rm -f "$CREATED_SWAP"
+    echo "  ✓ Temporary swap removed"
 fi
 
 echo "✓ Build complete"
