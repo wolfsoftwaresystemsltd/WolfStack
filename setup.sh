@@ -18,7 +18,7 @@ set -e
 # Helper: read from /dev/tty if available, otherwise return empty (use defaults)
 prompt_read() {
     if [ -e /dev/tty ] && : < /dev/tty 2>/dev/null; then
-        read "$1" < /dev/tty
+        read "$1" < /dev/tty 2>/dev/null || eval "$1="
     else
         eval "$1="
     fi
