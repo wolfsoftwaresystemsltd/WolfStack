@@ -384,6 +384,7 @@ impl VmManager {
             "--scsihw".to_string(), "virtio-scsi-single".to_string(),
             "--net0".to_string(), format!("virtio,bridge=vmbr0"),
             "--ostype".to_string(), "l26".to_string(), // Linux 2.6+ kernel
+            "--serial0".to_string(), "socket".to_string(), // Serial console for qm terminal
         ];
 
         // ISO (CD-ROM)

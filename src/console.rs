@@ -82,7 +82,11 @@ async fn console_session(
         }
         "pve-vm" => {
             // Proxmox VM serial console via qm terminal
-            cmd.arg(format!("qm terminal {}", name));
+            cmd.arg(format!(
+                "qm terminal {} 2>&1 || echo -e '\\r\\n\\x1b[31mSerial console not available.\\x1b[0m\\r\\n\
+                 \\x1b[33mAdd a serial port to this VM: qm set {} --serial0 socket\\x1b[0m\\r\\n'",
+                name, name
+            ));
         }
         "host" => {
             // Host shell — open an interactive login bash/sh session on this machine
