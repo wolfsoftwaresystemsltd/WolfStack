@@ -430,6 +430,7 @@ async fn remote_console_bridge(
             Err(_) => continue,
         };
 
+        let _ = session.text(format!("\r\nTrying: {}\r\n", url)).await;
         match tokio::time::timeout(
             std::time::Duration::from_secs(3),
             tokio_tungstenite::connect_async_tls_with_config(
@@ -440,15 +441,15 @@ async fn remote_console_bridge(
             ),
         ).await {
             Ok(Ok((stream, _))) => {
-
+                let _ = session.text("Connected to remote WS\r\n").await;
                 remote_stream = Some(stream);
                 break;
             }
-            Ok(Err(_e)) => {
-
+            Ok(Err(e)) => {
+                let _ = session.text(format!("WS error: {}\r\n", e)).await;
             }
             Err(_) => {
-
+                let _ = session.text("Timeout (3s)\r\n").await;
             }
         }
     }
