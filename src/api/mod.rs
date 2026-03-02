@@ -9142,6 +9142,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/ws/remote-console/{node_id}/{type}/{name}", web::get().to(crate::console::remote_console_ws))
         // PVE Console WebSocket proxy
         .route("/ws/pve-console/{node_id}/{vmid}", web::get().to(pve_console::pve_console_ws))
+        // PVE VNC — ticket endpoint + WebSocket bridge for Proxmox VM graphical consoles
+        .route("/api/pve-vnc-ticket/{vmid}", web::get().to(pve_console::pve_vnc_ticket))
+        .route("/ws/pve-vnc/{vmid}", web::get().to(pve_console::pve_vnc_ws))
         // MySQL Database Editor
         .route("/api/mysql/detect", web::get().to(mysql_detect))
         .route("/api/mysql/detect-containers", web::get().to(mysql_detect_containers))

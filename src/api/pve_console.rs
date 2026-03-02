@@ -2,16 +2,219 @@
 // (C)Copyright Wolf Software Systems Ltd
 // https://wolf.uk.com
 
-//! PVE Console — WebSocket proxy for Proxmox VE terminal sessions
-//! Bridges browser xterm.js ↔ PVE termproxy WebSocket using PVE's packet protocol.
+//! PVE Console — WebSocket proxy for Proxmox VE terminal and VNC sessions.
+//! Provides two modes:
+//! 1. Terminal (termproxy) — xterm.js for text shells (LXC, node shell)
+//! 2. VNC (vncproxy) — noVNC for graphical VM consoles (QEMU VMs)
 
 use actix_web::{web, HttpRequest, HttpResponse, Error};
 use actix_ws::Message;
 use futures::StreamExt;
+use std::collections::HashMap;
+use std::process::Command;
+use std::sync::Mutex;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite;
 use tracing::error;
 
 use super::AppState;
+
+/// Temporary storage for VNC proxy ports created by the ticket endpoint.
+/// Key: vmid, Value: (port, ticket, creation_time)
+static VNC_PORTS: std::sync::LazyLock<Mutex<HashMap<u64, (u16, String, std::time::Instant)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+
+/// REST endpoint: GET /api/pve-vnc-ticket/{vmid}
+/// Creates a PVE VNC proxy via pvesh and returns the ticket for noVNC auth.
+/// The VNC proxy port is stored in memory for the subsequent WS connection.
+pub async fn pve_vnc_ticket(
+    path: web::Path<String>,
+) -> Result<HttpResponse, Error> {
+    let vmid_str = path.into_inner();
+    let vmid: u64 = match vmid_str.parse() {
+        Ok(v) => v,
+        Err(_) => return Ok(HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid VMID" }))),
+    };
+
+    if !crate::containers::is_proxmox() {
+        return Ok(HttpResponse::BadRequest().json(serde_json::json!({ "error": "Not a Proxmox host" })));
+    }
+
+    let (port, ticket) = match create_vnc_proxy(vmid) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("PVE vncproxy failed for VMID {}: {}", vmid, e);
+            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })));
+        }
+    };
+
+    // Store for the WS handler to pick up
+    if let Ok(mut map) = VNC_PORTS.lock() {
+        // Clean expired entries (older than 30 seconds)
+        let now = std::time::Instant::now();
+        map.retain(|_, (_, _, t)| now.duration_since(*t).as_secs() < 30);
+        map.insert(vmid, (port, ticket.clone(), now));
+    }
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "ticket": ticket,
+        "vmid": vmid,
+    })))
+}
+
+/// Create a PVE VNC proxy for a VM and return (port, ticket).
+fn create_vnc_proxy(vmid: u64) -> Result<(u16, String), String> {
+    let pve_node = Command::new("hostname").output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "localhost".to_string());
+
+    // Determine guest type (qemu or lxc)
+    let qemu_check = Command::new("pvesh")
+        .args(["get", &format!("/nodes/{}/qemu/{}/status/current", pve_node, vmid), "--output-format", "json"])
+        .output();
+    let guest_type = if qemu_check.map(|o| o.status.success()).unwrap_or(false) {
+        "qemu"
+    } else {
+        "lxc"
+    };
+
+    // Create standard VNC proxy (no --websocket flag = plain TCP VNC)
+    let vncproxy_path = format!("/nodes/{}/{}/{}/vncproxy", pve_node, guest_type, vmid);
+    let vp_output = Command::new("pvesh")
+        .args(["create", &vncproxy_path, "--output-format", "json"])
+        .output();
+
+    let vp_data = match vp_output {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            serde_json::from_str::<serde_json::Value>(&text)
+                .map_err(|e| format!("Failed to parse vncproxy response: {}", e))
+        }
+        Ok(o) => Err(format!("pvesh vncproxy failed: {}", String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => Err(format!("Failed to run pvesh: {}", e)),
+    };
+
+    let vp_data = vp_data?;
+
+    let port = vp_data.get("port")
+        .and_then(|v| v.as_str().and_then(|s| s.parse::<u16>().ok()).or_else(|| v.as_u64().map(|n| n as u16)))
+        .unwrap_or(0);
+    let ticket = vp_data.get("ticket")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if port == 0 {
+        return Err("No VNC port in vncproxy response".to_string());
+    }
+
+    Ok((port, ticket))
+}
+
+
+/// WebSocket endpoint: /ws/pve-vnc/{vmid}
+/// Bridges browser noVNC ↔ PVE VNC proxy via TCP.
+/// The VNC proxy port is looked up from the ticket endpoint, or created on demand.
+pub async fn pve_vnc_ws(
+    req: HttpRequest,
+    stream: web::Payload,
+    path: web::Path<String>,
+) -> Result<HttpResponse, Error> {
+    let vmid_str = path.into_inner();
+    let vmid: u64 = match vmid_str.parse() {
+        Ok(v) => v,
+        Err(_) => return Ok(HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid VMID" }))),
+    };
+
+    if !crate::containers::is_proxmox() {
+        return Ok(HttpResponse::BadRequest().json(serde_json::json!({ "error": "Not a Proxmox host" })));
+    }
+
+    // Look up the stored port, or create a new VNC proxy on demand
+    let port = {
+        let stored = VNC_PORTS.lock().ok().and_then(|map| map.get(&vmid).map(|(p, _, _)| *p));
+        match stored {
+            Some(p) => p,
+            None => {
+                // Create VNC proxy on the fly
+                match create_vnc_proxy(vmid) {
+                    Ok((p, _)) => p,
+                    Err(e) => {
+                        error!("PVE vncproxy failed for VMID {}: {}", vmid, e);
+                        return Ok(HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })));
+                    }
+                }
+            }
+        }
+    };
+
+    // Connect TCP to the PVE VNC proxy port
+    let tcp_stream = match TcpStream::connect(format!("127.0.0.1:{}", port)).await {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to connect to PVE VNC proxy port {}: {}", port, e);
+            return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to connect to VNC proxy: {}", e)
+            })));
+        }
+    };
+
+    // Upgrade browser connection to WebSocket
+    let (res, session, msg_stream) = actix_ws::handle(&req, stream)?;
+
+    // Bridge WebSocket ↔ TCP
+    actix_rt::spawn(vnc_tcp_bridge(session, msg_stream, tcp_stream));
+
+    Ok(res)
+}
+
+/// Bridge browser noVNC WebSocket ↔ PVE VNC proxy TCP connection.
+/// Pure binary passthrough — noVNC speaks RFB protocol directly to PVE's VNC proxy.
+async fn vnc_tcp_bridge(
+    mut session: actix_ws::Session,
+    mut msg_stream: actix_ws::MessageStream,
+    tcp_stream: TcpStream,
+) {
+    let (mut tcp_rx, mut tcp_tx) = tcp_stream.into_split();
+    let mut buf = [0u8; 8192];
+
+    loop {
+        tokio::select! {
+            // TCP (VNC proxy) → WebSocket (noVNC browser)
+            result = tcp_rx.read(&mut buf) => {
+                match result {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if session.binary(buf[..n].to_vec()).await.is_err() { break; }
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // WebSocket (noVNC browser) → TCP (VNC proxy)
+            msg = msg_stream.next() => {
+                match msg {
+                    Some(Ok(Message::Binary(data))) => {
+                        if tcp_tx.write_all(&data).await.is_err() { break; }
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        // noVNC may send text frames for some protocol messages
+                        if tcp_tx.write_all(text.as_bytes()).await.is_err() { break; }
+                    }
+                    Some(Ok(Message::Ping(bytes))) => {
+                        let _ = session.pong(&bytes).await;
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let _ = session.close(None).await;
+}
 
 
 /// WebSocket endpoint: /ws/pve-console/{node_id}/{vmid}

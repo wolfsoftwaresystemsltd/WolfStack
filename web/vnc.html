@@ -121,11 +121,11 @@
 
 <body>
     <div class="toolbar">
-        <h3>🖥️ <span id="vm-name">VM Console</span></h3>
+        <h3 id="vm-name">VM Console</h3>
         <span id="status-badge" class="badge disconnected">Connecting...</span>
         <div class="spacer"></div>
         <button onclick="sendCtrlAltDel()" class="ctrl-alt-del" title="Send Ctrl+Alt+Del">Ctrl+Alt+Del</button>
-        <button onclick="toggleFullscreen()">⛶ Fullscreen</button>
+        <button onclick="toggleFullscreen()">Fullscreen</button>
     </div>
     <div id="vnc-container" style="position: relative;">
         <div class="status-overlay" id="status-overlay">
@@ -141,17 +141,75 @@
         const vmName = params.get('name') || 'unknown';
         const wsPort = parseInt(params.get('port') || '0');
         const host = params.get('host') || window.location.hostname;
+        const wsPath = params.get('ws_path') || '';
+        const vncTicket = params.get('ticket') || '';
 
         document.getElementById('vm-name').textContent = vmName;
         document.title = `${vmName} — VM Console`;
 
         let rfb = null;
 
-        if (!wsPort) {
-            document.getElementById('status-overlay').innerHTML =
-                '<p style="color:#fca5a5;">❌ No WebSocket port specified.<br>The VM may not be running.</p>';
-        } else {
+        if (wsPath) {
+            // WolfStack-proxied VNC (Proxmox VMs via WS bridge)
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+            const wsUrl = `${wsProtocol}://${window.location.host}${wsPath}`;
+            connectProxiedVNC(wsUrl, vncTicket);
+        } else if (wsPort) {
+            // Direct VNC (standalone QEMU VMs with their own VNC port)
             connectVNC(host, wsPort);
+        } else {
+            document.getElementById('status-overlay').innerHTML =
+                '<p style="color:#fca5a5;">No VNC connection parameters specified.<br>The VM may not be running.</p>';
+        }
+
+        function connectProxiedVNC(wsUrl, ticket) {
+            const container = document.getElementById('vnc-container');
+            try {
+                const opts = {
+                    scaleViewport: true,
+                    resizeSession: true,
+                    clipViewport: true,
+                };
+                if (ticket) {
+                    opts.credentials = { password: ticket };
+                }
+                rfb = new RFB(container, wsUrl, opts);
+
+                rfb.addEventListener('connect', () => {
+                    document.getElementById('status-badge').textContent = 'Connected';
+                    document.getElementById('status-badge').className = 'badge';
+                    const overlay = document.getElementById('status-overlay');
+                    if (overlay) overlay.remove();
+                });
+
+                rfb.addEventListener('disconnect', (e) => {
+                    document.getElementById('status-badge').textContent = 'Disconnected';
+                    document.getElementById('status-badge').className = 'badge disconnected';
+                    if (!e.detail.clean) {
+                        const c = document.getElementById('vnc-container');
+                        c.innerHTML = `
+                            <div class="status-overlay">
+                                <p style="color:#fca5a5;">Connection lost.<br>
+                                <button onclick="location.reload()"
+                                    style="margin-top:12px; padding:6px 16px; background:#1f2937; border:1px solid #374151; color:#d1d5db; border-radius:4px; cursor:pointer;">
+                                    Reconnect
+                                </button></p>
+                            </div>`;
+                    }
+                });
+
+                rfb.addEventListener('credentialsrequired', () => {
+                    if (ticket) {
+                        rfb.sendCredentials({ password: ticket });
+                    } else {
+                        rfb.sendCredentials({ password: prompt('VNC Password:') || '' });
+                    }
+                });
+
+            } catch (e) {
+                document.getElementById('status-overlay').innerHTML =
+                    `<p style="color:#fca5a5;">Failed to connect: ${e.message}</p>`;
+            }
         }
 
         function connectVNC(host, port) {
@@ -223,8 +281,8 @@
                         const container = document.getElementById('vnc-container');
                         container.innerHTML = `
                             <div class="status-overlay">
-                                <p style="color:#fca5a5;">⚠️ Connection lost.<br>
-                                <button onclick="location.reload()" 
+                                <p style="color:#fca5a5;">Connection lost.<br>
+                                <button onclick="location.reload()"
                                     style="margin-top:12px; padding:6px 16px; background:#1f2937; border:1px solid #374151; color:#d1d5db; border-radius:4px; cursor:pointer;">
                                     Reconnect
                                 </button></p>
@@ -238,7 +296,7 @@
 
             } catch (e) {
                 document.getElementById('status-overlay').innerHTML =
-                    `<p style="color:#fca5a5;">❌ Failed to connect: ${e.message}</p>`;
+                    `<p style="color:#fca5a5;">Failed to connect: ${e.message}</p>`;
             }
         }
 

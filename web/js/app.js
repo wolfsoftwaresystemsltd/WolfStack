@@ -10708,7 +10708,7 @@ function openVmConsole(name) {
     openConsole('vm', name);
 }
 
-function openPveVmConsole(vmid, displayName) {
+async function openPveVmConsole(vmid, displayName) {
     // For dedicated PVE nodes (added with API token), use PVE console proxy
     if (currentNodeId) {
         const node = allNodes.find(n => n.id === currentNodeId);
@@ -10717,8 +10717,42 @@ function openPveVmConsole(vmid, displayName) {
             return;
         }
     }
-    // WolfStack nodes on Proxmox — use pvesh termproxy via remote console
-    openConsole('pve-vm', vmid);
+    // WolfStack nodes on Proxmox — use VNC via pvesh vncproxy
+    try {
+        // Determine if remote or local
+        let ticketUrl, wsPath;
+        if (currentNodeId) {
+            const node = allNodes.find(n => n.id === currentNodeId);
+            if (node && !node.is_self) {
+                // Remote node — proxy REST and WS
+                ticketUrl = apiUrl(`/api/nodes/${currentNodeId}/proxy/api/pve-vnc-ticket/${vmid}`);
+                wsPath = `/ws/remote-console/${currentNodeId}/pve-vnc/${vmid}`;
+            }
+        }
+        if (!ticketUrl) {
+            // Local node
+            ticketUrl = apiUrl(`/api/pve-vnc-ticket/${vmid}`);
+            wsPath = `/ws/pve-vnc/${vmid}`;
+        }
+
+        const resp = await fetch(ticketUrl);
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            showToast(err.error || 'Failed to create VNC proxy', 'error');
+            return;
+        }
+        const data = await resp.json();
+        const ticket = data.ticket || '';
+
+        window.open(
+            `/vnc.html?ws_path=${encodeURIComponent(wsPath)}&ticket=${encodeURIComponent(ticket)}&name=${encodeURIComponent(displayName || 'VM ' + vmid)}`,
+            'vnc_' + vmid,
+            'width=1024,height=768,menubar=no,toolbar=no'
+        );
+    } catch (e) {
+        console.error('Failed to open PVE VNC console:', e);
+        showToast('Failed to open VNC console', 'error');
+    }
 }
 
 function openPveConsole(nodeId, vmid, displayName) {
