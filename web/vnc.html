@@ -16,13 +16,15 @@
             box-sizing: border-box;
         }
 
-        body {
+        html, body {
             background: #0a0e1a;
             color: #e0e0e0;
             font-family: 'Inter', -apple-system, sans-serif;
-            height: 100vh;
+            height: 100%;
+            width: 100%;
             display: flex;
             flex-direction: column;
+            overflow: hidden;
         }
 
         .toolbar {
@@ -74,16 +76,10 @@
 
         #vnc-container {
             flex: 1;
-            display: flex;
-            align-items: center;
-            justify-content: center;
             overflow: hidden;
             background: #000;
-        }
-
-        #vnc-container canvas {
-            max-width: 100%;
-            max-height: 100%;
+            width: 100%;
+            min-height: 0;
         }
 
         .status-overlay {
@@ -299,6 +295,13 @@
                     `<p style="color:#fca5a5;">Failed to connect: ${e.message}</p>`;
             }
         }
+
+        // Re-scale VNC on window resize
+        window.addEventListener('resize', () => {
+            if (rfb) {
+                rfb.scaleViewport = true;
+            }
+        });
 
         // Expose to global scope for toolbar buttons
         window.sendCtrlAltDel = function () {
