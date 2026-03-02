@@ -3106,7 +3106,15 @@ async function uploadFiles(files) {
         formData.append('file', file, file.name);
     }
     try {
-        const resp = await fetch(apiUrl(`/api/files/upload?path=${encodeURIComponent(currentFilePath)}`), {
+        let url;
+        if (containerFileMode && containerFileMode.type === 'docker') {
+            url = `/api/files/docker/upload?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(currentFilePath)}`;
+        } else if (containerFileMode && containerFileMode.type === 'lxc') {
+            url = `/api/files/lxc/upload?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(currentFilePath)}`;
+        } else {
+            url = `/api/files/upload?path=${encodeURIComponent(currentFilePath)}`;
+        }
+        const resp = await fetch(apiUrl(url), {
             method: 'POST',
             body: formData,
         });

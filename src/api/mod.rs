@@ -5783,6 +5783,78 @@ pub async fn files_docker_download(
     }
 }
 
+/// POST /api/files/docker/upload?container=NAME&path=/some/dir — upload file(s) into a Docker container
+pub async fn files_docker_upload(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+    mut payload: actix_multipart::Multipart,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = query.get("container").cloned().unwrap_or_default();
+    let dir = query.get("path").cloned().unwrap_or_else(|| "/tmp".into());
+    if container.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container'" }));
+    }
+
+    use futures::StreamExt;
+    let mut uploaded = Vec::new();
+
+    while let Some(Ok(mut field)) = payload.next().await {
+        let filename = field.content_disposition()
+            .and_then(|cd| cd.get_filename().map(|s| s.to_string()))
+            .unwrap_or_else(|| "upload".to_string());
+
+        let safe_name = filename.replace("..", "").replace("/", "").replace("\\", "");
+        if safe_name.is_empty() { continue; }
+
+        // Write to a temp file, then docker cp into container
+        let tmp = format!("/tmp/wolfstack-docker-ul-{}-{}", std::process::id(), safe_name);
+        {
+            let mut file = match std::fs::File::create(&tmp) {
+                Ok(f) => f,
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Cannot create temp file: {}", e)
+                    }));
+                }
+            };
+            use std::io::Write;
+            while let Some(Ok(chunk)) = field.next().await {
+                if file.write_all(&chunk).is_err() {
+                    let _ = std::fs::remove_file(&tmp);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to write temp file {}", safe_name)
+                    }));
+                }
+            }
+        }
+
+        let dest = format!("{}:{}/{}", container, dir.trim_end_matches('/'), safe_name);
+        let output = std::process::Command::new("docker").args(["cp", &tmp, &dest]).output();
+        let _ = std::fs::remove_file(&tmp);
+
+        match output {
+            Ok(out) if out.status.success() => { uploaded.push(safe_name); }
+            Ok(out) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("docker cp failed: {}", String::from_utf8_lossy(&out.stderr).trim())
+                }));
+            }
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("docker cp error: {}", e)
+                }));
+            }
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": format!("Uploaded {} file(s)", uploaded.len()),
+        "files": uploaded,
+    }))
+}
+
 // ─── LXC File Manager ───
 
 /// Detect if Proxmox `pct` is available, and use `pct exec` if so; else `lxc-attach`.
@@ -5996,6 +6068,84 @@ pub async fn files_lxc_download(
         })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
     }
+}
+
+/// POST /api/files/lxc/upload?container=NAME&path=/some/dir — upload file(s) into an LXC/Proxmox container
+pub async fn files_lxc_upload(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+    mut payload: actix_multipart::Multipart,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = query.get("container").cloned().unwrap_or_default();
+    let dir = query.get("path").cloned().unwrap_or_else(|| "/tmp".into());
+    if container.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container'" }));
+    }
+
+    use futures::StreamExt;
+    let mut uploaded = Vec::new();
+
+    while let Some(Ok(mut field)) = payload.next().await {
+        let filename = field.content_disposition()
+            .and_then(|cd| cd.get_filename().map(|s| s.to_string()))
+            .unwrap_or_else(|| "upload".to_string());
+
+        let safe_name = filename.replace("..", "").replace("/", "").replace("\\", "");
+        if safe_name.is_empty() { continue; }
+
+        // Collect file data
+        let mut data = Vec::new();
+        while let Some(Ok(chunk)) = field.next().await {
+            data.extend_from_slice(&chunk);
+        }
+
+        // Pipe into container via tee (works with both lxc-attach and pct exec)
+        let dest_path = format!("{}/{}", dir.trim_end_matches('/'), safe_name);
+        let mut child = match lxc_exec_cmd(&container, &["tee", &dest_path])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to exec into container: {}", e)
+                }));
+            }
+        };
+
+        if let Some(ref mut stdin) = child.stdin {
+            use std::io::Write;
+            if stdin.write_all(&data).is_err() {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to write to container: {}", safe_name)
+                }));
+            }
+        }
+        drop(child.stdin.take()); // Close stdin so tee finishes
+
+        match child.wait() {
+            Ok(status) if status.success() => { uploaded.push(safe_name); }
+            Ok(_) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to upload {} to container", safe_name)
+                }));
+            }
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Container exec error: {}", e)
+                }));
+            }
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": format!("Uploaded {} file(s)", uploaded.len()),
+        "files": uploaded,
+    }))
 }
 
 /// POST /api/agent/storage/apply — receive and apply a mount config from another node (cluster-auth)
@@ -9086,12 +9236,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/files/docker/delete", web::post().to(files_docker_delete))
         .route("/api/files/docker/rename", web::post().to(files_docker_rename))
         .route("/api/files/docker/download", web::get().to(files_docker_download))
+        .route("/api/files/docker/upload", web::post().to(files_docker_upload))
         // LXC File Manager
         .route("/api/files/lxc/browse", web::get().to(files_lxc_browse))
         .route("/api/files/lxc/mkdir", web::post().to(files_lxc_mkdir))
         .route("/api/files/lxc/delete", web::post().to(files_lxc_delete))
         .route("/api/files/lxc/rename", web::post().to(files_lxc_rename))
         .route("/api/files/lxc/download", web::get().to(files_lxc_download))
+        .route("/api/files/lxc/upload", web::post().to(files_lxc_upload))
         // Networking
         .route("/api/networking/interfaces", web::get().to(net_list_interfaces))
         .route("/api/networking/dns", web::get().to(net_get_dns))
