@@ -10719,20 +10719,15 @@ async function openPveVmConsole(vmid, displayName) {
     }
     // WolfStack nodes on Proxmox — use VNC via pvesh vncproxy
     try {
-        // Determine if remote or local
-        let ticketUrl, wsPath;
+        // apiUrl() handles remote proxy routing automatically
+        const ticketUrl = apiUrl(`/api/pve-vnc-ticket/${vmid}`);
+        // WS path: remote nodes need the remote-console bridge
+        let wsPath = `/ws/pve-vnc/${vmid}`;
         if (currentNodeId) {
             const node = allNodes.find(n => n.id === currentNodeId);
             if (node && !node.is_self) {
-                // Remote node — proxy REST and WS
-                ticketUrl = apiUrl(`/api/nodes/${currentNodeId}/proxy/api/pve-vnc-ticket/${vmid}`);
                 wsPath = `/ws/remote-console/${currentNodeId}/pve-vnc/${vmid}`;
             }
-        }
-        if (!ticketUrl) {
-            // Local node
-            ticketUrl = apiUrl(`/api/pve-vnc-ticket/${vmid}`);
-            wsPath = `/ws/pve-vnc/${vmid}`;
         }
 
         const resp = await fetch(ticketUrl);
