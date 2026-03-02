@@ -12497,7 +12497,7 @@ function loadMySQLEditor() {
     // Detect MySQL on this node
     const nodeId = currentNodeId;
     const baseUrl = nodeId ? getNodeApiBase(nodeId) : '';
-    fetch(`${baseUrl}/api/mysql/detect`, { credentials: 'include' })
+    fetch(`${baseUrl}/mysql/detect`, { credentials: 'include' })
         .then(r => r.json())
         .then(data => {
             banner.style.display = 'block';
@@ -12514,7 +12514,7 @@ function loadMySQLEditor() {
         .catch(() => { });
 
     // Detect MySQL containers (Docker/LXC)
-    fetch(`${baseUrl}/api/mysql/detect-containers`, { credentials: 'include' })
+    fetch(`${baseUrl}/mysql/detect-containers`, { credentials: 'include' })
         .then(r => r.json())
         .then(data => {
             const containers = data.containers || [];
@@ -12550,9 +12550,9 @@ function mysqlSelectContainer(idx) {
 
 
 function getNodeApiBase(nodeId) {
-    if (!nodeId) return '';
+    if (!nodeId) return '/api';
     const node = allNodes.find(n => n.id === nodeId);
-    if (node && node.is_self) return '';
+    if (node && node.is_self) return '/api';
     return `/api/nodes/${nodeId}/proxy`;
 }
 
@@ -12582,7 +12582,7 @@ async function mysqlConnect() {
 
     try {
         const baseUrl = getNodeApiBase(currentNodeId);
-        const resp = await fetch(`${baseUrl}/api/mysql/connect`, {
+        const resp = await fetch(`${baseUrl}/mysql/connect`, {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
@@ -12689,7 +12689,7 @@ async function mysqlLoadDatabases() {
 
     try {
         const baseUrl = getNodeApiBase(currentNodeId);
-        const resp = await fetch(`${baseUrl}/api/mysql/databases`, {
+        const resp = await fetch(`${baseUrl}/mysql/databases`, {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
@@ -12756,7 +12756,7 @@ async function mysqlToggleDb(db) {
 
     try {
         const baseUrl = getNodeApiBase(currentNodeId);
-        const resp = await fetch(`${baseUrl}/api/mysql/tables`, {
+        const resp = await fetch(`${baseUrl}/mysql/tables`, {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
@@ -12826,7 +12826,7 @@ async function mysqlLoadTableData() {
 
     try {
         const baseUrl = getNodeApiBase(currentNodeId);
-        const resp = await fetch(`${baseUrl}/api/mysql/data`, {
+        const resp = await fetch(`${baseUrl}/mysql/data`, {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
@@ -12946,7 +12946,7 @@ async function mysqlLoadStructure() {
     container.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);"><div class="spinner-sm"></div> Loading structure...</div>';
 
     const baseUrl = getNodeApiBase(currentNodeId);
-    const url = `${baseUrl}/api/mysql/query`;
+    const url = `${baseUrl}/mysql/query`;
     const structureQuery = `SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '${mysqlCurrentDb.replace(/'/g, "''")}' AND TABLE_NAME = '${mysqlCurrentTable.replace(/'/g, "''")}' ORDER BY ORDINAL_POSITION`;
 
     try {
@@ -13074,7 +13074,7 @@ async function mysqlLoadIndexes() {
 
     try {
         const baseUrl = getNodeApiBase(currentNodeId);
-        const resp = await fetch(`${baseUrl}/api/mysql/query`, {
+        const resp = await fetch(`${baseUrl}/mysql/query`, {
             method: 'POST', credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -13231,7 +13231,7 @@ async function mysqlLoadTriggers() {
 
     try {
         const baseUrl = getNodeApiBase(currentNodeId);
-        const resp = await fetch(`${baseUrl}/api/mysql/query`, {
+        const resp = await fetch(`${baseUrl}/mysql/query`, {
             method: 'POST', credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -13365,7 +13365,7 @@ async function mysqlDropTrigger(triggerName) {
 
 async function mysqlAlterTable(sql) {
     const baseUrl = getNodeApiBase(currentNodeId);
-    const resp = await fetch(`${baseUrl}/api/mysql/query`, {
+    const resp = await fetch(`${baseUrl}/mysql/query`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -13615,7 +13615,7 @@ async function mysqlDoDump(db, includeData, modal) {
 
     try {
         const baseUrl = getNodeApiBase(currentNodeId);
-        const resp = await fetch(`${baseUrl}/api/mysql/dump`, {
+        const resp = await fetch(`${baseUrl}/mysql/dump`, {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
@@ -13672,7 +13672,7 @@ async function mysqlExecuteQuery() {
 
     try {
         const baseUrl = getNodeApiBase(currentNodeId);
-        const resp = await fetch(`${baseUrl}/api/mysql/query`, {
+        const resp = await fetch(`${baseUrl}/mysql/query`, {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
