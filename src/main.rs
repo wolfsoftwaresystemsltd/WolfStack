@@ -1034,6 +1034,8 @@ async fn main() -> std::io::Result<()> {
             let https_server = HttpServer::new(move || {
                 App::new()
                     .app_data(app_state.clone())
+                    .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
+                    .app_data(actix_web::web::PayloadConfig::new(2 * 1024 * 1024 * 1024))
                     .configure(api::configure)
                     .route("/", web::get().to(index_handler))
                     .service(actix_files::Files::new("/", &web_dir).index_file("login.html"))
@@ -1049,6 +1051,8 @@ async fn main() -> std::io::Result<()> {
             let http_server = HttpServer::new(move || {
                 App::new()
                     .app_data(app_state2.clone())
+                    .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
+                    .app_data(actix_web::web::PayloadConfig::new(2 * 1024 * 1024 * 1024))
                     .configure(api::configure)
                     .route("/", web::get().to(index_handler))
                     .service(actix_files::Files::new("/", &web_dir2).index_file("login.html"))
@@ -1102,6 +1106,8 @@ async fn main() -> std::io::Result<()> {
             let main_server = HttpServer::new(move || {
                 App::new()
                     .app_data(app_state.clone())
+                    .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
+                    .app_data(actix_web::web::PayloadConfig::new(2 * 1024 * 1024 * 1024))
                     .configure(api::configure)
                     .route("/", web::get().to(index_handler))
                     .service(actix_files::Files::new("/", &web_dir).index_file("login.html"))

@@ -6095,14 +6095,41 @@ pub async fn files_lxc_upload(
         let safe_name = filename.replace("..", "").replace("/", "").replace("\\", "");
         if safe_name.is_empty() { continue; }
 
-        // Collect file data
-        let mut data = Vec::new();
-        while let Some(Ok(chunk)) = field.next().await {
-            data.extend_from_slice(&chunk);
+        // Write to temp file first (avoids buffering large files in memory)
+        let tmp = format!("/tmp/wolfstack-lxc-ul-{}-{}", std::process::id(), safe_name);
+        {
+            let mut file = match std::fs::File::create(&tmp) {
+                Ok(f) => f,
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Cannot create temp file: {}", e)
+                    }));
+                }
+            };
+            use std::io::Write;
+            while let Some(Ok(chunk)) = field.next().await {
+                if file.write_all(&chunk).is_err() {
+                    let _ = std::fs::remove_file(&tmp);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to write temp file {}", safe_name)
+                    }));
+                }
+            }
         }
 
-        // Pipe into container via tee (works with both lxc-attach and pct exec)
+        // Pipe temp file into container via tee (works with both lxc-attach and pct exec)
         let dest_path = format!("{}/{}", dir.trim_end_matches('/'), safe_name);
+        let data = match std::fs::read(&tmp) {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to read temp file: {}", e)
+                }));
+            }
+        };
+        let _ = std::fs::remove_file(&tmp);
+
         let mut child = match lxc_exec_cmd(&container, &["tee", &dest_path])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())

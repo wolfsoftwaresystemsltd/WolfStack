@@ -3102,30 +3102,62 @@ function triggerFileUpload() {
 async function uploadFiles(files) {
     if (!files || files.length === 0) return;
     const formData = new FormData();
+    let totalSize = 0;
     for (const file of files) {
         formData.append('file', file, file.name);
+        totalSize += file.size;
     }
-    try {
-        let url;
-        if (containerFileMode && containerFileMode.type === 'docker') {
-            url = `/api/files/docker/upload?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(currentFilePath)}`;
-        } else if (containerFileMode && containerFileMode.type === 'lxc') {
-            url = `/api/files/lxc/upload?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(currentFilePath)}`;
-        } else {
-            url = `/api/files/upload?path=${encodeURIComponent(currentFilePath)}`;
+
+    let url;
+    if (containerFileMode && containerFileMode.type === 'docker') {
+        url = `/api/files/docker/upload?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(currentFilePath)}`;
+    } else if (containerFileMode && containerFileMode.type === 'lxc') {
+        url = `/api/files/lxc/upload?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(currentFilePath)}`;
+    } else {
+        url = `/api/files/upload?path=${encodeURIComponent(currentFilePath)}`;
+    }
+
+    // Show progress bar
+    const names = Array.from(files).map(f => f.name).join(', ');
+    const sizeStr = totalSize > 1048576 ? (totalSize / 1048576).toFixed(1) + ' MB' : (totalSize / 1024).toFixed(0) + ' KB';
+    const toastId = 'upload-progress-' + Date.now();
+    showToast(`Uploading ${names} (${sizeStr})...`, 'info', 0, toastId);
+    const toastEl = document.getElementById(toastId);
+    let bar;
+    if (toastEl) {
+        const barWrap = document.createElement('div');
+        barWrap.style.cssText = 'width:100%;height:6px;background:rgba(255,255,255,0.15);border-radius:3px;margin-top:6px;overflow:hidden;';
+        bar = document.createElement('div');
+        bar.style.cssText = 'width:0%;height:100%;background:#22c55e;border-radius:3px;transition:width 0.2s;';
+        barWrap.appendChild(bar);
+        toastEl.querySelector('.toast-message, span')?.after(barWrap) || toastEl.appendChild(barWrap);
+    }
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', apiUrl(url));
+    xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && bar) {
+            const pct = Math.round((e.loaded / e.total) * 100);
+            bar.style.width = pct + '%';
         }
-        const resp = await fetch(apiUrl(url), {
-            method: 'POST',
-            body: formData,
-        });
-        const data = await resp.json();
-        if (resp.ok) {
-            showToast(data.message || 'Uploaded', 'success');
-            loadFiles();
-        } else {
-            showToast(data.error || 'Upload failed', 'error');
-        }
-    } catch (e) { showToast(`Upload failed: ${e.message}`, 'error'); }
+    };
+    xhr.onload = () => {
+        if (toastEl) toastEl.remove();
+        try {
+            const data = JSON.parse(xhr.responseText);
+            if (xhr.status >= 200 && xhr.status < 300) {
+                showToast(data.message || 'Uploaded', 'success');
+                loadFiles();
+            } else {
+                showToast(data.error || 'Upload failed', 'error');
+            }
+        } catch { showToast('Upload failed', 'error'); }
+    };
+    xhr.onerror = () => {
+        if (toastEl) toastEl.remove();
+        showToast('Upload failed: network error', 'error');
+    };
+    xhr.send(formData);
     // Reset the input
     document.getElementById('file-upload-input').value = '';
 }
@@ -5192,18 +5224,21 @@ function activityStop() {
 }
 
 // ─── Toast Notifications ───
-function showToast(message, type = 'info') {
+function showToast(message, type = 'info', duration = 4000, id = null) {
     const container = document.getElementById('toast-container');
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
+    if (id) toast.id = id;
     const icons = { success: '✓', error: '✗', info: 'ℹ' };
-    toast.innerHTML = `<span style="font-size: 16px;">${icons[type] || 'ℹ'}</span> ${message}`;
+    toast.innerHTML = `<span style="font-size: 16px;">${icons[type] || 'ℹ'}</span> <span class="toast-message">${message}</span>`;
     container.appendChild(toast);
-    setTimeout(() => {
-        toast.style.opacity = '0';
-        toast.style.transform = 'translateX(100%)';
-        setTimeout(() => toast.remove(), 300);
-    }, 4000);
+    if (duration > 0) {
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateX(100%)';
+            setTimeout(() => toast.remove(), 300);
+        }, duration);
+    }
 }
 
 // ─── Component Detail ───
