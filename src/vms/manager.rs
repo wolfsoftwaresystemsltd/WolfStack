@@ -76,6 +76,9 @@ pub struct VmConfig {
     /// Extra disks attached to this VM
     #[serde(default)]
     pub extra_disks: Vec<StorageVolume>,
+    /// Proxmox VMID (only set when running on Proxmox VE)
+    #[serde(default)]
+    pub vmid: Option<u32>,
 }
 
 fn default_net_model() -> String { "virtio".to_string() }
@@ -99,6 +102,7 @@ impl VmConfig {
             net_model: "virtio".to_string(),
             drivers_iso: None,
             extra_disks: Vec::new(),
+            vmid: None,
         }
     }
 }
@@ -122,6 +126,12 @@ impl VmManager {
     }
 
     pub fn list_vms(&self) -> Vec<VmConfig> {
+        // On Proxmox, discover VMs via qm list
+        if containers::is_proxmox() {
+            return self.qm_list_all();
+        }
+
+        // Standalone: scan local config files
         let mut vms = Vec::new();
         if let Ok(entries) = fs::read_dir(&self.base_dir) {
             for entry in entries.flatten() {
@@ -144,6 +154,120 @@ impl VmManager {
             }
         }
         vms
+    }
+
+    /// Discover all VMs from Proxmox via `qm list` + `qm config`
+    fn qm_list_all(&self) -> Vec<VmConfig> {
+        let output = match Command::new("qm").arg("list").output() {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            _ => return vec![],
+        };
+
+        output.lines()
+            .skip(1) // Skip header: VMID NAME STATUS MEM(MB) BOOTDISK(GB) PID
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let vmid: u32 = parts.first()?.parse().ok()?;
+                let name = parts.get(1).unwrap_or(&"").to_string();
+                let state = parts.get(2).unwrap_or(&"stopped").to_lowercase();
+                let mem_mb: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let disk_gb: u32 = parts.get(4).and_then(|s| s.parse::<f64>().ok()).map(|f| f as u32).unwrap_or(0);
+                let running = state == "running";
+
+                // Read detailed config from qm config {vmid}
+                let mut cpus: u32 = 1;
+                let mut memory_mb = mem_mb;
+                let mut disk_size_gb = disk_gb;
+                let mut auto_start = false;
+                let mut mac_address: Option<String> = None;
+                let mut iso_path: Option<String> = None;
+                let mut storage_path: Option<String> = None;
+
+                if let Ok(cfg_out) = Command::new("qm").args(["config", &vmid.to_string()]).output() {
+                    let cfg_text = String::from_utf8_lossy(&cfg_out.stdout);
+                    for cline in cfg_text.lines() {
+                        let cline = cline.trim();
+                        if cline.starts_with("cores:") {
+                            cpus = cline.split(':').nth(1).unwrap_or("1").trim().parse().unwrap_or(1);
+                        } else if cline.starts_with("memory:") {
+                            memory_mb = cline.split(':').nth(1).unwrap_or("0").trim().parse().unwrap_or(mem_mb);
+                        } else if cline.starts_with("onboot:") {
+                            auto_start = cline.split(':').nth(1).unwrap_or("0").trim() == "1";
+                        } else if cline.starts_with("net0:") {
+                            // Extract MAC from net0: virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0
+                            if let Some(val) = cline.splitn(2, ':').nth(1) {
+                                for part in val.split(',') {
+                                    let part = part.trim();
+                                    if part.starts_with("virtio=") || part.starts_with("e1000=") || part.starts_with("rtl8139=") {
+                                        mac_address = part.split('=').nth(1).map(|s| s.to_string());
+                                    }
+                                }
+                            }
+                        } else if (cline.starts_with("ide2:") || cline.starts_with("cdrom:")) && cline.contains("media=cdrom") {
+                            // Extract ISO path
+                            if let Some(val) = cline.splitn(2, ':').nth(1) {
+                                let iso = val.split(',').next().unwrap_or("").trim().to_string();
+                                if !iso.is_empty() {
+                                    iso_path = Some(iso);
+                                }
+                            }
+                        } else if cline.starts_with("scsi0:") || cline.starts_with("virtio0:") || cline.starts_with("ide0:") || cline.starts_with("sata0:") {
+                            // Extract storage and disk size from primary disk
+                            if let Some(val) = cline.splitn(2, ':').nth(1) {
+                                // e.g. "local-lvm:vm-100-disk-0,size=32G"
+                                let disk_spec = val.trim();
+                                if let Some(store) = disk_spec.split(':').next() {
+                                    storage_path = Some(store.trim().to_string());
+                                }
+                                for part in disk_spec.split(',') {
+                                    let part = part.trim();
+                                    if part.starts_with("size=") {
+                                        let size_str = part.trim_start_matches("size=").trim_end_matches('G').trim_end_matches('g');
+                                        if let Ok(s) = size_str.parse::<f64>() {
+                                            disk_size_gb = s as u32;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Some(VmConfig {
+                    name,
+                    cpus,
+                    memory_mb,
+                    disk_size_gb,
+                    iso_path,
+                    running,
+                    vnc_port: None,
+                    vnc_ws_port: None,
+                    mac_address,
+                    auto_start,
+                    wolfnet_ip: None,
+                    storage_path,
+                    os_disk_bus: "virtio".to_string(),
+                    net_model: "virtio".to_string(),
+                    drivers_iso: None,
+                    extra_disks: Vec::new(),
+                    vmid: Some(vmid),
+                })
+            })
+            .collect()
+    }
+
+    /// Look up a Proxmox VMID by VM name via `qm list`
+    fn qm_vmid_by_name(&self, name: &str) -> Option<u32> {
+        let output = Command::new("qm").arg("list").output().ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.get(1).map(|n| *n == name).unwrap_or(false) {
+                return parts.first()?.parse().ok();
+            }
+        }
+        None
     }
 
     fn vm_config_path(&self, name: &str) -> PathBuf {
@@ -484,11 +608,39 @@ impl VmManager {
     }
 
     /// Update VM settings (must be stopped)
-    pub fn update_vm(&self, name: &str, cpus: Option<u32>, memory_mb: Option<u32>, 
+    pub fn update_vm(&self, name: &str, cpus: Option<u32>, memory_mb: Option<u32>,
                      iso_path: Option<String>, wolfnet_ip: Option<String>,
                      disk_size_gb: Option<u32>,
                      os_disk_bus: Option<String>, net_model: Option<String>,
                      drivers_iso: Option<String>, auto_start: Option<bool>) -> Result<(), String> {
+        // On Proxmox, delegate to qm set
+        if containers::is_proxmox() {
+            let vmid = self.qm_vmid_by_name(name)
+                .ok_or_else(|| format!("VM '{}' not found in Proxmox", name))?;
+            let vmid_str = vmid.to_string();
+            let mut args = vec!["set", &vmid_str];
+            let cores_str;
+            let mem_str;
+            let onboot_str;
+            if let Some(c) = cpus { if c > 0 { cores_str = c.to_string(); args.extend(["--cores", &cores_str]); } }
+            if let Some(m) = memory_mb { if m >= 256 { mem_str = m.to_string(); args.extend(["--memory", &mem_str]); } }
+            if let Some(a) = auto_start { onboot_str = if a { "1".to_string() } else { "0".to_string() }; args.extend(["--onboot", &onboot_str]); }
+            if args.len() > 2 {
+                let output = Command::new("qm").args(&args).output()
+                    .map_err(|e| format!("Failed to run qm set: {}", e))?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(format!("qm set failed: {}", stderr.trim()));
+                }
+            }
+            // Disk resize on Proxmox
+            if let Some(new_size) = disk_size_gb {
+                let size_arg = format!("{}G", new_size);
+                let _ = Command::new("qm").args(["resize", &vmid_str, "scsi0", &size_arg]).output();
+            }
+            return Ok(());
+        }
+
         if self.check_running(name) {
             return Err("Cannot edit VM while it is running. Stop it first.".to_string());
         }
@@ -564,6 +716,19 @@ impl VmManager {
     }
 
     pub fn start_vm(&self, name: &str) -> Result<(), String> {
+        // On Proxmox, delegate to qm start
+        if containers::is_proxmox() {
+            let vmid = self.qm_vmid_by_name(name)
+                .ok_or_else(|| format!("VM '{}' not found in Proxmox", name))?;
+            let output = Command::new("qm").args(["start", &vmid.to_string()]).output()
+                .map_err(|e| format!("Failed to run qm start: {}", e))?;
+            if output.status.success() {
+                return Ok(());
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("qm start failed: {}", stderr.trim()));
+        }
+
         if self.check_running(name) {
              return Err("VM already running".to_string());
         }
@@ -947,6 +1112,19 @@ impl VmManager {
     }
 
     pub fn stop_vm(&self, name: &str) -> Result<(), String> {
+        // On Proxmox, delegate to qm stop
+        if containers::is_proxmox() {
+            let vmid = self.qm_vmid_by_name(name)
+                .ok_or_else(|| format!("VM '{}' not found in Proxmox", name))?;
+            let output = Command::new("qm").args(["stop", &vmid.to_string()]).output()
+                .map_err(|e| format!("Failed to run qm stop: {}", e))?;
+            if output.status.success() {
+                return Ok(());
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("qm stop failed: {}", stderr.trim()));
+        }
+
         // Read config to get WolfNet IP for cleanup
         let config = self.get_vm(name);
 
@@ -955,7 +1133,7 @@ impl VmManager {
             .arg(format!("qemu-system-x86_64.*-name {}", name))
             .output()
             .map_err(|e| e.to_string())?;
-            
+
         if !output.status.success() {
             return Err("Failed to stop VM (process not found?)".to_string());
         }
@@ -979,6 +1157,11 @@ impl VmManager {
     }
 
     pub fn get_vm(&self, name: &str) -> Option<VmConfig> {
+        // On Proxmox, find VM in the qm list output
+        if containers::is_proxmox() {
+            return self.qm_list_all().into_iter().find(|vm| vm.name == name);
+        }
+
         let config_path = self.vm_config_path(name);
         let content = fs::read_to_string(&config_path).ok()?;
         let mut vm: VmConfig = serde_json::from_str(&content).ok()?;
@@ -991,6 +1174,23 @@ impl VmManager {
     }
 
     pub fn delete_vm(&self, name: &str) -> Result<(), String> {
+        // On Proxmox, delegate to qm destroy
+        if containers::is_proxmox() {
+            let vmid = self.qm_vmid_by_name(name)
+                .ok_or_else(|| format!("VM '{}' not found in Proxmox", name))?;
+            // Stop first if running
+            let _ = Command::new("qm").args(["stop", &vmid.to_string()]).output();
+            let output = Command::new("qm").args(["destroy", &vmid.to_string(), "--purge"]).output()
+                .map_err(|e| format!("Failed to run qm destroy: {}", e))?;
+            if output.status.success() {
+                // Also clean up any WolfStack tracking config
+                let _ = fs::remove_file(self.vm_config_path(name));
+                return Ok(());
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("qm destroy failed: {}", stderr.trim()));
+        }
+
         if self.check_running(name) {
             let _ = self.stop_vm(name);
         }
@@ -1006,7 +1206,6 @@ impl VmManager {
                 let path = vol.file_path();
                 if path.exists() {
                     let _ = fs::remove_file(&path);
-
                 }
             }
         }
@@ -1015,7 +1214,6 @@ impl VmManager {
         let _ = fs::remove_file(self.vm_disk_path(name));  // fallback default path
         let _ = fs::remove_file(self.base_dir.join(format!("{}.runtime.json", name)));
         let _ = fs::remove_file(self.base_dir.join(format!("{}.log", name)));
-        
 
         Ok(())
     }
