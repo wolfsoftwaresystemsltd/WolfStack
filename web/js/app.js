@@ -13372,13 +13372,14 @@ async function mysqlDropTrigger(triggerName) {
 }
 
 
-async function mysqlAlterTable(sql) {
+async function mysqlAlterTable(sql, database) {
+    const db = database || mysqlCurrentDb || '';
     const baseUrl = getNodeApiBase(mysqlConnectedNodeId);
     const resp = await fetch(`${baseUrl}/mysql/query`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...mysqlCreds, database: mysqlCurrentDb, query: sql }),
+        body: JSON.stringify({ ...mysqlCreds, database: db, query: sql }),
     });
     let data;
     try { data = await resp.json(); } catch { data = { error: 'Server returned non-JSON (HTTP ' + resp.status + ')' }; }
@@ -13580,7 +13581,7 @@ function mysqlRenameTableDialog() {
     ).then(async (confirmed) => {
         if (!confirmed) return;
         try {
-            await mysqlAlterTable(`ALTER TABLE \`${db}\`.\`${tbl}\` RENAME TO \`${db}\`.\`${newName}\``);
+            await mysqlAlterTable(`ALTER TABLE \`${db}\`.\`${tbl}\` RENAME TO \`${db}\`.\`${newName}\``, db);
             mysqlCurrentTable = newName;
             showToast(`Table renamed to '${newName}'`, 'success');
             mysqlLoadStructure();
@@ -13637,7 +13638,7 @@ function mysqlCreateDatabaseDialog() {
         if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) { showToast('Invalid database name — use letters, numbers, and underscores', 'error'); return; }
 
         try {
-            await mysqlAlterTable(`CREATE DATABASE \`${name}\` CHARACTER SET ${charset}`);
+            await mysqlAlterTable(`CREATE DATABASE \`${name}\` CHARACTER SET ${charset}`, '');
             modal.remove();
             showToast(`Database '${name}' created`, 'success');
             mysqlLoadDatabases();
@@ -13706,7 +13707,7 @@ function mysqlCreateTableDialog(db) {
         const sql = mysqlCreateTableBuildSQL(db);
         if (!sql) return;
         try {
-            await mysqlAlterTable(sql);
+            await mysqlAlterTable(sql, db);
             modal.remove();
             showToast('Table created', 'success');
             mysqlRefreshDbTables(db);
@@ -13812,7 +13813,7 @@ function mysqlCreateViewDialog(db) {
 
         const sql = `CREATE VIEW \`${db}\`.\`${name}\` AS ${query}`;
         try {
-            await mysqlAlterTable(sql);
+            await mysqlAlterTable(sql, db);
             modal.remove();
             showToast(`View '${name}' created`, 'success');
             mysqlRefreshDbTables(db);
