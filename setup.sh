@@ -31,8 +31,13 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --beta) BRANCH="beta" ;;
         --install-dir|--install)
-            shift
-            CUSTOM_INSTALL_DIR="$1"
+            if [ -n "$2" ]; then
+                shift
+                CUSTOM_INSTALL_DIR="$1"
+            else
+                echo "✗ --install-dir requires a path argument"
+                exit 1
+            fi
             ;;
     esac
     shift
