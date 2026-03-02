@@ -81,20 +81,10 @@ async fn console_session(
             cmd.arg(format!("socat -,raw,echo=0 UNIX-CONNECT:{}", serial_sock));
         }
         "pve-vm" => {
-            // Proxmox VM console via termproxy — get ticket with pvesh, connect directly to the port
-            cmd.arg(format!(
-                r#"NODE=$(hostname) && \
-                GT="qemu" && \
-                pvesh get "/nodes/$NODE/qemu/{vmid}/status/current" --output-format json >/dev/null 2>&1 || GT="lxc" && \
-                RESP=$(pvesh create "/nodes/$NODE/$GT/{vmid}/termproxy" --output-format json 2>&1) && \
-                PORT=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['port'])" 2>/dev/null) && \
-                TICKET=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['ticket'])" 2>/dev/null) && \
-                USER=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('user','root@pam'))" 2>/dev/null) && \
-                if [ -z "$PORT" ] || [ -z "$TICKET" ]; then echo "Failed to get termproxy ticket: $RESP"; exit 1; fi && \
-                exec socat STDIO tcp:localhost:$PORT,connect-timeout=3,crlf && \
-                sleep 0.1"#,
-                vmid = name
-            ));
+            // Deprecated — PVE VM consoles now use VNC via /ws/pve-vnc/{vmid}
+            let _ = session.text("\r\n\x1b[33mPlease use the VNC console for Proxmox VMs.\x1b[0m\r\n").await;
+            let _ = session.close(None).await;
+            return;
         }
         "host" => {
             // Host shell — open an interactive login bash/sh session on this machine
@@ -407,7 +397,13 @@ async fn remote_console_bridge(
             format!("%{:02X}", b)
         }
     }).collect();
-    let ws_path = format!("/ws/console/{}/{}", ctype, encoded_name);
+
+    // PVE VNC uses a dedicated endpoint, not the generic console handler
+    let ws_path = if ctype == "pve-vnc" {
+        format!("/ws/pve-vnc/{}", encoded_name)
+    } else {
+        format!("/ws/console/{}/{}", ctype, encoded_name)
+    };
     let internal_port = remote_port + 1;
 
     // URLs to try in order: wss main, ws internal, ws main
@@ -441,7 +437,6 @@ async fn remote_console_bridge(
             Err(_) => continue,
         };
 
-        let _ = session.text(format!("\r\nTrying: {}\r\n", url)).await;
         match tokio::time::timeout(
             std::time::Duration::from_secs(3),
             tokio_tungstenite::connect_async_tls_with_config(
@@ -452,15 +447,14 @@ async fn remote_console_bridge(
             ),
         ).await {
             Ok(Ok((stream, _))) => {
-                let _ = session.text("Connected to remote WS\r\n").await;
                 remote_stream = Some(stream);
                 break;
             }
             Ok(Err(e)) => {
-                let _ = session.text(format!("WS error: {}\r\n", e)).await;
+                error!("Remote console WS error for {}: {}", url, e);
             }
             Err(_) => {
-                let _ = session.text("Timeout (3s)\r\n").await;
+                error!("Remote console WS timeout for {}", url);
             }
         }
     }
