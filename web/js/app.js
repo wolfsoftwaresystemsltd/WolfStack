@@ -12770,8 +12770,14 @@ async function mysqlToggleDb(db) {
         }
 
         const tables = data.tables || [];
+        const isSystem = ['information_schema', 'performance_schema', 'mysql', 'sys'].includes(db);
+        const createBtns = isSystem ? '' : `<div style="padding:6px 4px; display:flex; gap:4px; border-top:1px solid var(--border); margin-top:4px;">
+            <button onclick="event.stopPropagation(); mysqlCreateTableDialog('${db}')" style="flex:1; background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-secondary); padding:4px 8px; border-radius:4px; cursor:pointer; font-size:11px;" onmouseover="this.style.background='var(--bg-primary)'" onmouseout="this.style.background='var(--bg-tertiary)'">+ Table</button>
+            <button onclick="event.stopPropagation(); mysqlCreateViewDialog('${db}')" style="flex:1; background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-secondary); padding:4px 8px; border-radius:4px; cursor:pointer; font-size:11px;" onmouseover="this.style.background='var(--bg-primary)'" onmouseout="this.style.background='var(--bg-tertiary)'">+ View</button>
+        </div>`;
+
         if (tables.length === 0) {
-            container.innerHTML = '<div style="padding:6px 0; font-size:11px; color:var(--text-muted);">No tables</div>';
+            container.innerHTML = '<div style="padding:6px 0; font-size:11px; color:var(--text-muted);">No tables</div>' + createBtns;
             return;
         }
 
@@ -12780,16 +12786,16 @@ async function mysqlToggleDb(db) {
             const icon = t.type === 'VIEW' ? '👁️' : '📄';
             const rows = t.rows != null ? ` (${Number(t.rows).toLocaleString()})` : '';
             const isActive = (mysqlCurrentDb === db && mysqlCurrentTable === t.name);
-            html += `<div onclick="mysqlSelectTable('${db}', '${t.name.replace(/'/g, "\\'")}')" 
+            html += `<div onclick="mysqlSelectTable('${db}', '${t.name.replace(/'/g, "\\'")}')"
                 style="padding:4px 8px; cursor:pointer; display:flex; align-items:center; gap:6px; border-radius:4px; transition:background 0.15s; ${isActive ? 'background:var(--accent-primary-15);' : ''}"
-                onmouseover="this.style.background='var(--bg-tertiary)'" 
+                onmouseover="this.style.background='var(--bg-tertiary)'"
                 onmouseout="this.style.background='${isActive ? 'var(--accent-primary-15)' : 'none'}'"
                 class="mysql-table-item" data-db="${db}" data-table="${t.name}">
                 <span style="font-size:12px;">${icon}</span>
                 <span style="color:var(--text-secondary); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${t.name}<span style="color:var(--text-muted);">${rows}</span></span>
             </div>`;
         }
-        container.innerHTML = html;
+        container.innerHTML = html + createBtns;
     } catch (e) {
         container.innerHTML = `<div style="padding:6px 0; font-size:11px; color:#e74c3c;">Error: ${e.message}</div>`;
     }
@@ -13580,6 +13586,237 @@ function mysqlRenameTableDialog() {
             showToast('Error: ' + e.message, 'error');
         }
     });
+}
+
+// ─── Refresh table list for a database (force close + reopen) ───
+function mysqlRefreshDbTables(db) {
+    const container = document.getElementById(`mysql-tables-${db}`);
+    if (container) {
+        container.style.display = 'none';
+        const arrow = document.getElementById(`mysql-arrow-${db}`);
+        if (arrow) arrow.style.transform = 'rotate(0deg)';
+    }
+    mysqlToggleDb(db);
+}
+
+// ─── Create Database ───
+function mysqlCreateDatabaseDialog() {
+    if (!mysqlCreds) { showToast('Connect to MySQL first', 'error'); return; }
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:10000;';
+    modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:24px; width:400px; max-width:90vw;">
+        <h3 style="margin:0 0 16px; font-size:16px; color:var(--text-primary);">Create Database</h3>
+        <div style="margin-bottom:12px;">
+            <label style="font-size:11px; color:var(--text-muted); display:block; margin-bottom:4px;">Database Name</label>
+            <input id="create-db-name" style="width:100%; padding:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); font-family:var(--font-mono); box-sizing:border-box;" placeholder="my_database" autofocus>
+        </div>
+        <div style="margin-bottom:16px;">
+            <label style="font-size:11px; color:var(--text-muted); display:block; margin-bottom:4px;">Character Set</label>
+            <select id="create-db-charset" style="width:100%; padding:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); box-sizing:border-box;">
+                <option value="utf8mb4">utf8mb4 (recommended)</option>
+                <option value="utf8">utf8</option>
+                <option value="latin1">latin1</option>
+                <option value="ascii">ascii</option>
+            </select>
+        </div>
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+            <button onclick="this.closest('div[style*=fixed]').remove()" style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:8px 16px; border-radius:6px; cursor:pointer;">Cancel</button>
+            <button id="create-db-confirm" style="background:var(--accent-primary); color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:500;">Create Database</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('#create-db-name').focus();
+
+    modal.querySelector('#create-db-confirm').onclick = async () => {
+        const name = document.getElementById('create-db-name').value.trim();
+        const charset = document.getElementById('create-db-charset').value;
+        if (!name) { showToast('Database name is required', 'error'); return; }
+        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) { showToast('Invalid database name — use letters, numbers, and underscores', 'error'); return; }
+
+        try {
+            await mysqlAlterTable(`CREATE DATABASE \`${name}\` CHARACTER SET ${charset}`);
+            modal.remove();
+            showToast(`Database '${name}' created`, 'success');
+            mysqlLoadDatabases();
+        } catch (e) {
+            showToast('Error: ' + e.message, 'error');
+        }
+    };
+}
+
+// ─── Create Table ───
+function mysqlCreateTableDialog(db) {
+    if (!mysqlCreds) { showToast('Connect to MySQL first', 'error'); return; }
+    if (!db) db = mysqlCurrentDb;
+    if (!db) { showToast('Select a database first', 'error'); return; }
+
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:10000;';
+    modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:24px; width:640px; max-width:95vw; max-height:90vh; overflow-y:auto;">
+        <h3 style="margin:0 0 16px; font-size:16px; color:var(--text-primary);">Create Table in <span style="color:var(--accent-primary);">${escapeHtml(db)}</span></h3>
+        <div style="margin-bottom:14px;">
+            <label style="font-size:11px; color:var(--text-muted); display:block; margin-bottom:4px;">Table Name</label>
+            <input id="ct-table-name" style="width:100%; padding:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); font-family:var(--font-mono); box-sizing:border-box;" placeholder="my_table">
+        </div>
+        <div style="margin-bottom:10px; display:flex; align-items:center; justify-content:space-between;">
+            <span style="font-size:13px; font-weight:600; color:var(--text-primary);">Columns</span>
+            <button onclick="mysqlCreateTableAddCol()" style="background:var(--accent-primary); color:#fff; border:none; padding:4px 12px; border-radius:6px; cursor:pointer; font-size:12px;">+ Add Column</button>
+        </div>
+        <div id="ct-columns" style="display:flex; flex-direction:column; gap:8px; margin-bottom:14px;"></div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:16px;">
+            <div>
+                <label style="font-size:11px; color:var(--text-muted); display:block; margin-bottom:4px;">Engine</label>
+                <select id="ct-engine" style="width:100%; padding:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); box-sizing:border-box;">
+                    <option value="InnoDB">InnoDB (recommended)</option>
+                    <option value="MyISAM">MyISAM</option>
+                    <option value="MEMORY">MEMORY</option>
+                    <option value="ARIA">Aria (MariaDB)</option>
+                </select>
+            </div>
+            <div>
+                <label style="font-size:11px; color:var(--text-muted); display:block; margin-bottom:4px;">Character Set</label>
+                <select id="ct-charset" style="width:100%; padding:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); box-sizing:border-box;">
+                    <option value="utf8mb4">utf8mb4</option>
+                    <option value="utf8">utf8</option>
+                    <option value="latin1">latin1</option>
+                </select>
+            </div>
+        </div>
+        <div id="ct-preview" style="background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; padding:10px 12px; margin-bottom:16px; font-family:var(--font-mono); font-size:12px; color:#e67e22; white-space:pre-wrap; word-break:break-all; max-height:120px; overflow-y:auto;"></div>
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+            <button onclick="this.closest('div[style*=fixed]').remove()" style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:8px 16px; border-radius:6px; cursor:pointer;">Cancel</button>
+            <button id="ct-confirm" style="background:var(--accent-primary); color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:500;">Create Table</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('#ct-table-name').focus();
+
+    // Add first column (id) by default
+    mysqlCreateTableAddCol('id', 'INT', false, true, true);
+    mysqlCreateTableUpdatePreview(db);
+
+    // Live preview
+    modal.addEventListener('input', () => mysqlCreateTableUpdatePreview(db));
+    modal.addEventListener('change', () => mysqlCreateTableUpdatePreview(db));
+
+    modal.querySelector('#ct-confirm').onclick = async () => {
+        const sql = mysqlCreateTableBuildSQL(db);
+        if (!sql) return;
+        try {
+            await mysqlAlterTable(sql);
+            modal.remove();
+            showToast('Table created', 'success');
+            mysqlRefreshDbTables(db);
+        } catch (e) {
+            showToast('Error: ' + e.message, 'error');
+        }
+    };
+}
+
+function mysqlCreateTableAddCol(name, type, nullable, pk, ai) {
+    const container = document.getElementById('ct-columns');
+    const idx = container.children.length;
+    const row = document.createElement('div');
+    row.style.cssText = 'display:grid; grid-template-columns:1fr 1fr auto auto auto auto; gap:6px; align-items:center; padding:8px 10px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px;';
+    row.innerHTML = `
+        <input class="ct-col-name" style="padding:6px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:4px; color:var(--text-primary); font-family:var(--font-mono); font-size:12px; box-sizing:border-box;" placeholder="column_name" value="${escapeHtml(name || '')}">
+        <input class="ct-col-type" style="padding:6px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:4px; color:var(--text-primary); font-family:var(--font-mono); font-size:12px; box-sizing:border-box;" placeholder="VARCHAR(255)" value="${escapeHtml(type || 'VARCHAR(255)')}">
+        <label style="display:flex; align-items:center; gap:3px; font-size:11px; color:var(--text-muted); cursor:pointer; white-space:nowrap;" title="Nullable">
+            <input type="checkbox" class="ct-col-null" ${nullable !== false ? 'checked' : ''}> NULL
+        </label>
+        <label style="display:flex; align-items:center; gap:3px; font-size:11px; color:var(--text-muted); cursor:pointer; white-space:nowrap;" title="Primary Key">
+            <input type="checkbox" class="ct-col-pk" ${pk ? 'checked' : ''}> PK
+        </label>
+        <label style="display:flex; align-items:center; gap:3px; font-size:11px; color:var(--text-muted); cursor:pointer; white-space:nowrap;" title="Auto Increment">
+            <input type="checkbox" class="ct-col-ai" ${ai ? 'checked' : ''}> AI
+        </label>
+        <button onclick="this.parentElement.remove(); mysqlCreateTableUpdatePreview()" style="background:none; border:none; color:#e74c3c; cursor:pointer; font-size:14px; padding:2px 6px;" title="Remove column">✕</button>
+    `;
+    container.appendChild(row);
+}
+
+function mysqlCreateTableBuildSQL(db, silent) {
+    const tableName = document.getElementById('ct-table-name').value.trim();
+    if (!tableName) { if (!silent) showToast('Table name is required', 'error'); return null; }
+
+    const rows = document.querySelectorAll('#ct-columns > div');
+    if (rows.length === 0) { if (!silent) showToast('Add at least one column', 'error'); return null; }
+
+    const cols = [];
+    const pks = [];
+    for (const row of rows) {
+        const name = row.querySelector('.ct-col-name').value.trim();
+        const type = row.querySelector('.ct-col-type').value.trim();
+        const nullable = row.querySelector('.ct-col-null').checked;
+        const pk = row.querySelector('.ct-col-pk').checked;
+        const ai = row.querySelector('.ct-col-ai').checked;
+        if (!name || !type) continue;
+
+        let def = `\`${name}\` ${type}`;
+        if (!nullable) def += ' NOT NULL';
+        if (ai) def += ' AUTO_INCREMENT';
+        cols.push(def);
+        if (pk) pks.push(`\`${name}\``);
+    }
+
+    if (cols.length === 0) { if (!silent) showToast('Add at least one valid column', 'error'); return null; }
+    if (pks.length > 0) cols.push(`PRIMARY KEY (${pks.join(', ')})`);
+
+    const engine = document.getElementById('ct-engine').value;
+    const charset = document.getElementById('ct-charset').value;
+
+    return `CREATE TABLE \`${db || mysqlCurrentDb}\`.\`${tableName}\` (\n  ${cols.join(',\n  ')}\n) ENGINE=${engine} DEFAULT CHARSET=${charset}`;
+}
+
+function mysqlCreateTableUpdatePreview(db) {
+    const preview = document.getElementById('ct-preview');
+    if (!preview) return;
+    const sql = mysqlCreateTableBuildSQL(db, true);
+    preview.textContent = sql || '-- Define table name and columns above';
+}
+
+// ─── Create View ───
+function mysqlCreateViewDialog(db) {
+    if (!mysqlCreds) { showToast('Connect to MySQL first', 'error'); return; }
+    if (!db) db = mysqlCurrentDb;
+    if (!db) { showToast('Select a database first', 'error'); return; }
+
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:10000;';
+    modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:24px; width:540px; max-width:95vw;">
+        <h3 style="margin:0 0 16px; font-size:16px; color:var(--text-primary);">Create View in <span style="color:var(--accent-primary);">${escapeHtml(db)}</span></h3>
+        <div style="margin-bottom:12px;">
+            <label style="font-size:11px; color:var(--text-muted); display:block; margin-bottom:4px;">View Name</label>
+            <input id="cv-view-name" style="width:100%; padding:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); font-family:var(--font-mono); box-sizing:border-box;" placeholder="my_view">
+        </div>
+        <div style="margin-bottom:16px;">
+            <label style="font-size:11px; color:var(--text-muted); display:block; margin-bottom:4px;">SELECT Statement</label>
+            <textarea id="cv-view-query" rows="6" style="width:100%; padding:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); font-family:var(--font-mono); font-size:12px; box-sizing:border-box; resize:vertical;" placeholder="SELECT column1, column2 FROM my_table WHERE ..."></textarea>
+        </div>
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+            <button onclick="this.closest('div[style*=fixed]').remove()" style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:8px 16px; border-radius:6px; cursor:pointer;">Cancel</button>
+            <button id="cv-confirm" style="background:var(--accent-primary); color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:500;">Create View</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('#cv-view-name').focus();
+
+    modal.querySelector('#cv-confirm').onclick = async () => {
+        const name = document.getElementById('cv-view-name').value.trim();
+        const query = document.getElementById('cv-view-query').value.trim();
+        if (!name) { showToast('View name is required', 'error'); return; }
+        if (!query) { showToast('SELECT statement is required', 'error'); return; }
+
+        const sql = `CREATE VIEW \`${db}\`.\`${name}\` AS ${query}`;
+        try {
+            await mysqlAlterTable(sql);
+            modal.remove();
+            showToast(`View '${name}' created`, 'success');
+            mysqlRefreshDbTables(db);
+        } catch (e) {
+            showToast('Error: ' + e.message, 'error');
+        }
+    };
 }
 
 function mysqlDumpDatabase(db) {
