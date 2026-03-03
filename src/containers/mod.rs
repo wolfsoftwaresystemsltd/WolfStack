@@ -3115,7 +3115,7 @@ pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
                 if key.contains("cpuset.cpus") {
                     cfg.cpus = val.to_string();
                 }
-                if key.contains("cpu.shares") {
+                if key.contains("cpu.shares") || key.contains("cpu.weight") {
                     cfg.cpu_shares = val.to_string();
                 }
             }
@@ -3409,7 +3409,7 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
     // Cgroup resource keys
     let resource_patterns = [
         "memory.limit", "memory.max", "memory.memsw", "swap",
-        "cpuset.cpus", "cpu.shares",
+        "cpuset.cpus", "cpu.shares", "cpu.weight",
     ];
 
     let mut preserved: Vec<String> = Vec::new();
@@ -4828,8 +4828,8 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
                 cfg_content.push_str("\nlxc.cgroup2.memory.swap.max = 0\n");
                 modified = true;
             }
-            if !cfg_content.contains("cpu.shares") {
-                cfg_content.push_str("lxc.cgroup2.cpu.shares = 1024\n");
+            if !cfg_content.contains("cpu.weight") {
+                cfg_content.push_str("lxc.cgroup2.cpu.weight = 100\n");
                 modified = true;
             }
             if modified {
@@ -5121,12 +5121,13 @@ pub fn lxc_set_resource_limits(container: &str, memory: Option<&str>, cpus: Opti
         if let Some(cpu) = cpus {
             if !cpu.is_empty() {
                  if let Ok(cores) = cpu.parse::<u32>() {
-                     let shares = cores * 1024;
-                     let limit_line = format!("\nlxc.cgroup2.cpu.shares = {}\n", shares);
-                     if !config.contains("cpu.shares") {
+                     // cgroup v2: cpu.weight range is 1-10000, default 100
+                     let weight = (cores * 100).min(10000);
+                     let limit_line = format!("\nlxc.cgroup2.cpu.weight = {}\n", weight);
+                     if !config.contains("cpu.weight") {
                         config.push_str(&limit_line);
                         modified = true;
-                         messages.push(format!("CPU shares set to {}", shares));
+                         messages.push(format!("CPU weight set to {}", weight));
                      }
                  }
             }
