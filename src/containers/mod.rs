@@ -2210,8 +2210,11 @@ fn pct_list_all() -> Vec<ContainerInfo> {
             }
 
             let rootfs_path = format!("/var/lib/lxc/{}/rootfs", vmid);
+            // Extract Proxmox storage name from rootfs config
+            // e.g. "local-lvm:vm-101-disk-0,size=32G" → "local-lvm"
             let storage_path = if !rootfs_storage.is_empty() {
-                Some(rootfs_storage.clone())
+                let storage_name = rootfs_storage.split(':').next().unwrap_or("").to_string();
+                if storage_name.is_empty() { None } else { Some(storage_name) }
             } else if std::path::Path::new(&rootfs_path).exists() {
                 Some(rootfs_path.clone())
             } else { None };
@@ -2920,6 +2923,15 @@ fn parse_proxmox_config(mut cfg: LxcParsedConfig, content: &str, container: &str
             }
             "swap" => {
                 cfg.swap_limit = val.to_string();
+            }
+            "rootfs" => {
+                // e.g. "local-lvm:vm-101-disk-0,size=32G" → storage name "local-lvm"
+                if let Some(storage_name) = val.split(':').next() {
+                    let storage_name = storage_name.trim();
+                    if !storage_name.is_empty() {
+                        cfg.storage_path = storage_name.to_string();
+                    }
+                }
             }
             "unprivileged" => cfg.unprivileged = val == "1",
             "features" => {
@@ -4355,6 +4367,8 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
         "--net0".to_string(), "name=eth0,bridge=vmbr0,ip=dhcp".to_string(),
         "--start".to_string(), "0".to_string(),
         "--unprivileged".to_string(), "1".to_string(),
+        "--swap".to_string(), "0".to_string(),
+        "--cores".to_string(), "1".to_string(),
     ];
 
     if let Some(pw) = root_password {
@@ -4371,10 +4385,13 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
         }
     }
 
+    // Override default cores if user specified
     if let Some(cores) = cpu_cores {
         if cores > 0 {
-            args.push("--cores".to_string());
-            args.push(cores.to_string());
+            // Remove the default --cores 1 and replace
+            if let Some(pos) = args.iter().position(|a| a == "--cores") {
+                args[pos + 1] = cores.to_string();
+            }
         }
     }
 
@@ -4763,6 +4780,28 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
         if let Some(path) = storage_path {
             if !path.is_empty() && path != LXC_DEFAULT_PATH {
                 lxc_register_path(path);
+            }
+        }
+
+        // Set sane defaults: swap=0 and 1 CPU core so containers start reliably
+        let base = if let Some(p) = storage_path.filter(|p| !p.is_empty() && *p != LXC_DEFAULT_PATH) {
+            p.to_string()
+        } else {
+            LXC_DEFAULT_PATH.to_string()
+        };
+        let cfg_path = format!("{}/{}/config", base, name);
+        if let Ok(mut cfg_content) = std::fs::read_to_string(&cfg_path) {
+            let mut modified = false;
+            if !cfg_content.contains("memory.swap.max") && !cfg_content.contains("memory.memsw") {
+                cfg_content.push_str("\nlxc.cgroup2.memory.swap.max = 0\n");
+                modified = true;
+            }
+            if !cfg_content.contains("cpu.shares") {
+                cfg_content.push_str("lxc.cgroup2.cpu.shares = 1024\n");
+                modified = true;
+            }
+            if modified {
+                let _ = std::fs::write(&cfg_path, cfg_content);
             }
         }
 
