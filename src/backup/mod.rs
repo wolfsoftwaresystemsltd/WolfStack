@@ -347,8 +347,9 @@ pub fn backup_lxc(name: &str) -> Result<(PathBuf, u64), String> {
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
 
-    // Check LXC path — could be /var/lib/lxc/{name} or custom
-    let lxc_path = format!("/var/lib/lxc/{}", name);
+    // Check LXC path — could be /var/lib/lxc/{name} or custom storage
+    let lxc_base = crate::containers::lxc_base_dir(name);
+    let lxc_path = format!("{}/{}", lxc_base, name);
     if !Path::new(&lxc_path).exists() {
         if was_running {
             let _ = Command::new("lxc-start").args(["-n", name]).output();
@@ -358,7 +359,7 @@ pub fn backup_lxc(name: &str) -> Result<(PathBuf, u64), String> {
 
     // Create tar.gz of the entire container directory
     let output = Command::new("tar")
-        .args(["czf", &tar_path.to_string_lossy(), "-C", "/var/lib/lxc", name])
+        .args(["czf", &tar_path.to_string_lossy(), "-C", &lxc_base, name])
         .output()
         .map_err(|e| format!("Failed to tar LXC container: {}", e))?;
 

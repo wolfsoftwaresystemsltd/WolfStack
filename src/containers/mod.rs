@@ -125,6 +125,61 @@ fn flush_routes_to_disk(routes: &std::collections::HashMap<String, String>) {
     }
 }
 
+// ─── LXC Storage Paths Registry ───
+// Tracks all known directories that may contain LXC containers.
+// Always includes /var/lib/lxc as the default.
+// Persisted at /etc/wolfstack/lxc-paths.json.
+
+pub const LXC_DEFAULT_PATH: &str = "/var/lib/lxc";
+const LXC_PATHS_FILE: &str = "/etc/wolfstack/lxc-paths.json";
+
+pub static LXC_STORAGE_PATHS: std::sync::LazyLock<Mutex<Vec<String>>> =
+    std::sync::LazyLock::new(|| {
+        let mut paths = vec![LXC_DEFAULT_PATH.to_string()];
+        if let Ok(content) = std::fs::read_to_string(LXC_PATHS_FILE) {
+            if let Ok(saved) = serde_json::from_str::<Vec<String>>(&content) {
+                for p in saved {
+                    if p != LXC_DEFAULT_PATH && !paths.contains(&p) && std::path::Path::new(&p).is_dir() {
+                        paths.push(p);
+                    }
+                }
+            }
+        }
+        Mutex::new(paths)
+    });
+
+/// Get all known LXC storage paths (always includes /var/lib/lxc).
+pub fn lxc_storage_paths() -> Vec<String> {
+    LXC_STORAGE_PATHS.lock().unwrap().clone()
+}
+
+/// Register an additional LXC storage path. Returns true if the path was new.
+pub fn lxc_register_path(path: &str) -> bool {
+    if path.is_empty() || path == LXC_DEFAULT_PATH {
+        return false;
+    }
+    let mut paths = LXC_STORAGE_PATHS.lock().unwrap();
+    if paths.contains(&path.to_string()) {
+        return false;
+    }
+    paths.push(path.to_string());
+    let _ = std::fs::write(LXC_PATHS_FILE, serde_json::to_string_pretty(&*paths).unwrap_or_default());
+    true
+}
+
+/// Find the base directory containing a named LXC container.
+/// Checks all registered paths; falls back to /var/lib/lxc if not found.
+pub fn lxc_base_dir(container: &str) -> String {
+    let paths = LXC_STORAGE_PATHS.lock().unwrap();
+    for base in paths.iter() {
+        let dir = format!("{}/{}", base, container);
+        if std::path::Path::new(&dir).is_dir() {
+            return base.clone();
+        }
+    }
+    LXC_DEFAULT_PATH.to_string()
+}
+
 /// Clean up stale /32 kernel routes for WolfNet IPs that don't belong to local containers.
 /// Stale routes (from deleted/moved containers) override the wolfnet0 /24 route and
 /// prevent cross-node container routing through the WolfNet tunnel.
@@ -390,15 +445,17 @@ pub fn wolfnet_allocate_ip(host_ip: &str, extra_used: &[u8]) -> String {
     }
 
     // Check LXC containers with .wolfnet/ip marker files
-    if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
-        for entry in entries.flatten() {
-            let ip_file = entry.path().join(".wolfnet/ip");
-            if let Ok(ip_str) = std::fs::read_to_string(&ip_file) {
-                let ip_str = ip_str.trim();
-                let ip_parts: Vec<&str> = ip_str.split('.').collect();
-                if ip_parts.len() == 4 {
-                    if let Ok(last) = ip_parts[3].parse::<u8>() {
-                        used_ips.insert(last);
+    for lxc_path in lxc_storage_paths() {
+        if let Ok(entries) = std::fs::read_dir(&lxc_path) {
+            for entry in entries.flatten() {
+                let ip_file = entry.path().join(".wolfnet/ip");
+                if let Ok(ip_str) = std::fs::read_to_string(&ip_file) {
+                    let ip_str = ip_str.trim();
+                    let ip_parts: Vec<&str> = ip_str.split('.').collect();
+                    if ip_parts.len() == 4 {
+                        if let Ok(last) = ip_parts[3].parse::<u8>() {
+                            used_ips.insert(last);
+                        }
                     }
                 }
             }
@@ -530,14 +587,15 @@ pub fn wolfnet_used_ips() -> Vec<String> {
     }
 
     // LXC containers (from .wolfnet/ip marker files — authoritative source)
-    let lxc_base = std::path::Path::new("/var/lib/lxc");
-    if let Ok(entries) = std::fs::read_dir(lxc_base) {
-        for entry in entries.flatten() {
-            let ip_file = entry.path().join(".wolfnet/ip");
-            if let Ok(contents) = std::fs::read_to_string(&ip_file) {
-                let ip = contents.trim().to_string();
-                if !ip.is_empty() && !ips.contains(&ip) {
-                    ips.push(ip);
+    for lxc_path in lxc_storage_paths() {
+        if let Ok(entries) = std::fs::read_dir(&lxc_path) {
+            for entry in entries.flatten() {
+                let ip_file = entry.path().join(".wolfnet/ip");
+                if let Ok(contents) = std::fs::read_to_string(&ip_file) {
+                    let ip = contents.trim().to_string();
+                    if !ip.is_empty() && !ips.contains(&ip) {
+                        ips.push(ip);
+                    }
                 }
             }
         }
@@ -903,15 +961,20 @@ pub fn lxc_attach_wolfnet(container: &str, ip: &str) -> Result<String, String> {
     // wolfnet0 is a TUN device — can't be bridged.
     // Instead, save the WolfNet IP as a marker; it will be applied inside the
     // container at start time via lxc-attach + host routing.
-    let marker_dir = format!("/var/lib/lxc/{}/.wolfnet", container);
+    let base = lxc_base_dir(container);
+    let marker_dir = format!("{}/{}/.wolfnet", base, container);
     let _ = std::fs::create_dir_all(&marker_dir);
     if let Err(e) = std::fs::write(format!("{}/ip", marker_dir), ip) {
         return Err(format!("Failed to save WolfNet IP: {}", e));
     }
 
     // If the container is already running, apply immediately (no restart needed)
+    let mut info_args = vec!["-n", container, "-sH"];
+    if base != LXC_DEFAULT_PATH {
+        info_args = vec!["-P", &base, "-n", container, "-sH"];
+    }
     let running = Command::new("lxc-info")
-        .args(["-n", container, "-sH"])
+        .args(&info_args)
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_uppercase().contains("RUNNING"))
         .unwrap_or(false);
@@ -927,8 +990,12 @@ pub fn lxc_attach_wolfnet(container: &str, ip: &str) -> Result<String, String> {
 
 /// Get the bridge IP assigned to a container's interface (e.g. wn0)
 fn get_container_bridge_ip(container: &str, iface: &str) -> String {
+    let base = lxc_base_dir(container);
+    let mut args: Vec<&str> = Vec::new();
+    if base != LXC_DEFAULT_PATH { args.extend_from_slice(&["-P", &base]); }
+    args.extend_from_slice(&["-n", container, "--", "ip", "-4", "addr", "show", iface]);
     if let Ok(output) = Command::new("lxc-attach")
-        .args(["-n", container, "--", "ip", "-4", "addr", "show", iface])
+        .args(&args)
         .output()
     {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -954,40 +1021,41 @@ fn get_container_bridge_ip(container: &str, iface: &str) -> String {
 /// Called on WolfStack startup to restore routes that were lost since
 /// `lxc_apply_wolfnet` only runs at container start time.
 pub fn reapply_wolfnet_routes() {
-    let lxc_base = std::path::Path::new("/var/lib/lxc");
-    let entries = match std::fs::read_dir(lxc_base) {
-        Ok(e) => e,
-        Err(_) => return, // No LXC containers at all
-    };
-
-    for entry in entries.flatten() {
-        let container = match entry.file_name().into_string() {
-            Ok(s) => s,
+    for base_path in lxc_storage_paths() {
+        let lxc_base = std::path::Path::new(&base_path);
+        let entries = match std::fs::read_dir(lxc_base) {
+            Ok(e) => e,
             Err(_) => continue,
         };
 
-        // Check if this container has a WolfNet IP
-        let ip_file = entry.path().join(".wolfnet/ip");
-        let _ip = match std::fs::read_to_string(&ip_file) {
-            Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
-            _ => continue,
-        };
+        for entry in entries.flatten() {
+            let container = match entry.file_name().into_string() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
 
-        // Check if the container is actually running
-        let running = Command::new("lxc-info")
-            .args(["-n", &container, "-sH"])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_uppercase().contains("RUNNING"))
-            .unwrap_or(false);
-        if !running { continue; }
+            // Check if this container has a WolfNet IP
+            let ip_file = entry.path().join(".wolfnet/ip");
+            let _ip = match std::fs::read_to_string(&ip_file) {
+                Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+                _ => continue,
+            };
 
+            // Check if the container is actually running
+            let mut info_args = vec!["-n".to_string(), container.clone(), "-sH".to_string()];
+            if base_path != LXC_DEFAULT_PATH {
+                info_args = vec!["-P".to_string(), base_path.clone(), "-n".to_string(), container.clone(), "-sH".to_string()];
+            }
+            let running = Command::new("lxc-info")
+                .args(&info_args)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_uppercase().contains("RUNNING"))
+                .unwrap_or(false);
+            if !running { continue; }
 
-
-        // Re-apply the WolfNet IP and routes INSIDE the container.
-        // This is critical: lxc-autostart and host reboots don't call lxc_apply_wolfnet(),
-        // so the container's WolfNet IP (/32 secondary on wn0/eth0) is lost after restart.
-        // lxc_apply_wolfnet handles: bring up wn0, add WolfNet IP, add host route, iptables.
-        lxc_apply_wolfnet(&container);
+            // Re-apply the WolfNet IP and routes INSIDE the container.
+            lxc_apply_wolfnet(&container);
+        }
     }
 
     // Ensure forwarding is on
@@ -997,11 +1065,18 @@ pub fn reapply_wolfnet_routes() {
 
 /// Apply WolfNet IP inside a running container (called after lxc-start)
 fn lxc_apply_wolfnet(container: &str) {
-    let ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", container);
+    let base = lxc_base_dir(container);
+    let ip_file = format!("{}/{}/.wolfnet/ip", base, container);
     if let Ok(ip) = std::fs::read_to_string(&ip_file) {
         let ip = ip.trim();
         if ip.is_empty() { return; }
 
+        // Build lxc-attach prefix with -P if on non-default storage
+        let attach_prefix: Vec<String> = if base != LXC_DEFAULT_PATH {
+            vec!["-P".to_string(), base.clone(), "-n".to_string(), container.to_string(), "--".to_string()]
+        } else {
+            vec!["-n".to_string(), container.to_string(), "--".to_string()]
+        };
 
         // Wait for container to be ready
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -1018,27 +1093,29 @@ fn lxc_apply_wolfnet(container: &str) {
             // route via vmbr0 stays intact.
             let bridge_ip = get_container_bridge_ip(container, "wn0");
 
+            let bridge_cidr = format!("{}/24", bridge_ip);
+            let wolfnet_cidr = format!("{}/32", ip);
 
             // Bring wn0 up
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "link", "set", "wn0", "up"])
-                .output();
+            let mut args: Vec<String> = attach_prefix.clone();
+            args.extend(["ip", "link", "set", "wn0", "up"].iter().map(|s| s.to_string()));
+            let _ = Command::new("lxc-attach").args(&args).output();
 
             // Assign bridge IP on wn0 for host-side routing (idempotent — addr add ignores dups)
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", bridge_ip), "dev", "wn0"])
-                .output();
+            let mut args: Vec<String> = attach_prefix.clone();
+            args.extend(["ip", "addr", "add", &bridge_cidr, "dev", "wn0"].iter().map(|s| s.to_string()));
+            let _ = Command::new("lxc-attach").args(&args).output();
 
             // Add WolfNet IP as secondary /32 on wn0
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "wn0"])
-                .output();
+            let mut args: Vec<String> = attach_prefix.clone();
+            args.extend(["ip", "addr", "add", &wolfnet_cidr, "dev", "wn0"].iter().map(|s| s.to_string()));
+            let _ = Command::new("lxc-attach").args(&args).output();
 
             // Route WolfNet subnet through wn0 via lxcbr0 gateway — without this,
             // 10.10.10.x traffic goes out via eth0/vmbr0 where WolfNet is unreachable.
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "route", "replace", "10.10.10.0/24", "via", "10.0.3.1", "dev", "wn0"])
-                .output();
+            let mut args: Vec<String> = attach_prefix.clone();
+            args.extend(["ip", "route", "replace", "10.10.10.0/24", "via", "10.0.3.1", "dev", "wn0"].iter().map(|s| s.to_string()));
+            let _ = Command::new("lxc-attach").args(&args).output();
 
             // Host route — via bridge IP so traffic for WolfNet IP reaches container
             let _ = Command::new("ip").args(["route", "del", &format!("{}/32", ip)]).output();
@@ -1056,35 +1133,39 @@ fn lxc_apply_wolfnet(container: &str) {
             // Standalone LXC: original approach — bridge IP on eth0, WolfNet IP as secondary
             let bridge_ip = assign_container_bridge_ip(container);
 
+            let bridge_cidr = format!("{}/24", bridge_ip);
+            let wolfnet_cidr = format!("{}/32", ip);
 
             // 1. Write network config files FIRST (assign_container_bridge_ip already did this)
             //    so the restart below picks up the correct IP.
 
             // 2. Restart networking (try all methods for distro compat)
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "sh", "-c",
-                    "systemctl restart systemd-networkd 2>/dev/null; \
-                     netplan apply 2>/dev/null; \
-                     /etc/init.d/networking restart 2>/dev/null; \
-                     true"])
-                .output();
+            let mut args: Vec<String> = attach_prefix.clone();
+            args.extend(["sh", "-c",
+                "systemctl restart systemd-networkd 2>/dev/null; \
+                 netplan apply 2>/dev/null; \
+                 /etc/init.d/networking restart 2>/dev/null; \
+                 true"].iter().map(|s| s.to_string()));
+            let _ = Command::new("lxc-attach").args(&args).output();
 
             // 3. Flush ALL addresses on eth0 to clear stale IPs from DHCP, NetworkManager,
             //    or old configs. Then re-add exactly the ones we want.
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "addr", "flush", "dev", "eth0"])
-                .output();
+            let mut args: Vec<String> = attach_prefix.clone();
+            args.extend(["ip", "addr", "flush", "dev", "eth0"].iter().map(|s| s.to_string()));
+            let _ = Command::new("lxc-attach").args(&args).output();
 
             // 4. Add bridge IP + wolfnet IP + default route
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", bridge_ip), "dev", "eth0"])
-                .output();
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/32", ip), "dev", "eth0"])
-                .output();
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "ip", "route", "replace", "default", "via", "10.0.3.1"])
-                .output();
+            let mut args: Vec<String> = attach_prefix.clone();
+            args.extend(["ip", "addr", "add", &bridge_cidr, "dev", "eth0"].iter().map(|s| s.to_string()));
+            let _ = Command::new("lxc-attach").args(&args).output();
+
+            let mut args: Vec<String> = attach_prefix.clone();
+            args.extend(["ip", "addr", "add", &wolfnet_cidr, "dev", "eth0"].iter().map(|s| s.to_string()));
+            let _ = Command::new("lxc-attach").args(&args).output();
+
+            let mut args: Vec<String> = attach_prefix.clone();
+            args.extend(["ip", "route", "replace", "default", "via", "10.0.3.1"].iter().map(|s| s.to_string()));
+            let _ = Command::new("lxc-attach").args(&args).output();
 
             // Host route — via bridge IP so ARP resolves on lxcbr0
             let _ = Command::new("ip").args(["route", "del", &format!("{}/32", ip)]).output();
@@ -1119,7 +1200,8 @@ fn find_free_bridge_ip() -> u8 {
     let mut used: Vec<u8> = Vec::new();
 
     // 1. Scan LXC config files (covers stopped containers too)
-    if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
+    for lxc_scan_path in lxc_storage_paths() {
+    if let Ok(entries) = std::fs::read_dir(&lxc_scan_path) {
         for entry in entries.flatten() {
             // systemd-networkd
             let net_file = entry.path().join("rootfs/etc/systemd/network/eth0.network");
@@ -1160,6 +1242,7 @@ fn find_free_bridge_ip() -> u8 {
             }
         }
     }
+    } // end for lxc_scan_path
 
     // 2. Scan running LXC containers' actual IPs
     for c in lxc_list_all() {
@@ -1267,7 +1350,8 @@ fn find_free_bridge_ip() -> u8 {
 /// the next free bridge IP. Writes network config in either case.
 fn assign_container_bridge_ip(container: &str) -> String {
     // Try to derive from wolfnet IP (deterministic — no allocation needed)
-    let wolfnet_ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", container);
+    let base = lxc_base_dir(container);
+    let wolfnet_ip_file = format!("{}/{}/.wolfnet/ip", base, container);
     if let Ok(wolfnet_ip) = std::fs::read_to_string(&wolfnet_ip_file) {
         let wolfnet_ip = wolfnet_ip.trim();
         if let Some(last_octet) = wolfnet_ip.rsplit('.').next() {
@@ -1287,7 +1371,7 @@ fn assign_container_bridge_ip(container: &str) -> String {
 /// Write network config to container rootfs — supports systemd-networkd, Netplan,
 /// and /etc/network/interfaces for maximum distro compatibility
 fn write_container_network_config(container: &str, bridge_ip: &str) {
-    let rootfs = format!("/var/lib/lxc/{}/rootfs", container);
+    let rootfs = format!("{}/{}/rootfs", lxc_base_dir(container), container);
 
     // Method 1: systemd-networkd (Debian Trixie, Arch, etc.)
     let networkd_dir = format!("{}/etc/systemd/network", rootfs);
@@ -1421,9 +1505,13 @@ done"#;
         "docker" => Command::new("docker")
             .args(["exec", name, "sh", "-c", script])
             .output(),
-        "lxc" => Command::new("lxc-attach")
-            .args(["-n", name, "--", "sh", "-c", script])
-            .output(),
+        "lxc" => {
+            let base = lxc_base_dir(name);
+            let mut args: Vec<&str> = Vec::new();
+            if base != LXC_DEFAULT_PATH { args.extend_from_slice(&["-P", &base]); }
+            args.extend_from_slice(&["-n", name, "--", "sh", "-c", script]);
+            Command::new("lxc-attach").args(&args).output()
+        }
         _ => return vec![],
     };
 
@@ -1914,119 +2002,124 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
         return pct_list_all();
     }
 
-    // Fallback: native LXC
-    Command::new("lxc-ls")
-        .args(["-f", "-F", "NAME,STATE,PID,RAM,IPV4"])
-        .output()
-        .ok()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .skip(1) // Skip header
-                .filter(|l| !l.is_empty())
-                .map(|line| {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    let name = parts.first().unwrap_or(&"").to_string();
-                    let state = parts.get(1).unwrap_or(&"STOPPED").to_lowercase();
-                    let status = if state == "running" {
-                        format!("Running (PID {})", parts.get(2).unwrap_or(&"-"))
-                    } else {
-                        "Stopped".to_string()
-                    };
+    // Fallback: native LXC — scan all registered storage paths
+    let mut containers = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
 
-                    // IP address: try multiple methods
-                    let mut ip = String::new();
+    for base_path in lxc_storage_paths() {
+        let output = match Command::new("lxc-ls")
+            .args(["-P", &base_path, "-f", "-F", "NAME,STATE,PID,RAM,IPV4"])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
 
-                    if state == "running" {
-                        // Method 1: Use lxc-info which reliably reports IP
-                        if let Ok(info_out) = Command::new("lxc-info")
-                            .args(["-n", &name, "-iH"])
-                            .output()
-                        {
-                            let info_ip = String::from_utf8_lossy(&info_out.stdout)
-                                .lines()
-                                .filter(|l| !l.contains(':')) // Filter out IPv6 addresses
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            if !info_ip.is_empty() && info_ip != "-" {
-                                ip = info_ip;
-                            }
-                        }
+        for line in String::from_utf8_lossy(&output.stdout).lines().skip(1).filter(|l| !l.is_empty()) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let name = parts.first().unwrap_or(&"").to_string();
+            if name.is_empty() || !seen_names.insert(name.clone()) {
+                continue; // Skip duplicates
+            }
+            let state = parts.get(1).unwrap_or(&"STOPPED").to_lowercase();
+            let status = if state == "running" {
+                format!("Running (PID {})", parts.get(2).unwrap_or(&"-"))
+            } else {
+                "Stopped".to_string()
+            };
+
+            // IP address: try multiple methods
+            let mut ip = String::new();
+
+            if state == "running" {
+                // Method 1: Use lxc-info which reliably reports IP
+                if let Ok(info_out) = Command::new("lxc-info")
+                    .args(["-P", &base_path, "-n", &name, "-iH"])
+                    .output()
+                {
+                    let info_ip = String::from_utf8_lossy(&info_out.stdout)
+                        .lines()
+                        .filter(|l| !l.contains(':')) // Filter out IPv6 addresses
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if !info_ip.is_empty() && info_ip != "-" {
+                        ip = info_ip;
                     }
+                }
+            }
 
-                    // Method 2: If still no IP, try from lxc-ls output (after RAM column)
-                    if ip.is_empty() {
-                        // Skip NAME(0), STATE(1), PID(2), RAM(3), rest is IPV4
-                        let lxc_ip = parts.get(4..).map(|p| p.join(" ")).unwrap_or_default()
-                            .replace("-", "");
-                        if !lxc_ip.trim().is_empty() {
-                            ip = lxc_ip.trim().to_string();
-                        }
-                    }
+            // Method 2: If still no IP, try from lxc-ls output (after RAM column)
+            if ip.is_empty() {
+                // Skip NAME(0), STATE(1), PID(2), RAM(3), rest is IPV4
+                let lxc_ip = parts.get(4..).map(|p| p.join(" ")).unwrap_or_default()
+                    .replace("-", "");
+                if !lxc_ip.trim().is_empty() {
+                    ip = lxc_ip.trim().to_string();
+                }
+            }
 
-                    // Method 3: Check for WolfNet IP marker
-                    let wolfnet_ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", name);
-                    let wolfnet_ip = std::fs::read_to_string(&wolfnet_ip_file)
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_default();
-                    if !wolfnet_ip.is_empty() {
-                        if ip.is_empty() {
-                            ip = format!("{} (wolfnet)", wolfnet_ip);
-                        } else if !ip.contains(&wolfnet_ip) {
-                            ip = format!("{}, {} (wolfnet)", ip, wolfnet_ip);
-                        }
-                    }
+            // Method 3: Check for WolfNet IP marker
+            let wolfnet_ip_file = format!("{}/{}/.wolfnet/ip", base_path, name);
+            let wolfnet_ip = std::fs::read_to_string(&wolfnet_ip_file)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            if !wolfnet_ip.is_empty() {
+                if ip.is_empty() {
+                    ip = format!("{} (wolfnet)", wolfnet_ip);
+                } else if !ip.contains(&wolfnet_ip) {
+                    ip = format!("{}, {} (wolfnet)", ip, wolfnet_ip);
+                }
+            }
 
-                    // Read config for autostart and hostname
-                    let config_path = format!("/var/lib/lxc/{}/config", name);
-                    let config_content = std::fs::read_to_string(&config_path).unwrap_or_default();
-                    let autostart = config_content.lines().any(|l| l.trim() == "lxc.start.auto = 1");
-                    let hostname = config_content.lines()
-                        .find(|l| l.trim().starts_with("lxc.uts.name"))
-                        .and_then(|l| l.split('=').nth(1))
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_default();
+            // Read config for autostart and hostname
+            let config_path = format!("{}/{}/config", base_path, name);
+            let config_content = std::fs::read_to_string(&config_path).unwrap_or_default();
+            let autostart = config_content.lines().any(|l| l.trim() == "lxc.start.auto = 1");
+            let hostname = config_content.lines()
+                .find(|l| l.trim().starts_with("lxc.uts.name"))
+                .and_then(|l| l.split('=').nth(1))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
 
-                    // Get LXC rootfs path and disk usage
-                    let rootfs_path = format!("/var/lib/lxc/{}/rootfs", name);
-                    let storage_path = if std::path::Path::new(&rootfs_path).exists() {
-                        Some(rootfs_path.clone())
-                    } else { None };
-                    let (du, dt, ft) = get_path_disk_usage(&rootfs_path);
+            // Get LXC rootfs path and disk usage
+            let rootfs_path = format!("{}/{}/rootfs", base_path, name);
+            let storage_path = if std::path::Path::new(&rootfs_path).exists() {
+                Some(rootfs_path.clone())
+            } else { None };
+            let (du, dt, ft) = get_path_disk_usage(&rootfs_path);
 
-                    let version = lxc_read_os_version(&rootfs_path);
+            let version = lxc_read_os_version(&rootfs_path);
 
-                    // Detect Wolf services inside running containers
-                    let services = if state == "running" {
-                        detect_container_services("lxc", &name)
-                    } else {
-                        vec![]
-                    };
+            // Detect Wolf services inside running containers
+            let services = if state == "running" {
+                detect_container_services("lxc", &name)
+            } else {
+                vec![]
+            };
 
-                    ContainerInfo {
-                        id: name.clone(),
-                        name,
-                        image: "lxc".to_string(),
-                        status,
-                        state,
-                        created: String::new(),
-                        ports: vec![],
-                        runtime: "lxc".to_string(),
-                        ip_address: ip,
-                        autostart,
-                        hostname,
-                        storage_path,
-                        disk_usage: du,
-                        disk_total: dt,
-                        fs_type: ft,
-                        version,
-                        services,
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+            containers.push(ContainerInfo {
+                id: name.clone(),
+                name,
+                image: "lxc".to_string(),
+                status,
+                state,
+                created: String::new(),
+                ports: vec![],
+                runtime: "lxc".to_string(),
+                ip_address: ip,
+                autostart,
+                hostname,
+                storage_path,
+                disk_usage: du,
+                disk_total: dt,
+                fs_type: ft,
+                version,
+                services,
+            });
+        }
+    }
+    containers
 }
 
 /// List LXC containers using Proxmox's pct command (filters out stale containers)
@@ -2337,8 +2430,12 @@ fn lxc_info(name: &str) -> LxcDetailInfo {
 
     // Fallback: if still 0, try reading /proc/meminfo inside the container
     if memory_limit == 0 {
+        let base = lxc_base_dir(name);
+        let mut attach_args: Vec<&str> = Vec::new();
+        if base != LXC_DEFAULT_PATH { attach_args.extend_from_slice(&["-P", &base]); }
+        attach_args.extend_from_slice(&["-n", name, "--", "cat", "/proc/meminfo"]);
         if let Ok(out) = Command::new("lxc-attach")
-            .args(["-n", name, "--", "cat", "/proc/meminfo"])
+            .args(&attach_args)
             .output()
         {
             if out.status.success() {
@@ -2363,8 +2460,12 @@ fn lxc_info(name: &str) -> LxcDetailInfo {
     let cpu_percent = lxc_cpu_percent(name);
 
     // PID count
+    let base_for_pid = lxc_base_dir(name);
+    let mut pid_args: Vec<&str> = Vec::new();
+    if base_for_pid != LXC_DEFAULT_PATH { pid_args.extend_from_slice(&["-P", &base_for_pid]); }
+    pid_args.extend_from_slice(&["-n", name, "-pH"]);
     let pids = Command::new("lxc-info")
-        .args(["-n", name, "-pH"])
+        .args(&pid_args)
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -2386,17 +2487,25 @@ fn lxc_info(name: &str) -> LxcDetailInfo {
 
 /// Get LXC container logs from journal
 pub fn lxc_logs(container: &str, lines: u32) -> Vec<String> {
+    let base = lxc_base_dir(container);
+    let mut prefix: Vec<&str> = Vec::new();
+    if base != LXC_DEFAULT_PATH { prefix.extend_from_slice(&["-P", &base]); }
+    let lines_str = lines.to_string();
+    let mut args = prefix.clone();
+    args.extend_from_slice(&["-n", container, "--", "journalctl", "--no-pager", "-n", &lines_str]);
     // Try getting logs from lxc-attach dmesg or journal
     Command::new("lxc-attach")
-        .args(["-n", container, "--", "journalctl", "--no-pager", "-n", &lines.to_string()])
+        .args(&args)
         .output()
         .ok()
         .map(|o| {
             let out = String::from_utf8_lossy(&o.stdout);
             if out.trim().is_empty() {
                 // Fallback: read from syslog
+                let mut args2 = prefix.clone();
+                args2.extend_from_slice(&["-n", container, "--", "cat", "/var/log/syslog"]);
                 Command::new("lxc-attach")
-                    .args(["-n", container, "--", "cat", "/var/log/syslog"])
+                    .args(&args2)
                     .output()
                     .ok()
                     .map(|o2| {
@@ -2436,7 +2545,7 @@ pub fn lxc_set_root_password(container: &str, password: &str) -> Result<String, 
     let hash = String::from_utf8_lossy(&hash_output.stdout).trim().to_string();
 
     // Find the rootfs — could be in default path or custom storage
-    let shadow_path = format!("/var/lib/lxc/{}/rootfs/etc/shadow", container);
+    let shadow_path = format!("{}/{}/rootfs/etc/shadow", lxc_base_dir(container), container);
     
     if let Ok(shadow) = std::fs::read_to_string(&shadow_path) {
         let new_shadow: String = shadow.lines().map(|line| {
@@ -2474,7 +2583,12 @@ pub fn lxc_start(container: &str) -> Result<String, String> {
     let result = if is_proxmox() {
         run_lxc_cmd(&["pct", "start", container])
     } else {
-        run_lxc_cmd(&["lxc-start", "-n", container])
+        let base = lxc_base_dir(container);
+        if base != LXC_DEFAULT_PATH {
+            run_lxc_cmd(&["lxc-start", "-P", &base, "-n", container])
+        } else {
+            run_lxc_cmd(&["lxc-start", "-n", container])
+        }
     };
     
     // Apply WolfNet IP if configured
@@ -2488,66 +2602,76 @@ pub fn lxc_start(container: &str) -> Result<String, String> {
 
 /// First-boot setup for LXC containers (runs once)
 fn lxc_post_start_setup(container: &str) {
-    let marker = format!("/var/lib/lxc/{}/.wolfstack_setup_done", container);
+    let base = lxc_base_dir(container);
+    let marker = format!("{}/{}/.wolfstack_setup_done", base, container);
     if std::path::Path::new(&marker).exists() { return; }
 
-
+    // Build lxc-attach prefix args (with -P if non-default storage)
+    let attach_prefix: Vec<&str> = if base != LXC_DEFAULT_PATH {
+        vec!["-P", &base, "-n", container, "--"]
+    } else {
+        vec!["-n", container, "--"]
+    };
 
     // Assign a unique bridge IP if not already configured by WolfNet
-    let wolfnet_file = format!("/var/lib/lxc/{}/.wolfnet/ip", container);
+    let wolfnet_file = format!("{}/{}/.wolfnet/ip", base, container);
     if !std::path::Path::new(&wolfnet_file).exists() {
         let bridge_ip = assign_container_bridge_ip(container);
 
         // Apply immediately
-        let _ = Command::new("lxc-attach")
-            .args(["-n", container, "--", "ip", "addr", "flush", "dev", "eth0"])
-            .output();
-        let _ = Command::new("lxc-attach")
-            .args(["-n", container, "--", "ip", "addr", "add", &format!("{}/24", bridge_ip), "dev", "eth0"])
-            .output();
-        let _ = Command::new("lxc-attach")
-            .args(["-n", container, "--", "ip", "route", "replace", "default", "via", "10.0.3.1"])
-            .output();
+        let mut args = attach_prefix.clone();
+        args.extend_from_slice(&["ip", "addr", "flush", "dev", "eth0"]);
+        let _ = Command::new("lxc-attach").args(&args).output();
+
+        let mut args = attach_prefix.clone();
+        let cidr = format!("{}/24", bridge_ip);
+        args.extend_from_slice(&["ip", "addr", "add", &cidr, "dev", "eth0"]);
+        let _ = Command::new("lxc-attach").args(&args).output();
+
+        let mut args = attach_prefix.clone();
+        args.extend_from_slice(&["ip", "route", "replace", "default", "via", "10.0.3.1"]);
+        let _ = Command::new("lxc-attach").args(&args).output();
+
         // Restart networking (multi-distro)
-        let _ = Command::new("lxc-attach")
-            .args(["-n", container, "--", "sh", "-c",
-                "systemctl restart systemd-networkd 2>/dev/null; \
-                 netplan apply 2>/dev/null; \
-                 /etc/init.d/networking restart 2>/dev/null; \
-                 true"])
-            .output();
+        let mut args = attach_prefix.clone();
+        args.extend_from_slice(&["sh", "-c",
+            "systemctl restart systemd-networkd 2>/dev/null; \
+             netplan apply 2>/dev/null; \
+             /etc/init.d/networking restart 2>/dev/null; \
+             true"]);
+        let _ = Command::new("lxc-attach").args(&args).output();
     }
 
     // Wait for container networking to settle
     std::thread::sleep(std::time::Duration::from_secs(5));
 
     // Install openssh-server
-    let ssh_install = Command::new("lxc-attach")
-        .args(["-n", container, "--", "sh", "-c",
-            "apt-get update -qq && apt-get install -y -qq openssh-server 2>/dev/null || \
-             yum install -y openssh-server 2>/dev/null || \
-             apk add openssh 2>/dev/null"])
-        .output();
+    let mut args = attach_prefix.clone();
+    args.extend_from_slice(&["sh", "-c",
+        "apt-get update -qq && apt-get install -y -qq openssh-server 2>/dev/null || \
+         yum install -y openssh-server 2>/dev/null || \
+         apk add openssh 2>/dev/null"]);
+    let ssh_install = Command::new("lxc-attach").args(&args).output();
 
     let ssh_ok = ssh_install.as_ref().map(|o| o.status.success()).unwrap_or(false);
 
     if ssh_ok {
         // Enable root SSH login and start sshd
-        let _ = Command::new("lxc-attach")
-            .args(["-n", container, "--", "sh", "-c",
-                "sed -i 's/#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; \
-                 sed -i 's/#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; \
-                 mkdir -p /run/sshd; \
-                 systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || /usr/sbin/sshd 2>/dev/null || true; \
-                 systemctl enable sshd 2>/dev/null || update-rc.d ssh enable 2>/dev/null || true"])
-            .output();
+        let mut args = attach_prefix.clone();
+        args.extend_from_slice(&["sh", "-c",
+            "sed -i 's/#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; \
+             sed -i 's/#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; \
+             mkdir -p /run/sshd; \
+             systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || /usr/sbin/sshd 2>/dev/null || true; \
+             systemctl enable sshd 2>/dev/null || update-rc.d ssh enable 2>/dev/null || true"]);
+        let _ = Command::new("lxc-attach").args(&args).output();
 
     } else {
 
     }
 
     // Create WolfStack MOTD — write directly to rootfs (avoids shell escaping issues)
-    let motd_path = format!("/var/lib/lxc/{}/rootfs/etc/motd", container);
+    let motd_path = format!("{}/{}/rootfs/etc/motd", base, container);
     let _ = std::fs::write(&motd_path, r#"
  __        __    _  __ ____  _             _
  \ \      / /__ | |/ _/ ___|| |_ __ _  ___| | __
@@ -2572,7 +2696,12 @@ pub fn lxc_stop(container: &str) -> Result<String, String> {
     if is_proxmox() {
         run_lxc_cmd(&["pct", "stop", container])
     } else {
-        run_lxc_cmd(&["lxc-stop", "-n", container])
+        let base = lxc_base_dir(container);
+        if base != LXC_DEFAULT_PATH {
+            run_lxc_cmd(&["lxc-stop", "-P", &base, "-n", container])
+        } else {
+            run_lxc_cmd(&["lxc-stop", "-n", container])
+        }
     }
 }
 
@@ -2587,7 +2716,12 @@ pub fn lxc_freeze(container: &str) -> Result<String, String> {
     if is_proxmox() {
         run_lxc_cmd(&["pct", "suspend", container])
     } else {
-        run_lxc_cmd(&["lxc-freeze", "-n", container])
+        let base = lxc_base_dir(container);
+        if base != LXC_DEFAULT_PATH {
+            run_lxc_cmd(&["lxc-freeze", "-P", &base, "-n", container])
+        } else {
+            run_lxc_cmd(&["lxc-freeze", "-n", container])
+        }
     }
 }
 
@@ -2596,7 +2730,12 @@ pub fn lxc_unfreeze(container: &str) -> Result<String, String> {
     if is_proxmox() {
         run_lxc_cmd(&["pct", "resume", container])
     } else {
-        run_lxc_cmd(&["lxc-unfreeze", "-n", container])
+        let base = lxc_base_dir(container);
+        if base != LXC_DEFAULT_PATH {
+            run_lxc_cmd(&["lxc-unfreeze", "-P", &base, "-n", container])
+        } else {
+            run_lxc_cmd(&["lxc-unfreeze", "-n", container])
+        }
     }
 }
 
@@ -2606,19 +2745,24 @@ pub fn lxc_destroy(container: &str) -> Result<String, String> {
     if is_proxmox() {
         run_lxc_cmd(&["pct", "destroy", container])
     } else {
-        run_lxc_cmd(&["lxc-destroy", "-n", container])
+        let base = lxc_base_dir(container);
+        if base != LXC_DEFAULT_PATH {
+            run_lxc_cmd(&["lxc-destroy", "-P", &base, "-n", container])
+        } else {
+            run_lxc_cmd(&["lxc-destroy", "-n", container])
+        }
     }
 }
 
 /// Read LXC container config
 pub fn lxc_config(container: &str) -> Option<String> {
-    let path = format!("/var/lib/lxc/{}/config", container);
+    let path = format!("{}/{}/config", lxc_base_dir(container), container);
     std::fs::read_to_string(&path).ok()
 }
 
 /// Save LXC container config (creates .bak backup first)
 pub fn lxc_save_config(container: &str, content: &str) -> Result<String, String> {
-    let path = format!("/var/lib/lxc/{}/config", container);
+    let path = format!("{}/{}/config", lxc_base_dir(container), container);
     if !std::path::Path::new(&path).exists() {
         return Err(format!("Container '{}' config not found", container));
     }
@@ -2692,6 +2836,10 @@ pub struct LxcParsedConfig {
 
     // WolfNet
     pub wolfnet_ip: String,
+
+    // Storage
+    #[serde(default)]
+    pub storage_path: String,
 }
 /// Parse a Proxmox-format config (/etc/pve/lxc/<vmid>.conf)
 /// Format: `key: value` with network as `net0: name=eth0,bridge=vmbr0,hwaddr=...,ip=...,gw=...`
@@ -2808,7 +2956,7 @@ fn parse_proxmox_config(mut cfg: LxcParsedConfig, content: &str, container: &str
     cfg.network_interfaces = net_map.into_values().collect();
 
     // Read WolfNet IP
-    let wolfnet_ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", container);
+    let wolfnet_ip_file = format!("{}/{}/.wolfnet/ip", lxc_base_dir(container), container);
     if let Ok(ip) = std::fs::read_to_string(&wolfnet_ip_file) {
         cfg.wolfnet_ip = ip.trim().to_string();
     }
@@ -2820,7 +2968,7 @@ fn parse_proxmox_config(mut cfg: LxcParsedConfig, content: &str, container: &str
 pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
     // Try Proxmox config first (/etc/pve/lxc/<vmid>.conf), then native LXC
     let pve_path = format!("/etc/pve/lxc/{}.conf", container);
-    let lxc_path = format!("/var/lib/lxc/{}/config", container);
+    let lxc_path = format!("{}/{}/config", lxc_base_dir(container), container);
 
     let (content, is_proxmox_fmt) = if let Ok(c) = std::fs::read_to_string(&pve_path) {
         (c, true)
@@ -2830,8 +2978,11 @@ pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
         return None;
     };
 
+    let base = lxc_base_dir(container);
+    let rootfs = format!("{}/{}/rootfs", base, container);
     let mut cfg = LxcParsedConfig {
         raw_config: content.clone(),
+        storage_path: if std::path::Path::new(&rootfs).exists() { rootfs } else { base.clone() },
         ..Default::default()
     };
 
@@ -2970,7 +3121,7 @@ pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
     cfg.network_interfaces = net_map.into_values().collect();
 
     // Read WolfNet IP from file
-    let wolfnet_ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", container);
+    let wolfnet_ip_file = format!("{}/{}/.wolfnet/ip", lxc_base_dir(container), container);
     if let Ok(ip) = std::fs::read_to_string(&wolfnet_ip_file) {
         cfg.wolfnet_ip = ip.trim().to_string();
     }
@@ -3117,7 +3268,7 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
 
     // Handle WolfNet IP separately
     if let Some(ref wip) = settings.wolfnet_ip {
-        let wolfnet_dir = format!("/var/lib/lxc/{}/.wolfnet", container);
+        let wolfnet_dir = format!("{}/{}/.wolfnet", lxc_base_dir(container), container);
         let wolfnet_ip_file = format!("{}/ip", wolfnet_dir);
         let ip_trimmed = wip.trim();
         if ip_trimmed.is_empty() {
@@ -3204,7 +3355,8 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
         return pct_update_settings(container, settings);
     }
 
-    let path = format!("/var/lib/lxc/{}/config", container);
+    let base = lxc_base_dir(container);
+    let path = format!("{}/{}/config", base, container);
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Config not found: {}", e))?;
 
@@ -3423,7 +3575,7 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
 
     // Handle WolfNet IP separately (stored in .wolfnet/ip file)
     if let Some(ref wip) = settings.wolfnet_ip {
-        let wolfnet_dir = format!("/var/lib/lxc/{}/.wolfnet", container);
+        let wolfnet_dir = format!("{}/{}/.wolfnet", base, container);
         let wolfnet_ip_file = format!("{}/ip", wolfnet_dir);
         let ip_trimmed = wip.trim();
         if ip_trimmed.is_empty() {
@@ -3435,8 +3587,11 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
                 .map_err(|e| format!("Failed to write WolfNet IP: {}", e))?;
 
             // Apply live if the container is running
+            let mut info_args: Vec<&str> = Vec::new();
+            if base != LXC_DEFAULT_PATH { info_args.extend_from_slice(&["-P", &base]); }
+            info_args.extend_from_slice(&["-n", container, "-sH"]);
             let running = Command::new("lxc-info")
-                .args(["-n", container, "-sH"])
+                .args(&info_args)
                 .output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_uppercase().contains("RUNNING"))
                 .unwrap_or(false);
@@ -3451,7 +3606,7 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
 
 /// Update LXC container autostart specifically
 pub fn lxc_set_autostart(container: &str, enabled: bool) -> Result<String, String> {
-    let path = format!("/var/lib/lxc/{}/config", container);
+    let path = format!("{}/{}/config", lxc_base_dir(container), container);
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Config not found: {}", e))?;
 
@@ -3471,7 +3626,7 @@ pub fn lxc_set_autostart(container: &str, enabled: bool) -> Result<String, Strin
 
 /// Update LXC container network link (bridge/vlan)
 pub fn lxc_set_network_link(container: &str, link: &str) -> Result<String, String> {
-    let path = format!("/var/lib/lxc/{}/config", container);
+    let path = format!("{}/{}/config", lxc_base_dir(container), container);
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Config not found: {}", e))?;
 
@@ -3544,14 +3699,15 @@ pub fn next_available_wolfnet_ip() -> Option<String> {
     }
 
     // Scan all LXC containers for WolfNet IPs
-    if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", name);
-            if let Ok(ip) = std::fs::read_to_string(&ip_file) {
-                let ip = ip.trim().to_string();
-                if !ip.is_empty() {
-                    used.insert(ip);
+    for lxc_path in lxc_storage_paths() {
+        if let Ok(entries) = std::fs::read_dir(&lxc_path) {
+            for entry in entries.flatten() {
+                let ip_file = entry.path().join(".wolfnet/ip");
+                if let Ok(ip) = std::fs::read_to_string(&ip_file) {
+                    let ip = ip.trim().to_string();
+                    if !ip.is_empty() {
+                        used.insert(ip);
+                    }
                 }
             }
         }
@@ -3668,26 +3824,28 @@ pub fn detect_network_conflicts() -> Vec<NetworkConflict> {
     let mut ip_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
 
     // Scan all LXC containers
-    if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let config_path = format!("/var/lib/lxc/{}/config", name);
-            if let Ok(content) = std::fs::read_to_string(&config_path) {
-                for line in content.lines() {
-                    let line = line.trim();
-                    let parts: Vec<&str> = line.splitn(2, '=').collect();
-                    if parts.len() != 2 { continue; }
-                    let key = parts[0].trim();
-                    let val = parts[1].trim().to_lowercase();
+    for lxc_path in lxc_storage_paths() {
+        if let Ok(entries) = std::fs::read_dir(&lxc_path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let config_path = entry.path().join("config");
+                if let Ok(content) = std::fs::read_to_string(&config_path) {
+                    for line in content.lines() {
+                        let line = line.trim();
+                        let parts: Vec<&str> = line.splitn(2, '=').collect();
+                        if parts.len() != 2 { continue; }
+                        let key = parts[0].trim();
+                        let val = parts[1].trim().to_lowercase();
 
-                    if key == "lxc.net.0.hwaddr" && !val.is_empty() {
-                        mac_map.entry(val.clone()).or_default().push(name.clone());
-                    }
-                    if key == "lxc.net.0.ipv4.address" && !val.is_empty() {
-                        // Strip CIDR notation for comparison
-                        let ip = val.split('/').next().unwrap_or("").to_string();
-                        if !ip.is_empty() {
-                            ip_map.entry(ip).or_default().push(name.clone());
+                        if key == "lxc.net.0.hwaddr" && !val.is_empty() {
+                            mac_map.entry(val.clone()).or_default().push(name.clone());
+                        }
+                        if key == "lxc.net.0.ipv4.address" && !val.is_empty() {
+                            // Strip CIDR notation for comparison
+                            let ip = val.split('/').next().unwrap_or("").to_string();
+                            if !ip.is_empty() {
+                                ip_map.entry(ip).or_default().push(name.clone());
+                            }
                         }
                     }
                 }
@@ -4310,7 +4468,7 @@ pub fn lxc_clone_local(source: &str, new_name: &str, storage: Option<&str>) -> R
         let mut args = vec!["-n", source, "-N", new_name];
         let path_str;
         if let Some(s) = storage {
-            if !s.is_empty() && s != "/var/lib/lxc" {
+            if !s.is_empty() && s != LXC_DEFAULT_PATH {
                 path_str = s.to_string();
                 args.push("-P");
                 args.push(&path_str);
@@ -4320,7 +4478,12 @@ pub fn lxc_clone_local(source: &str, new_name: &str, storage: Option<&str>) -> R
             .map_err(|e| format!("Failed to run lxc-copy: {}", e))?;
 
         if output.status.success() {
-
+            // Register the storage path if non-default
+            if let Some(s) = storage {
+                if !s.is_empty() && s != LXC_DEFAULT_PATH {
+                    lxc_register_path(s);
+                }
+            }
             lxc_clone_fixup_ip(new_name);
             Ok(format!("Container '{}' cloned to '{}'", source, new_name))
         } else {
@@ -4373,7 +4536,7 @@ pub fn lxc_export(container: &str) -> Result<(std::path::PathBuf, ContainerExpor
     } else {
         // Standalone: tar the rootfs + config
 
-        let container_dir = format!("/var/lib/lxc/{}", container);
+        let container_dir = format!("{}/{}", lxc_base_dir(container), container);
         if !std::path::Path::new(&container_dir).exists() {
             return Err(format!("Container directory not found: {}", container_dir));
         }
@@ -4525,8 +4688,8 @@ pub fn lxc_import(archive_path: &str, new_name: &str, storage: Option<&str>) -> 
             Err(format!("Import failed: {} {}", stderr.trim(), stdout.trim()))
         }
     } else {
-        // Standalone: create empty container + extract archive
-        let container_dir = format!("/var/lib/lxc/{}", new_name);
+        // Standalone: create empty container + extract archive (always to default path)
+        let container_dir = format!("{}/{}", LXC_DEFAULT_PATH, new_name);
         if std::path::Path::new(&container_dir).exists() {
             return Err(format!("Container '{}' already exists", new_name));
         }
@@ -4580,7 +4743,7 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
     // Custom storage path
     let path_str;
     if let Some(path) = storage_path {
-        if !path.is_empty() && path != "/var/lib/lxc" {
+        if !path.is_empty() && path != LXC_DEFAULT_PATH {
             path_str = path.to_string();
             args.push("-P");
             args.push(&path_str);
@@ -4596,12 +4759,18 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
 
     if output.status.success() {
 
+        // Register the storage path if non-default
+        if let Some(path) = storage_path {
+            if !path.is_empty() && path != LXC_DEFAULT_PATH {
+                lxc_register_path(path);
+            }
+        }
 
         // Ensure LXC config has proper networking (the download template often
         // omits hwaddr, bridge, etc., leaving the container without networking)
         lxc_ensure_network_config(name);
 
-        let storage_info = storage_path.filter(|p| !p.is_empty() && *p != "/var/lib/lxc")
+        let storage_info = storage_path.filter(|p| !p.is_empty() && *p != LXC_DEFAULT_PATH)
             .map(|p| format!(" on {}", p))
             .unwrap_or_default();
         Ok(format!("Container '{}' created ({} {} {}){}", name, distribution, release, architecture, storage_info))
@@ -4857,8 +5026,8 @@ pub fn lxc_set_resource_limits(container: &str, memory: Option<&str>, cpus: Opti
     let mut messages = Vec::new();
     
     // Limits are applied via lxc-cgroup but only work if container is running.
-    // However, we want them persistent. Persistent config is in /var/lib/lxc/NAME/config
-    let config_path = format!("/var/lib/lxc/{}/config", container);
+    // However, we want them persistent. Persistent config is in <base>/NAME/config
+    let config_path = format!("{}/{}/config", lxc_base_dir(container), container);
     if let Ok(mut config) = std::fs::read_to_string(&config_path) {
         let mut modified = false;
         
@@ -5153,22 +5322,22 @@ pub fn lxc_clone_snapshot(container: &str, new_name: &str) -> Result<String, Str
 pub fn lxc_clone_fixup_ip(new_name: &str) {
     let new_last = find_free_bridge_ip();
     let new_ip = format!("10.0.3.{}", new_last);
-
+    let base = lxc_base_dir(new_name);
 
     // Write multi-distro network config inside rootfs
     write_container_network_config(new_name, &new_ip);
 
     // Remove WolfNet IP marker from clone (it shouldn't inherit the original's WolfNet IP)
-    let wolfnet_dir = format!("/var/lib/lxc/{}/.wolfnet", new_name);
+    let wolfnet_dir = format!("{}/{}/.wolfnet", base, new_name);
     let _ = std::fs::remove_dir_all(&wolfnet_dir);
 
     // Update the LXC config: rootfs path, hostname, hwaddr, ipv4.address, and ensure
     // all required networking fields are present
-    let config_path = format!("/var/lib/lxc/{}/config", new_name);
+    let config_path = format!("{}/{}/config", base, new_name);
     if let Ok(config) = std::fs::read_to_string(&config_path) {
         let new_mac = format!("00:16:3e:{:02x}:{:02x}:{:02x}",
             rand_byte(), rand_byte(), new_last);
-        let correct_rootfs = format!("dir:/var/lib/lxc/{}/rootfs", new_name);
+        let correct_rootfs = format!("dir:{}/{}/rootfs", base, new_name);
         let mut has_hwaddr = false;
         let mut has_type = false;
         let mut has_link = false;
@@ -5223,14 +5392,14 @@ pub fn lxc_clone_fixup_ip(new_name: &str) {
 
     // Write the setup_done marker so lxc_post_start_setup doesn't
     // redundantly re-assign the bridge IP we just set
-    let marker = format!("/var/lib/lxc/{}/.wolfstack_setup_done", new_name);
+    let marker = format!("{}/{}/.wolfstack_setup_done", base, new_name);
     let _ = std::fs::write(&marker, "cloned");
 }
 
 /// Ensure an LXC container has proper networking config after creation.
 /// The `lxc-create -t download` template often omits hwaddr, bridge, etc.
 pub fn lxc_ensure_network_config(name: &str) {
-    let config_path = format!("/var/lib/lxc/{}/config", name);
+    let config_path = format!("{}/{}/config", lxc_base_dir(name), name);
     let config = match std::fs::read_to_string(&config_path) {
         Ok(c) => c,
         Err(_) => return,
@@ -5411,8 +5580,12 @@ fn parse_size_str(s: &str) -> u64 {
 
 /// Read a cgroup value via lxc-cgroup command
 fn lxc_cgroup_read(name: &str, key: &str) -> Option<u64> {
+    let base = lxc_base_dir(name);
+    let mut args: Vec<&str> = Vec::new();
+    if base != LXC_DEFAULT_PATH { args.extend_from_slice(&["-P", &base]); }
+    args.extend_from_slice(&["-n", name, key]);
     Command::new("lxc-cgroup")
-        .args(["-n", name, key])
+        .args(&args)
         .output()
         .ok()
         .and_then(|o| {
@@ -5425,8 +5598,12 @@ fn lxc_cgroup_read(name: &str, key: &str) -> Option<u64> {
 /// Get CPU usage percentage for an LXC container
 fn lxc_cpu_percent(name: &str) -> f64 {
     // Read cpu.stat usage_usec (cgroup v2)
+    let base = lxc_base_dir(name);
+    let mut args: Vec<&str> = Vec::new();
+    if base != LXC_DEFAULT_PATH { args.extend_from_slice(&["-P", &base]); }
+    args.extend_from_slice(&["-n", name, "cpu.stat"]);
     let usage = Command::new("lxc-cgroup")
-        .args(["-n", name, "cpu.stat"])
+        .args(&args)
         .output()
         .ok()
         .and_then(|o| {
@@ -5457,8 +5634,12 @@ fn lxc_cpu_percent(name: &str) -> f64 {
 
 fn read_container_net(name: &str) -> (u64, u64) {
     // Read network stats via container's PID
+    let base = lxc_base_dir(name);
+    let mut info_args: Vec<&str> = Vec::new();
+    if base != LXC_DEFAULT_PATH { info_args.extend_from_slice(&["-P", &base]); }
+    info_args.extend_from_slice(&["-n", name, "-pH"]);
     let pid = Command::new("lxc-info")
-        .args(["-n", name, "-pH"])
+        .args(&info_args)
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -5532,9 +5713,15 @@ pub fn install_component_in_container(
                 .map_err(|e| format!("Failed to exec in container: {}", e))?
         }
         "lxc" => {
+            let base = lxc_base_dir(container);
+            let mut prefix: Vec<&str> = Vec::new();
+            if base != LXC_DEFAULT_PATH { prefix.extend_from_slice(&["-P", &base]); }
+
             // Verify container is running
+            let mut info_args = prefix.clone();
+            info_args.extend_from_slice(&["-n", container, "-sH"]);
             let check = Command::new("lxc-info")
-                .args(["-n", container, "-sH"])
+                .args(&info_args)
                 .output()
                 .map_err(|e| format!("Failed to check container state: {}", e))?;
             let state = String::from_utf8_lossy(&check.stdout).trim().to_string();
@@ -5543,15 +5730,17 @@ pub fn install_component_in_container(
             }
 
             // First ensure curl is available
-            let _ = Command::new("lxc-attach")
-                .args(["-n", container, "--", "sh", "-c",
-                    "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || yum install -y -q curl 2>/dev/null || apk add --quiet curl 2>/dev/null || true"])
-                .output();
+            let mut args = prefix.clone();
+            args.extend_from_slice(&["-n", container, "--", "sh", "-c",
+                "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || yum install -y -q curl 2>/dev/null || apk add --quiet curl 2>/dev/null || true"]);
+            let _ = Command::new("lxc-attach").args(&args).output();
 
             // Download and run install script (DEBIAN_FRONTEND=noninteractive prevents dpkg prompts from hanging)
+            let install_cmd = format!("export DEBIAN_FRONTEND=noninteractive; curl -fsSL '{}' | bash", install_script);
+            let mut args = prefix.clone();
+            args.extend_from_slice(&["-n", container, "--", "sh", "-c", &install_cmd]);
             Command::new("lxc-attach")
-                .args(["-n", container, "--", "sh", "-c",
-                    &format!("export DEBIAN_FRONTEND=noninteractive; curl -fsSL '{}' | bash", install_script)])
+                .args(&args)
                 .output()
                 .map_err(|e| format!("Failed to attach to container: {}", e))?
         }
@@ -5592,13 +5781,18 @@ pub fn list_running_containers() -> Vec<(String, String, String)> {
         }
     }
 
-    // LXC containers
-    if let Ok(output) = Command::new("lxc-ls")
-        .args(["--running"])
-        .output()
-    {
-        for name in String::from_utf8_lossy(&output.stdout).split_whitespace() {
-            result.push(("lxc".to_string(), name.to_string(), "LXC".to_string()));
+    // LXC containers — scan all registered storage paths
+    let mut seen_lxc = std::collections::HashSet::new();
+    for lxc_path in lxc_storage_paths() {
+        if let Ok(output) = Command::new("lxc-ls")
+            .args(["-P", &lxc_path, "--running"])
+            .output()
+        {
+            for name in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+                if seen_lxc.insert(name.to_string()) {
+                    result.push(("lxc".to_string(), name.to_string(), "LXC".to_string()));
+                }
+            }
         }
     }
 
@@ -5618,7 +5812,7 @@ pub struct ContainerMount {
 
 /// Add a bind mount to an LXC container's config (container must be stopped)
 pub fn lxc_add_mount(container: &str, host_path: &str, container_path: &str, read_only: bool) -> Result<String, String> {
-    let config_path = format!("/var/lib/lxc/{}/config", container);
+    let config_path = format!("{}/{}/config", lxc_base_dir(container), container);
     let mut config = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("Container '{}' config not found: {}", container, e))?;
 
@@ -5650,7 +5844,7 @@ pub fn lxc_add_mount(container: &str, host_path: &str, container_path: &str, rea
 
 /// Remove a bind mount from an LXC container's config
 pub fn lxc_remove_mount(container: &str, host_path: &str) -> Result<String, String> {
-    let config_path = format!("/var/lib/lxc/{}/config", container);
+    let config_path = format!("{}/{}/config", lxc_base_dir(container), container);
     let config = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("Container '{}' config not found: {}", container, e))?;
 
@@ -5674,7 +5868,7 @@ pub fn lxc_remove_mount(container: &str, host_path: &str) -> Result<String, Stri
 
 /// List current bind mounts for an LXC container
 pub fn lxc_list_mounts(container: &str) -> Vec<ContainerMount> {
-    let config_path = format!("/var/lib/lxc/{}/config", container);
+    let config_path = format!("{}/{}/config", lxc_base_dir(container), container);
     let config = match std::fs::read_to_string(&config_path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),

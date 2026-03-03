@@ -8841,6 +8841,11 @@ async function openLxcSettings(name) {
                         <input type="text" class="form-control" value="${escapeHtml(cfg.arch || 'auto')}" readonly
                             style="opacity:0.7;cursor:not-allowed;">
                     </div>
+                    ${cfg.storage_path ? `<div class="form-group">
+                        <label>Storage</label>
+                        <input type="text" class="form-control" value="${escapeHtml(cfg.storage_path)}" readonly
+                            style="opacity:0.7;cursor:not-allowed;font-size:12px;">
+                    </div>` : ''}
                     <div class="form-group">
                         <label>Privilege Mode</label>
                         <select id="lxc-unprivileged" class="form-control">

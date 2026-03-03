@@ -133,6 +133,24 @@ async fn main() -> std::io::Result<()> {
     info!("  Hostname:   {}", hostname);
     info!("  Dashboard:  http://{}:{}", cli.bind, cli.port);
 
+    // Seed LXC storage paths from any mounted storage that has LXC containers
+    if let Ok(entries) = std::fs::read_dir("/mnt/wolfstack") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Check if this mount has LXC containers (subdirs with 'config' files)
+                if let Ok(subdirs) = std::fs::read_dir(&path) {
+                    for sub in subdirs.flatten() {
+                        if sub.path().join("config").exists() && sub.path().join("rootfs").exists() {
+                            containers::lxc_register_path(&path.to_string_lossy());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Ensure lxcbr0 bridge is up (needed for WolfNet container networking)
     containers::ensure_lxc_bridge();
     // Re-apply host routes for running containers (routes are lost on restart)

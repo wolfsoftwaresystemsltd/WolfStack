@@ -324,7 +324,7 @@ fn install_lxc(
 
     // Write WolfNet IP file so it's pre-assigned
     if let Some(ref ip) = wolfnet_ip {
-        let wolfnet_dir = format!("/var/lib/lxc/{}/.wolfnet", container_name);
+        let wolfnet_dir = format!("{}/{}/.wolfnet", crate::containers::lxc_base_dir(container_name), container_name);
         let _ = std::fs::create_dir_all(&wolfnet_dir);
         let _ = std::fs::write(format!("{}/ip", wolfnet_dir), ip);
     }
@@ -639,13 +639,14 @@ pub fn prepare_install(
 
             // Write WolfNet IP
             if let Some(ref ip) = wolfnet_ip {
+                let base = crate::containers::lxc_base_dir(container_name);
                 script.push_str(&format!(
-                    "mkdir -p /var/lib/lxc/{}/.wolfnet\n",
-                    shell_escape(container_name)
+                    "mkdir -p {}/{}/.wolfnet\n",
+                    shell_escape(&base), shell_escape(container_name)
                 ));
                 script.push_str(&format!(
-                    "echo {} > /var/lib/lxc/{}/.wolfnet/ip\n\n",
-                    shell_escape(ip), shell_escape(container_name)
+                    "echo {} > {}/{}/.wolfnet/ip\n\n",
+                    shell_escape(ip), shell_escape(&base), shell_escape(container_name)
                 ));
             }
 
