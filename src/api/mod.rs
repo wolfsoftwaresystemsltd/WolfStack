@@ -2263,6 +2263,12 @@ pub async fn lxc_create(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
 
+    // Auto-assign WolfNet IP if not specified but WolfNet is available
+    let wolfnet_ip = match body.wolfnet_ip.as_deref() {
+        Some(ip) if !ip.is_empty() => Some(ip.to_string()),
+        _ => containers::next_available_wolfnet_ip(),
+    };
+
     // On Proxmox, pct_create handles password, memory, and CPU natively
     if containers::is_proxmox() {
         let storage = body.storage_path.as_deref();
@@ -2279,7 +2285,7 @@ pub async fn lxc_create(
         return match containers::pct_create_api(
             &body.name, &body.distribution, &body.release, &body.architecture,
             storage, password, memory_mb, cpu_cores,
-            body.wolfnet_ip.as_deref(),
+            wolfnet_ip.as_deref(),
         ) {
             Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
             Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
@@ -2311,13 +2317,11 @@ pub async fn lxc_create(
                 _ => {}
             }
 
-            // Attach WolfNet if requested
-            if let Some(ip) = &body.wolfnet_ip {
-                if !ip.is_empty() {
-                    match containers::lxc_attach_wolfnet(&body.name, ip) {
-                        Ok(wn_msg) => messages.push(wn_msg),
-                        Err(e) => messages.push(format!("WolfNet warning: {}", e)),
-                    }
+            // Attach WolfNet (auto-assigned or user-specified)
+            if let Some(ref ip) = wolfnet_ip {
+                match containers::lxc_attach_wolfnet(&body.name, ip) {
+                    Ok(wn_msg) => messages.push(wn_msg),
+                    Err(e) => messages.push(format!("WolfNet warning: {}", e)),
                 }
             }
 
