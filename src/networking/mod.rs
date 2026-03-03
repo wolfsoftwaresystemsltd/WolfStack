@@ -2121,18 +2121,20 @@ pub fn detect_wolfnet_ips() -> Vec<serde_json::Value> {
         }
     }
 
-    // LXC containers with WolfNet IPs (/var/lib/lxc/<name>/.wolfnet/ip)
-    if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let ip_file = format!("/var/lib/lxc/{}/.wolfnet/ip", name);
-            if let Ok(ip) = std::fs::read_to_string(&ip_file) {
-                let ip = ip.trim().to_string();
-                if !ip.is_empty() && ip.parse::<std::net::Ipv4Addr>().is_ok() {
-                    ips.push(serde_json::json!({
-                        "ip": ip,
-                        "source": format!("lxc: {}", name)
-                    }));
+    // LXC containers with WolfNet IPs — scan all registered storage paths
+    for lxc_path in crate::containers::lxc_storage_paths() {
+        if let Ok(entries) = std::fs::read_dir(&lxc_path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let ip_file = entry.path().join(".wolfnet/ip");
+                if let Ok(ip) = std::fs::read_to_string(&ip_file) {
+                    let ip = ip.trim().to_string();
+                    if !ip.is_empty() && ip.parse::<std::net::Ipv4Addr>().is_ok() {
+                        ips.push(serde_json::json!({
+                            "ip": ip,
+                            "source": format!("lxc: {}", name)
+                        }));
+                    }
                 }
             }
         }

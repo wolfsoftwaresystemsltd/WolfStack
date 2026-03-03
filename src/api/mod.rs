@@ -2655,7 +2655,7 @@ pub async fn lxc_clone(
     match result {
         Ok(msg) => {
             // Remove duplicated wolfnet IP marker and allocate fresh one
-            let _ = std::fs::remove_dir_all(format!("/var/lib/lxc/{}/.wolfnet", body.new_name));
+            let _ = std::fs::remove_dir_all(format!("{}/{}/.wolfnet", containers::lxc_base_dir(&body.new_name), body.new_name));
             let _ = containers::lxc_start(&body.new_name);
             if let Some(ip) = containers::next_available_wolfnet_ip() {
                 let _ = containers::lxc_attach_wolfnet(&body.new_name, &ip);
@@ -3015,7 +3015,7 @@ async fn lxc_import_endpoint_inner(
             let _ = std::fs::remove_file(&archive);
 
             // Remove duplicated wolfnet IP from the template (both standalone and Proxmox)
-            let wolfnet_marker = format!("/var/lib/lxc/{}/.wolfnet", new_name);
+            let wolfnet_marker = format!("{}/{}/.wolfnet", containers::lxc_base_dir(&new_name), new_name);
             let _ = std::fs::remove_dir_all(&wolfnet_marker);
 
             // Also strip any wolfnet veth config from the imported container
