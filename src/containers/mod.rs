@@ -972,8 +972,12 @@ pub fn lxc_attach_wolfnet(container: &str, ip: &str) -> Result<String, String> {
     // Ensure lxcbr0 bridge exists (needed for WolfNet routing)
     ensure_lxc_bridge();
 
-    // Write bridge IP network config into the rootfs
-    assign_container_bridge_ip(container);
+    // Write bridge IP network config into the rootfs.
+    // Standalone only — Proxmox manages eth0 on vmbr0 and we must NOT overwrite
+    // its config. Proxmox wn0 config is written at runtime by lxc_apply_wolfnet.
+    if !is_proxmox() {
+        assign_container_bridge_ip(container);
+    }
 
     // Ensure the LXC config has a NIC on lxcbr0.
     // Proxmox: add a separate wn0 NIC (eth0 stays on vmbr0 for external access).
@@ -1117,7 +1121,27 @@ fn lxc_apply_wolfnet(container: &str) {
             let bridge_cidr = format!("{}/24", bridge_ip);
             let wolfnet_cidr = format!("{}/32", ip);
 
-            // Bring wn0 up
+            // Write persistent wn0 config for NetworkManager-based distros (Fedora, AlmaLinux, Rocky).
+            // Without this, NM auto-manages wn0 with DHCP and overrides our manual IP assignments.
+            // No gateway/DNS on wn0 — those stay on eth0 (vmbr0).
+            let nm_cmd = format!(
+                "if [ -d /etc/NetworkManager ]; then \
+                     mkdir -p /etc/NetworkManager/system-connections && \
+                     printf '[connection]\\nid=wn0\\ntype=ethernet\\ninterface-name=wn0\\nautoconnect=true\\n\\n\
+[ipv4]\\nmethod=manual\\naddress1={}/24\\naddress2={}/32\\nroute1=10.10.10.0/24,10.0.3.1\\n\\n\
+[ipv6]\\nmethod=disabled\\n' \
+                     > /etc/NetworkManager/system-connections/wn0.nmconnection && \
+                     chmod 600 /etc/NetworkManager/system-connections/wn0.nmconnection && \
+                     nmcli con reload 2>/dev/null && \
+                     nmcli con up wn0 2>/dev/null; \
+                 fi; true",
+                bridge_ip, ip
+            );
+            let mut nm_args: Vec<String> = attach_prefix.clone();
+            nm_args.extend(["sh", "-c", &nm_cmd].iter().map(|s| s.to_string()));
+            let _ = Command::new("lxc-attach").args(&nm_args).output();
+
+            // Bring wn0 up (fallback for non-NM distros; idempotent if NM already brought it up)
             let mut args: Vec<String> = attach_prefix.clone();
             args.extend(["ip", "link", "set", "wn0", "up"].iter().map(|s| s.to_string()));
             let _ = Command::new("lxc-attach").args(&args).output();
