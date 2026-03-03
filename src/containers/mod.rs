@@ -968,6 +968,46 @@ pub fn lxc_attach_wolfnet(container: &str, ip: &str) -> Result<String, String> {
         return Err(format!("Failed to save WolfNet IP: {}", e));
     }
 
+    // Ensure lxcbr0 bridge exists (needed for WolfNet routing)
+    ensure_lxc_bridge();
+
+    // Write bridge IP network config into the rootfs
+    assign_container_bridge_ip(container);
+
+    // For standalone LXC, ensure the config has a NIC on lxcbr0
+    if !is_proxmox() {
+        let config_path = format!("{}/{}/config", base, container);
+        if let Ok(cfg) = std::fs::read_to_string(&config_path) {
+            if !cfg.contains("lxcbr0") {
+                let max_idx = cfg.lines()
+                    .filter_map(|l| {
+                        let t = l.trim();
+                        if t.starts_with("lxc.net.") {
+                            t["lxc.net.".len()..].split('.').next()
+                                .and_then(|n| n.parse::<u32>().ok())
+                        } else { None }
+                    })
+                    .max()
+                    .unwrap_or(0);
+                let wn_idx = max_idx + 1;
+                let wn_mac = format!("00:16:3e:{:02x}:{:02x}:{:02x}",
+                    rand_byte(), rand_byte(), rand_byte());
+                let wn_config = format!(
+                    "\n# WolfNet NIC\n\
+                     lxc.net.{i}.type = veth\n\
+                     lxc.net.{i}.link = lxcbr0\n\
+                     lxc.net.{i}.flags = up\n\
+                     lxc.net.{i}.name = wn0\n\
+                     lxc.net.{i}.hwaddr = {mac}\n",
+                    i = wn_idx, mac = wn_mac
+                );
+                let mut content = cfg;
+                content.push_str(&wn_config);
+                let _ = std::fs::write(&config_path, content);
+            }
+        }
+    }
+
     // If the container is already running, apply immediately (no restart needed)
     let mut info_args = vec!["-n", container, "-sH"];
     if base != LXC_DEFAULT_PATH {
@@ -3597,6 +3637,47 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
             let _ = std::fs::create_dir_all(&wolfnet_dir);
             std::fs::write(&wolfnet_ip_file, ip_trimmed)
                 .map_err(|e| format!("Failed to write WolfNet IP: {}", e))?;
+
+            // Ensure the lxcbr0 bridge exists (needed for WolfNet routing)
+            ensure_lxc_bridge();
+
+            // Write bridge IP network config into the rootfs so networking
+            // is correct even before lxc_apply_wolfnet runs at start time
+            assign_container_bridge_ip(container);
+
+            // Ensure the LXC config has a NIC on lxcbr0 (may be missing if
+            // container was created without WolfNet or on a different system)
+            let config_path = format!("{}/{}/config", base, container);
+            if let Ok(cfg) = std::fs::read_to_string(&config_path) {
+                if !cfg.contains("lxcbr0") {
+                    // Find next free net index
+                    let max_idx = cfg.lines()
+                        .filter_map(|l| {
+                            let t = l.trim();
+                            if t.starts_with("lxc.net.") {
+                                t["lxc.net.".len()..].split('.').next()
+                                    .and_then(|n| n.parse::<u32>().ok())
+                            } else { None }
+                        })
+                        .max()
+                        .unwrap_or(0);
+                    let wn_idx = max_idx + 1;
+                    let wn_mac = format!("00:16:3e:{:02x}:{:02x}:{:02x}",
+                        rand_byte(), rand_byte(), rand_byte());
+                    let wn_config = format!(
+                        "\n# WolfNet NIC\n\
+                         lxc.net.{i}.type = veth\n\
+                         lxc.net.{i}.link = lxcbr0\n\
+                         lxc.net.{i}.flags = up\n\
+                         lxc.net.{i}.name = wn0\n\
+                         lxc.net.{i}.hwaddr = {mac}\n",
+                        i = wn_idx, mac = wn_mac
+                    );
+                    let mut content = cfg;
+                    content.push_str(&wn_config);
+                    let _ = std::fs::write(&config_path, content);
+                }
+            }
 
             // Apply live if the container is running
             let mut info_args: Vec<&str> = Vec::new();
