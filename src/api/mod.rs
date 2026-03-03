@@ -656,6 +656,7 @@ pub struct UpdateNodeSettings {
     pub pve_cluster_name: Option<String>,
     pub cluster_name: Option<String>,
     pub login_disabled: Option<bool>,
+    pub update_script: Option<String>,
 }
 
 pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<UpdateNodeSettings>) -> HttpResponse {
@@ -684,6 +685,7 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
         fp,
         cluster_name.clone(),
         body.login_disabled,
+        body.update_script.clone(),
     ) {
         // If cluster name changed, rename all cluster-scoped data to match.
         // All nodes in the cluster share the same name, so wolfrun services,
@@ -710,7 +712,7 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                     if node.cluster_name.as_deref() == Some(old_name.as_str()) {
                         state.cluster.update_node_settings(
                             &node.id, None, None, None, None, None,
-                            Some(new_name.clone()), None,
+                            Some(new_name.clone()), None, None,
                         );
                     }
                 }

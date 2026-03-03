@@ -4908,6 +4908,11 @@ function openNodeSettings(nodeId) {
                     <input type="text" class="form-control" id="node-settings-cluster-name" value="${clusterName}">
                     <small style="color: var(--text-muted);">Change to move this node to a different cluster group</small>
                 </div>
+                <div class="form-group">
+                    <label>Update Script</label>
+                    <input type="text" class="form-control" id="node-settings-update-script" value="${node.update_script || ''}" placeholder="curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash" style="font-family:'JetBrains Mono',monospace;font-size:12px;">
+                    <small style="color: var(--text-muted);">Command to run when upgrading this node. Leave blank for the default setup script.</small>
+                </div>
                 ${isPve ? `
                 <div class="form-group">
                     <label>PVE Token</label>
@@ -5098,6 +5103,15 @@ async function saveNodeSettings() {
     if (pveToken) updates.pve_token = pveToken;
     if (pveFingerprint !== undefined && document.getElementById('node-settings-pve-fingerprint')) {
         updates.pve_fingerprint = pveFingerprint || null;
+    }
+
+    // Update script
+    const updateScriptEl = document.getElementById('node-settings-update-script');
+    if (updateScriptEl) {
+        const node = allNodes.find(n => n.id === nodeId);
+        const oldScript = node ? (node.update_script || '') : '';
+        const newScript = updateScriptEl.value.trim();
+        if (newScript !== oldScript) updates.update_script = newScript;
     }
 
     // Login disabled toggle

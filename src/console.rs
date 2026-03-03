@@ -37,10 +37,19 @@ pub async fn console_ws(
         })));
     }
 
+    // Look up this node's custom update script (if any)
+    let update_script = if container_type == "upgrade" {
+        state.cluster.get_all_nodes().iter()
+            .find(|n| n.is_self)
+            .and_then(|n| n.update_script.clone())
+    } else {
+        None
+    };
+
     let (response, session, msg_stream) = actix_ws::handle(&req, body)?;
 
     // Use actix_rt::spawn (not tokio::spawn) so we can use non-Send types
-    actix_rt::spawn(console_session(session, msg_stream, container_type, container_name));
+    actix_rt::spawn(console_session(session, msg_stream, container_type, container_name, update_script));
 
     Ok(response)
 }
@@ -50,6 +59,7 @@ async fn console_session(
     mut msg_stream: actix_ws::MessageStream,
     ctype: String,
     name: String,
+    update_script: Option<String>,
 ) {
     // Create PTY
     let pty_system = native_pty_system();
@@ -105,8 +115,11 @@ async fn console_session(
             cmd.arg("if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi");
         }
         "upgrade" => {
-            // WolfStack upgrade — re-run the setup script
-            cmd.arg("curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/main/setup.sh | bash");
+            // WolfStack upgrade — use custom update script if configured, otherwise default
+            let script = update_script.as_deref().unwrap_or(
+                "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash"
+            );
+            cmd.arg(script);
         }
         "install" => {
             // Component install — name format: "component" (host) or "component@docker:container" / "component@lxc:container"

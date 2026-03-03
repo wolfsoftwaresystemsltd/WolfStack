@@ -88,6 +88,8 @@ pub struct Node {
     pub login_disabled: bool,             // Whether direct login is disabled on this node
     #[serde(default)]
     pub tls: bool,                        // Whether this node serves HTTPS on its main port
+    #[serde(default)]
+    pub update_script: Option<String>,    // Custom install/update script command
 }
 
 fn default_node_type() -> String { "wolfstack".to_string() }
@@ -222,6 +224,7 @@ impl ClusterState {
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let prev_login_disabled = nodes.get(&self.self_id).map(|n| n.login_disabled);
+        let prev_update_script = nodes.get(&self.self_id).and_then(|n| n.update_script.clone());
         nodes.insert(self.self_id.clone(), Node {
             id: self.self_id.clone(),
             hostname: metrics.hostname.clone(),
@@ -249,6 +252,7 @@ impl ClusterState {
             has_kvm,
             login_disabled: prev_login_disabled.or_else(|| Self::load_self_login_disabled()).unwrap_or(false),
             tls: tls_enabled,
+            update_script: prev_update_script,
         });
     }
 
@@ -354,6 +358,7 @@ impl ClusterState {
             has_kvm: false,
             login_disabled: false,
             tls: false,
+            update_script: None,
         });
         drop(nodes);
         self.save_nodes();
@@ -446,7 +451,7 @@ impl ClusterState {
     }
 
     /// Update node settings (hostname, address, port, token, fingerprint, cluster name)
-    pub fn update_node_settings(&self, id: &str, hostname: Option<String>, address: Option<String>, port: Option<u16>, pve_token: Option<String>, pve_fingerprint: Option<Option<String>>, cluster_name: Option<String>, login_disabled: Option<bool>) -> bool {
+    pub fn update_node_settings(&self, id: &str, hostname: Option<String>, address: Option<String>, port: Option<u16>, pve_token: Option<String>, pve_fingerprint: Option<Option<String>>, cluster_name: Option<String>, login_disabled: Option<bool>, update_script: Option<String>) -> bool {
         let mut nodes = self.nodes.write().unwrap();
         if let Some(node) = nodes.get_mut(id) {
             if let Some(h) = hostname { node.hostname = h; }
@@ -455,6 +460,7 @@ impl ClusterState {
             if let Some(token) = pve_token { node.pve_token = Some(token); }
             if let Some(fp) = pve_fingerprint { node.pve_fingerprint = fp; }
             if let Some(disabled) = login_disabled { node.login_disabled = disabled; }
+            if let Some(script) = update_script { node.update_script = if script.is_empty() { None } else { Some(script) }; }
             if let Some(ref name) = cluster_name {
                 // Update both cluster_name fields so sidebar grouping works
                 node.cluster_name = Some(name.clone());
@@ -663,6 +669,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         has_kvm: true,
                         login_disabled: node.login_disabled,
                         tls: true, // Proxmox always serves HTTPS
+                        update_script: node.update_script.clone(),
                     });
 
                     // Reset fail count on success
@@ -749,6 +756,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                 has_kvm,
                                 login_disabled: node.login_disabled,
                                 tls: node_tls,
+                                update_script: node.update_script.clone(),
                             });
 
                             // Reset fail count on success
@@ -819,6 +827,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                             },
                                             known.cluster_name.clone(),
                                             None,  // don't propagate login_disabled via gossip
+                                            None,  // don't propagate update_script via gossip
                                         );
                                     }
                                 } else {
