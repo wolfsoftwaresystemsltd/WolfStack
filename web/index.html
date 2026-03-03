@@ -3091,9 +3091,14 @@
                                     Checking...
                                 </span>
                             </div>
-                            <button class="btn btn-primary" onclick="generateClusterSecret()" id="btn-generate-secret">
-                                Generate New Cluster Secret
-                            </button>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <button class="btn btn-primary" onclick="generateClusterSecret()" id="btn-generate-secret">
+                                    Generate New Cluster Secret
+                                </button>
+                                <button class="btn" onclick="repushClusterSecret()" id="btn-repush-secret" style="display:none;">
+                                    Re-push to All Nodes
+                                </button>
+                            </div>
                         </div>
                         <div id="cluster-secret-results" style="margin-top:16px;display:none;">
                         </div>

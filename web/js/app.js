@@ -15887,12 +15887,15 @@ async function loadClusterSecretStatus() {
         var resp = await fetch('/api/cluster/secret-status');
         if (!resp.ok) { el.textContent = 'Error loading status'; return; }
         var data = await resp.json();
+        var repushBtn = document.getElementById('btn-repush-secret');
         if (data.has_custom_secret) {
             el.textContent = 'Custom secret active';
             el.style.color = 'var(--success)';
+            if (repushBtn) repushBtn.style.display = '';
         } else {
             el.textContent = 'Using default secret';
             el.style.color = 'var(--text-muted)';
+            if (repushBtn) repushBtn.style.display = 'none';
         }
     } catch (e) {
         el.textContent = 'Error';
@@ -15933,6 +15936,45 @@ async function generateClusterSecret() {
             container.style.display = 'block';
         }
         loadClusterSecretStatus();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    } finally {
+        btn.innerHTML = origHtml;
+        btn.disabled = false;
+    }
+}
+
+async function repushClusterSecret() {
+    var btn = document.getElementById('btn-repush-secret');
+    var origHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = 'Pushing to all nodes...';
+    try {
+        var resp = await fetch('/api/cluster/secret/repush', { method: 'POST' });
+        var data = await resp.json();
+        if (!resp.ok) {
+            showToast(data.error || 'Failed to re-push', 'error');
+            return;
+        }
+        var results = data.nodes || [];
+        var ok = results.filter(function(r) { return r.success; }).length;
+        var fail = results.filter(function(r) { return !r.success; }).length;
+        showToast('Re-pushed to ' + ok + ' node(s)' + (fail > 0 ? ', ' + fail + ' failed' : ''), fail > 0 ? 'warning' : 'success');
+
+        var container = document.getElementById('cluster-secret-results');
+        if (container && results.length > 0) {
+            var html = '<div style="background:var(--bg-input);border-radius:12px;padding:16px;border:1px solid var(--border);max-width:600px;">';
+            html += '<h4 style="margin:0 0 10px;font-size:14px;">Re-push Results</h4>';
+            results.forEach(function(r) {
+                var icon = r.success ? '<span style="color:var(--success)">OK</span>' : '<span style="color:var(--danger)">FAILED</span>';
+                html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:13px;border-bottom:1px solid var(--border);">';
+                html += '<span>' + (r.node || r.address) + '</span>' + icon;
+                html += '</div>';
+            });
+            html += '</div>';
+            container.innerHTML = html;
+            container.style.display = 'block';
+        }
     } catch (e) {
         showToast('Failed: ' + e.message, 'error');
     } finally {

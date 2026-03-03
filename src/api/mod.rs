@@ -419,6 +419,58 @@ pub async fn cluster_secret_generate(req: HttpRequest, state: web::Data<AppState
     }))
 }
 
+/// POST /api/cluster/secret/repush — re-push the existing custom secret to all nodes
+pub async fn cluster_secret_repush(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let active = crate::auth::load_cluster_secret();
+    if active == crate::auth::default_cluster_secret() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "No custom secret to push — generate one first"
+        }));
+    }
+
+    let nodes = state.cluster.get_all_nodes();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_default();
+
+    let mut results = Vec::new();
+    for node in &nodes {
+        if node.is_self || !node.online || node.node_type == "proxmox" {
+            continue;
+        }
+        let urls = build_node_urls(&node.address, node.port, "/api/cluster/secret/receive");
+        let mut pushed = false;
+        let mut err = String::new();
+        for url in &urls {
+            match client.post(url)
+                .header("X-WolfStack-Secret", crate::auth::default_cluster_secret())
+                .json(&serde_json::json!({ "secret": active }))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => { pushed = true; break; }
+                Ok(resp) => { err = format!("HTTP {}", resp.status()); }
+                Err(e) => { err = format!("{}", e); }
+            }
+        }
+        results.push(serde_json::json!({
+            "node": if node.hostname.is_empty() { &node.address } else { &node.hostname },
+            "address": node.address,
+            "success": pushed,
+            "error": if pushed { "" } else { &err },
+        }));
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "pushed": true,
+        "nodes": results,
+    }))
+}
+
 /// POST /api/cluster/secret/receive — receive a new cluster secret from admin node
 pub async fn cluster_secret_receive(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
     if let Err(resp) = require_cluster_auth(&req, &state) { return resp; }
@@ -9283,6 +9335,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/cluster/verify-token", web::get().to(verify_join_token))
         .route("/api/cluster/secret-status", web::get().to(cluster_secret_status))
         .route("/api/cluster/secret/generate", web::post().to(cluster_secret_generate))
+        .route("/api/cluster/secret/repush", web::post().to(cluster_secret_repush))
         .route("/api/cluster/secret/receive", web::post().to(cluster_secret_receive))
         .route("/api/cluster/wolfnet-sync", web::post().to(wolfnet_sync_cluster))
         .route("/api/cluster/diagnose", web::post().to(cluster_diagnose))
