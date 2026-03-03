@@ -4420,6 +4420,55 @@ fn pct_ensure_template(storage: &str, distribution: &str, release: &str, archite
     Ok(format!("{}:vztmpl/{}", storage, best_template))
 }
 
+/// Fix networking for NetworkManager-based distros on Proxmox containers.
+/// Proxmox's `ip=dhcp` doesn't always write correct NetworkManager keyfiles
+/// for RHEL-family containers (AlmaLinux, Rocky, Fedora, CentOS), leaving them
+/// without working networking. This mounts the rootfs and writes the config.
+fn pct_fix_nm_networking(vmid: &str, distribution: &str) {
+    let dist = distribution.to_lowercase();
+    let is_nm_distro = dist.contains("alma") || dist.contains("rocky")
+        || dist.contains("centos") || dist.contains("fedora")
+        || dist.contains("rhel");
+    if !is_nm_distro { return; }
+
+    // Mount the container rootfs
+    let mount_out = Command::new("pct").args(["mount", vmid]).output();
+    match mount_out {
+        Ok(ref o) if o.status.success() => {}
+        _ => return,
+    }
+
+    let rootfs = format!("/var/lib/lxc/{}/rootfs", vmid);
+
+    // Write NetworkManager keyfile for eth0 DHCP
+    let nm_base = format!("{}/etc/NetworkManager", rootfs);
+    if std::path::Path::new(&nm_base).exists() {
+        let nm_dir = format!("{}/system-connections", nm_base);
+        let _ = std::fs::create_dir_all(&nm_dir);
+        let conf = "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n\
+                    [ipv4]\nmethod=auto\ndns=8.8.8.8;1.1.1.1;\n\n\
+                    [ipv6]\nmethod=auto\n";
+        let nm_file = format!("{}/eth0.nmconnection", nm_dir);
+        let _ = std::fs::write(&nm_file, conf);
+        let _ = std::fs::set_permissions(
+            &nm_file,
+            std::fs::Permissions::from_mode(0o600),
+        );
+        // Remove legacy ifcfg files that might conflict
+        let _ = std::fs::remove_file(format!(
+            "{}/etc/sysconfig/network-scripts/ifcfg-eth0", rootfs
+        ));
+    }
+
+    // Write fallback resolv.conf (DHCP will overwrite if it gets DNS from server)
+    let resolv_path = format!("{}/etc/resolv.conf", rootfs);
+    let _ = std::fs::remove_file(&resolv_path); // might be a symlink
+    let _ = std::fs::write(&resolv_path, "nameserver 8.8.8.8\nnameserver 1.1.1.1\n");
+
+    // Unmount
+    let _ = Command::new("pct").args(["unmount", vmid]).output();
+}
+
 /// Create an LXC container via Proxmox's pct command (public API entry point)
 pub fn pct_create_api(name: &str, distribution: &str, release: &str, architecture: &str,
               storage_id: Option<&str>, root_password: Option<&str>,
@@ -4487,6 +4536,11 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
 
     if output.status.success() {
 
+        // Fix networking for NetworkManager-based distros (AlmaLinux, Rocky, Fedora, CentOS).
+        // Proxmox's `ip=dhcp` doesn't always generate correct NM keyfiles for RHEL-family
+        // containers, leaving them without working networking. Mount the rootfs, write a
+        // proper eth0.nmconnection for DHCP, and set fallback DNS.
+        pct_fix_nm_networking(&vmid.to_string(), distribution);
 
         // Attach WolfNet: add wn0 on lxcbr0 with the WolfNet IP
         if let Some(ip) = wolfnet_ip {
