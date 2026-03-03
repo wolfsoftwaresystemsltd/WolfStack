@@ -974,36 +974,16 @@ pub fn lxc_attach_wolfnet(container: &str, ip: &str) -> Result<String, String> {
     // Write bridge IP network config into the rootfs
     assign_container_bridge_ip(container);
 
-    // For standalone LXC, ensure the config has a NIC on lxcbr0
+    // Ensure the LXC config has a NIC on lxcbr0.
+    // Proxmox: add a separate wn0 NIC (eth0 stays on vmbr0 for external access).
+    // Standalone LXC: eth0 is already on lxcbr0 (set by lxc_ensure_network_config),
+    //   so we just make sure lxcbr0 is present — no separate wn0 needed.
     if !is_proxmox() {
         let config_path = format!("{}/{}/config", base, container);
         if let Ok(cfg) = std::fs::read_to_string(&config_path) {
             if !cfg.contains("lxcbr0") {
-                let max_idx = cfg.lines()
-                    .filter_map(|l| {
-                        let t = l.trim();
-                        if t.starts_with("lxc.net.") {
-                            t["lxc.net.".len()..].split('.').next()
-                                .and_then(|n| n.parse::<u32>().ok())
-                        } else { None }
-                    })
-                    .max()
-                    .unwrap_or(0);
-                let wn_idx = max_idx + 1;
-                let wn_mac = format!("00:16:3e:{:02x}:{:02x}:{:02x}",
-                    rand_byte(), rand_byte(), rand_byte());
-                let wn_config = format!(
-                    "\n# WolfNet NIC\n\
-                     lxc.net.{i}.type = veth\n\
-                     lxc.net.{i}.link = lxcbr0\n\
-                     lxc.net.{i}.flags = up\n\
-                     lxc.net.{i}.name = wn0\n\
-                     lxc.net.{i}.hwaddr = {mac}\n",
-                    i = wn_idx, mac = wn_mac
-                );
-                let mut content = cfg;
-                content.push_str(&wn_config);
-                let _ = std::fs::write(&config_path, content);
+                // Point the existing eth0 (net.0) to lxcbr0
+                lxc_ensure_network_config(container);
             }
         }
     }
@@ -3645,38 +3625,9 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
             // is correct even before lxc_apply_wolfnet runs at start time
             assign_container_bridge_ip(container);
 
-            // Ensure the LXC config has a NIC on lxcbr0 (may be missing if
-            // container was created without WolfNet or on a different system)
-            let config_path = format!("{}/{}/config", base, container);
-            if let Ok(cfg) = std::fs::read_to_string(&config_path) {
-                if !cfg.contains("lxcbr0") {
-                    // Find next free net index
-                    let max_idx = cfg.lines()
-                        .filter_map(|l| {
-                            let t = l.trim();
-                            if t.starts_with("lxc.net.") {
-                                t["lxc.net.".len()..].split('.').next()
-                                    .and_then(|n| n.parse::<u32>().ok())
-                            } else { None }
-                        })
-                        .max()
-                        .unwrap_or(0);
-                    let wn_idx = max_idx + 1;
-                    let wn_mac = format!("00:16:3e:{:02x}:{:02x}:{:02x}",
-                        rand_byte(), rand_byte(), rand_byte());
-                    let wn_config = format!(
-                        "\n# WolfNet NIC\n\
-                         lxc.net.{i}.type = veth\n\
-                         lxc.net.{i}.link = lxcbr0\n\
-                         lxc.net.{i}.flags = up\n\
-                         lxc.net.{i}.name = wn0\n\
-                         lxc.net.{i}.hwaddr = {mac}\n",
-                        i = wn_idx, mac = wn_mac
-                    );
-                    let mut content = cfg;
-                    content.push_str(&wn_config);
-                    let _ = std::fs::write(&config_path, content);
-                }
+            // Standalone LXC uses eth0 on lxcbr0 — make sure it's configured
+            if !std::fs::read_to_string(&path).unwrap_or_default().contains("lxcbr0") {
+                lxc_ensure_network_config(container);
             }
 
             // Apply live if the container is running
