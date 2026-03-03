@@ -19,9 +19,23 @@ pub async fn console_ws(
     req: HttpRequest,
     path: web::Path<(String, String)>,
     body: web::Payload,
+    state: web::Data<crate::api::AppState>,
 ) -> Result<HttpResponse, actix_web::Error> {
+    // Require session authentication for WebSocket console access
+    if let Err(resp) = crate::api::require_auth(&req, &state) {
+        return Ok(resp);
+    }
+
     let (container_type, container_name) = path.into_inner();
 
+    // Validate container name to prevent command injection (except for compound install names)
+    if container_type != "install" && container_type != "appstore-install"
+        && !crate::auth::is_safe_name(&container_name)
+    {
+        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Invalid container name"
+        })));
+    }
 
     let (response, session, msg_stream) = actix_ws::handle(&req, body)?;
 
@@ -362,8 +376,21 @@ pub async fn remote_console_ws(
     body: web::Payload,
     state: web::Data<crate::api::AppState>,
 ) -> Result<HttpResponse, actix_web::Error> {
+    // Require session authentication
+    if let Err(resp) = crate::api::require_auth(&req, &state) {
+        return Ok(resp);
+    }
+
     let (node_id, ctype, name) = path.into_inner();
 
+    // Validate name to prevent command injection
+    if ctype != "install" && ctype != "appstore-install" && ctype != "pve-vnc"
+        && !crate::auth::is_safe_name(&name)
+    {
+        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Invalid container name"
+        })));
+    }
 
     // Look up the node
     let node = match state.cluster.get_node(&node_id) {
@@ -372,7 +399,7 @@ pub async fn remote_console_ws(
     };
 
     if node.is_self {
-        return console_ws(req, web::Path::from((ctype, name)), body).await;
+        return console_ws(req, web::Path::from((ctype, name)), body, state).await;
     }
 
     let (response, session, msg_stream) = actix_ws::handle(&req, body)?;

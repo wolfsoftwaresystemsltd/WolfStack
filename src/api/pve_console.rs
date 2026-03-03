@@ -30,8 +30,11 @@ static VNC_PORTS: std::sync::LazyLock<Mutex<HashMap<u64, (u16, String, std::time
 /// Creates a PVE VNC proxy via pvesh and returns the ticket for noVNC auth.
 /// The VNC proxy port is stored in memory for the subsequent WS connection.
 pub async fn pve_vnc_ticket(
+    req: HttpRequest,
+    state: web::Data<AppState>,
     path: web::Path<String>,
 ) -> Result<HttpResponse, Error> {
+    if let Err(resp) = super::require_auth(&req, &state) { return Ok(resp); }
     let vmid_str = path.into_inner();
     let vmid: u64 = match vmid_str.parse() {
         Ok(v) => v,
@@ -122,7 +125,9 @@ pub async fn pve_vnc_ws(
     req: HttpRequest,
     stream: web::Payload,
     path: web::Path<String>,
+    state: web::Data<AppState>,
 ) -> Result<HttpResponse, Error> {
+    if let Err(resp) = super::require_auth(&req, &state) { return Ok(resp); }
     let vmid_str = path.into_inner();
     let vmid: u64 = match vmid_str.parse() {
         Ok(v) => v,
@@ -227,6 +232,8 @@ pub async fn pve_console_ws(
     path: web::Path<(String, String)>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, Error> {
+    if let Err(resp) = super::require_auth(&req, &state) { return Ok(resp); }
+
     let (node_id, vmid_str) = path.into_inner();
 
     let vmid: u64 = match vmid_str.parse() {

@@ -67,6 +67,8 @@ pub struct AppState {
     pub statuspage: Arc<crate::statuspage::StatusPageState>,
     /// Whether this server has TLS enabled (HTTPS on main port)
     pub tls_enabled: bool,
+    /// Login rate limiter (brute-force protection)
+    pub login_limiter: Arc<crate::auth::LoginRateLimiter>,
 }
 
 /// Load or generate the join token from /etc/wolfstack/join-token
@@ -175,7 +177,16 @@ pub struct LoginRequest {
 }
 
 /// POST /api/auth/login — authenticate with Linux credentials
-pub async fn login(state: web::Data<AppState>, body: web::Json<LoginRequest>) -> HttpResponse {
+pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json<LoginRequest>) -> HttpResponse {
+    // Rate limiting — extract client IP
+    let client_ip = req.connection_info().peer_addr().unwrap_or("unknown").to_string();
+    if state.login_limiter.is_locked_out(&client_ip) {
+        return HttpResponse::TooManyRequests().json(serde_json::json!({
+            "success": false,
+            "error": "Too many failed login attempts. Please try again later."
+        }));
+    }
+
     // Check if direct login is disabled on this node
     {
         let nodes = state.cluster.nodes.read().unwrap();
@@ -189,12 +200,17 @@ pub async fn login(state: web::Data<AppState>, body: web::Json<LoginRequest>) ->
         }
     }
     if crate::auth::authenticate_user(&body.username, &body.password) {
+        state.login_limiter.clear(&client_ip);
         let token = state.sessions.create_session(&body.username);
-        let cookie = Cookie::build("wolfstack_session", &token)
+        let mut cookie = Cookie::build("wolfstack_session", &token)
             .path("/")
             .http_only(true)
+            .same_site(actix_web::cookie::SameSite::Strict)
             .max_age(actix_web::cookie::time::Duration::hours(8))
             .finish();
+        if state.tls_enabled {
+            cookie.set_secure(true);
+        }
 
         HttpResponse::Ok()
             .cookie(cookie)
@@ -203,6 +219,7 @@ pub async fn login(state: web::Data<AppState>, body: web::Json<LoginRequest>) ->
                 "username": body.username
             }))
     } else {
+        state.login_limiter.record_failure(&client_ip);
         HttpResponse::Unauthorized().json(serde_json::json!({
             "success": false,
             "error": "Invalid username or password"
@@ -317,7 +334,7 @@ pub async fn verify_join_token(state: web::Data<AppState>, query: web::Query<std
     if provided.is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing token parameter" }));
     }
-    if provided == state.join_token {
+    if crate::auth::validate_cluster_secret(provided, &state.join_token) {
         HttpResponse::Ok().json(serde_json::json!({
             "valid": true,
             "hostname": hostname::get().map(|h| h.to_string_lossy().to_string()).unwrap_or_default(),
@@ -2187,8 +2204,9 @@ pub async fn wolfnet_network_status(req: HttpRequest, state: web::Data<AppState>
 }
 
 /// GET /api/wolfnet/used-ips — returns WolfNet IPs in use on this node
-/// No auth required — only returns IP addresses, needed by any WolfNet peer for route discovery
-pub async fn wolfnet_used_ips_endpoint(_req: HttpRequest, _state: web::Data<AppState>) -> HttpResponse {
+/// Requires cluster auth — used for inter-node route discovery
+pub async fn wolfnet_used_ips_endpoint(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_cluster_auth(&req, &state) { return resp; }
     let ips = containers::wolfnet_used_ips();
     HttpResponse::Ok().json(ips)
 }
@@ -3201,14 +3219,24 @@ pub async fn network_conflicts(
 /// POST /api/containers/docker/import — receive a migrated container image
 /// Accepts the tar file as raw body bytes, container name via query param
 pub async fn docker_import(
-    _req: HttpRequest,
+    req: HttpRequest,
+    state: web::Data<AppState>,
     body: web::Bytes,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
-    // No auth — this is for inter-node communication during migration
+    // Require cluster auth — this is for inter-node communication during migration
+    if let Err(resp) = require_cluster_auth(&req, &state) { return resp; }
+
     let container_name = query.get("name")
         .cloned()
         .unwrap_or_else(|| format!("migrated-{}", chrono::Utc::now().timestamp()));
+
+    // Sanitize container name to prevent path traversal
+    if !crate::auth::is_safe_name(&container_name) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Invalid container name"
+        }));
+    }
 
     // Save to temp file
     let tar_path = format!("/tmp/wolfstack-import-{}.tar", container_name);

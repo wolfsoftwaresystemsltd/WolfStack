@@ -140,7 +140,7 @@ async fn main() -> std::io::Result<()> {
     // Set kernel networking prerequisites for WolfNet container routing
     containers::wolfnet_init();
 
-    // Load built-in cluster secret for inter-node authentication
+    // Load per-installation cluster secret for inter-node authentication
     let cluster_secret = auth::load_cluster_secret();
 
     // Fetch public IP (best effort)
@@ -232,6 +232,7 @@ async fn main() -> std::io::Result<()> {
             wolfrun: wolfrun_state.clone(),
             statuspage: statuspage_state.clone(),
             tls_enabled,
+            login_limiter: Arc::new(auth::LoginRateLimiter::new()),
         });
 
         // Background: periodic self-monitoring update
@@ -305,12 +306,14 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
-        // Background: session cleanup
+        // Background: session + login rate limiter cleanup
         let sessions_cleanup = sessions.clone();
+        let login_limiter_cleanup = app_state.login_limiter.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(300)).await;
                 sessions_cleanup.cleanup();
+                login_limiter_cleanup.cleanup();
             }
         });
 

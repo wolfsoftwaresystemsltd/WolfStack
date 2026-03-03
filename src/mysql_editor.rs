@@ -270,13 +270,13 @@ pub async fn list_tables(params: &ConnParams, database: &str) -> Result<Vec<serd
 
     let (pool, mut conn) = get_conn_with_timeout(&p).await?;
 
-    // Get table names and types
+    // Get table names and types (parameterized to prevent SQL injection)
     let rows: Vec<Row> = conn
-        .query(format!(
+        .exec(
             "SELECT TABLE_NAME, TABLE_TYPE, TABLE_ROWS, DATA_LENGTH \
-             FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{}'",
-            database.replace('\'', "''")
-        ))
+             FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?",
+            (database,)
+        )
         .await
         .map_err(|e| format!("Tables query failed: {}", detailed_mysql_error(&e)))?;
 
@@ -311,14 +311,13 @@ pub async fn table_structure(
     let (pool, mut conn) = get_conn_with_timeout(&p).await?;
 
     let rows: Vec<Row> = conn
-        .query(format!(
+        .exec(
             "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, EXTRA \
              FROM information_schema.COLUMNS \
-             WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}' \
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
              ORDER BY ORDINAL_POSITION",
-            database.replace('\'', "''"),
-            table.replace('\'', "''")
-        ))
+            (database, table)
+        )
         .await
         .map_err(|e| format!("Structure query failed: {}", detailed_mysql_error(&e)))?;
 
@@ -371,15 +370,14 @@ pub async fn table_data(
         .map_err(|e| format!("Count query failed: {}", detailed_mysql_error(&e)))?;
     let total_rows = count_row.unwrap_or(0);
 
-    // Get column names
+    // Get column names (parameterized to prevent SQL injection)
     let col_rows: Vec<Row> = conn
-        .query(format!(
+        .exec(
             "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
-             WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}' \
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
              ORDER BY ORDINAL_POSITION",
-            database.replace('\'', "''"),
-            table.replace('\'', "''")
-        ))
+            (database, table)
+        )
         .await
         .map_err(|e| format!("Column query failed: {}", detailed_mysql_error(&e)))?;
 
@@ -489,12 +487,12 @@ pub async fn dump_database(params: &ConnParams, database: &str, include_data: bo
     sql.push_str(&format!("CREATE DATABASE IF NOT EXISTS `{}`;\n", database.replace('`', "``")));
     sql.push_str(&format!("USE `{}`;\n\n", database.replace('`', "``")));
 
-    // Get all tables
+    // Get all tables (parameterized to prevent SQL injection)
     let tables: Vec<String> = conn
-        .query(format!(
-            "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{}' AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
-            database.replace('\'', "''")
-        ))
+        .exec(
+            "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
+            (database,)
+        )
         .await
         .map_err(|e| format!("Failed to list tables: {}", detailed_mysql_error(&e)))?;
 

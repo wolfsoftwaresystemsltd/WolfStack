@@ -7,8 +7,8 @@
 //! Authenticates against /etc/shadow using the system's crypt() function.
 //! WolfStack must run as root to read /etc/shadow.
 //!
-//! Cluster-internal requests are authenticated via a built-in shared secret
-//! that is the same across all WolfStack installations.
+//! Cluster-internal requests are authenticated via a per-installation shared
+//! secret generated on first run and stored in /etc/wolfstack/cluster-secret.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -18,14 +18,47 @@ use tracing::warn;
 /// Session token lifetime (8 hours)
 const SESSION_LIFETIME: Duration = Duration::from_secs(8 * 3600);
 
-/// Built-in cluster secret shared by all WolfStack installations.
-/// This prevents unauthenticated external access to inter-node APIs
-/// without requiring manual key distribution between nodes.
-const CLUSTER_SECRET: &str = "wsk_a7f3b9e2c1d4f6a8b0e3d5c7f9a1b3d5e7f9a1c3b5d7e9f0a2b4c6d8e0f1a3";
+/// Maximum failed login attempts per IP before lockout
+const MAX_LOGIN_ATTEMPTS: u32 = 10;
+/// Lockout window — failed attempts are counted within this period
+const LOGIN_LOCKOUT_WINDOW: Duration = Duration::from_secs(300); // 5 minutes
 
-/// Get the cluster secret — same on every WolfStack installation
+/// Load or generate a unique per-installation cluster secret from /etc/wolfstack/cluster-secret.
+/// On first run a cryptographically random 64-hex-char token is created.
 pub fn load_cluster_secret() -> String {
-    CLUSTER_SECRET.to_string()
+    let path = std::path::Path::new("/etc/wolfstack/cluster-secret");
+    if let Ok(secret) = std::fs::read_to_string(path) {
+        let secret = secret.trim().to_string();
+        if !secret.is_empty() {
+            return secret;
+        }
+    }
+    // Generate a new secret
+    use std::fmt::Write;
+    let mut secret = String::from("wsk_");
+    let random_bytes: [u8; 32] = {
+        let mut buf = [0u8; 32];
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            use std::io::Read;
+            let _ = f.read_exact(&mut buf);
+        } else {
+            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            let seed = t.as_nanos() ^ (std::process::id() as u128);
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = ((seed >> (i % 16 * 8)) & 0xFF) as u8 ^ (i as u8).wrapping_mul(37);
+            }
+        }
+        buf
+    };
+    for b in &random_bytes {
+        let _ = write!(secret, "{:02x}", b);
+    }
+    // Save it
+    let _ = std::fs::create_dir_all("/etc/wolfstack");
+    if let Err(e) = std::fs::write(path, &secret) {
+        warn!("Could not save cluster secret to {}: {}", path.display(), e);
+    }
+    secret
 }
 
 /// Validate a cluster secret from a request header
@@ -179,4 +212,64 @@ fn verify_password(password: &str, stored_hash: &str) -> bool {
         let result_str = std::ffi::CStr::from_ptr(result).to_string_lossy();
         result_str == stored_hash
     }
+}
+
+/// IP-based login rate limiter to prevent brute-force attacks
+pub struct LoginRateLimiter {
+    attempts: RwLock<HashMap<String, Vec<Instant>>>,
+}
+
+impl LoginRateLimiter {
+    pub fn new() -> Self {
+        Self {
+            attempts: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Record a failed login attempt for an IP. Returns true if the IP is now locked out.
+    pub fn record_failure(&self, ip: &str) -> bool {
+        let mut attempts = self.attempts.write().unwrap();
+        let entry = attempts.entry(ip.to_string()).or_default();
+        let now = Instant::now();
+        // Prune old entries outside the window
+        entry.retain(|t| now.duration_since(*t) < LOGIN_LOCKOUT_WINDOW);
+        entry.push(now);
+        entry.len() >= MAX_LOGIN_ATTEMPTS as usize
+    }
+
+    /// Check if an IP is currently locked out (too many recent failures)
+    pub fn is_locked_out(&self, ip: &str) -> bool {
+        let attempts = self.attempts.read().unwrap();
+        if let Some(entry) = attempts.get(ip) {
+            let now = Instant::now();
+            let recent = entry.iter().filter(|t| now.duration_since(**t) < LOGIN_LOCKOUT_WINDOW).count();
+            recent >= MAX_LOGIN_ATTEMPTS as usize
+        } else {
+            false
+        }
+    }
+
+    /// Clear failures for an IP (called on successful login)
+    pub fn clear(&self, ip: &str) {
+        let mut attempts = self.attempts.write().unwrap();
+        attempts.remove(ip);
+    }
+
+    /// Periodic cleanup of expired entries
+    pub fn cleanup(&self) {
+        let mut attempts = self.attempts.write().unwrap();
+        let now = Instant::now();
+        attempts.retain(|_, entries| {
+            entries.retain(|t| now.duration_since(*t) < LOGIN_LOCKOUT_WINDOW);
+            !entries.is_empty()
+        });
+    }
+}
+
+/// Validate a container/VM name — only allow safe characters (alphanumeric, dash, underscore, dot)
+pub fn is_safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 253
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        && !name.contains("..")
 }
