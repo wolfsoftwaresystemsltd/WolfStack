@@ -415,8 +415,9 @@ pub async fn remote_console_ws(
         return console_ws(req, web::Path::from((ctype, name)), body, state).await;
     }
 
+    let secret = state.cluster_secret.clone();
     let (response, session, msg_stream) = actix_ws::handle(&req, body)?;
-    actix_rt::spawn(remote_console_bridge(session, msg_stream, node.address, node.port, ctype, name));
+    actix_rt::spawn(remote_console_bridge(session, msg_stream, node.address, node.port, ctype, name, secret));
     Ok(response)
 }
 
@@ -428,6 +429,7 @@ async fn remote_console_bridge(
     remote_port: u16,
     ctype: String,
     name: String,
+    cluster_secret: String,
 ) {
     // Simple percent-encode for URL path
     let encoded_name: String = name.bytes().map(|b| {
@@ -472,10 +474,14 @@ async fn remote_console_bridge(
     let mut remote_stream = None;
 
     for url in &urls {
-        let ws_request = match tungstenite::client::IntoClientRequest::into_client_request(url.as_str()) {
+        let mut ws_request = match tungstenite::client::IntoClientRequest::into_client_request(url.as_str()) {
             Ok(req) => req,
             Err(_) => continue,
         };
+        // Authenticate with remote node via cluster secret
+        if let Ok(val) = tungstenite::http::HeaderValue::from_str(&cluster_secret) {
+            ws_request.headers_mut().insert("X-WolfStack-Secret", val);
+        }
 
         match tokio::time::timeout(
             std::time::Duration::from_secs(3),
