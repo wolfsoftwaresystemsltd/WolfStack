@@ -1036,7 +1036,15 @@ fn get_container_bridge_ip(container: &str, iface: &str) -> String {
             }
         }
     }
-    // Fallback: assign a fresh bridge IP
+    // Derive from WolfNet IP so the last octet matches (10.10.10.X → 10.0.3.X)
+    let wolfnet_ip_file = format!("{}/{}/.wolfnet/ip", base, container);
+    if let Ok(wolfnet_ip) = std::fs::read_to_string(&wolfnet_ip_file) {
+        let wolfnet_ip = wolfnet_ip.trim();
+        if let Some(last_octet) = wolfnet_ip.rsplit('.').next() {
+            return format!("10.0.3.{}", last_octet);
+        }
+    }
+    // Last resort: assign a fresh bridge IP
     warn!("Could not detect bridge IP for {}:{}, assigning new one", container, iface);
     let last = find_free_bridge_ip();
     format!("10.0.3.{}", last)
