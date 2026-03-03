@@ -93,10 +93,16 @@ async fn console_session(
             ));
         }
         "lxc" => {
+            let base = crate::containers::lxc_base_dir(&name);
+            let p_flag = if base != crate::containers::LXC_DEFAULT_PATH {
+                format!("-P {} ", base)
+            } else {
+                String::new()
+            };
             cmd.arg(format!(
-                "lxc-attach -n {} --set-var TERM=xterm-256color -- /bin/sh -c \
+                "lxc-attach {}-n {} --set-var TERM=xterm-256color -- /bin/sh -c \
                  'if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi'",
-                name
+                p_flag, name
             ));
         }
         "vm" => {
@@ -204,24 +210,30 @@ async fn console_session(
                                 }
                             }
                             "lxc" => {
+                                let lxc_base = crate::containers::lxc_base_dir(container);
+                                let lxc_p = if lxc_base != crate::containers::LXC_DEFAULT_PATH {
+                                    format!("-P {} ", lxc_base)
+                                } else {
+                                    String::new()
+                                };
                                 if is_inline {
                                     cmd.arg(format!(
                                         "echo '\\x1b[1;36mInstalling {} in LXC container {}...\\x1b[0m' && \
-                                         lxc-attach -n {} --set-var TERM=xterm-256color --set-var DEBIAN_FRONTEND=noninteractive -- sh -c \
+                                         lxc-attach {}-n {} --set-var TERM=xterm-256color --set-var DEBIAN_FRONTEND=noninteractive -- sh -c \
                                          '{}'; \
                                          echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
-                                        component, container, container, certbot_inline
+                                        component, container, lxc_p, container, certbot_inline
                                     ));
                                 } else {
                                     cmd.arg(format!(
                                         "echo '\\x1b[1;36mInstalling {} in LXC container {}...\\x1b[0m' && \
-                                         lxc-attach -n {} --set-var TERM=xterm-256color --set-var DEBIAN_FRONTEND=noninteractive -- sh -c \
+                                         lxc-attach {}-n {} --set-var TERM=xterm-256color --set-var DEBIAN_FRONTEND=noninteractive -- sh -c \
                                          'apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || \
                                           yum install -y -q curl 2>/dev/null || \
                                           apk add --quiet curl 2>/dev/null || true && \
                                           curl -fsSL \"{}\" | bash'; \
                                          echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
-                                        component, container, container, install_script
+                                        component, container, lxc_p, container, install_script
                                     ));
                                 }
                             }
