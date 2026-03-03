@@ -9,6 +9,7 @@
 //! WolfNet: Optional overlay network integration for container networking
 
 use serde::{Deserialize, Serialize};
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::Mutex;
 use tracing::{error, warn};
@@ -1162,7 +1163,8 @@ fn lxc_apply_wolfnet(container: &str) {
             // 2. Restart networking (try all methods for distro compat)
             let mut args: Vec<String> = attach_prefix.clone();
             args.extend(["sh", "-c",
-                "systemctl restart systemd-networkd 2>/dev/null; \
+                "nmcli con reload 2>/dev/null && nmcli con up eth0 2>/dev/null; \
+                 systemctl restart systemd-networkd 2>/dev/null; \
                  netplan apply 2>/dev/null; \
                  /etc/init.d/networking restart 2>/dev/null; \
                  true"].iter().map(|s| s.to_string()));
@@ -1170,8 +1172,12 @@ fn lxc_apply_wolfnet(container: &str) {
 
             // 3. Flush ALL addresses on eth0 to clear stale IPs from DHCP, NetworkManager,
             //    or old configs. Then re-add exactly the ones we want.
+            //    Also tell NetworkManager to not manage eth0 temporarily so it
+            //    doesn't override our manual IP assignments.
             let mut args: Vec<String> = attach_prefix.clone();
-            args.extend(["ip", "addr", "flush", "dev", "eth0"].iter().map(|s| s.to_string()));
+            args.extend(["sh", "-c",
+                "nmcli dev set eth0 managed no 2>/dev/null; \
+                 ip addr flush dev eth0"].iter().map(|s| s.to_string()));
             let _ = Command::new("lxc-attach").args(&args).output();
 
             // 4. Add bridge IP + wolfnet IP + default route
@@ -1427,6 +1433,27 @@ fn write_container_network_config(container: &str, bridge_ip: &str) {
             bridge_ip
         );
         let _ = std::fs::write(&ifaces_path, &conf);
+    }
+
+    // Method 4: NetworkManager keyfile (RHEL, AlmaLinux, Rocky, Fedora, CentOS)
+    let nm_dir = format!("{}/etc/NetworkManager/system-connections", rootfs);
+    if std::path::Path::new(&nm_dir).exists() || std::path::Path::new(&format!("{}/etc/NetworkManager", rootfs)).exists() {
+        let _ = std::fs::create_dir_all(&nm_dir);
+        let conf = format!(
+            "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n\
+             [ipv4]\nmethod=manual\naddresses={}/24\ngateway=10.0.3.1\ndns=10.0.3.1;8.8.8.8;\n\n\
+             [ipv6]\nmethod=disabled\n",
+            bridge_ip
+        );
+        let _ = std::fs::write(format!("{}/eth0.nmconnection", nm_dir), &conf);
+        // Set permissions (NM requires 600)
+        let _ = std::fs::set_permissions(
+            format!("{}/eth0.nmconnection", nm_dir),
+            std::fs::Permissions::from_mode(0o600),
+        );
+        // Remove legacy ifcfg files that might conflict
+        let ifcfg_path = format!("{}/etc/sysconfig/network-scripts/ifcfg-eth0", rootfs);
+        let _ = std::fs::remove_file(&ifcfg_path);
     }
 
     // Always write resolv.conf as a fallback
