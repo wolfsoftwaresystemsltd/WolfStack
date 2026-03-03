@@ -576,10 +576,11 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
 
         let id = state.cluster.add_server(body.address.clone(), port, cluster_name.clone());
 
-        // If we have a custom cluster secret, push it to the new node
-        if state.cluster_secret != crate::auth::default_cluster_secret() {
+        // If we have a custom cluster secret (on disk), push it to the new node
+        let active_secret = crate::auth::load_cluster_secret();
+        if active_secret != crate::auth::default_cluster_secret() {
             let addr = body.address.clone();
-            let secret = state.cluster_secret.clone();
+            let secret = active_secret;
             tokio::spawn(async move {
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(10))
