@@ -1162,6 +1162,50 @@ fn lxc_apply_wolfnet(container: &str) {
             args.extend(["ip", "route", "replace", "10.10.10.0/24", "via", "10.0.3.1", "dev", "wn0"].iter().map(|s| s.to_string()));
             let _ = Command::new("lxc-attach").args(&args).output();
 
+            // Try to bring up eth0 via NetworkManager (write DHCP config if missing)
+            let eth0_nm_cmd = "if [ -d /etc/NetworkManager ]; then \
+                if [ ! -f /etc/NetworkManager/system-connections/eth0.nmconnection ]; then \
+                    printf '[connection]\\nid=eth0\\ntype=ethernet\\ninterface-name=eth0\\nautoconnect=true\\n\\n\
+[ipv4]\\nmethod=auto\\ndns=8.8.8.8;1.1.1.1;\\n\\n[ipv6]\\nmethod=auto\\n' \
+                    > /etc/NetworkManager/system-connections/eth0.nmconnection && \
+                    chmod 600 /etc/NetworkManager/system-connections/eth0.nmconnection; \
+                fi; \
+                nmcli con reload 2>/dev/null; \
+                nmcli con up eth0 2>/dev/null; \
+            fi; true";
+            let mut eth0_args: Vec<String> = attach_prefix.clone();
+            eth0_args.extend(["sh", "-c", eth0_nm_cmd].iter().map(|s| s.to_string()));
+            let _ = Command::new("lxc-attach").args(&eth0_args).output();
+
+            // Give DHCP a moment to acquire a lease on eth0
+            std::thread::sleep(std::time::Duration::from_secs(3));
+
+            // Check if eth0 got a default route. If not (no DHCP server on vmbr0),
+            // fall back to routing internet through wn0/lxcbr0 which has NAT — just
+            // like standalone LXC containers work.
+            let mut chk_args: Vec<String> = attach_prefix.clone();
+            chk_args.extend(["ip", "route", "show", "default"].iter().map(|s| s.to_string()));
+            let has_default = Command::new("lxc-attach").args(&chk_args).output()
+                .map(|o| {
+                    let out = String::from_utf8_lossy(&o.stdout);
+                    !out.trim().is_empty()
+                })
+                .unwrap_or(false);
+
+            if !has_default {
+                // No default route from eth0 DHCP — route internet through lxcbr0
+                let mut args: Vec<String> = attach_prefix.clone();
+                args.extend(["ip", "route", "replace", "default", "via", "10.0.3.1", "dev", "wn0"].iter().map(|s| s.to_string()));
+                let _ = Command::new("lxc-attach").args(&args).output();
+
+                // Write DNS so name resolution works
+                let dns_cmd = "rm -f /etc/resolv.conf; \
+                    printf 'nameserver 8.8.8.8\\nnameserver 1.1.1.1\\n' > /etc/resolv.conf";
+                let mut dns_args: Vec<String> = attach_prefix.clone();
+                dns_args.extend(["sh", "-c", dns_cmd].iter().map(|s| s.to_string()));
+                let _ = Command::new("lxc-attach").args(&dns_args).output();
+            }
+
             // Host route — via bridge IP so traffic for WolfNet IP reaches container
             let _ = Command::new("ip").args(["route", "del", &format!("{}/32", ip)]).output();
             let out = Command::new("ip")
