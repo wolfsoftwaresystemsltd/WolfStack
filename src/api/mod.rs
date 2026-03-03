@@ -626,6 +626,58 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
             }));
         }
 
+        // Check for WolfNet IP conflicts before adding the node.
+        // Fetch the remote node's status to get its wolfnet_ips, then compare
+        // against all IPs known in this cluster (local + remote via route cache).
+        let status_urls = build_node_urls(&body.address, port, "/api/agent/status");
+        let cluster_secret = crate::auth::load_cluster_secret();
+        let default_secret = crate::auth::default_cluster_secret();
+        let mut remote_wolfnet_ips: Vec<String> = Vec::new();
+        for url in &status_urls {
+            // Try the active cluster secret first, then the default (new node may not have received custom secret yet)
+            for secret in [&cluster_secret, &default_secret.to_string()] {
+                if let Ok(resp) = client.get(url)
+                    .header("X-WolfStack-Secret", secret)
+                    .send().await
+                {
+                    if resp.status().is_success() {
+                        if let Ok(data) = resp.json::<serde_json::Value>().await {
+                            if let Some(ips) = data.get("wolfnet_ips").and_then(|v| v.as_array()) {
+                                remote_wolfnet_ips = ips.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect();
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            if !remote_wolfnet_ips.is_empty() { break; }
+        }
+
+        if !remote_wolfnet_ips.is_empty() {
+            // Collect all WolfNet IPs known in this cluster
+            let local_ips = containers::wolfnet_used_ips();
+            let route_ips: Vec<String> = containers::WOLFNET_ROUTES.lock().unwrap()
+                .keys().cloned().collect();
+
+            let mut conflicts = Vec::new();
+            for ip in &remote_wolfnet_ips {
+                if local_ips.contains(ip) || route_ips.contains(ip) {
+                    conflicts.push(ip.clone());
+                }
+            }
+            if !conflicts.is_empty() {
+                return HttpResponse::Conflict().json(serde_json::json!({
+                    "error": format!(
+                        "Cannot join node: WolfNet IP conflict — {} is already in use in this cluster. \
+                         Change the node's IP in /etc/wolfnet/config.toml and restart wolfnet before joining.",
+                        conflicts.join(", ")
+                    )
+                }));
+            }
+        }
+
         let id = state.cluster.add_server(body.address.clone(), port, cluster_name.clone());
 
         // If we have a custom cluster secret (on disk), push it to the new node
