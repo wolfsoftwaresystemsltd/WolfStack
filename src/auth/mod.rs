@@ -7,8 +7,8 @@
 //! Authenticates against /etc/shadow using the system's crypt() function.
 //! WolfStack must run as root to read /etc/shadow.
 //!
-//! Cluster-internal requests are authenticated via a per-installation shared
-//! secret generated on first run and stored in /etc/wolfstack/cluster-secret.
+//! Cluster-internal requests are authenticated via a built-in shared secret
+//! that is the same across all WolfStack installations.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -23,42 +23,14 @@ const MAX_LOGIN_ATTEMPTS: u32 = 10;
 /// Lockout window — failed attempts are counted within this period
 const LOGIN_LOCKOUT_WINDOW: Duration = Duration::from_secs(300); // 5 minutes
 
-/// Load or generate a unique per-installation cluster secret from /etc/wolfstack/cluster-secret.
-/// On first run a cryptographically random 64-hex-char token is created.
+/// Built-in cluster secret shared by all WolfStack installations.
+/// This prevents unauthenticated external access to inter-node APIs
+/// without requiring manual key distribution between nodes.
+const CLUSTER_SECRET: &str = "wsk_a7f3b9e2c1d4f6a8b0e3d5c7f9a1b3d5e7f9a1c3b5d7e9f0a2b4c6d8e0f1a3";
+
+/// Get the cluster secret — same on every WolfStack installation
 pub fn load_cluster_secret() -> String {
-    let path = std::path::Path::new("/etc/wolfstack/cluster-secret");
-    if let Ok(secret) = std::fs::read_to_string(path) {
-        let secret = secret.trim().to_string();
-        if !secret.is_empty() {
-            return secret;
-        }
-    }
-    // Generate a new secret
-    use std::fmt::Write;
-    let mut secret = String::from("wsk_");
-    let random_bytes: [u8; 32] = {
-        let mut buf = [0u8; 32];
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            use std::io::Read;
-            let _ = f.read_exact(&mut buf);
-        } else {
-            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-            let seed = t.as_nanos() ^ (std::process::id() as u128);
-            for (i, b) in buf.iter_mut().enumerate() {
-                *b = ((seed >> (i % 16 * 8)) & 0xFF) as u8 ^ (i as u8).wrapping_mul(37);
-            }
-        }
-        buf
-    };
-    for b in &random_bytes {
-        let _ = write!(secret, "{:02x}", b);
-    }
-    // Save it
-    let _ = std::fs::create_dir_all("/etc/wolfstack");
-    if let Err(e) = std::fs::write(path, &secret) {
-        warn!("Could not save cluster secret to {}: {}", path.display(), e);
-    }
-    secret
+    CLUSTER_SECRET.to_string()
 }
 
 /// Validate a cluster secret from a request header
