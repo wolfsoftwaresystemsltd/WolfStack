@@ -6111,6 +6111,10 @@ fn lxc_exec_cmd(container: &str, cmd_args: &[&str]) -> std::process::Command {
         cmd.arg("exec").arg(container).arg("--");
     } else {
         cmd = std::process::Command::new("lxc-attach");
+        let base = crate::containers::lxc_base_dir(container);
+        if base != crate::containers::LXC_DEFAULT_PATH {
+            cmd.arg("-P").arg(&base);
+        }
         cmd.arg("-n").arg(container).arg("--");
     }
     for a in cmd_args { cmd.arg(a); }
