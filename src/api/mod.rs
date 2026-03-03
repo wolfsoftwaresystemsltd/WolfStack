@@ -126,7 +126,12 @@ pub fn require_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<St
     // Accept internal requests from other WolfStack nodes if they provide the cluster secret
     if let Some(val) = req.headers().get("X-WolfStack-Secret") {
         let provided = val.to_str().unwrap_or("");
-        if crate::auth::validate_cluster_secret(provided, &state.cluster_secret) {
+        // Accept: the in-memory secret, the hardcoded default, OR the on-disk secret
+        // (covers the window between secret propagation and node restart)
+        if crate::auth::validate_cluster_secret(provided, &state.cluster_secret)
+            || crate::auth::validate_cluster_secret(provided, crate::auth::default_cluster_secret())
+            || crate::auth::validate_cluster_secret(provided, &crate::auth::load_cluster_secret())
+        {
             return Ok("cluster-node".to_string());
         }
         // Invalid secret — do NOT fall through to session auth
@@ -154,7 +159,10 @@ pub fn require_cluster_auth(req: &HttpRequest, state: &web::Data<AppState>) -> R
     match req.headers().get("X-WolfStack-Secret") {
         Some(val) => {
             let provided = val.to_str().unwrap_or("");
-            if crate::auth::validate_cluster_secret(provided, &state.cluster_secret) {
+            if crate::auth::validate_cluster_secret(provided, &state.cluster_secret)
+                || crate::auth::validate_cluster_secret(provided, crate::auth::default_cluster_secret())
+                || crate::auth::validate_cluster_secret(provided, &crate::auth::load_cluster_secret())
+            {
                 Ok(())
             } else {
                 Err(HttpResponse::Forbidden().json(serde_json::json!({
@@ -347,6 +355,83 @@ pub async fn verify_join_token(state: web::Data<AppState>, query: web::Query<std
     }
 }
 
+// ─── Cluster Secret Management ───
+
+/// GET /api/cluster/secret-status — check whether a custom cluster secret is active
+pub async fn cluster_secret_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    // Check the on-disk secret (not just in-memory) so status is correct even before restart
+    let active = crate::auth::load_cluster_secret();
+    let has_custom = active != crate::auth::default_cluster_secret();
+    HttpResponse::Ok().json(serde_json::json!({
+        "has_custom_secret": has_custom,
+    }))
+}
+
+/// POST /api/cluster/secret/generate — generate a new cluster secret and propagate to all nodes
+pub async fn cluster_secret_generate(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let new_secret = crate::auth::generate_cluster_secret();
+    if let Err(e) = crate::auth::save_cluster_secret(&new_secret) {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+
+    // Propagate to all online nodes across all clusters
+    let nodes = state.cluster.get_all_nodes();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_default();
+
+    let mut results = Vec::new();
+    for node in &nodes {
+        if node.is_self || !node.online || node.node_type == "proxmox" {
+            continue;
+        }
+        let urls = build_node_urls(&node.address, node.port, "/api/cluster/secret/receive");
+        let mut pushed = false;
+        let mut err = String::new();
+        for url in &urls {
+            match client.post(url)
+                .header("X-WolfStack-Secret", crate::auth::default_cluster_secret())
+                .json(&serde_json::json!({ "secret": new_secret }))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => { pushed = true; break; }
+                Ok(resp) => { err = format!("HTTP {}", resp.status()); }
+                Err(e) => { err = format!("{}", e); }
+            }
+        }
+        results.push(serde_json::json!({
+            "node": if node.hostname.is_empty() { &node.address } else { &node.hostname },
+            "address": node.address,
+            "success": pushed,
+            "error": if pushed { "" } else { &err },
+        }));
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "generated": true,
+        "nodes": results,
+    }))
+}
+
+/// POST /api/cluster/secret/receive — receive a new cluster secret from admin node
+pub async fn cluster_secret_receive(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    if let Err(resp) = require_cluster_auth(&req, &state) { return resp; }
+    let secret = match body.get("secret").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing secret" })),
+    };
+    if let Err(e) = crate::auth::save_cluster_secret(secret) {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "saved": true }))
+}
+
 /// POST /api/nodes — add a server to the cluster
 #[derive(Deserialize)]
 pub struct AddServerRequest {
@@ -490,6 +575,30 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
         }
 
         let id = state.cluster.add_server(body.address.clone(), port, cluster_name.clone());
+
+        // If we have a custom cluster secret, push it to the new node
+        if state.cluster_secret != crate::auth::default_cluster_secret() {
+            let addr = body.address.clone();
+            let secret = state.cluster_secret.clone();
+            tokio::spawn(async move {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .danger_accept_invalid_certs(true)
+                    .build()
+                    .unwrap_or_default();
+                let urls = build_node_urls(&addr, port, "/api/cluster/secret/receive");
+                for url in &urls {
+                    if let Ok(resp) = client.post(url)
+                        .header("X-WolfStack-Secret", crate::auth::default_cluster_secret())
+                        .json(&serde_json::json!({ "secret": secret }))
+                        .send()
+                        .await
+                    {
+                        if resp.status().is_success() { break; }
+                    }
+                }
+            });
+        }
 
         HttpResponse::Ok().json(serde_json::json!({
             "id": id,
@@ -8398,11 +8507,14 @@ pub async fn wolfrun_adopt(req: HttpRequest, state: web::Data<AppState>, body: w
 
 /// POST /api/wolfrun/sync — receive WolfRun services from a cluster peer
 pub async fn wolfrun_sync(req: HttpRequest, state: web::Data<AppState>, body: web::Json<Vec<crate::wolfrun::WolfRunService>>) -> HttpResponse {
-    // Authenticate via cluster secret (inter-node auth)
+    // Authenticate via cluster secret (inter-node auth) or session auth
     let secret = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if secret != state.cluster_secret {
+    if !crate::auth::validate_cluster_secret(secret, &state.cluster_secret)
+        && !crate::auth::validate_cluster_secret(secret, crate::auth::default_cluster_secret())
+        && !crate::auth::validate_cluster_secret(secret, &crate::auth::load_cluster_secret())
+    {
         // Also try cookie auth (in case admin calls it manually)
         if let Err(resp) = require_auth(&req, &state) { return resp; }
     }
@@ -8437,7 +8549,10 @@ pub async fn statuspage_config_get(req: HttpRequest, state: web::Data<AppState>)
     let secret = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if secret != state.cluster_secret {
+    if !crate::auth::validate_cluster_secret(secret, &state.cluster_secret)
+        && !crate::auth::validate_cluster_secret(secret, crate::auth::default_cluster_secret())
+        && !crate::auth::validate_cluster_secret(secret, &crate::auth::load_cluster_secret())
+    {
         if let Err(resp) = require_auth(&req, &state) { return resp; }
     }
     let config = state.statuspage.config.read().unwrap().clone();
@@ -8694,11 +8809,14 @@ fn sp_broadcast(state: &web::Data<AppState>) {
 
 /// POST /api/statuspage/sync — receive status page config from a cluster peer
 pub async fn statuspage_sync(req: HttpRequest, state: web::Data<AppState>, body: web::Json<crate::statuspage::StatusPageConfig>) -> HttpResponse {
-    // Authenticate via cluster secret (inter-node auth)
+    // Authenticate via cluster secret (inter-node auth) or session auth
     let secret = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if secret != state.cluster_secret {
+    if !crate::auth::validate_cluster_secret(secret, &state.cluster_secret)
+        && !crate::auth::validate_cluster_secret(secret, crate::auth::default_cluster_secret())
+        && !crate::auth::validate_cluster_secret(secret, &crate::auth::load_cluster_secret())
+    {
         if let Err(resp) = require_auth(&req, &state) { return resp; }
     }
 
@@ -9160,6 +9278,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/auth/join-token", web::get().to(get_join_token))
         // Cluster
         .route("/api/cluster/verify-token", web::get().to(verify_join_token))
+        .route("/api/cluster/secret-status", web::get().to(cluster_secret_status))
+        .route("/api/cluster/secret/generate", web::post().to(cluster_secret_generate))
+        .route("/api/cluster/secret/receive", web::post().to(cluster_secret_receive))
         .route("/api/cluster/wolfnet-sync", web::post().to(wolfnet_sync_cluster))
         .route("/api/cluster/diagnose", web::post().to(cluster_diagnose))
         .route("/api/nodes", web::get().to(get_nodes))

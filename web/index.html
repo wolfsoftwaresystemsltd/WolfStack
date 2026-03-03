@@ -2564,6 +2564,7 @@
                         <button class="settings-tab-btn" onclick="switchSettingsTab('alerting')">🔔 Alerting</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('ai')">🤖 AI Agent</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('backup')">📦 Config Backup</button>
+                        <button class="settings-tab-btn" onclick="switchSettingsTab('security')">🔐 Security</button>
                     </div>
                 </div>
                 <div class="card-body" style="padding:24px;">
@@ -3073,6 +3074,28 @@
                                 ⚠️ Does not include: login credentials, join tokens, TLS certificates, or container/VM
                                 data.
                             </p>
+                        </div>
+                    </div>
+
+                    <div id="settings-tab-security" class="settings-tab-panel">
+                        <div style="background:var(--bg-input);border-radius:12px;padding:20px;border:1px solid var(--border);max-width:600px;">
+                            <h4 style="margin:0 0 8px 0;font-size:15px;">Cluster Secret</h4>
+                            <p style="font-size:13px;color:var(--text-muted);margin:0 0 16px 0;">
+                                All WolfStack nodes use a shared secret for inter-node authentication.
+                                By default a built-in secret is used. You can generate a custom secret
+                                which will be automatically propagated to all online nodes across every cluster.
+                            </p>
+                            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+                                <span style="font-size:13px;font-weight:600;">Status:</span>
+                                <span id="cluster-secret-status" style="font-size:13px;padding:4px 10px;border-radius:6px;background:var(--bg-secondary);border:1px solid var(--border);">
+                                    Checking...
+                                </span>
+                            </div>
+                            <button class="btn btn-primary" onclick="generateClusterSecret()" id="btn-generate-secret">
+                                Generate New Cluster Secret
+                            </button>
+                        </div>
+                        <div id="cluster-secret-results" style="margin-top:16px;display:none;">
                         </div>
                     </div>
 

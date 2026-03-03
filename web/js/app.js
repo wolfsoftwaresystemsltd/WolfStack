@@ -15846,7 +15846,7 @@ function switchSettingsTab(tabName) {
     // Highlight the correct button
     document.querySelectorAll('.settings-tab-btn').forEach(btn => {
         const btnText = btn.textContent.trim().toLowerCase();
-        const tabMap = { 'appearance': '\ud83c\udfa8 appearance', 'alerting': '\ud83d\udd14 alerting', 'ai': '\ud83e\udd16 ai agent', 'backup': '\ud83d\udce6 config backup' };
+        const tabMap = { 'appearance': '\ud83c\udfa8 appearance', 'alerting': '\ud83d\udd14 alerting', 'ai': '\ud83e\udd16 ai agent', 'backup': '\ud83d\udce6 config backup', 'security': '\ud83d\udd10 security' };
         if (btnText === (tabMap[tabName] || '').trim()) {
             btn.classList.add('active');
         }
@@ -15859,6 +15859,71 @@ function switchSettingsTab(tabName) {
         loadAiAlerts();
     } else if (tabName === 'alerting') {
         loadAlertingConfig();
+    } else if (tabName === 'security') {
+        loadClusterSecretStatus();
+    }
+}
+
+// ─── Cluster Secret Management ───
+
+async function loadClusterSecretStatus() {
+    var el = document.getElementById('cluster-secret-status');
+    if (!el) return;
+    try {
+        var resp = await fetch('/api/cluster/secret-status');
+        if (!resp.ok) { el.textContent = 'Error loading status'; return; }
+        var data = await resp.json();
+        if (data.has_custom_secret) {
+            el.textContent = 'Custom secret active';
+            el.style.color = 'var(--success)';
+        } else {
+            el.textContent = 'Using default secret';
+            el.style.color = 'var(--text-muted)';
+        }
+    } catch (e) {
+        el.textContent = 'Error';
+    }
+}
+
+async function generateClusterSecret() {
+    if (!confirm('Generate a new cluster secret and propagate it to all online nodes?\n\nExisting nodes will accept both the old and new secret.\nThe new secret takes full effect after each node restarts.')) return;
+    var btn = document.getElementById('btn-generate-secret');
+    var origHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = 'Generating & propagating...';
+    try {
+        var resp = await fetch('/api/cluster/secret/generate', { method: 'POST' });
+        var data = await resp.json();
+        if (!resp.ok) {
+            showToast(data.error || 'Failed to generate secret', 'error');
+            return;
+        }
+        // Show propagation results
+        var results = data.nodes || [];
+        var ok = results.filter(function(r) { return r.success; }).length;
+        var fail = results.filter(function(r) { return !r.success; }).length;
+        showToast('Secret generated. Propagated to ' + ok + ' node(s)' + (fail > 0 ? ', ' + fail + ' failed' : ''), fail > 0 ? 'warning' : 'success');
+
+        var container = document.getElementById('cluster-secret-results');
+        if (container && results.length > 0) {
+            var html = '<div style="background:var(--bg-input);border-radius:12px;padding:16px;border:1px solid var(--border);max-width:600px;">';
+            html += '<h4 style="margin:0 0 10px;font-size:14px;">Propagation Results</h4>';
+            results.forEach(function(r) {
+                var icon = r.success ? '<span style="color:var(--success)">OK</span>' : '<span style="color:var(--danger)">FAILED</span>';
+                html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:13px;border-bottom:1px solid var(--border);">';
+                html += '<span>' + (r.node || r.address) + '</span>' + icon;
+                html += '</div>';
+            });
+            html += '</div>';
+            container.innerHTML = html;
+            container.style.display = 'block';
+        }
+        loadClusterSecretStatus();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    } finally {
+        btn.innerHTML = origHtml;
+        btn.disabled = false;
     }
 }
 
