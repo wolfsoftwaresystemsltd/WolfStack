@@ -11651,7 +11651,7 @@ async function restoreBackup(id) {
 
 // ─── Schedule Modal ───
 
-function showScheduleSelectedModal() {
+async function showScheduleSelectedModal() {
     const targets = getSelectedTargets();
     if (targets.length === 0) {
         showToast('Please select at least one item to schedule', 'error');
@@ -11661,7 +11661,7 @@ function showScheduleSelectedModal() {
     const summary = document.getElementById('schedule-selected-summary');
     const allSelected = targets.length === document.querySelectorAll('.backup-target-cb').length;
     if (summary) {
-        const storage = getSelectedStorage();
+        const storage = await getSelectedStorage();
         const storageLabel = storage.path || 'local';
         if (allSelected) {
             summary.textContent = `Will schedule backup of all ${targets.length} items to ${storageLabel}`;
@@ -11683,7 +11683,7 @@ async function createSchedule() {
     const time = document.getElementById('schedule-time').value.trim();
     const retention = parseInt(document.getElementById('schedule-retention').value) || 0;
     const targets = getSelectedTargets();
-    const storage = getSelectedStorage();
+    const storage = await getSelectedStorage();
     const allSelected = targets.length === document.querySelectorAll('.backup-target-cb').length;
 
     const body = {
