@@ -813,7 +813,7 @@ fn store_pbs(local_path: &Path, storage: &BackupStorage, filename: &str) -> Resu
        .arg("--backup-type").arg("ct");
 
     if !storage.pbs_fingerprint.is_empty() {
-        cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
+        cmd.env("PBS_FINGERPRINT", &storage.pbs_fingerprint);
     }
     if !storage.pbs_namespace.is_empty() {
         cmd.arg("--ns").arg(&storage.pbs_namespace);
@@ -1397,7 +1397,7 @@ fn retrieve_from_pbs(entry: &BackupEntry, dest: &Path) -> Result<(), String> {
        .arg("--repository").arg(&repo);
 
     if !storage.pbs_fingerprint.is_empty() {
-        cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
+        cmd.env("PBS_FINGERPRINT", &storage.pbs_fingerprint);
     }
     if !storage.pbs_token_secret.is_empty() {
         cmd.env("PBS_PASSWORD", &storage.pbs_token_secret);
@@ -1428,7 +1428,7 @@ pub fn list_pbs_snapshots(storage: &BackupStorage) -> Result<serde_json::Value, 
        .arg("--repository").arg(&repo);
 
     if !storage.pbs_fingerprint.is_empty() {
-        cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
+        cmd.env("PBS_FINGERPRINT", &storage.pbs_fingerprint);
     }
     if !storage.pbs_namespace.is_empty() {
         cmd.arg("--ns").arg(&storage.pbs_namespace);
@@ -1518,7 +1518,7 @@ where
        .arg("--ignore-ownership").arg("true");
 
     if !storage.pbs_fingerprint.is_empty() {
-        cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
+        cmd.env("PBS_FINGERPRINT", &storage.pbs_fingerprint);
     }
     if !storage.pbs_namespace.is_empty() {
         cmd.arg("--ns").arg(&storage.pbs_namespace);
@@ -1577,7 +1577,7 @@ where
         pct_cmd.arg("restore").arg(&snapshot_fixed).arg("pct.conf.blob").arg(&pct_path)
             .arg("--repository").arg(&repo);
         if !pbs_pw.is_empty() { pct_cmd.env("PBS_PASSWORD", pbs_pw); }
-        if !storage.pbs_fingerprint.is_empty() { pct_cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint); }
+        if !storage.pbs_fingerprint.is_empty() { pct_cmd.env("PBS_FINGERPRINT", &storage.pbs_fingerprint); }
         let _ = pct_cmd.output(); // Best-effort
 
         // Create a basic LXC config so `lxc-ls` discovers the container
@@ -1674,7 +1674,7 @@ fn detect_pbs_archive(storage: &BackupStorage, snapshot: &str) -> Option<String>
        .arg("--repository").arg(&repo);
 
     if !storage.pbs_fingerprint.is_empty() {
-        cmd.arg("--fingerprint").arg(&storage.pbs_fingerprint);
+        cmd.env("PBS_FINGERPRINT", &storage.pbs_fingerprint);
     }
     if !storage.pbs_namespace.is_empty() {
         cmd.arg("--ns").arg(&storage.pbs_namespace);
