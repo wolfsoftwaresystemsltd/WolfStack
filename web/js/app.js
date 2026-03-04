@@ -2824,6 +2824,7 @@ function renderFilteredFileList(entries, isSearch) {
             <td style="font-family:var(--font-mono);font-size:13px;cursor:pointer;color:var(--accent);" onclick="changePermissions('${e.path.replace(/'/g, "\\'")}')" title="Click to change permissions">${escapeHtml(e.permissions)}</td>
             <td style="white-space:nowrap;">
                 ${!e.is_dir ? `<button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="downloadFile('${e.path.replace(/'/g, "\\'")}')">⬇️</button>` : ''}
+                ${!e.is_dir && e.size < 2097152 ? `<button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="editFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">📝</button>` : ''}
                 <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="renameFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">✏️</button>
                 <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);" onclick="deleteFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">🗑️</button>
             </td>
@@ -3097,6 +3098,51 @@ async function createNewFolder(name) {
 
 function triggerFileUpload() {
     document.getElementById('file-upload-input').click();
+}
+
+// ─── File Editor ───
+
+var _editFilePath = '';
+
+async function editFile(path, name) {
+    const url = containerFileMode
+        ? apiUrl(`/api/files/${containerFileMode.type}/read?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(path)}`)
+        : apiUrl(`/api/files/read?path=${encodeURIComponent(path)}`);
+    try {
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.error) { showToast(`Cannot edit: ${data.error}`, 'error'); return; }
+        _editFilePath = path;
+        document.getElementById('file-editor-title').textContent = name;
+        document.getElementById('file-editor-path').textContent = path;
+        document.getElementById('file-editor-content').value = data.content;
+        document.getElementById('file-editor-modal').classList.add('active');
+    } catch (e) {
+        showToast(`Failed to load file: ${e.message}`, 'error');
+    }
+}
+
+async function saveFileEdit() {
+    const content = document.getElementById('file-editor-content').value;
+    const url = containerFileMode
+        ? apiUrl(`/api/files/${containerFileMode.type}/write`)
+        : apiUrl('/api/files/write');
+    const body = containerFileMode
+        ? { container: containerFileMode.name, path: _editFilePath, content }
+        : { path: _editFilePath, content };
+    try {
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (data.error) { showToast(`Save failed: ${data.error}`, 'error'); return; }
+        showToast('File saved', 'success');
+        document.getElementById('file-editor-modal').classList.remove('active');
+    } catch (e) {
+        showToast(`Save failed: ${e.message}`, 'error');
+    }
 }
 
 async function uploadFiles(files) {

@@ -5836,6 +5836,69 @@ pub async fn files_chmod(
     HttpResponse::Ok().json(serde_json::json!({ "results": results }))
 }
 
+/// GET /api/files/read?path=/etc/hosts — read file contents as text
+pub async fn files_read(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let path = match query.get("path") {
+        Some(p) => p.clone(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" })),
+    };
+    let canonical = match sanitize_file_path(&path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+    if canonical.is_dir() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Cannot edit a directory" }));
+    }
+    let metadata = match std::fs::metadata(&canonical) {
+        Ok(m) => m,
+        Err(e) => return HttpResponse::NotFound().json(serde_json::json!({ "error": format!("File not found: {}", e) })),
+    };
+    if metadata.len() > 2 * 1024 * 1024 {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "File too large to edit (max 2MB)" }));
+    }
+    match std::fs::read_to_string(&canonical) {
+        Ok(content) => HttpResponse::Ok().json(serde_json::json!({
+            "path": path,
+            "content": content,
+            "size": metadata.len(),
+        })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": format!("Cannot read file (binary?): {}", e) })),
+    }
+}
+
+/// POST /api/files/write — write text content to a file
+pub async fn files_write(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let path = match body.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" })),
+    };
+    let content = match body.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'content'" })),
+    };
+    let canonical = match sanitize_file_path(&path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+    if canonical.is_dir() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Cannot write to a directory" }));
+    }
+    match std::fs::write(&canonical, content) {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "message": "File saved", "path": path })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Write failed: {}", e) })),
+    }
+}
+
 /// GET /api/files/docker/browse?container=ID&path=/ — browse files inside a Docker container
 pub async fn files_docker_browse(
     req: HttpRequest,
@@ -6111,6 +6174,69 @@ pub async fn files_docker_upload(
         "message": format!("Uploaded {} file(s)", uploaded.len()),
         "files": uploaded,
     }))
+}
+
+/// GET /api/files/docker/read?container=ID&path=/etc/hosts — read file from Docker container
+pub async fn files_docker_read(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = match query.get("container") {
+        Some(c) => c.clone(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container'" })),
+    };
+    let path = match query.get("path") {
+        Some(p) => p.clone(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" })),
+    };
+    let output = std::process::Command::new("docker")
+        .args(["exec", &container, "cat", &path])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let content = String::from_utf8_lossy(&out.stdout).to_string();
+            HttpResponse::Ok().json(serde_json::json!({ "path": path, "content": content, "size": content.len() }))
+        }
+        Ok(out) => HttpResponse::BadRequest().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/files/docker/write — write file inside Docker container
+pub async fn files_docker_write(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = match body.get("container").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container'" })),
+    };
+    let path = match body.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" })),
+    };
+    let content = match body.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'content'" })),
+    };
+    // Write to temp file then docker cp in
+    let tmp = format!("/tmp/wolfstack-edit-{}", std::process::id());
+    if let Err(e) = std::fs::write(&tmp, content) {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Temp write failed: {}", e) }));
+    }
+    let output = std::process::Command::new("docker")
+        .args(["cp", &tmp, &format!("{}:{}", container, path)])
+        .output();
+    let _ = std::fs::remove_file(&tmp);
+    match output {
+        Ok(out) if out.status.success() => HttpResponse::Ok().json(serde_json::json!({ "message": "File saved", "path": path })),
+        Ok(out) => HttpResponse::BadRequest().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
 }
 
 // ─── LXC File Manager ───
@@ -6435,6 +6561,75 @@ pub async fn files_lxc_upload(
         "message": format!("Uploaded {} file(s)", uploaded.len()),
         "files": uploaded,
     }))
+}
+
+/// GET /api/files/lxc/read?container=NAME&path=/etc/hosts — read file from LXC container
+pub async fn files_lxc_read(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = match query.get("container") {
+        Some(c) => c.clone(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container'" })),
+    };
+    let path = match query.get("path") {
+        Some(p) => p.clone(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" })),
+    };
+    let output = std::process::Command::new("lxc-attach")
+        .args(["-n", &container, "--", "cat", &path])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let content = String::from_utf8_lossy(&out.stdout).to_string();
+            HttpResponse::Ok().json(serde_json::json!({ "path": path, "content": content, "size": content.len() }))
+        }
+        Ok(out) => HttpResponse::BadRequest().json(serde_json::json!({ "error": String::from_utf8_lossy(&out.stderr).trim().to_string() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/files/lxc/write — write file inside LXC container
+pub async fn files_lxc_write(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = match body.get("container").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container'" })),
+    };
+    let path = match body.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" })),
+    };
+    let content = match body.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'content'" })),
+    };
+    // Write via lxc-attach using tee
+    let mut child = match std::process::Command::new("lxc-attach")
+        .args(["-n", &container, "--", "tee", &path])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(content.as_bytes());
+    }
+    match child.wait() {
+        Ok(status) if status.success() => HttpResponse::Ok().json(serde_json::json!({ "message": "File saved", "path": path })),
+        Ok(_) => HttpResponse::BadRequest().json(serde_json::json!({ "error": "lxc-attach write failed" })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
 }
 
 /// POST /api/agent/storage/apply — receive and apply a mount config from another node (cluster-auth)
@@ -9532,6 +9727,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/files/download", web::get().to(files_download))
         .route("/api/files/search", web::get().to(files_search))
         .route("/api/files/chmod", web::post().to(files_chmod))
+        .route("/api/files/read", web::get().to(files_read))
+        .route("/api/files/write", web::post().to(files_write))
         // Docker File Manager
         .route("/api/files/docker/browse", web::get().to(files_docker_browse))
         .route("/api/files/docker/mkdir", web::post().to(files_docker_mkdir))
@@ -9539,6 +9736,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/files/docker/rename", web::post().to(files_docker_rename))
         .route("/api/files/docker/download", web::get().to(files_docker_download))
         .route("/api/files/docker/upload", web::post().to(files_docker_upload))
+        .route("/api/files/docker/read", web::get().to(files_docker_read))
+        .route("/api/files/docker/write", web::post().to(files_docker_write))
         // LXC File Manager
         .route("/api/files/lxc/browse", web::get().to(files_lxc_browse))
         .route("/api/files/lxc/mkdir", web::post().to(files_lxc_mkdir))
@@ -9546,6 +9745,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/files/lxc/rename", web::post().to(files_lxc_rename))
         .route("/api/files/lxc/download", web::get().to(files_lxc_download))
         .route("/api/files/lxc/upload", web::post().to(files_lxc_upload))
+        .route("/api/files/lxc/read", web::get().to(files_lxc_read))
+        .route("/api/files/lxc/write", web::post().to(files_lxc_write))
         // Networking
         .route("/api/networking/interfaces", web::get().to(net_list_interfaces))
         .route("/api/networking/dns", web::get().to(net_get_dns))

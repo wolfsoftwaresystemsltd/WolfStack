@@ -1,6 +1,6 @@
 [package]
 name = "wolfstack"
-version = "11.26.11"
+version = "11.26.12"
 edition = "2024"
 authors = ["Wolf Software Systems Ltd"]
 description = "Server management platform for the Wolf software suite"
