@@ -305,7 +305,7 @@ if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev
     WOLFNET_SRC_DIR="${CUSTOM_INSTALL_DIR:-/opt}/wolfnet-src"
     if [ ! -d "$WOLFNET_SRC_DIR" ]; then
         echo "  WolfNet source not found — cloning..."
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+        git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
     fi
 
@@ -315,40 +315,38 @@ if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev
     git fetch origin 2>&1 || true
     git reset --hard origin/main 2>&1 || true
 
-    # Verify wolfnet subdirectory exists after reset — if not, re-clone
-    if [ ! -d "$WOLFNET_SRC_DIR/wolfnet" ]; then
-        echo "  ⚠ wolfnet subdirectory missing — re-cloning WolfScale repo..."
-        cd /tmp
+    # If the existing source dir is a WolfScale clone (old layout), replace it
+    if [ -d "$WOLFNET_SRC_DIR/wolfnet" ] && [ ! -f "$WOLFNET_SRC_DIR/Cargo.toml" ]; then
+        echo "  Replacing old WolfScale clone with standalone WolfNet repo..."
         rm -rf "$WOLFNET_SRC_DIR"
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+        git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-        cd "$WOLFNET_SRC_DIR"
     fi
 
     # Rebuild
     export PATH="${CARGO_HOME:-$REAL_HOME/.cargo}/bin:/usr/local/bin:/usr/bin:$PATH"
     if command -v cargo &> /dev/null; then
-        cd "$WOLFNET_SRC_DIR/wolfnet"
+        cd "$WOLFNET_SRC_DIR"
         if [ -n "$CUSTOM_INSTALL_DIR" ]; then
             chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" "$TMPDIR" 2>/dev/null || true
             if [ "$REAL_USER" != "root" ]; then
-                su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:/usr/local/bin:/usr/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
+                su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:/usr/local/bin:/usr/bin:\$PATH' && cd $WOLFNET_SRC_DIR && cargo build --release"
             else
                 cargo build --release
             fi
         elif [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
             chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
-            su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
+            su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR && $REAL_HOME/.cargo/bin/cargo build --release"
         else
             cargo build --release
         fi
 
         # Install updated binaries
         systemctl stop wolfnet 2>/dev/null || true
-        cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
+        cp "$WOLFNET_SRC_DIR/target/release/wolfnet" /usr/local/bin/wolfnet
         chmod +x /usr/local/bin/wolfnet
-        if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
-            cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+        if [ -f "$WOLFNET_SRC_DIR/target/release/wolfnetctl" ]; then
+            cp "$WOLFNET_SRC_DIR/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
             chmod +x /usr/local/bin/wolfnetctl
         fi
         systemctl start wolfnet 2>/dev/null || true
@@ -365,7 +363,7 @@ elif command -v wolfnet &> /dev/null && [ -f "/etc/systemd/system/wolfnet.servic
     WOLFNET_SRC_DIR="${CUSTOM_INSTALL_DIR:-/opt}/wolfnet-src"
     if [ ! -d "$WOLFNET_SRC_DIR" ]; then
         echo "  WolfNet source not found — cloning..."
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+        git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
     fi
 
@@ -375,36 +373,34 @@ elif command -v wolfnet &> /dev/null && [ -f "/etc/systemd/system/wolfnet.servic
     git fetch origin 2>&1 || true
     git reset --hard origin/main 2>&1 || true
 
-    # Verify wolfnet subdirectory exists after reset — if not, re-clone
-    if [ ! -d "$WOLFNET_SRC_DIR/wolfnet" ]; then
-        echo "  ⚠ wolfnet subdirectory missing — re-cloning WolfScale repo..."
-        cd /tmp
+    # If the existing source dir is a WolfScale clone (old layout), replace it
+    if [ -d "$WOLFNET_SRC_DIR/wolfnet" ] && [ ! -f "$WOLFNET_SRC_DIR/Cargo.toml" ]; then
+        echo "  Replacing old WolfScale clone with standalone WolfNet repo..."
         rm -rf "$WOLFNET_SRC_DIR"
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+        git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-        cd "$WOLFNET_SRC_DIR"
     fi
 
     export PATH="${CARGO_HOME:-$REAL_HOME/.cargo}/bin:/usr/local/bin:/usr/bin:$PATH"
     if command -v cargo &> /dev/null; then
-        cd "$WOLFNET_SRC_DIR/wolfnet"
+        cd "$WOLFNET_SRC_DIR"
         if [ -n "$CUSTOM_INSTALL_DIR" ]; then
             chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" "$TMPDIR" 2>/dev/null || true
             if [ "$REAL_USER" != "root" ]; then
-                su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:/usr/local/bin:/usr/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
+                su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:/usr/local/bin:/usr/bin:\$PATH' && cd $WOLFNET_SRC_DIR && cargo build --release"
             else
                 cargo build --release
             fi
         elif [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
             chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
-            su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
+            su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR && $REAL_HOME/.cargo/bin/cargo build --release"
         else
             cargo build --release
         fi
-        cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
+        cp "$WOLFNET_SRC_DIR/target/release/wolfnet" /usr/local/bin/wolfnet
         chmod +x /usr/local/bin/wolfnet
-        if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
-            cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+        if [ -f "$WOLFNET_SRC_DIR/target/release/wolfnetctl" ]; then
+            cp "$WOLFNET_SRC_DIR/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
             chmod +x /usr/local/bin/wolfnetctl
         fi
         echo "  ✓ WolfNet updated"
@@ -467,7 +463,7 @@ else
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
         cd "$WOLFNET_SRC_DIR" && git fetch origin && git reset --hard origin/main
     else
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+        git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
         cd "$WOLFNET_SRC_DIR"
     fi
@@ -487,26 +483,26 @@ else
 
     # Build WolfNet
     echo "  Building WolfNet..."
-    cd "$WOLFNET_SRC_DIR/wolfnet"
+    cd "$WOLFNET_SRC_DIR"
     if [ -n "$CUSTOM_INSTALL_DIR" ]; then
         chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" "$TMPDIR" 2>/dev/null || true
         if [ "$REAL_USER" != "root" ]; then
-            su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:/usr/local/bin:/usr/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
+            su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:/usr/local/bin:/usr/bin:\$PATH' && cd $WOLFNET_SRC_DIR && cargo build --release"
         else
             cargo build --release
         fi
     elif [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
         chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
-        su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
+        su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR && $REAL_HOME/.cargo/bin/cargo build --release"
     else
         cargo build --release
     fi
 
     # Install binaries
-    cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
+    cp "$WOLFNET_SRC_DIR/target/release/wolfnet" /usr/local/bin/wolfnet
     chmod +x /usr/local/bin/wolfnet
-    if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
-        cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+    if [ -f "$WOLFNET_SRC_DIR/target/release/wolfnetctl" ]; then
+        cp "$WOLFNET_SRC_DIR/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
         chmod +x /usr/local/bin/wolfnetctl
     fi
     echo "  ✓ WolfNet binary installed"
