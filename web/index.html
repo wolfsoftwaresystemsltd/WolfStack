@@ -3306,6 +3306,24 @@
             <input type="file" id="file-upload-input" multiple style="display:none;" onchange="uploadFiles(this.files)">
         </div>
 
+        <!-- File Editor Modal -->
+        <div id="file-editor-modal" class="modal-overlay">
+            <div class="modal" style="max-width:800px; width:90%;">
+                <div class="modal-header">
+                    <h3 id="file-editor-title">Edit File</h3>
+                    <button class="modal-close" onclick="document.getElementById('file-editor-modal').classList.remove('active')">&times;</button>
+                </div>
+                <div class="modal-body" style="padding:0;">
+                    <div style="padding:8px 16px 0; font-size:11px; color:var(--text-muted); font-family:var(--font-mono);" id="file-editor-path"></div>
+                    <textarea id="file-editor-content" style="width:100%; height:60vh; margin:0; padding:12px 16px; border:none; border-top:1px solid var(--border); border-bottom:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-family:var(--font-mono); font-size:13px; line-height:1.5; resize:vertical; tab-size:4; white-space:pre; overflow-wrap:normal; overflow-x:auto;" spellcheck="false"></textarea>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" onclick="document.getElementById('file-editor-modal').classList.remove('active')">Cancel</button>
+                    <button class="btn btn-primary" onclick="saveFileEdit()">Save</button>
+                </div>
+            </div>
+        </div>
+
         <!-- ═══ PVE Resources (Proxmox VMs & Containers) ═══ -->
         <div id="page-pve-resources" class="page-view" style="display:none;">
             <div id="pve-resources-content">
