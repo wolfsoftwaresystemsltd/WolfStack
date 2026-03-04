@@ -316,7 +316,7 @@ if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev
     git reset --hard origin/main 2>&1 || true
 
     # If the existing source dir is a WolfScale clone (old layout), replace it
-    if [ -d "$WOLFNET_SRC_DIR/wolfnet" ] && [ ! -f "$WOLFNET_SRC_DIR/Cargo.toml" ]; then
+    if [ -f "$WOLFNET_SRC_DIR/Cargo.toml" ] && ! grep -q 'name = "wolfnet"' "$WOLFNET_SRC_DIR/Cargo.toml"; then
         echo "  Replacing old WolfScale clone with standalone WolfNet repo..."
         rm -rf "$WOLFNET_SRC_DIR"
         git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
@@ -374,7 +374,7 @@ elif command -v wolfnet &> /dev/null && [ -f "/etc/systemd/system/wolfnet.servic
     git reset --hard origin/main 2>&1 || true
 
     # If the existing source dir is a WolfScale clone (old layout), replace it
-    if [ -d "$WOLFNET_SRC_DIR/wolfnet" ] && [ ! -f "$WOLFNET_SRC_DIR/Cargo.toml" ]; then
+    if [ -f "$WOLFNET_SRC_DIR/Cargo.toml" ] && ! grep -q 'name = "wolfnet"' "$WOLFNET_SRC_DIR/Cargo.toml"; then
         echo "  Replacing old WolfScale clone with standalone WolfNet repo..."
         rm -rf "$WOLFNET_SRC_DIR"
         git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
