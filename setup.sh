@@ -303,54 +303,58 @@ if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev
 
     # Always update WolfNet when WolfStack updates
     WOLFNET_SRC_DIR="${CUSTOM_INSTALL_DIR:-/opt}/wolfnet-src"
-    if [ -d "$WOLFNET_SRC_DIR" ]; then
-        echo "  Updating WolfNet..."
-        cd "$WOLFNET_SRC_DIR"
+    if [ ! -d "$WOLFNET_SRC_DIR" ]; then
+        echo "  WolfNet source not found — cloning..."
+        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-        git fetch origin 2>&1 || true
-        git reset --hard origin/main 2>&1 || true
+    fi
 
-        # Verify wolfnet subdirectory exists after reset — if not, re-clone
-        if [ ! -d "$WOLFNET_SRC_DIR/wolfnet" ]; then
-            echo "  ⚠ wolfnet subdirectory missing — re-cloning WolfScale repo..."
-            cd /tmp
-            rm -rf "$WOLFNET_SRC_DIR"
-            git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
-            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-            cd "$WOLFNET_SRC_DIR"
-        fi
+    echo "  Updating WolfNet..."
+    cd "$WOLFNET_SRC_DIR"
+    git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+    git fetch origin 2>&1 || true
+    git reset --hard origin/main 2>&1 || true
 
-        # Rebuild
-        export PATH="${CARGO_HOME:-$REAL_HOME/.cargo}/bin:/usr/local/bin:/usr/bin:$PATH"
-        if command -v cargo &> /dev/null; then
-            cd "$WOLFNET_SRC_DIR/wolfnet"
-            if [ -n "$CUSTOM_INSTALL_DIR" ]; then
-                chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" "$TMPDIR" 2>/dev/null || true
-                if [ "$REAL_USER" != "root" ]; then
-                    su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:/usr/local/bin:/usr/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
-                else
-                    cargo build --release
-                fi
-            elif [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
-                chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
-                su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
+    # Verify wolfnet subdirectory exists after reset — if not, re-clone
+    if [ ! -d "$WOLFNET_SRC_DIR/wolfnet" ]; then
+        echo "  ⚠ wolfnet subdirectory missing — re-cloning WolfScale repo..."
+        cd /tmp
+        rm -rf "$WOLFNET_SRC_DIR"
+        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+        git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+        cd "$WOLFNET_SRC_DIR"
+    fi
+
+    # Rebuild
+    export PATH="${CARGO_HOME:-$REAL_HOME/.cargo}/bin:/usr/local/bin:/usr/bin:$PATH"
+    if command -v cargo &> /dev/null; then
+        cd "$WOLFNET_SRC_DIR/wolfnet"
+        if [ -n "$CUSTOM_INSTALL_DIR" ]; then
+            chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" "$TMPDIR" 2>/dev/null || true
+            if [ "$REAL_USER" != "root" ]; then
+                su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:/usr/local/bin:/usr/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
             else
                 cargo build --release
             fi
-
-            # Install updated binaries
-            systemctl stop wolfnet 2>/dev/null || true
-            cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
-            chmod +x /usr/local/bin/wolfnet
-            if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
-                cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
-                chmod +x /usr/local/bin/wolfnetctl
-            fi
-            systemctl start wolfnet 2>/dev/null || true
-            echo "  ✓ WolfNet updated and restarted"
+        elif [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
+            chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
+            su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
         else
-            echo "  ⚠ Cargo not found — skipping WolfNet rebuild"
+            cargo build --release
         fi
+
+        # Install updated binaries
+        systemctl stop wolfnet 2>/dev/null || true
+        cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
+        chmod +x /usr/local/bin/wolfnet
+        if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
+            cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+            chmod +x /usr/local/bin/wolfnetctl
+        fi
+        systemctl start wolfnet 2>/dev/null || true
+        echo "  ✓ WolfNet updated and restarted"
+    else
+        echo "  ⚠ Cargo not found — skipping WolfNet rebuild"
     fi
 
 elif command -v wolfnet &> /dev/null && [ -f "/etc/systemd/system/wolfnet.service" ]; then
@@ -359,49 +363,53 @@ elif command -v wolfnet &> /dev/null && [ -f "/etc/systemd/system/wolfnet.servic
 
     # Always update WolfNet when WolfStack updates
     WOLFNET_SRC_DIR="${CUSTOM_INSTALL_DIR:-/opt}/wolfnet-src"
-    if [ -d "$WOLFNET_SRC_DIR" ]; then
-        echo "  Updating WolfNet..."
-        cd "$WOLFNET_SRC_DIR"
+    if [ ! -d "$WOLFNET_SRC_DIR" ]; then
+        echo "  WolfNet source not found — cloning..."
+        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-        git fetch origin 2>&1 || true
-        git reset --hard origin/main 2>&1 || true
+    fi
 
-        # Verify wolfnet subdirectory exists after reset — if not, re-clone
-        if [ ! -d "$WOLFNET_SRC_DIR/wolfnet" ]; then
-            echo "  ⚠ wolfnet subdirectory missing — re-cloning WolfScale repo..."
-            cd /tmp
-            rm -rf "$WOLFNET_SRC_DIR"
-            git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
-            git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
-            cd "$WOLFNET_SRC_DIR"
-        fi
+    echo "  Updating WolfNet..."
+    cd "$WOLFNET_SRC_DIR"
+    git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+    git fetch origin 2>&1 || true
+    git reset --hard origin/main 2>&1 || true
 
-        export PATH="${CARGO_HOME:-$REAL_HOME/.cargo}/bin:/usr/local/bin:/usr/bin:$PATH"
-        if command -v cargo &> /dev/null; then
-            cd "$WOLFNET_SRC_DIR/wolfnet"
-            if [ -n "$CUSTOM_INSTALL_DIR" ]; then
-                chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" "$TMPDIR" 2>/dev/null || true
-                if [ "$REAL_USER" != "root" ]; then
-                    su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:/usr/local/bin:/usr/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
-                else
-                    cargo build --release
-                fi
-            elif [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
-                chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
-                su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
+    # Verify wolfnet subdirectory exists after reset — if not, re-clone
+    if [ ! -d "$WOLFNET_SRC_DIR/wolfnet" ]; then
+        echo "  ⚠ wolfnet subdirectory missing — re-cloning WolfScale repo..."
+        cd /tmp
+        rm -rf "$WOLFNET_SRC_DIR"
+        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+        git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
+        cd "$WOLFNET_SRC_DIR"
+    fi
+
+    export PATH="${CARGO_HOME:-$REAL_HOME/.cargo}/bin:/usr/local/bin:/usr/bin:$PATH"
+    if command -v cargo &> /dev/null; then
+        cd "$WOLFNET_SRC_DIR/wolfnet"
+        if [ -n "$CUSTOM_INSTALL_DIR" ]; then
+            chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR" "$CARGO_HOME" "$RUSTUP_HOME" "$TMPDIR" 2>/dev/null || true
+            if [ "$REAL_USER" != "root" ]; then
+                su - "$REAL_USER" -c "export CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME' TMPDIR='$TMPDIR' PATH='$CARGO_HOME/bin:/usr/local/bin:/usr/bin:\$PATH' && cd $WOLFNET_SRC_DIR/wolfnet && cargo build --release"
             else
                 cargo build --release
             fi
-            cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
-            chmod +x /usr/local/bin/wolfnet
-            if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
-                cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
-                chmod +x /usr/local/bin/wolfnetctl
-            fi
-            echo "  ✓ WolfNet updated"
+        elif [ "$REAL_USER" != "root" ] && [ -f "$REAL_HOME/.cargo/bin/cargo" ]; then
+            chown -R "$REAL_USER:$REAL_USER" "$WOLFNET_SRC_DIR"
+            su - "$REAL_USER" -c "cd $WOLFNET_SRC_DIR/wolfnet && $REAL_HOME/.cargo/bin/cargo build --release"
         else
-            echo "  ⚠ Cargo not found — skipping WolfNet rebuild"
+            cargo build --release
         fi
+        cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnet" /usr/local/bin/wolfnet
+        chmod +x /usr/local/bin/wolfnet
+        if [ -f "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" ]; then
+            cp "$WOLFNET_SRC_DIR/wolfnet/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
+            chmod +x /usr/local/bin/wolfnetctl
+        fi
+        echo "  ✓ WolfNet updated"
+    else
+        echo "  ⚠ Cargo not found — skipping WolfNet rebuild"
     fi
 
     echo "  Starting WolfNet..."
