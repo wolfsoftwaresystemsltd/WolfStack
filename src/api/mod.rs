@@ -997,15 +997,25 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                         errors.push(format!("{}: WolfNet not configured", node.hostname));
                         continue;
                     }
-                    // Use the node's real address (not WolfNet IP) as the endpoint
-                    let endpoint = format!("{}:{}", node.address, listen_port);
+                    // Use the node's real address as the endpoint.
+                    // If bound to 0.0.0.0 or 127.0.0.1, those aren't routable — use the
+                    // public IP (for internet-reachable nodes) or fall back to LAN IP
+                    // (for local-only networks).
+                    let effective_addr = if node.address == "0.0.0.0" || node.address == "127.0.0.1" {
+                        node.public_ip.clone()
+                            .or_else(|| networking::detect_lan_ip())
+                            .unwrap_or_else(|| node.address.clone())
+                    } else {
+                        node.address.clone()
+                    };
+                    let endpoint = format!("{}:{}", effective_addr, listen_port);
                     infos.push(NodeWnInfo {
                         hostname,
                         wolfnet_ip: address,
                         public_key,
                         endpoint,
                         is_self: true,
-                        address: node.address.clone(),
+                        address: effective_addr,
                         port: node.port,
                     });
                 }

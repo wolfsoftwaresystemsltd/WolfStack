@@ -2043,6 +2043,34 @@ fn detect_wolfnet_gateway_ip() -> Option<String> {
     None
 }
 
+/// Detect the best reachable LAN IP for this node.
+/// Returns the first private (RFC1918) IPv4 address found on a real interface,
+/// skipping loopback, docker, wolfnet, veth, and bridge interfaces.
+/// Used when the node is bound to 0.0.0.0 or 127.0.0.1 and we need a real
+/// endpoint for WolfNet peers to connect to.
+pub fn detect_lan_ip() -> Option<String> {
+    let interfaces = list_interfaces();
+    for iface in &interfaces {
+        if iface.name == "lo" || iface.name.starts_with("docker")
+            || iface.name.starts_with("br-") || iface.name.starts_with("veth")
+            || iface.name.starts_with("wn") || iface.name.starts_with("wolfnet")
+            || iface.name.starts_with("virbr")
+        {
+            continue;
+        }
+        for addr in &iface.addresses {
+            if addr.family == "inet" {
+                if let Ok(ip) = addr.address.parse::<std::net::Ipv4Addr>() {
+                    if is_private_ip(ip) && !ip.is_loopback() {
+                        return Some(addr.address.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Detect public (non-RFC1918) IPs on all interfaces
 pub fn detect_public_ips() -> Vec<String> {
     let mut public_ips = Vec::new();
