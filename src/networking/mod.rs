@@ -2749,7 +2749,27 @@ fn detect_wolfnet_iface() -> Option<String> {
 }
 
 /// Detect the WolfNet subnet prefix (e.g. "10.0.10")
+/// Detect the WolfNet subnet prefix by reading /etc/wolfnet/config.toml directly.
+/// Falls back to runtime status.json, then to default.
 fn detect_wolfnet_subnet() -> Option<String> {
+    // Primary: read from config.toml (source of truth — user may have changed it)
+    if let Ok(content) = std::fs::read_to_string("/etc/wolfnet/config.toml") {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("address") && trimmed.contains('=') {
+                // address = "10.10.10.1" or address = 10.10.10.1
+                if let Some(val) = trimmed.split('=').nth(1) {
+                    let addr = val.trim().trim_matches('"').trim();
+                    let parts: Vec<&str> = addr.split('.').collect();
+                    if parts.len() >= 3 {
+                        return Some(format!("{}.{}.{}", parts[0], parts[1], parts[2]));
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: runtime status (may be stale if WolfNet was reconfigured but not restarted)
     if let Some(info) = get_wolfnet_local_info() {
         if let Some(addr) = info["address"].as_str() {
             let parts: Vec<&str> = addr.split('.').collect();
