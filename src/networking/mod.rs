@@ -2488,10 +2488,11 @@ fn generate_client_config(bridge: &WireGuardBridge, client: &WireGuardClient) ->
     // Detect the server's public/reachable IP for the Endpoint field
     let server_endpoint = detect_server_endpoint(bridge.listen_port);
 
-    // AllowedIPs: bridge subnet (for gateway) + WolfNet subnet (for cluster resources)
-    // Traffic to 10.20.X.Y reaches 10.0.10.Y via NETMAP on the server
-    let wolfnet_cidr = format!("{}.0/24", bridge.wolfnet_subnet);
-    let allowed_ips = format!("{}, {}", bridge.bridge_subnet(), wolfnet_cidr);
+    // AllowedIPs: only the bridge subnet — users always use 10.20.X.x addresses.
+    // NETMAP on the server translates bridge IPs to WolfNet IPs transparently.
+    // We intentionally exclude the raw WolfNet subnet so that multiple clusters
+    // (which may share the same WolfNet subnet) don't cause routing conflicts.
+    let allowed_ips = bridge.bridge_subnet();
 
     Ok(format!(
         "# WolfStack WireGuard Bridge — Cluster: {cluster}\n\
@@ -2563,6 +2564,12 @@ pub fn apply_wireguard_bridge(bridge: &WireGuardBridge) -> Result<(), String> {
         .map(|o| o.status.success()).unwrap_or(false);
     if !exists {
         run_cmd("ip", &["link", "add", &iface, "type", "wireguard"])?;
+        // Tell NetworkManager to ignore this interface — on desktop systems NM
+        // will otherwise try to manage the WG interface, mess with routing
+        // metrics, and cause slow/broken connectivity on WiFi.
+        let _ = Command::new("nmcli")
+            .args(["device", "set", &iface, "managed", "no"])
+            .output();
     }
 
     // Write private key to temp file for wg setconf
