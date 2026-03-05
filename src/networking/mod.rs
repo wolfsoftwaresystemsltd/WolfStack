@@ -354,24 +354,29 @@ fn set_dns_systemd_resolved(nameservers: &[String], search_domains: &[String]) -
 /// Ensure NetworkManager has a persistent config to ignore WolfStack/WolfNet interfaces.
 /// Writes /etc/NetworkManager/conf.d/wolfstack.conf and reloads NM if the file is new.
 fn ensure_nm_unmanaged() {
-    let conf_path = "/etc/NetworkManager/conf.d/wolfstack.conf";
-    if std::path::Path::new(conf_path).exists() {
-        return;
-    }
-    // Only write if NetworkManager conf.d directory exists (NM is installed)
+    // Only act if NetworkManager conf.d directory exists (NM is installed)
     if !std::path::Path::new("/etc/NetworkManager/conf.d").is_dir() {
         return;
     }
+    let conf_path = "/etc/NetworkManager/conf.d/wolfstack.conf";
+    // The WG interface name includes the cluster name which may be mixed-case
+    // (e.g. "wg-WolfStack"), so use the broad "wg-*" pattern. Re-write if an
+    // older version with the narrow pattern exists.
     let content = "\
 # WolfStack: prevent NetworkManager from managing overlay/tunnel interfaces.
 # These are managed by WolfStack/WolfNet and NM interference causes routing
 # problems on desktop systems (especially Fedora with WiFi).
 [keyfile]
-unmanaged-devices=interface-name:wg-wolfstack*;interface-name:wolfnet*
+unmanaged-devices=interface-name:wg-*;interface-name:wolfnet*
 ";
-    if std::fs::write(conf_path, content).is_ok() {
-        // Reload NM config so it picks up the new file
-        let _ = Command::new("nmcli").args(["general", "reload"]).output();
+    let needs_write = match std::fs::read_to_string(conf_path) {
+        Ok(existing) => existing != content,
+        Err(_) => true,
+    };
+    if needs_write {
+        if std::fs::write(conf_path, content).is_ok() {
+            let _ = Command::new("nmcli").args(["general", "reload"]).output();
+        }
     }
 }
 
