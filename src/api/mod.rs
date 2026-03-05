@@ -69,6 +69,8 @@ pub struct AppState {
     pub tls_enabled: bool,
     /// Login rate limiter (brute-force protection)
     pub login_limiter: Arc<crate::auth::LoginRateLimiter>,
+    /// WireGuard bridge configs (cluster → bridge)
+    pub wireguard_bridges: Arc<std::sync::RwLock<std::collections::HashMap<String, crate::networking::WireGuardBridge>>>,
 }
 
 /// Load or generate the join token from /etc/wolfstack/join-token
@@ -4245,6 +4247,179 @@ pub async fn net_listening_ports(
         "listening": networking::get_listening_ports(),
         "blocked": networking::get_blocked_ports(),
     }))
+}
+
+// ─── WireGuard Bridge API ───
+
+/// GET /api/networking/wireguard — list all bridges
+pub async fn net_wireguard_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let bridges = state.wireguard_bridges.read().unwrap();
+    let installed = networking::wireguard_installed();
+    let list: Vec<serde_json::Value> = bridges.values().map(|b| {
+        serde_json::json!({
+            "cluster": b.cluster,
+            "enabled": b.enabled,
+            "listen_port": b.listen_port,
+            "public_key": b.public_key,
+            "bridge_subnet": b.bridge_subnet(),
+            "server_ip": b.server_ip,
+            "wolfnet_subnet": b.wolfnet_subnet,
+            "interface": b.interface_name(),
+            "client_count": b.clients.len(),
+        })
+    }).collect();
+    HttpResponse::Ok().json(serde_json::json!({
+        "installed": installed,
+        "bridges": list,
+    }))
+}
+
+/// GET /api/networking/wireguard/{cluster} — get bridge details + clients
+pub async fn net_wireguard_get(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let cluster = path.into_inner();
+    let bridges = state.wireguard_bridges.read().unwrap();
+    match bridges.get(&cluster) {
+        Some(bridge) => {
+            let clients: Vec<serde_json::Value> = bridge.clients.iter().map(|c| {
+                serde_json::json!({
+                    "id": c.id,
+                    "name": c.name,
+                    "public_key": c.public_key,
+                    "assigned_ip": c.assigned_ip,
+                    "created_at": c.created_at,
+                    "enabled": c.enabled,
+                })
+            }).collect();
+            HttpResponse::Ok().json(serde_json::json!({
+                "cluster": bridge.cluster,
+                "enabled": bridge.enabled,
+                "listen_port": bridge.listen_port,
+                "public_key": bridge.public_key,
+                "bridge_subnet": bridge.bridge_subnet(),
+                "server_ip": bridge.server_ip,
+                "wolfnet_subnet": bridge.wolfnet_subnet,
+                "interface": bridge.interface_name(),
+                "clients": clients,
+            }))
+        }
+        None => HttpResponse::NotFound().json(serde_json::json!({"error": "No bridge for this cluster"})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WgInitRequest {
+    #[serde(default = "default_wg_port")]
+    listen_port: u16,
+}
+fn default_wg_port() -> u16 { 51820 }
+
+/// POST /api/networking/wireguard/{cluster}/init — initialize bridge
+pub async fn net_wireguard_init(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<WgInitRequest>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let cluster = path.into_inner();
+    match networking::init_wireguard_bridge(&cluster, body.listen_port) {
+        Ok(bridge) => {
+            let mut bridges = state.wireguard_bridges.write().unwrap();
+            bridges.insert(cluster, bridge.clone());
+            HttpResponse::Ok().json(serde_json::json!({
+                "status": "ok",
+                "bridge_subnet": bridge.bridge_subnet(),
+                "listen_port": bridge.listen_port,
+                "public_key": bridge.public_key,
+            }))
+        }
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WgToggleRequest {
+    enabled: bool,
+}
+
+/// POST /api/networking/wireguard/{cluster}/toggle — enable/disable bridge
+pub async fn net_wireguard_toggle(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<WgToggleRequest>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let cluster = path.into_inner();
+    match networking::toggle_wireguard_bridge(&cluster, body.enabled) {
+        Ok(msg) => {
+            // Reload state
+            let fresh = networking::load_wireguard_bridges();
+            *state.wireguard_bridges.write().unwrap() = fresh;
+            HttpResponse::Ok().json(serde_json::json!({"status": msg}))
+        }
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    }
+}
+
+/// DELETE /api/networking/wireguard/{cluster} — delete bridge entirely
+pub async fn net_wireguard_delete(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let cluster = path.into_inner();
+    match networking::delete_wireguard_bridge(&cluster) {
+        Ok(msg) => {
+            state.wireguard_bridges.write().unwrap().remove(&cluster);
+            HttpResponse::Ok().json(serde_json::json!({"status": msg}))
+        }
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WgAddClientRequest {
+    name: String,
+}
+
+/// POST /api/networking/wireguard/{cluster}/clients — add client
+pub async fn net_wireguard_add_client(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<WgAddClientRequest>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let cluster = path.into_inner();
+    match networking::add_wireguard_client(&cluster, &body.name) {
+        Ok((client, conf)) => {
+            // Reload state
+            let fresh = networking::load_wireguard_bridges();
+            *state.wireguard_bridges.write().unwrap() = fresh;
+            HttpResponse::Ok().json(serde_json::json!({
+                "client": {
+                    "id": client.id,
+                    "name": client.name,
+                    "assigned_ip": client.assigned_ip,
+                    "created_at": client.created_at,
+                },
+                "config": conf,
+            }))
+        }
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    }
+}
+
+/// DELETE /api/networking/wireguard/{cluster}/clients/{id} — remove client
+pub async fn net_wireguard_remove_client(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let (cluster, client_id) = path.into_inner();
+    match networking::remove_wireguard_client(&cluster, &client_id) {
+        Ok(msg) => {
+            let fresh = networking::load_wireguard_bridges();
+            *state.wireguard_bridges.write().unwrap() = fresh;
+            HttpResponse::Ok().json(serde_json::json!({"status": msg}))
+        }
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    }
+}
+
+/// GET /api/networking/wireguard/{cluster}/clients/{id}/config — download client config
+pub async fn net_wireguard_client_config(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let (cluster, client_id) = path.into_inner();
+    match networking::get_client_config(&cluster, &client_id) {
+        Ok(conf) => HttpResponse::Ok()
+            .content_type("text/plain")
+            .insert_header(("Content-Disposition", format!("attachment; filename=\"wg-{}-{}.conf\"", cluster, client_id)))
+            .body(conf),
+        Err(e) => HttpResponse::NotFound().json(serde_json::json!({"error": e})),
+    }
 }
 
 // ─── Backup API ───
@@ -9773,6 +9948,15 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/networking/ip-mappings/{id}", web::put().to(net_update_ip_mapping))
         .route("/api/networking/available-ips", web::get().to(net_available_ips))
         .route("/api/networking/listening-ports", web::get().to(net_listening_ports))
+        // WireGuard bridge
+        .route("/api/networking/wireguard", web::get().to(net_wireguard_list))
+        .route("/api/networking/wireguard/{cluster}", web::get().to(net_wireguard_get))
+        .route("/api/networking/wireguard/{cluster}/init", web::post().to(net_wireguard_init))
+        .route("/api/networking/wireguard/{cluster}/toggle", web::post().to(net_wireguard_toggle))
+        .route("/api/networking/wireguard/{cluster}", web::delete().to(net_wireguard_delete))
+        .route("/api/networking/wireguard/{cluster}/clients", web::post().to(net_wireguard_add_client))
+        .route("/api/networking/wireguard/{cluster}/clients/{id}", web::delete().to(net_wireguard_remove_client))
+        .route("/api/networking/wireguard/{cluster}/clients/{id}/config", web::get().to(net_wireguard_client_config))
         // Backups
         .route("/api/backups", web::get().to(backup_list))
         .route("/api/backups", web::post().to(backup_create))

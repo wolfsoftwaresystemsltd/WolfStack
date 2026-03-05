@@ -6780,22 +6780,25 @@ async function loadWolfNetRoutesTable() {
 
 async function loadNetworking() {
     try {
-        const [ifResp, dnsResp, wnResp, mappingsResp] = await Promise.all([
+        const [ifResp, dnsResp, wnResp, mappingsResp, wgResp] = await Promise.all([
             fetch(apiUrl('/api/networking/interfaces')),
             fetch(apiUrl('/api/networking/dns')),
             fetch(apiUrl('/api/networking/wolfnet')),
             fetch(apiUrl('/api/networking/ip-mappings')),
+            fetch(apiUrl('/api/networking/wireguard')),
         ]);
         const interfaces = await ifResp.json();
         const dns = await dnsResp.json();
         const wolfnet = await wnResp.json();
         const mappings = mappingsResp.ok ? await mappingsResp.json() : [];
+        const wgData = wgResp.ok ? await wgResp.json() : { installed: false, bridges: [] };
 
         cachedInterfaces = interfaces;
         renderNetInterfaces(interfaces);
         renderDnsConfig(dns);
         renderWolfNetStatus(wolfnet);
         renderIpMappings(mappings);
+        renderWireGuardBridge(wgData);
     } catch (e) {
         console.error('Failed to load networking:', e);
     }
@@ -7410,6 +7413,217 @@ async function removeIpMapping(id, publicIp, wolfnetIp) {
         loadNetworking();
     } catch (e) {
         showModal('Error: ' + e.message);
+    }
+}
+
+// ─── WireGuard Bridge ───
+
+function renderWireGuardBridge(data) {
+    const body = document.getElementById('wg-bridge-body');
+    const actions = document.getElementById('wg-bridge-actions');
+    if (!body) return;
+
+    if (!data.installed && (!data.bridges || data.bridges.length === 0)) {
+        body.innerHTML = '<p style="color:var(--text-muted); font-size:13px;">WireGuard tools not installed. Initialize a bridge to auto-install.</p>';
+    }
+
+    // Determine current cluster
+    const node = currentNodeId ? allNodes.find(n => n.id === currentNodeId) : null;
+    const cluster = node?.cluster_name || 'WolfStack';
+    const bridge = data.bridges ? data.bridges.find(b => b.cluster === cluster) : null;
+
+    if (!bridge) {
+        body.innerHTML = `
+            <p style="font-size:12px; color:var(--text-muted); margin-bottom:12px;">
+                Connect to this cluster's WolfNet from your local machine using any WireGuard client.
+                Each cluster gets a unique subnet so you can connect to multiple clusters simultaneously.
+            </p>
+            <p style="text-align:center; padding:20px; color:var(--text-muted);">
+                No WireGuard bridge configured for cluster <strong>${cluster}</strong>.
+            </p>`;
+        if (actions) actions.innerHTML = `<button class="btn btn-sm btn-primary" onclick="wgInitBridge('${cluster}')" style="font-size:12px;">+ Initialize Bridge</button>`;
+        return;
+    }
+
+    // Bridge exists — show status and clients
+    const statusBadge = bridge.enabled
+        ? '<span class="badge badge-success">Enabled</span>'
+        : '<span class="badge badge-danger">Disabled</span>';
+
+    let clientsHtml = '';
+    if (bridge.client_count > 0) {
+        // Need to fetch full details to show clients
+        wgLoadBridgeDetails(cluster);
+        clientsHtml = '<div id="wg-clients-table-wrap"><p style="color:var(--text-muted); font-size:12px;">Loading clients...</p></div>';
+    } else {
+        clientsHtml = '<div id="wg-clients-table-wrap"><p style="text-align:center; padding:12px; color:var(--text-muted); font-size:12px;">No clients configured. Click <strong>+ Add Client</strong> to generate a WireGuard config.</p></div>';
+    }
+
+    body.innerHTML = `
+        <p style="font-size:12px; color:var(--text-muted); margin-bottom:12px;">
+            Connect to this cluster's WolfNet from your local machine using any WireGuard client.
+            Each cluster gets a unique subnet so you can connect to multiple clusters simultaneously.
+        </p>
+        <div class="stats-grid" style="margin-bottom:16px;">
+            <div class="stat-card"><span class="stat-value">${statusBadge}</span><span class="stat-label">Status</span></div>
+            <div class="stat-card"><span class="stat-value">${bridge.listen_port}</span><span class="stat-label">UDP Port</span></div>
+            <div class="stat-card"><span class="stat-value">${bridge.bridge_subnet}</span><span class="stat-label">Bridge Subnet</span></div>
+            <div class="stat-card"><span class="stat-value">${bridge.client_count}</span><span class="stat-label">Clients</span></div>
+        </div>
+        <h4 style="margin:0 0 8px 0; font-size:13px;">Clients</h4>
+        ${clientsHtml}`;
+
+    if (actions) actions.innerHTML = `
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button class="btn btn-sm btn-primary" onclick="wgAddClient('${cluster}')" style="font-size:12px;">+ Add Client</button>
+            <button class="btn btn-sm ${bridge.enabled ? 'btn-danger' : 'btn-success'}" onclick="wgToggleBridge('${cluster}', ${!bridge.enabled})" style="font-size:12px;">${bridge.enabled ? 'Disable' : 'Enable'}</button>
+            <button class="btn btn-sm btn-danger" onclick="wgDeleteBridge('${cluster}')" style="font-size:12px;">Delete</button>
+        </div>`;
+}
+
+async function wgLoadBridgeDetails(cluster) {
+    try {
+        const resp = await fetch(apiUrl(`/api/networking/wireguard/${encodeURIComponent(cluster)}`));
+        if (!resp.ok) return;
+        const bridge = await resp.json();
+        const wrap = document.getElementById('wg-clients-table-wrap');
+        if (!wrap) return;
+
+        if (!bridge.clients || bridge.clients.length === 0) {
+            wrap.innerHTML = '<p style="text-align:center; padding:12px; color:var(--text-muted); font-size:12px;">No clients configured.</p>';
+            return;
+        }
+
+        let rows = bridge.clients.map(c => `
+            <tr>
+                <td>${c.name}</td>
+                <td><code style="font-size:11px;">${c.assigned_ip}</code></td>
+                <td title="${c.public_key}"><code style="font-size:11px;">${c.public_key.substring(0, 20)}...</code></td>
+                <td>${c.created_at ? c.created_at.substring(0, 10) : ''}</td>
+                <td>
+                    <button class="btn btn-sm" style="font-size:10px; padding:1px 6px;" onclick="wgDownloadConfig('${cluster}', '${c.id}', '${c.name}')" title="Download .conf">⬇️</button>
+                    <button class="btn btn-sm btn-danger" style="font-size:10px; padding:1px 6px;" onclick="wgRemoveClient('${cluster}', '${c.id}', '${c.name}')" title="Remove">🗑️</button>
+                </td>
+            </tr>`).join('');
+
+        wrap.innerHTML = `
+            <table class="data-table" style="font-size:12px;">
+                <thead><tr><th>Name</th><th>IP</th><th>Public Key</th><th>Created</th><th>Actions</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>`;
+    } catch (e) {
+        console.error('Failed to load WireGuard bridge details:', e);
+    }
+}
+
+async function wgInitBridge(cluster) {
+    const port = prompt('WireGuard listen port:', '51820');
+    if (!port) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/networking/wireguard/${encodeURIComponent(cluster)}/init`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ listen_port: parseInt(port) }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast('WireGuard bridge initialized — subnet: ' + data.bridge_subnet, 'success');
+        loadNetworking();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function wgAddClient(cluster) {
+    const name = prompt('Client name (e.g. "my-laptop"):');
+    if (!name) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/networking/wireguard/${encodeURIComponent(cluster)}/clients`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+
+        // Show the config in a modal with copy/download
+        showModal(`
+            <h3>WireGuard Client: ${data.client.name}</h3>
+            <p style="font-size:12px; color:var(--text-muted);">
+                IP: <strong>${data.client.assigned_ip}</strong> — Import this config into your WireGuard client.
+            </p>
+            <pre id="wg-client-conf" style="background:var(--bg-tertiary); padding:12px; border-radius:6px; font-size:11px; overflow-x:auto; white-space:pre-wrap; user-select:all;">${data.config}</pre>
+            <div style="display:flex; gap:8px; margin-top:12px;">
+                <button class="btn btn-primary btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('wg-client-conf').textContent); showToast('Copied!', 'success');">Copy to Clipboard</button>
+                <button class="btn btn-sm" onclick="wgDownloadText('wg-${cluster}-${data.client.name}.conf', document.getElementById('wg-client-conf').textContent)">Download .conf</button>
+            </div>
+            <p style="font-size:11px; color:var(--warning); margin-top:8px;">Save this config — the private key can be re-downloaded from the client list.</p>
+        `);
+        loadNetworking();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function wgRemoveClient(cluster, clientId, name) {
+    if (!confirm(`Remove WireGuard client "${name}"? They will no longer be able to connect.`)) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/networking/wireguard/${encodeURIComponent(cluster)}/clients/${clientId}`), { method: 'DELETE' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(data.status, 'success');
+        loadNetworking();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function wgDownloadConfig(cluster, clientId, name) {
+    try {
+        const resp = await fetch(apiUrl(`/api/networking/wireguard/${encodeURIComponent(cluster)}/clients/${clientId}/config`));
+        if (!resp.ok) throw new Error('Failed to download config');
+        const text = await resp.text();
+        wgDownloadText(`wg-${cluster}-${name}.conf`, text);
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+function wgDownloadText(filename, text) {
+    const blob = new Blob([text], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+
+async function wgToggleBridge(cluster, enabled) {
+    try {
+        const resp = await fetch(apiUrl(`/api/networking/wireguard/${encodeURIComponent(cluster)}/toggle`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(data.status, 'success');
+        loadNetworking();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function wgDeleteBridge(cluster) {
+    if (!confirm(`Delete WireGuard bridge for cluster "${cluster}"? All clients will be disconnected and removed.`)) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/networking/wireguard/${encodeURIComponent(cluster)}`), { method: 'DELETE' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(data.status, 'success');
+        loadNetworking();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
     }
 }
 

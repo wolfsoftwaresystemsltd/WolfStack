@@ -209,6 +209,9 @@ async fn main() -> std::io::Result<()> {
     containers::lxc_autostart_all();
     vms_manager.autostart_vms();
 
+    // Re-apply WireGuard bridge interfaces (survives reboot)
+    networking::apply_all_wireguard_bridges();
+
     // Check if TLS will be available (so the frontend knows the correct protocol for URLs)
     let tls_enabled = if cli.no_tls {
         false
@@ -258,6 +261,7 @@ async fn main() -> std::io::Result<()> {
             statuspage: statuspage_state.clone(),
             tls_enabled,
             login_limiter: Arc::new(auth::LoginRateLimiter::new()),
+            wireguard_bridges: Arc::new(std::sync::RwLock::new(networking::load_wireguard_bridges())),
         });
 
         // Background: periodic self-monitoring update

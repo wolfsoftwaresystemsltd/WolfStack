@@ -9,6 +9,7 @@
 //! - VLANs (802.1Q)
 //! - DNS configuration
 //! - WolfNet overlay status
+//! - WireGuard bridge (VPN access to WolfNet from external clients)
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
@@ -2229,4 +2230,554 @@ fn rand_id() -> u64 {
         .unwrap_or_default()
         .as_nanos();
     (nanos as u64) ^ (std::process::id() as u64) ^ 0xdeadbeef
+}
+
+// ─── WireGuard Bridge ──────────────────────────────────────────────────────
+//
+// Provides VPN access to WolfNet overlay networks from external clients.
+// Each cluster gets a unique WireGuard bridge subnet (10.20.X.0/24) with
+// NAT bridging into the actual WolfNet subnet — allowing simultaneous
+// connections to multiple clusters without IP conflicts.
+
+const WG_BRIDGE_CONFIG: &str = "/etc/wolfstack/wireguard-bridge.json";
+
+/// WireGuard bridge configuration for a single cluster
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireGuardBridge {
+    pub cluster: String,
+    pub enabled: bool,
+    pub listen_port: u16,
+    pub private_key: String,
+    pub public_key: String,
+    /// Third octet for bridge subnet, e.g. 1 → 10.20.1.0/24
+    pub bridge_octet: u8,
+    pub server_ip: String,
+    /// WolfNet subnet prefix, e.g. "10.0.10"
+    #[serde(default)]
+    pub wolfnet_subnet: String,
+    #[serde(default)]
+    pub clients: Vec<WireGuardClient>,
+}
+
+/// A WireGuard client (external user) connected via the bridge
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireGuardClient {
+    pub id: String,
+    pub name: String,
+    pub public_key: String,
+    pub private_key: String,
+    pub assigned_ip: String,
+    pub created_at: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool { true }
+
+impl WireGuardBridge {
+    /// Interface name for this bridge (e.g. "wg-prod")
+    pub fn interface_name(&self) -> String {
+        let safe: String = self.cluster.chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-')
+            .take(12)
+            .collect();
+        format!("wg-{}", if safe.is_empty() { "bridge".to_string() } else { safe })
+    }
+
+    /// Full bridge subnet CIDR (e.g. "10.20.1.0/24")
+    pub fn bridge_subnet(&self) -> String {
+        format!("10.20.{}.0/24", self.bridge_octet)
+    }
+}
+
+/// Check if WireGuard tools are installed
+pub fn wireguard_installed() -> bool {
+    Command::new("which").arg("wg")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Attempt to install wireguard-tools for the current distro
+pub fn install_wireguard_tools() -> Result<String, String> {
+    // Detect distro
+    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let id = os_release.lines()
+        .find(|l| l.starts_with("ID="))
+        .map(|l| l.trim_start_matches("ID=").trim_matches('"').to_lowercase())
+        .unwrap_or_default();
+    let id_like = os_release.lines()
+        .find(|l| l.starts_with("ID_LIKE="))
+        .map(|l| l.trim_start_matches("ID_LIKE=").trim_matches('"').to_lowercase())
+        .unwrap_or_default();
+
+    let (cmd, args): (&str, Vec<&str>) = if id == "ubuntu" || id == "debian" || id_like.contains("debian") {
+        ("apt", vec!["install", "-y", "wireguard-tools"])
+    } else if id == "fedora" || id_like.contains("fedora") || id_like.contains("rhel") {
+        ("dnf", vec!["install", "-y", "wireguard-tools"])
+    } else if id == "centos" || id == "rhel" || id_like.contains("centos") {
+        ("yum", vec!["install", "-y", "wireguard-tools"])
+    } else if id == "opensuse" || id == "sles" || id_like.contains("suse") {
+        ("zypper", vec!["install", "-y", "wireguard-tools"])
+    } else {
+        return Err(format!("Unsupported distro '{}' — install wireguard-tools manually", id));
+    };
+
+    let output = Command::new(cmd).args(&args).output()
+        .map_err(|e| format!("Failed to run {}: {}", cmd, e))?;
+
+    if output.status.success() {
+        Ok("wireguard-tools installed".to_string())
+    } else {
+        Err(format!("Package install failed: {}", String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+/// Load all WireGuard bridge configs from disk
+pub fn load_wireguard_bridges() -> std::collections::HashMap<String, WireGuardBridge> {
+    match std::fs::read_to_string(WG_BRIDGE_CONFIG) {
+        Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+        Err(_) => std::collections::HashMap::new(),
+    }
+}
+
+/// Save all WireGuard bridge configs to disk
+pub fn save_wireguard_bridges(bridges: &std::collections::HashMap<String, WireGuardBridge>) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(bridges)
+        .map_err(|e| format!("Failed to serialize WireGuard config: {}", e))?;
+    std::fs::write(WG_BRIDGE_CONFIG, json)
+        .map_err(|e| format!("Failed to write {}: {}", WG_BRIDGE_CONFIG, e))
+}
+
+/// Initialize a WireGuard bridge for a cluster
+pub fn init_wireguard_bridge(cluster: &str, listen_port: u16) -> Result<WireGuardBridge, String> {
+    // Install wireguard-tools if needed
+    if !wireguard_installed() {
+        install_wireguard_tools()?;
+        if !wireguard_installed() {
+            return Err("wireguard-tools installation failed — 'wg' not found".to_string());
+        }
+    }
+
+    let mut bridges = load_wireguard_bridges();
+    if bridges.contains_key(cluster) {
+        return Err(format!("Bridge already exists for cluster '{}'", cluster));
+    }
+
+    // Check port not already in use by another bridge
+    for (name, b) in &bridges {
+        if b.listen_port == listen_port {
+            return Err(format!("Port {} already in use by cluster '{}'", listen_port, name));
+        }
+    }
+
+    // Generate server keypair
+    let priv_key = wg_genkey()?;
+    let pub_key = wg_pubkey(&priv_key)?;
+
+    // Auto-assign bridge octet (1, 2, 3, ...)
+    let used_octets: Vec<u8> = bridges.values().map(|b| b.bridge_octet).collect();
+    let octet = (1u8..=254).find(|o| !used_octets.contains(o))
+        .ok_or("No available bridge subnets (all 254 in use)")?;
+
+    // Detect WolfNet subnet
+    let wolfnet_subnet = detect_wolfnet_subnet().unwrap_or_else(|| "10.0.10".to_string());
+
+    let bridge = WireGuardBridge {
+        cluster: cluster.to_string(),
+        enabled: true,
+        listen_port,
+        private_key: priv_key,
+        public_key: pub_key,
+        bridge_octet: octet,
+        server_ip: format!("10.20.{}.1/24", octet),
+        wolfnet_subnet,
+        clients: Vec::new(),
+    };
+
+    bridges.insert(cluster.to_string(), bridge.clone());
+    save_wireguard_bridges(&bridges)?;
+
+    // Apply the interface
+    apply_wireguard_bridge(&bridge)?;
+
+    Ok(bridge)
+}
+
+/// Add a client to a cluster's WireGuard bridge
+pub fn add_wireguard_client(cluster: &str, name: &str) -> Result<(WireGuardClient, String), String> {
+    let mut bridges = load_wireguard_bridges();
+    let bridge = bridges.get_mut(cluster)
+        .ok_or(format!("No WireGuard bridge for cluster '{}'", cluster))?;
+
+    // Check name uniqueness
+    if bridge.clients.iter().any(|c| c.name == name) {
+        return Err(format!("Client '{}' already exists", name));
+    }
+
+    // Generate client keypair
+    let priv_key = wg_genkey()?;
+    let pub_key = wg_pubkey(&priv_key)?;
+
+    // Assign next available IP (.2, .3, .4, ...)
+    let used_hosts: Vec<u8> = bridge.clients.iter()
+        .filter_map(|c| {
+            c.assigned_ip.split('.').nth(3)
+                .and_then(|s| s.split('/').next())
+                .and_then(|s| s.parse::<u8>().ok())
+        })
+        .collect();
+    let host = (2u8..=254).find(|h| !used_hosts.contains(h))
+        .ok_or("No available client IPs in bridge subnet")?;
+
+    let client = WireGuardClient {
+        id: format!("{:016x}", rand_id()),
+        name: name.to_string(),
+        public_key: pub_key,
+        private_key: priv_key,
+        assigned_ip: format!("10.20.{}.{}/32", bridge.bridge_octet, host),
+        created_at: chrono_now(),
+        enabled: true,
+    };
+
+    // Generate the .conf content before adding to bridge (need bridge data)
+    let conf = generate_client_config(bridge, &client)?;
+
+    bridge.clients.push(client.clone());
+    save_wireguard_bridges(&bridges)?;
+
+    // Apply the peer to the live interface
+    let bridge_ref = bridges.get(cluster).unwrap();
+    let _ = wg_set_peer(bridge_ref, &client);
+
+    Ok((client, conf))
+}
+
+/// Remove a client from a cluster's WireGuard bridge
+pub fn remove_wireguard_client(cluster: &str, client_id: &str) -> Result<String, String> {
+    let mut bridges = load_wireguard_bridges();
+    let bridge = bridges.get_mut(cluster)
+        .ok_or(format!("No WireGuard bridge for cluster '{}'", cluster))?;
+
+    let idx = bridge.clients.iter().position(|c| c.id == client_id)
+        .ok_or(format!("Client '{}' not found", client_id))?;
+
+    let client = bridge.clients.remove(idx);
+
+    // Remove from live interface
+    let _ = Command::new("wg")
+        .args(["set", &bridge.interface_name(), "peer", &client.public_key, "remove"])
+        .output();
+
+    save_wireguard_bridges(&bridges)?;
+    Ok(format!("Client '{}' removed", client.name))
+}
+
+/// Get a client's .conf content (for re-download)
+pub fn get_client_config(cluster: &str, client_id: &str) -> Result<String, String> {
+    let bridges = load_wireguard_bridges();
+    let bridge = bridges.get(cluster)
+        .ok_or(format!("No WireGuard bridge for cluster '{}'", cluster))?;
+    let client = bridge.clients.iter().find(|c| c.id == client_id)
+        .ok_or(format!("Client '{}' not found", client_id))?;
+    generate_client_config(bridge, client)
+}
+
+/// Generate the WireGuard client .conf file content
+fn generate_client_config(bridge: &WireGuardBridge, client: &WireGuardClient) -> Result<String, String> {
+    // Detect the server's public/reachable IP for the Endpoint field
+    let server_endpoint = detect_server_endpoint(bridge.listen_port);
+
+    Ok(format!(
+        "# WolfStack WireGuard Bridge — Cluster: {cluster}\n\
+         # Client: {name}\n\
+         # Generated: {date}\n\
+         \n\
+         [Interface]\n\
+         PrivateKey = {priv_key}\n\
+         Address = {addr}\n\
+         \n\
+         [Peer]\n\
+         PublicKey = {pub_key}\n\
+         Endpoint = {endpoint}\n\
+         AllowedIPs = {subnet}\n\
+         PersistentKeepalive = 25\n",
+        cluster = bridge.cluster,
+        name = client.name,
+        date = &chrono_now()[..10],
+        priv_key = client.private_key,
+        addr = client.assigned_ip,
+        pub_key = bridge.public_key,
+        endpoint = server_endpoint,
+        subnet = bridge.bridge_subnet(),
+    ))
+}
+
+/// Enable or disable a WireGuard bridge
+pub fn toggle_wireguard_bridge(cluster: &str, enabled: bool) -> Result<String, String> {
+    let mut bridges = load_wireguard_bridges();
+    let bridge = bridges.get_mut(cluster)
+        .ok_or(format!("No WireGuard bridge for cluster '{}'", cluster))?;
+
+    bridge.enabled = enabled;
+    let bridge_clone = bridge.clone();
+    save_wireguard_bridges(&bridges)?;
+
+    if enabled {
+        apply_wireguard_bridge(&bridge_clone)?;
+        Ok("Bridge enabled".to_string())
+    } else {
+        teardown_wireguard_bridge(cluster)?;
+        Ok("Bridge disabled".to_string())
+    }
+}
+
+/// Delete a WireGuard bridge entirely
+pub fn delete_wireguard_bridge(cluster: &str) -> Result<String, String> {
+    let mut bridges = load_wireguard_bridges();
+    if bridges.remove(cluster).is_none() {
+        return Err(format!("No WireGuard bridge for cluster '{}'", cluster));
+    }
+    let _ = teardown_wireguard_bridge(cluster);
+    save_wireguard_bridges(&bridges)?;
+    Ok(format!("Bridge for cluster '{}' deleted", cluster))
+}
+
+/// Create/configure the WireGuard interface, add all peers, set up NAT
+pub fn apply_wireguard_bridge(bridge: &WireGuardBridge) -> Result<(), String> {
+    let iface = bridge.interface_name();
+
+    // Create interface if it doesn't exist
+    let exists = Command::new("ip").args(["link", "show", &iface]).output()
+        .map(|o| o.status.success()).unwrap_or(false);
+    if !exists {
+        run_cmd("ip", &["link", "add", &iface, "type", "wireguard"])?;
+    }
+
+    // Write private key to temp file for wg setconf
+    let key_path = format!("/tmp/wg-{}-key", iface);
+    std::fs::write(&key_path, &bridge.private_key)
+        .map_err(|e| format!("Failed to write key: {}", e))?;
+
+    // Set private key and listen port
+    run_cmd("wg", &["set", &iface, "private-key", &key_path, "listen-port", &bridge.listen_port.to_string()])?;
+
+    // Clean up key file
+    let _ = std::fs::remove_file(&key_path);
+
+    // Set IP address (flush first to avoid duplicates)
+    let _ = Command::new("ip").args(["addr", "flush", "dev", &iface]).output();
+    run_cmd("ip", &["addr", "add", &bridge.server_ip, "dev", &iface])?;
+
+    // Bring up
+    run_cmd("ip", &["link", "set", &iface, "up"])?;
+
+    // Add all enabled client peers
+    for client in &bridge.clients {
+        if client.enabled {
+            let _ = wg_set_peer(bridge, client);
+        }
+    }
+
+    // Set up NAT/forwarding rules
+    setup_bridge_nat(bridge)?;
+
+    Ok(())
+}
+
+/// Remove WireGuard interface and NAT rules for a cluster
+pub fn teardown_wireguard_bridge(cluster: &str) -> Result<(), String> {
+    let bridges = load_wireguard_bridges();
+    if let Some(bridge) = bridges.get(cluster) {
+        let iface = bridge.interface_name();
+        let _ = Command::new("ip").args(["link", "set", &iface, "down"]).output();
+        let _ = Command::new("ip").args(["link", "delete", &iface]).output();
+        cleanup_bridge_nat(bridge);
+    }
+    Ok(())
+}
+
+/// Re-apply all enabled bridges (called on startup)
+pub fn apply_all_wireguard_bridges() {
+    let bridges = load_wireguard_bridges();
+    for (cluster, bridge) in &bridges {
+        if bridge.enabled {
+            if let Err(e) = apply_wireguard_bridge(bridge) {
+                warn!("Failed to apply WireGuard bridge for cluster '{}': {}", cluster, e);
+            }
+        }
+    }
+}
+
+// ─── WireGuard helpers ──────────────────────────────────────────────────────
+
+/// Generate a WireGuard private key
+fn wg_genkey() -> Result<String, String> {
+    let output = Command::new("wg").arg("genkey").output()
+        .map_err(|e| format!("wg genkey failed: {}", e))?;
+    if !output.status.success() {
+        return Err("wg genkey failed".to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Derive public key from a private key
+fn wg_pubkey(private_key: &str) -> Result<String, String> {
+    use std::io::Write;
+    let mut child = Command::new("wg").arg("pubkey")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("wg pubkey failed: {}", e))?;
+    child.stdin.take().unwrap().write_all(private_key.as_bytes())
+        .map_err(|e| format!("wg pubkey stdin: {}", e))?;
+    let output = child.wait_with_output()
+        .map_err(|e| format!("wg pubkey wait: {}", e))?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Add a peer to a live WireGuard interface
+fn wg_set_peer(bridge: &WireGuardBridge, client: &WireGuardClient) -> Result<(), String> {
+    let iface = bridge.interface_name();
+    run_cmd("wg", &[
+        "set", &iface,
+        "peer", &client.public_key,
+        "allowed-ips", &client.assigned_ip,
+    ])
+}
+
+/// Set up iptables NAT rules for a bridge
+fn setup_bridge_nat(bridge: &WireGuardBridge) -> Result<(), String> {
+    let iface = bridge.interface_name();
+    let subnet = bridge.bridge_subnet();
+
+    // Detect WolfNet interface name
+    let wn_iface = detect_wolfnet_iface().unwrap_or_else(|| "wolfnet0".to_string());
+
+    // Enable IP forwarding
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]).output();
+
+    // Clean up any existing rules for this bridge first
+    cleanup_bridge_nat(bridge);
+
+    // MASQUERADE traffic from bridge subnet going to WolfNet
+    let _ = Command::new("iptables").args([
+        "-t", "nat", "-A", "POSTROUTING",
+        "-s", &subnet, "-o", &wn_iface, "-j", "MASQUERADE",
+    ]).output();
+
+    // Allow forwarding between WG and WolfNet
+    let _ = Command::new("iptables").args([
+        "-A", "FORWARD", "-i", &iface, "-o", &wn_iface, "-j", "ACCEPT",
+    ]).output();
+    let _ = Command::new("iptables").args([
+        "-A", "FORWARD", "-i", &wn_iface, "-o", &iface,
+        "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT",
+    ]).output();
+
+    Ok(())
+}
+
+/// Remove iptables NAT rules for a bridge
+fn cleanup_bridge_nat(bridge: &WireGuardBridge) {
+    let iface = bridge.interface_name();
+    let subnet = bridge.bridge_subnet();
+    let wn_iface = detect_wolfnet_iface().unwrap_or_else(|| "wolfnet0".to_string());
+
+    let _ = Command::new("iptables").args([
+        "-t", "nat", "-D", "POSTROUTING",
+        "-s", &subnet, "-o", &wn_iface, "-j", "MASQUERADE",
+    ]).output();
+    let _ = Command::new("iptables").args([
+        "-D", "FORWARD", "-i", &iface, "-o", &wn_iface, "-j", "ACCEPT",
+    ]).output();
+    let _ = Command::new("iptables").args([
+        "-D", "FORWARD", "-i", &wn_iface, "-o", &iface,
+        "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT",
+    ]).output();
+}
+
+/// Detect WolfNet interface name (wn0 or wolfnet0)
+fn detect_wolfnet_iface() -> Option<String> {
+    let interfaces = list_interfaces();
+    interfaces.iter()
+        .find(|i| i.name.starts_with("wn") || i.name.starts_with("wolfnet"))
+        .map(|i| i.name.clone())
+}
+
+/// Detect the WolfNet subnet prefix (e.g. "10.0.10")
+fn detect_wolfnet_subnet() -> Option<String> {
+    if let Some(info) = get_wolfnet_local_info() {
+        if let Some(addr) = info["address"].as_str() {
+            let parts: Vec<&str> = addr.split('.').collect();
+            if parts.len() >= 3 {
+                return Some(format!("{}.{}.{}", parts[0], parts[1], parts[2]));
+            }
+        }
+    }
+    None
+}
+
+/// Detect the best endpoint address for clients to connect to
+fn detect_server_endpoint(port: u16) -> String {
+    // Try public IP first
+    if let Ok(output) = Command::new("curl")
+        .args(["-s", "--connect-timeout", "3", "https://ifconfig.me/ip"])
+        .output()
+    {
+        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !ip.is_empty() && output.status.success() {
+            return format!("{}:{}", ip, port);
+        }
+    }
+
+    // Fall back to LAN IP
+    if let Some(lan_ip) = detect_lan_ip() {
+        return format!("{}:{}", lan_ip, port);
+    }
+
+    format!("YOUR_SERVER_IP:{}", port)
+}
+
+/// Run a command, return Ok(()) on success or Err with stderr
+fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), String> {
+    let output = Command::new(cmd).args(args).output()
+        .map_err(|e| format!("{} failed: {}", cmd, e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!("{} {}: {}", cmd, args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()))
+    }
+}
+
+/// Get current ISO 8601 timestamp
+fn chrono_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    // Simple UTC timestamp without chrono dependency
+    let days = secs / 86400;
+    let time_secs = secs % 86400;
+    let hours = time_secs / 3600;
+    let minutes = (time_secs % 3600) / 60;
+    let seconds = time_secs % 60;
+
+    // Days since 1970-01-01
+    let mut y = 1970i64;
+    let mut remaining = days as i64;
+    loop {
+        let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+        if remaining < year_days { break; }
+        remaining -= year_days;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 0usize;
+    while m < 12 && remaining >= month_days[m] {
+        remaining -= month_days[m];
+        m += 1;
+    }
+
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m + 1, remaining + 1, hours, minutes, seconds)
 }
