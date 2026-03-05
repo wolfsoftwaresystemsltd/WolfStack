@@ -199,13 +199,18 @@ function showModal(message, title) {
     var overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
     var modal = document.createElement('div');
-    modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:480px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit';
+    modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:560px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit';
     var h = document.createElement('div');
     h.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:14px;color:var(--accent-light,#60a5fa);display:flex;align-items:center;gap:8px';
     h.textContent = title;
     var body = document.createElement('div');
-    body.style.cssText = 'font-size:13px;line-height:1.6;color:var(--text-secondary,#a1a1aa);white-space:pre-wrap;word-break:break-word;max-height:300px;overflow-y:auto';
-    body.textContent = message;
+    body.style.cssText = 'font-size:13px;line-height:1.6;color:var(--text-secondary,#a1a1aa);white-space:pre-wrap;word-break:break-word;max-height:400px;overflow-y:auto';
+    // Support HTML content (if it starts with <) or plain text
+    if (typeof message === 'string' && message.trimStart().startsWith('<')) {
+        body.innerHTML = message;
+    } else {
+        body.textContent = message;
+    }
     var btnWrap = document.createElement('div');
     btnWrap.style.cssText = 'margin-top:18px;text-align:right';
     var btn = document.createElement('button');
@@ -222,6 +227,94 @@ function showModal(message, title) {
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
     btn.focus();
+}
+
+/// Styled confirmation dialog — returns a Promise<boolean>
+function showConfirm(message, title) {
+    title = title || 'Confirm';
+    return new Promise(function (resolve) {
+        var overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
+        var modal = document.createElement('div');
+        modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:480px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit';
+        var h = document.createElement('div');
+        h.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:14px;color:var(--accent-light,#60a5fa);display:flex;align-items:center;gap:8px';
+        h.textContent = title;
+        var body = document.createElement('div');
+        body.style.cssText = 'font-size:13px;line-height:1.6;color:var(--text-secondary,#a1a1aa)';
+        body.textContent = message;
+        var btnWrap = document.createElement('div');
+        btnWrap.style.cssText = 'margin-top:18px;display:flex;justify-content:flex-end;gap:8px';
+        var cancelBtn = document.createElement('button');
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.style.cssText = 'background:var(--bg-tertiary,#2d2f3a);color:var(--text-secondary,#a1a1aa);border:1px solid var(--border-color,#3f4150);border-radius:6px;padding:8px 20px;cursor:pointer;font-size:13px;font-weight:500;transition:background 0.2s';
+        cancelBtn.onmouseenter = function () { cancelBtn.style.background = 'var(--border-color,#3f4150)'; };
+        cancelBtn.onmouseleave = function () { cancelBtn.style.background = 'var(--bg-tertiary,#2d2f3a)'; };
+        var confirmBtn = document.createElement('button');
+        confirmBtn.textContent = 'Confirm';
+        confirmBtn.style.cssText = 'background:var(--danger,#ef4444);color:#fff;border:none;border-radius:6px;padding:8px 20px;cursor:pointer;font-size:13px;font-weight:500;transition:background 0.2s';
+        confirmBtn.onmouseenter = function () { confirmBtn.style.opacity = '0.85'; };
+        confirmBtn.onmouseleave = function () { confirmBtn.style.opacity = '1'; };
+        cancelBtn.onclick = function () { overlay.remove(); resolve(false); };
+        confirmBtn.onclick = function () { overlay.remove(); resolve(true); };
+        overlay.onclick = function (e) { if (e.target === overlay) { overlay.remove(); resolve(false); } };
+        btnWrap.appendChild(cancelBtn);
+        btnWrap.appendChild(confirmBtn);
+        modal.appendChild(h);
+        modal.appendChild(body);
+        modal.appendChild(btnWrap);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        confirmBtn.focus();
+    });
+}
+
+/// Styled prompt dialog — returns a Promise<string|null>
+function showPrompt(message, title, defaultValue) {
+    title = title || 'Input';
+    return new Promise(function (resolve) {
+        var overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
+        var modal = document.createElement('div');
+        modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:480px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit';
+        var h = document.createElement('div');
+        h.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:14px;color:var(--accent-light,#60a5fa);display:flex;align-items:center;gap:8px';
+        h.textContent = title;
+        var body = document.createElement('div');
+        body.style.cssText = 'font-size:13px;line-height:1.6;color:var(--text-secondary,#a1a1aa);margin-bottom:12px';
+        body.textContent = message;
+        var input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'form-control';
+        input.value = defaultValue || '';
+        input.style.cssText = 'width:100%;box-sizing:border-box;';
+        var btnWrap = document.createElement('div');
+        btnWrap.style.cssText = 'margin-top:16px;display:flex;justify-content:flex-end;gap:8px';
+        var cancelBtn = document.createElement('button');
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.style.cssText = 'background:var(--bg-tertiary,#2d2f3a);color:var(--text-secondary,#a1a1aa);border:1px solid var(--border-color,#3f4150);border-radius:6px;padding:8px 20px;cursor:pointer;font-size:13px;font-weight:500;transition:background 0.2s';
+        cancelBtn.onmouseenter = function () { cancelBtn.style.background = 'var(--border-color,#3f4150)'; };
+        cancelBtn.onmouseleave = function () { cancelBtn.style.background = 'var(--bg-tertiary,#2d2f3a)'; };
+        var okBtn = document.createElement('button');
+        okBtn.textContent = 'OK';
+        okBtn.style.cssText = 'background:var(--accent,#3b82f6);color:#fff;border:none;border-radius:6px;padding:8px 20px;cursor:pointer;font-size:13px;font-weight:500;transition:background 0.2s';
+        okBtn.onmouseenter = function () { okBtn.style.background = 'var(--accent-light,#60a5fa)'; };
+        okBtn.onmouseleave = function () { okBtn.style.background = 'var(--accent,#3b82f6)'; };
+        cancelBtn.onclick = function () { overlay.remove(); resolve(null); };
+        okBtn.onclick = function () { overlay.remove(); resolve(input.value); };
+        input.onkeydown = function (e) { if (e.key === 'Enter') { overlay.remove(); resolve(input.value); } };
+        overlay.onclick = function (e) { if (e.target === overlay) { overlay.remove(); resolve(null); } };
+        btnWrap.appendChild(cancelBtn);
+        btnWrap.appendChild(okBtn);
+        modal.appendChild(h);
+        modal.appendChild(body);
+        modal.appendChild(input);
+        modal.appendChild(btnWrap);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        input.focus();
+        input.select();
+    });
 }
 
 // ─── Page Loading Overlay (modern blur + spinner) ───
@@ -7517,7 +7610,7 @@ async function wgLoadBridgeDetails(cluster) {
 }
 
 async function wgInitBridge(cluster) {
-    const port = prompt('WireGuard listen port:', '51820');
+    const port = await showPrompt('Choose a UDP port for the WireGuard bridge:', 'Initialize WireGuard Bridge', '51820');
     if (!port) return;
     try {
         const resp = await fetch(apiUrl(`/api/networking/wireguard/${encodeURIComponent(cluster)}/init`), {
@@ -7535,7 +7628,7 @@ async function wgInitBridge(cluster) {
 }
 
 async function wgAddClient(cluster) {
-    const name = prompt('Client name (e.g. "my-laptop"):');
+    const name = await showPrompt('Enter a name for this client (e.g. "my-laptop"):', 'Add WireGuard Client');
     if (!name) return;
     try {
         const resp = await fetch(apiUrl(`/api/networking/wireguard/${encodeURIComponent(cluster)}/clients`), {
@@ -7546,27 +7639,69 @@ async function wgAddClient(cluster) {
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Failed');
 
-        // Show the config in a modal with copy/download
-        showModal(`
-            <h3>WireGuard Client: ${data.client.name}</h3>
-            <p style="font-size:12px; color:var(--text-muted);">
-                IP: <strong>${data.client.assigned_ip}</strong> — Import this config into your WireGuard client.
-            </p>
-            <pre id="wg-client-conf" style="background:var(--bg-tertiary); padding:12px; border-radius:6px; font-size:11px; overflow-x:auto; white-space:pre-wrap; user-select:all;">${data.config}</pre>
-            <div style="display:flex; gap:8px; margin-top:12px;">
-                <button class="btn btn-primary btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('wg-client-conf').textContent); showToast('Copied!', 'success');">Copy to Clipboard</button>
-                <button class="btn btn-sm" onclick="wgDownloadText('wg-${cluster}-${data.client.name}.conf', document.getElementById('wg-client-conf').textContent)">Download .conf</button>
-            </div>
-            <p style="font-size:11px; color:var(--warning); margin-top:8px;">Save this config — the private key can be re-downloaded from the client list.</p>
-        `);
+        // Show config in a styled modal with clear instructions
+        wgShowClientConfigModal(cluster, data.client, data.config);
         loadNetworking();
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
     }
 }
 
+function wgShowClientConfigModal(cluster, client, config) {
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
+    overlay.onclick = function (e) { if (e.target === overlay) overlay.remove(); };
+
+    var modal = document.createElement('div');
+    modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:28px;max-width:560px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit';
+
+    modal.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+            <div style="font-size:16px;font-weight:600;color:var(--accent-light,#60a5fa);">WireGuard Client Created</div>
+            <button onclick="this.closest('div[style*=fixed]').remove()" style="background:none;border:none;color:var(--text-muted);font-size:20px;cursor:pointer;padding:0 4px;">&times;</button>
+        </div>
+        <div style="background:var(--bg-tertiary,#2d2f3a);border-radius:8px;padding:14px;margin-bottom:16px;">
+            <div style="display:flex;gap:24px;font-size:13px;">
+                <div><span style="color:var(--text-muted);">Client:</span> <strong>${client.name}</strong></div>
+                <div><span style="color:var(--text-muted);">IP:</span> <strong>${client.assigned_ip}</strong></div>
+            </div>
+        </div>
+        <div style="font-size:13px;color:var(--text-secondary,#a1a1aa);margin-bottom:12px;">
+            <strong>How to connect:</strong>
+            <ol style="margin:8px 0 0 0;padding-left:20px;line-height:1.8;">
+                <li>Copy or download the config below</li>
+                <li>Open the <strong>WireGuard app</strong> on your device</li>
+                <li>Import the <code>.conf</code> file (or paste from clipboard)</li>
+                <li>Activate the tunnel — you're connected!</li>
+            </ol>
+        </div>
+        <pre id="wg-client-conf" style="background:var(--bg-primary,#13141a);border:1px solid var(--border-color,#2d2f3a);padding:14px;border-radius:8px;font-size:11px;line-height:1.5;overflow-x:auto;white-space:pre-wrap;user-select:all;max-height:200px;overflow-y:auto;margin-bottom:14px;"></pre>
+        <div style="display:flex;gap:8px;">
+            <button class="btn btn-primary btn-sm" id="wg-copy-btn" style="flex:1;">Copy to Clipboard</button>
+            <button class="btn btn-sm" id="wg-download-btn" style="flex:1;">Download .conf</button>
+        </div>
+    `;
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    // Set config as text content (not innerHTML) to avoid XSS
+    document.getElementById('wg-client-conf').textContent = config;
+
+    document.getElementById('wg-copy-btn').onclick = function () {
+        navigator.clipboard.writeText(config);
+        this.textContent = 'Copied!';
+        showToast('Config copied to clipboard', 'success');
+        setTimeout(function () { var b = document.getElementById('wg-copy-btn'); if (b) b.textContent = 'Copy to Clipboard'; }, 2000);
+    };
+    document.getElementById('wg-download-btn').onclick = function () {
+        wgDownloadText('wg-' + cluster + '-' + client.name + '.conf', config);
+    };
+}
+
 async function wgRemoveClient(cluster, clientId, name) {
-    if (!confirm(`Remove WireGuard client "${name}"? They will no longer be able to connect.`)) return;
+    var confirmed = await showConfirm('Remove WireGuard client "' + name + '"? They will no longer be able to connect.', 'Remove Client');
+    if (!confirmed) return;
     try {
         const resp = await fetch(apiUrl(`/api/networking/wireguard/${encodeURIComponent(cluster)}/clients/${clientId}`), { method: 'DELETE' });
         const data = await resp.json();
@@ -7615,7 +7750,8 @@ async function wgToggleBridge(cluster, enabled) {
 }
 
 async function wgDeleteBridge(cluster) {
-    if (!confirm(`Delete WireGuard bridge for cluster "${cluster}"? All clients will be disconnected and removed.`)) return;
+    var confirmed = await showConfirm('Delete WireGuard bridge for cluster "' + cluster + '"? All clients will be disconnected and removed.', 'Delete Bridge');
+    if (!confirmed) return;
     try {
         const resp = await fetch(apiUrl(`/api/networking/wireguard/${encodeURIComponent(cluster)}`), { method: 'DELETE' });
         const data = await resp.json();
