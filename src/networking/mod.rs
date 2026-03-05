@@ -351,6 +351,30 @@ fn set_dns_systemd_resolved(nameservers: &[String], search_domains: &[String]) -
     Ok("DNS updated via systemd-resolved".to_string())
 }
 
+/// Ensure NetworkManager has a persistent config to ignore WolfStack/WolfNet interfaces.
+/// Writes /etc/NetworkManager/conf.d/wolfstack.conf and reloads NM if the file is new.
+fn ensure_nm_unmanaged() {
+    let conf_path = "/etc/NetworkManager/conf.d/wolfstack.conf";
+    if std::path::Path::new(conf_path).exists() {
+        return;
+    }
+    // Only write if NetworkManager conf.d directory exists (NM is installed)
+    if !std::path::Path::new("/etc/NetworkManager/conf.d").is_dir() {
+        return;
+    }
+    let content = "\
+# WolfStack: prevent NetworkManager from managing overlay/tunnel interfaces.
+# These are managed by WolfStack/WolfNet and NM interference causes routing
+# problems on desktop systems (especially Fedora with WiFi).
+[keyfile]
+unmanaged-devices=interface-name:wg-wolfstack*;interface-name:wolfnet*
+";
+    if std::fs::write(conf_path, content).is_ok() {
+        // Reload NM config so it picks up the new file
+        let _ = Command::new("nmcli").args(["general", "reload"]).output();
+    }
+}
+
 /// Find the primary NetworkManager connection (ethernet or wifi)
 fn find_primary_nm_connection() -> Option<String> {
     let output = Command::new("nmcli")
@@ -2564,13 +2588,15 @@ pub fn apply_wireguard_bridge(bridge: &WireGuardBridge) -> Result<(), String> {
         .map(|o| o.status.success()).unwrap_or(false);
     if !exists {
         run_cmd("ip", &["link", "add", &iface, "type", "wireguard"])?;
-        // Tell NetworkManager to ignore this interface — on desktop systems NM
-        // will otherwise try to manage the WG interface, mess with routing
-        // metrics, and cause slow/broken connectivity on WiFi.
-        let _ = Command::new("nmcli")
-            .args(["device", "set", &iface, "managed", "no"])
-            .output();
     }
+
+    // Tell NetworkManager to ignore WireGuard and WolfNet interfaces — on
+    // Fedora/RHEL desktops NM tries to manage them, messes with routing
+    // metrics, and causes slow/broken connectivity on WiFi.
+    ensure_nm_unmanaged();
+    let _ = Command::new("nmcli")
+        .args(["device", "set", &iface, "managed", "no"])
+        .output();
 
     // Write private key to temp file for wg setconf
     let key_path = format!("/tmp/wg-{}-key", iface);
