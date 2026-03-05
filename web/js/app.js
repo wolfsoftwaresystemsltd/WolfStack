@@ -1985,6 +1985,16 @@ async function fetchNodes() {
         }
     } catch (e) {
         console.error('Failed to fetch nodes:', e);
+        // If we're on HTTPS and getting NetworkErrors, the TLS certificate likely
+        // doesn't match (e.g. accessing via IP with a domain cert). The HTTP
+        // inter-node server runs on port+1, so redirect there automatically.
+        if (window.location.protocol === 'https:' && e instanceof TypeError &&
+            e.message.includes('NetworkError') && !window.location.search.includes('no_tls_redirect')) {
+            const httpPort = parseInt(window.location.port || '443') + 1;
+            window.location.href = 'http://' + window.location.hostname + ':' + httpPort +
+                window.location.pathname + '?no_tls_redirect=1';
+            return;
+        }
         _sessionCheckFails++;
         if (_sessionCheckFails >= 3) window.location.href = '/login.html';
     }
