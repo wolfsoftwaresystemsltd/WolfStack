@@ -2488,10 +2488,18 @@ fn generate_client_config(bridge: &WireGuardBridge, client: &WireGuardClient) ->
     // Detect the server's public/reachable IP for the Endpoint field
     let server_endpoint = detect_server_endpoint(bridge.listen_port);
 
+    // AllowedIPs: bridge subnet (for gateway) + WolfNet subnet (for cluster resources)
+    // Traffic to 10.20.X.Y reaches 10.0.10.Y via NETMAP on the server
+    let wolfnet_cidr = format!("{}.0/24", bridge.wolfnet_subnet);
+    let allowed_ips = format!("{}, {}", bridge.bridge_subnet(), wolfnet_cidr);
+
     Ok(format!(
         "# WolfStack WireGuard Bridge — Cluster: {cluster}\n\
          # Client: {name}\n\
          # Generated: {date}\n\
+         #\n\
+         # Bridge subnet {bridge_sub} maps to WolfNet {wn_sub}.0/24\n\
+         # e.g. ping {bridge_prefix}.5 reaches WolfNet {wn_sub}.5\n\
          \n\
          [Interface]\n\
          PrivateKey = {priv_key}\n\
@@ -2500,16 +2508,19 @@ fn generate_client_config(bridge: &WireGuardBridge, client: &WireGuardClient) ->
          [Peer]\n\
          PublicKey = {pub_key}\n\
          Endpoint = {endpoint}\n\
-         AllowedIPs = {subnet}\n\
+         AllowedIPs = {allowed}\n\
          PersistentKeepalive = 25\n",
         cluster = bridge.cluster,
         name = client.name,
         date = &chrono_now()[..10],
+        bridge_sub = bridge.bridge_subnet(),
+        bridge_prefix = format!("10.20.{}", bridge.bridge_octet),
+        wn_sub = bridge.wolfnet_subnet,
         priv_key = client.private_key,
         addr = client.assigned_ip,
         pub_key = bridge.public_key,
         endpoint = server_endpoint,
-        subnet = bridge.bridge_subnet(),
+        allowed = allowed_ips,
     ))
 }
 
@@ -2646,10 +2657,17 @@ fn wg_set_peer(bridge: &WireGuardBridge, client: &WireGuardClient) -> Result<(),
     ])
 }
 
-/// Set up iptables NAT rules for a bridge
+/// Set up iptables NAT rules for a bridge.
+///
+/// Creates a bidirectional NAT mapping between the bridge subnet (10.20.X.0/24)
+/// and the WolfNet subnet (e.g. 10.0.10.0/24) using NETMAP for 1:1 translation:
+///   - Client sends to 10.20.X.5 → DNAT rewrites dst to 10.0.10.5
+///   - Response from 10.0.10.5 → SNAT rewrites src to 10.20.X.5
+/// Also MASQUERADEs the client source so WolfNet peers route replies back here.
 fn setup_bridge_nat(bridge: &WireGuardBridge) -> Result<(), String> {
     let iface = bridge.interface_name();
     let subnet = bridge.bridge_subnet();
+    let wn_subnet = format!("{}.0/24", bridge.wolfnet_subnet);
 
     // Detect WolfNet interface name
     let wn_iface = detect_wolfnet_iface().unwrap_or_else(|| "wolfnet0".to_string());
@@ -2660,19 +2678,31 @@ fn setup_bridge_nat(bridge: &WireGuardBridge) -> Result<(), String> {
     // Clean up any existing rules for this bridge first
     cleanup_bridge_nat(bridge);
 
-    // MASQUERADE traffic from bridge subnet going to WolfNet
+    // NETMAP: translate bridge subnet ↔ WolfNet subnet (1:1 mapping)
+    // Inbound on WG: 10.20.X.5 → 10.0.10.5
+    let _ = Command::new("iptables").args([
+        "-t", "nat", "-A", "PREROUTING",
+        "-i", &iface, "-d", &subnet, "-j", "NETMAP", "--to", &wn_subnet,
+    ]).output();
+
+    // Return traffic: 10.0.10.5 → 10.20.X.5 (for packets going back out WG)
+    let _ = Command::new("iptables").args([
+        "-t", "nat", "-A", "POSTROUTING",
+        "-o", &iface, "-s", &wn_subnet, "-j", "NETMAP", "--to", &subnet,
+    ]).output();
+
+    // MASQUERADE the client source IP so WolfNet peers route replies back to this node
     let _ = Command::new("iptables").args([
         "-t", "nat", "-A", "POSTROUTING",
         "-s", &subnet, "-o", &wn_iface, "-j", "MASQUERADE",
     ]).output();
 
-    // Allow forwarding between WG and WolfNet
+    // Allow forwarding in both directions between WG and WolfNet
     let _ = Command::new("iptables").args([
         "-A", "FORWARD", "-i", &iface, "-o", &wn_iface, "-j", "ACCEPT",
     ]).output();
     let _ = Command::new("iptables").args([
-        "-A", "FORWARD", "-i", &wn_iface, "-o", &iface,
-        "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT",
+        "-A", "FORWARD", "-i", &wn_iface, "-o", &iface, "-j", "ACCEPT",
     ]).output();
 
     Ok(())
@@ -2682,18 +2712,31 @@ fn setup_bridge_nat(bridge: &WireGuardBridge) -> Result<(), String> {
 fn cleanup_bridge_nat(bridge: &WireGuardBridge) {
     let iface = bridge.interface_name();
     let subnet = bridge.bridge_subnet();
+    let wn_subnet = format!("{}.0/24", bridge.wolfnet_subnet);
     let wn_iface = detect_wolfnet_iface().unwrap_or_else(|| "wolfnet0".to_string());
 
+    // NETMAP rules
+    let _ = Command::new("iptables").args([
+        "-t", "nat", "-D", "PREROUTING",
+        "-i", &iface, "-d", &subnet, "-j", "NETMAP", "--to", &wn_subnet,
+    ]).output();
+    let _ = Command::new("iptables").args([
+        "-t", "nat", "-D", "POSTROUTING",
+        "-o", &iface, "-s", &wn_subnet, "-j", "NETMAP", "--to", &subnet,
+    ]).output();
+
+    // MASQUERADE
     let _ = Command::new("iptables").args([
         "-t", "nat", "-D", "POSTROUTING",
         "-s", &subnet, "-o", &wn_iface, "-j", "MASQUERADE",
     ]).output();
+
+    // FORWARD rules
     let _ = Command::new("iptables").args([
         "-D", "FORWARD", "-i", &iface, "-o", &wn_iface, "-j", "ACCEPT",
     ]).output();
     let _ = Command::new("iptables").args([
-        "-D", "FORWARD", "-i", &wn_iface, "-o", &iface,
-        "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT",
+        "-D", "FORWARD", "-i", &wn_iface, "-o", &iface, "-j", "ACCEPT",
     ]).output();
 }
 
