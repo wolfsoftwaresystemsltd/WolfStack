@@ -811,11 +811,13 @@ if [ ! -f "/etc/wolfstack/config.toml" ]; then
     # Prompt for port
     echo -n "Dashboard port [8553]: "
     prompt_read WS_PORT
+    WS_PORT=$(echo "$WS_PORT" | tr -d '[:space:][:cntrl:]')
     WS_PORT=${WS_PORT:-8553}
 
     # Prompt for bind address
     echo -n "Bind address [0.0.0.0]: "
     prompt_read WS_BIND
+    WS_BIND=$(echo "$WS_BIND" | tr -d '[:cntrl:]' | xargs)
     WS_BIND=${WS_BIND:-0.0.0.0}
 
     # Write config
@@ -837,7 +839,8 @@ else
     echo "✓ Config already exists at /etc/wolfstack/config.toml"
     echo "  (Upgrade mode - skipping configuration prompts)"
     # Read port from existing config
-    WS_PORT=$(grep "port" /etc/wolfstack/config.toml 2>/dev/null | head -1 | awk '{print $3}' || echo "8553")
+    WS_PORT=$(grep "^port" /etc/wolfstack/config.toml 2>/dev/null | head -1 | awk '{print $3}' | tr -d '[:space:][:cntrl:]' || echo "8553")
+    WS_PORT=${WS_PORT:-8553}
 fi
 
 # ─── Create systemd service ─────────────────────────────────────────────────

@@ -62,6 +62,10 @@ struct Cli {
     #[arg(long)]
     tls_domain: Option<String>,
 
+    /// Disable TLS and run in HTTP-only mode
+    #[arg(long)]
+    no_tls: bool,
+
     /// Print this server's join token and exit
     #[arg(long)]
     show_token: bool,
@@ -206,7 +210,9 @@ async fn main() -> std::io::Result<()> {
     vms_manager.autostart_vms();
 
     // Check if TLS will be available (so the frontend knows the correct protocol for URLs)
-    let tls_enabled = if cli.tls_cert.is_some() && cli.tls_key.is_some() {
+    let tls_enabled = if cli.no_tls {
+        false
+    } else if cli.tls_cert.is_some() && cli.tls_key.is_some() {
         true
     } else {
         installer::find_tls_certificate(cli.tls_domain.as_deref()).is_some()
@@ -1005,7 +1011,9 @@ async fn main() -> std::io::Result<()> {
         info!("");
 
         // Resolve TLS certificate paths
-        let tls_paths = if let (Some(cert), Some(key)) = (&cli.tls_cert, &cli.tls_key) {
+        let tls_paths = if cli.no_tls {
+            None
+        } else if let (Some(cert), Some(key)) = (&cli.tls_cert, &cli.tls_key) {
             Some((cert.clone(), key.clone()))
         } else {
             installer::find_tls_certificate(cli.tls_domain.as_deref())
@@ -1112,7 +1120,9 @@ async fn main() -> std::io::Result<()> {
             }
             Ok(())
         } else {
-            if tls_paths.is_some() {
+            if cli.no_tls {
+                info!("  ⚡ HTTP mode (TLS disabled via --no-tls)");
+            } else if tls_paths.is_some() {
                 info!("  ⚠️  TLS certificates found but failed to load — running HTTP only");
             } else {
                 info!("  ⚡ HTTP mode (no TLS certificates found)");
