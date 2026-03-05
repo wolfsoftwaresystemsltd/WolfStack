@@ -2710,8 +2710,15 @@ fn setup_bridge_nat(bridge: &WireGuardBridge) -> Result<(), String> {
     // Detect WolfNet interface name
     let wn_iface = detect_wolfnet_iface().unwrap_or_else(|| "wolfnet0".to_string());
 
-    // Enable IP forwarding
-    let _ = Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]).output();
+    // Enable forwarding only on the WireGuard and WolfNet interfaces — avoid
+    // enabling the global ip_forward flag which turns the machine into a full
+    // router and can cause network-wide slowdowns (especially on low-powered
+    // devices like Raspberry Pis that send ICMP redirects or forward LAN traffic).
+    let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.forwarding=1", iface)]).output();
+    let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.forwarding=1", wn_iface)]).output();
+    // Disable ICMP redirects on these interfaces — we handle routing ourselves
+    let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.send_redirects=0", iface)]).output();
+    let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.send_redirects=0", wn_iface)]).output();
 
     // Clean up any existing rules for this bridge first
     cleanup_bridge_nat(bridge);
