@@ -279,6 +279,7 @@ pub fn cleanup_stale_wolfnet_routes() {
                     .output(); // Silently ignores EEXIST
 
                 // Ensure container can route WolfNet subnet via bridge gateway
+                // with src hint so the container uses its WolfNet IP as source
                 let gateway = Command::new("docker")
                     .args(["network", "inspect", "bridge", "--format", "{{range .IPAM.Config}}{{.Gateway}}{{end}}"])
                     .output()
@@ -286,7 +287,7 @@ pub fn cleanup_stale_wolfnet_routes() {
                     .unwrap_or_else(|_| "172.17.0.1".to_string());
                 let gw = if gateway.is_empty() { "172.17.0.1".to_string() } else { gateway };
                 let _ = Command::new("nsenter")
-                    .args(["--target", &pid_out, "--net", "ip", "route", "replace", "10.10.10.0/24", "via", &gw])
+                    .args(["--target", &pid_out, "--net", "ip", "route", "replace", "10.10.10.0/24", "via", &gw, "src", &label])
                     .output();
             }
         }
@@ -1150,14 +1151,14 @@ fn lxc_apply_wolfnet(container: &str) {
                 "if [ -d /etc/NetworkManager ]; then \
                      mkdir -p /etc/NetworkManager/system-connections && \
                      printf '[connection]\\nid=wn0\\ntype=ethernet\\ninterface-name=wn0\\nautoconnect=true\\n\\n\
-[ipv4]\\nmethod=manual\\naddress1={}/24\\naddress2={}/32\\nroute1=10.10.10.0/24,10.0.3.1\\n\\n\
+[ipv4]\\nmethod=manual\\naddress1={}/24\\naddress2={}/32\\nroute1=10.10.10.0/24,10.0.3.1\\nroute1_options=src={}\\n\\n\
 [ipv6]\\nmethod=disabled\\n' \
                      > /etc/NetworkManager/system-connections/wn0.nmconnection && \
                      chmod 600 /etc/NetworkManager/system-connections/wn0.nmconnection && \
                      nmcli con reload 2>/dev/null && \
                      nmcli con up wn0 2>/dev/null; \
                  fi; true",
-                bridge_ip, ip
+                bridge_ip, ip, ip
             );
             let mut nm_args: Vec<String> = attach_prefix.clone();
             nm_args.extend(["sh", "-c", &nm_cmd].iter().map(|s| s.to_string()));
