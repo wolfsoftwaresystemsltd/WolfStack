@@ -4344,7 +4344,9 @@ function renderDiskInfo(devices) {
             const parts = partsByDisk[dk.device] || [];
             const diskBytes = dk.size_bytes || 1;
             const model = dk.model ? escapeHtml(dk.model) : '';
+            const tran = dk.tran ? dk.tran.toUpperCase() : (dk.rotational ? 'HDD' : 'SSD');
             const rotate = dk.rotational ? 'HDD' : 'SSD';
+            const ptLabel = dk.pttype ? dk.pttype.toUpperCase() : '';
 
             let allocatedBytes = 0;
             const segments = parts.map(p => {
@@ -4417,34 +4419,32 @@ function renderDiskInfo(devices) {
             // SMART health badge
             let smartBadge = '';
             if (dk.smart) {
-                const passed = dk.smart.passed;
-                const temp = dk.smart.temperature_c;
-                const hrs = dk.smart.power_on_hours;
-                const realloc = dk.smart.reallocated_sectors;
-                if (passed === true) {
+                const s = dk.smart;
+                if (s.passed === true) {
                     smartBadge += `<span style="font-size:11px;padding:1px 6px;border-radius:3px;background:#10b981;color:#fff;font-weight:600;">HEALTHY</span>`;
-                } else if (passed === false) {
+                } else if (s.passed === false) {
                     smartBadge += `<span style="font-size:11px;padding:1px 6px;border-radius:3px;background:#ef4444;color:#fff;font-weight:600;">FAILING</span>`;
                 }
-                const details = [];
-                if (temp != null) details.push(`${temp}°C`);
-                if (hrs != null) details.push(`${Number(hrs).toLocaleString()}h`);
-                if (realloc != null && realloc > 0) details.push(`${realloc} realloc`);
-                if (details.length > 0) {
-                    const tempColor = (temp != null && temp >= 50) ? '#ef4444' : (temp != null && temp >= 40) ? '#f59e0b' : 'var(--text-muted)';
-                    const reallocColor = (realloc != null && realloc > 0) ? '#ef4444' : 'var(--text-muted)';
-                    smartBadge += `<span style="font-size:11px;color:var(--text-muted);margin-left:4px;">`;
-                    if (temp != null) smartBadge += `<span style="color:${tempColor};">${temp}°C</span> `;
-                    if (hrs != null) smartBadge += `${Number(hrs).toLocaleString()}h `;
-                    if (realloc != null && realloc > 0) smartBadge += `<span style="color:${reallocColor};">${realloc} realloc!</span>`;
-                    smartBadge += `</span>`;
+                const parts = [];
+                if (s.temperature_c != null) {
+                    const tc = s.temperature_c;
+                    const tcCol = tc >= 50 ? '#ef4444' : tc >= 40 ? '#f59e0b' : 'var(--text-muted)';
+                    parts.push(`<span style="color:${tcCol};">${tc}°C</span>`);
+                }
+                if (s.power_on_hours != null) parts.push(`${Number(s.power_on_hours).toLocaleString()}h`);
+                if (s.reallocated_sectors > 0) parts.push(`<span style="color:#ef4444;">${s.reallocated_sectors} realloc</span>`);
+                if (s.pending_sectors > 0) parts.push(`<span style="color:#ef4444;">${s.pending_sectors} pending</span>`);
+                if (s.nvme_pct_used != null) parts.push(`${s.nvme_pct_used}% worn`);
+                if (s.nvme_spare_pct != null) parts.push(`${s.nvme_spare_pct}% spare`);
+                if (parts.length > 0) {
+                    smartBadge += `<span style="font-size:11px;color:var(--text-muted);margin-left:4px;">${parts.join(' · ')}</span>`;
                 }
             }
 
             return `<div style="margin-bottom:14px;">
                 <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px;">
                     <span style="font-weight:700;font-size:13px;color:var(--text-primary);">${escapeHtml(dk.device)}</span>
-                    <span style="font-size:12px;color:var(--text-muted);">${escapeHtml(dk.size)} ${rotate}${model ? ' — ' + model : ''}</span>
+                    <span style="font-size:12px;color:var(--text-muted);">${escapeHtml(dk.size)} ${tran} ${rotate}${ptLabel ? ' · ' + ptLabel : ''}${model ? ' — ' + model : ''}${dk.serial ? ' [' + escapeHtml(dk.serial) + ']' : ''}</span>
                     ${smartBadge}
                 </div>
                 <div style="display:flex;gap:3px;height:46px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;padding:3px;overflow:hidden;">
@@ -4466,7 +4466,9 @@ function renderDiskInfo(devices) {
             : d.type === 'lvm' ? 'LVM' : d.type === 'loop' ? 'Loop' : d.type || '—';
 
         const indent = d.type !== 'disk' ? 'padding-left:20px;' : 'font-weight:600;';
-        const fstype = d.fstype || '<span style="color:var(--text-muted)">—</span>';
+        let fstype = d.fstype || '<span style="color:var(--text-muted)">—</span>';
+        if (d.fstype && d.label) fstype += ` <span style="color:var(--text-muted);font-size:10px;">[${escapeHtml(d.label)}]</span>`;
+        if (d.uuid) fstype += `<div style="font-size:9px;color:var(--text-muted);font-family:var(--font-mono);opacity:0.7;user-select:all;" title="UUID: ${escapeHtml(d.uuid)}">${escapeHtml(d.uuid)}</div>`;
 
         const mounts = (d.mountpoints || []).length > 0
             ? d.mountpoints.map(m => `<code style="font-size:11px; background:var(--bg-secondary); padding:1px 5px; border-radius:3px;">${escapeHtml(m)}</code>`).join(' ')
@@ -4488,15 +4490,22 @@ function renderDiskInfo(devices) {
                 </div>`;
         }
 
-        const modelInfo = d.type === 'disk'
-            ? (d.model ? escapeHtml(d.model) : '<span style="color:var(--text-muted)">—</span>')
-            : `<span style="color:var(--text-muted);font-size:11px;">${escapeHtml(d.disk)}</span>`;
+        let modelInfo;
+        if (d.type === 'disk') {
+            const parts = [];
+            if (d.model) parts.push(escapeHtml(d.model));
+            if (d.serial) parts.push(`<span style="font-size:10px;color:var(--text-muted);">S/N: ${escapeHtml(d.serial)}</span>`);
+            modelInfo = parts.length > 0 ? parts.join('<br>') : '<span style="color:var(--text-muted)">—</span>';
+        } else {
+            modelInfo = `<span style="color:var(--text-muted);font-size:11px;">${escapeHtml(d.disk)}</span>`;
+        }
 
-        const rotate = d.rotational ? '🔄 HDD' : '⚡ SSD';
+        const tranLabel = d.tran ? d.tran.toUpperCase() : '';
+        const rotate = d.rotational ? 'HDD' : 'SSD';
         const deviceLabel = `<code style="font-size:12px;">${escapeHtml(d.device)}</code>`;
 
-        // Color swatch for partitions matching the visual map
-        const colorDot = (d.type === 'part' && partColorMap[d.device])
+        // Color swatch matching the visual map (partitions and whole-disk filesystems)
+        const colorDot = partColorMap[d.device]
             ? `<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${partColorMap[d.device]};margin-right:4px;vertical-align:middle;"></span>`
             : '';
 
@@ -4545,15 +4554,18 @@ function renderDiskInfo(devices) {
                 extras.push(`<span style="color:${tcCol};">${tc}°C</span>`);
             }
             if (s.power_on_hours != null) extras.push(`${Number(s.power_on_hours).toLocaleString()}h`);
-            if (s.reallocated_sectors != null && s.reallocated_sectors > 0) {
-                extras.push(`<span style="color:#ef4444;">${s.reallocated_sectors} realloc</span>`);
-            }
+            if (s.reallocated_sectors > 0) extras.push(`<span style="color:#ef4444;">${s.reallocated_sectors} realloc</span>`);
+            if (s.pending_sectors > 0) extras.push(`<span style="color:#ef4444;">${s.pending_sectors} pending</span>`);
+            if (s.uncorrectable_sectors > 0) extras.push(`<span style="color:#ef4444;">${s.uncorrectable_sectors} uncorrect</span>`);
+            if (s.nvme_pct_used != null) extras.push(`${s.nvme_pct_used}% worn`);
+            if (s.nvme_spare_pct != null) extras.push(`${s.nvme_spare_pct}% spare`);
+            if (s.wear_level != null) extras.push(`wear: ${s.wear_level}`);
             if (extras.length > 0) healthCell += `<div style="font-size:10px;color:var(--text-muted);margin-top:1px;">${extras.join(' · ')}</div>`;
         }
 
         return `<tr>
             <td style="${indent}${d.type !== 'disk' ? 'color:var(--text-secondary);' : ''}">${colorDot}${deviceLabel}</td>
-            <td>${typeIcon} <span style="font-size:12px;">${typeLabel}${d.type === 'disk' ? ' · ' + rotate : ''}</span></td>
+            <td>${typeIcon} <span style="font-size:12px;">${typeLabel}${d.type === 'disk' ? ' · ' + rotate + (tranLabel ? ' · ' + tranLabel : '') + (d.pttype ? ' · ' + d.pttype.toUpperCase() : '') : ''}</span></td>
             <td style="font-size:12px;">${modelInfo}</td>
             <td style="font-family:var(--font-mono); font-size:12px;">${fstype}</td>
             <td style="font-size:13px; white-space:nowrap;">${escapeHtml(d.size)}</td>

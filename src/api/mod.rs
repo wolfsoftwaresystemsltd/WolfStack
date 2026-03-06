@@ -5655,7 +5655,7 @@ pub async fn storage_disk_info(req: HttpRequest, state: web::Data<AppState>) -> 
     let lsblk_out = std::process::Command::new("lsblk")
         .args([
             "-J",
-            "-o", "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS,TYPE,HOTPLUG,ROTA,MODEL",
+            "-o", "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS,TYPE,HOTPLUG,ROTA,MODEL,SERIAL,UUID,PTTYPE,TRAN",
             "--bytes",
         ])
         .output();
@@ -5728,6 +5728,10 @@ pub async fn storage_disk_info(req: HttpRequest, state: web::Data<AppState>) -> 
             let model  = dev.get("model").and_then(|v| v.as_str()).unwrap_or(parent_model).to_string();
             let hotplug = dev.get("hotplug").and_then(|v| v.as_bool()).unwrap_or(false);
             let rotational = dev.get("rota").and_then(|v| v.as_bool()).unwrap_or(true);
+            let serial = dev.get("serial").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let uuid   = dev.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let pttype = dev.get("pttype").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let tran   = dev.get("tran").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
             // Collect mountpoints
             let mounts: Vec<String> = dev.get("mountpoints")
@@ -5760,6 +5764,10 @@ pub async fn storage_disk_info(req: HttpRequest, state: web::Data<AppState>) -> 
                 "mountpoints": mounts,
                 "hotplug": hotplug,
                 "rotational": rotational,
+                "serial": if serial.is_empty() { serde_json::json!(null) } else { serde_json::json!(serial) },
+                "uuid": if uuid.is_empty() { serde_json::json!(null) } else { serde_json::json!(uuid) },
+                "pttype": if pttype.is_empty() { serde_json::json!(null) } else { serde_json::json!(pttype) },
+                "tran": if tran.is_empty() { serde_json::json!(null) } else { serde_json::json!(tran) },
                 "df": df,
             }));
 
@@ -5799,18 +5807,42 @@ pub async fn storage_disk_info(req: HttpRequest, state: web::Data<AppState>) -> 
                                 .and_then(|v| v.as_i64());
                             let power_on = json.pointer("/power_on_time/hours")
                                 .and_then(|v| v.as_u64());
-                            let reallocated = json.get("ata_smart_attributes")
+                            let attrs_table = json.get("ata_smart_attributes")
                                 .and_then(|a| a.get("table"))
-                                .and_then(|t| t.as_array())
-                                .and_then(|attrs| attrs.iter().find(|a|
-                                    a.get("id").and_then(|v| v.as_u64()) == Some(5)
-                                ))
-                                .and_then(|a| a.get("raw").and_then(|r| r.get("value")).and_then(|v| v.as_u64()));
+                                .and_then(|t| t.as_array());
+                            let find_attr = |id: u64| -> Option<u64> {
+                                attrs_table?.iter()
+                                    .find(|a| a.get("id").and_then(|v| v.as_u64()) == Some(id))
+                                    .and_then(|a| a.get("raw").and_then(|r| r.get("value")).and_then(|v| v.as_u64()))
+                            };
+                            let reallocated = find_attr(5);     // Reallocated Sector Count
+                            let pending = find_attr(197);       // Current Pending Sector Count
+                            let uncorrectable = find_attr(198); // Offline Uncorrectable
+                            let wear_level = find_attr(177)     // SSD Wear Leveling Count
+                                .or_else(|| find_attr(233));    // Media Wearout Indicator
+                            let total_written = json.pointer("/ata_device_statistics/pages")
+                                .and_then(|p| p.as_array())
+                                .and_then(|pages| pages.iter()
+                                    .flat_map(|page| page.get("table").and_then(|t| t.as_array()).into_iter().flatten())
+                                    .find(|e| e.get("name").and_then(|n| n.as_str()) == Some("Logical Sectors Written"))
+                                )
+                                .and_then(|e| e.get("value").and_then(|v| v.as_u64()));
+                            // For NVMe, use different paths
+                            let nvme_spare = json.pointer("/nvme_smart_health_information_log/available_spare")
+                                .and_then(|v| v.as_u64());
+                            let nvme_pct_used = json.pointer("/nvme_smart_health_information_log/percentage_used")
+                                .and_then(|v| v.as_u64());
                             smart_map.insert(dev.to_string(), serde_json::json!({
                                 "passed": passed,
                                 "temperature_c": temp,
                                 "power_on_hours": power_on,
                                 "reallocated_sectors": reallocated,
+                                "pending_sectors": pending,
+                                "uncorrectable_sectors": uncorrectable,
+                                "wear_level": wear_level,
+                                "total_written_sectors": total_written,
+                                "nvme_spare_pct": nvme_spare,
+                                "nvme_pct_used": nvme_pct_used,
                             }));
                         }
                     }
