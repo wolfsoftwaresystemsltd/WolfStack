@@ -6829,6 +6829,34 @@ setInterval(fetchNodes, 10000);  // Refresh tree + metrics every 10s
 
 let dockerStats = {};
 let containerPollTimer = null;
+let containerUpdateCounts = {};
+let _updateSummaryLoading = false;
+
+async function fetchContainerUpdateSummary() {
+    if (_updateSummaryLoading) return;
+    _updateSummaryLoading = true;
+    try {
+        const resp = await fetch(apiUrl('/api/containers/updates/summary'), { method: 'POST' });
+        const data = await resp.json();
+        if (data.ok && data.containers) {
+            containerUpdateCounts = data.containers;
+            applyUpdateBadges();
+        }
+    } catch (e) { /* silent */ }
+    _updateSummaryLoading = false;
+}
+
+function applyUpdateBadges() {
+    document.querySelectorAll('[data-update-badge]').forEach(el => {
+        const key = el.getAttribute('data-update-badge');
+        const info = containerUpdateCounts[key];
+        if (info && info.count > 0) {
+            el.innerHTML = `<span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:600;background:rgba(245,158,11,0.15);color:#f59e0b;">${info.count} update${info.count !== 1 ? 's' : ''}</span>`;
+        } else if (info) {
+            el.innerHTML = '<span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;">up to date</span>';
+        }
+    });
+}
 
 async function fetchContainerStatus() {
     try {
@@ -8326,6 +8354,8 @@ async function loadDockerContainers() {
         renderDockerContainers(containers);
         renderDockerStats(stats);
         renderDockerImages(images);
+        // Apply cached update badges immediately, then offer refresh
+        applyUpdateBadges();
     } catch (e) {
         console.error('Failed to load Docker containers:', e);
     }
@@ -8406,7 +8436,7 @@ function renderDockerContainers(containers) {
         }).join('') + '</div>' : '';
 
         return `<tr data-name="${c.name}">
-            <td><strong>${c.name}</strong>${svcBadges}<br><span style="font-size:11px;color:var(--text-muted)">${c.id.substring(0, 12)}</span></td>
+            <td><strong>${c.name}</strong>${svcBadges}<span data-update-badge="docker:${c.name}" style="margin-left:6px;"></span><br><span style="font-size:11px;color:var(--text-muted)">${c.id.substring(0, 12)}</span></td>
             <td>${c.image}</td>
             <td><span style="color:${stateColor}">●</span> ${c.status}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
@@ -8904,6 +8934,7 @@ async function loadLxcContainers() {
         stats.forEach(s => { lxcStats[s.name] = s; });
 
         renderLxcContainers(containers, lxcStats);
+        applyUpdateBadges();
     } catch (e) {
         console.error('Failed to load LXC containers:', e);
     }
@@ -8968,7 +8999,7 @@ function renderLxcContainers(containers, stats) {
         }).join('') + '</div>' : '';
 
         return `<tr>
-            <td><strong>${c.hostname || c.name}</strong>${lxcSvcBadges}${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
+            <td><strong>${c.hostname || c.name}</strong>${lxcSvcBadges}<span data-update-badge="lxc:${c.name}" style="margin-left:6px;"></span>${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
             <td style="font-size:12px;color:var(--text-secondary);">${c.version || '<span style="color:var(--text-muted)">—</span>'}</td>
             <td><span style="color:${stateColor}">●</span> ${c.state}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
@@ -9183,6 +9214,18 @@ async function openContainerCron(runtime, container) {
                         <input type="text" id="ct-cron-comment" class="form-control" placeholder="Description" style="font-size:12px;">
                     </div>
                 </div>
+            </div>
+
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-header"><h3 style="font-size:14px;">Quick Actions</h3></div>
+                <div class="card-body" style="display:flex;flex-wrap:wrap;gap:8px;">
+                    <button class="btn btn-sm" onclick="addContainerPremadeCron('apt-update')">📦 System Updates (weekly)</button>
+                    <button class="btn btn-sm" onclick="addContainerPremadeCron('log-cleanup')">🗑️ Clean Logs (daily)</button>
+                    <button class="btn btn-sm" onclick="addContainerPremadeCron('tmp-cleanup')">🧹 Clean /tmp (daily)</button>
+                    <button class="btn btn-sm" onclick="addContainerPremadeCron('certbot-renew')">🔒 Renew SSL Certs</button>
+                    <button class="btn btn-sm" onclick="addContainerPremadeCron('disk-usage')">💾 Log Disk Usage (hourly)</button>
+                    <button class="btn btn-sm" onclick="addContainerPremadeCron('health-check')">🏥 Health Check (5 min)</button>
+                </div>
             </div>`;
 
         if (entries.length === 0) {
@@ -9226,6 +9269,37 @@ async function openContainerCron(runtime, container) {
         body.innerHTML = html;
     } catch (e) {
         body.innerHTML = `<p style="color:#ef4444;">Failed to load cron jobs: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+var CONTAINER_PREMADE_CRON_JOBS = {
+    'apt-update': { schedule: '0 2 * * 1', command: 'command -v apt >/dev/null && apt-get update -qq && apt-get upgrade -y -qq || command -v dnf >/dev/null && dnf upgrade -y -q || command -v yum >/dev/null && yum update -y -q || command -v apk >/dev/null && apk update && apk upgrade || command -v pacman >/dev/null && pacman -Syu --noconfirm', comment: 'System updates (weekly Mon 2AM)' },
+    'log-cleanup': { schedule: '0 4 * * *', command: 'find /var/log -name "*.gz" -mtime +7 -delete 2>/dev/null; find /var/log -name "*.old" -mtime +7 -delete 2>/dev/null; find /var/log -name "*.[0-9]" -mtime +7 -delete 2>/dev/null', comment: 'Clean old logs (daily 4AM)' },
+    'tmp-cleanup': { schedule: '0 6 * * *', command: 'find /tmp -type f -atime +7 -delete 2>/dev/null', comment: 'Clean /tmp files older than 7 days' },
+    'certbot-renew': { schedule: '0 5 * * *', command: 'certbot renew --quiet 2>/dev/null', comment: 'Renew SSL certificates (daily 5AM)' },
+    'disk-usage': { schedule: '0 * * * *', command: 'df -h / | tail -1 >> /var/log/disk-usage.log', comment: 'Log disk usage (hourly)' },
+    'health-check': { schedule: '*/5 * * * *', command: 'ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || echo "$(date): Network unreachable" >> /var/log/health-check.log', comment: 'Health check (every 5 min)' }
+};
+
+async function addContainerPremadeCron(type) {
+    var job = CONTAINER_PREMADE_CRON_JOBS[type];
+    if (!job) return;
+    if (!confirm('Add premade cron job to ' + _containerCronName + '?\n\nSchedule: ' + job.schedule + '\nCommand: ' + job.command + '\nComment: ' + job.comment)) return;
+    try {
+        var resp = await fetch(apiUrl(`/api/containers/${_containerCronRuntime}/${encodeURIComponent(_containerCronName)}/cron`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ schedule: job.schedule, command: job.command, comment: job.comment, enabled: true })
+        });
+        var data = await resp.json();
+        if (data.status === 'saved') {
+            showToast('Cron job added to ' + _containerCronName, 'success');
+            openContainerCron(_containerCronRuntime, _containerCronName);
+        } else {
+            showToast('Error: ' + (data.error || 'Failed'), 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
     }
 }
 

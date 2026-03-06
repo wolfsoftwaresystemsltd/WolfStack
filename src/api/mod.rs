@@ -1906,14 +1906,53 @@ pub async fn container_cron_delete(req: HttpRequest, state: web::Data<AppState>,
 // ─── Container Update Checking ───
 
 /// Detect which package manager is available inside a container.
+/// Uses `command -v` (POSIX shell built-in) instead of `which` for compatibility
+/// with minimal containers (e.g. AlmaLinux) that don't ship `which`.
 fn detect_container_pkg_manager(runtime: &str, container: &str) -> &'static str {
     for pm in &["apt", "dnf", "yum", "pacman", "apk"] {
-        let out = container_exec_cmd(runtime, container, &["which", pm]).output();
+        let check = format!("command -v {} >/dev/null 2>&1 && echo found", pm);
+        let out = container_exec_cmd(runtime, container, &["sh", "-c", &check]).output();
         if let Ok(o) = out {
-            if o.status.success() { return pm; }
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if o.status.success() && stdout.trim() == "found" { return pm; }
         }
     }
     "unknown"
+}
+
+/// Quick update count check for a container (uses cached package data, no refresh).
+fn quick_container_update_count(runtime: &str, container: &str) -> (String, usize) {
+    let pm = detect_container_pkg_manager(runtime, container);
+    let cmd = match pm {
+        "apt"    => "apt list --upgradable 2>/dev/null | grep -v '^Listing' | grep -c .",
+        "dnf"    => "dnf check-update --quiet 2>/dev/null | grep -c '^\\S'",
+        "yum"    => "yum check-update --quiet 2>/dev/null | grep -c '^\\S'",
+        "pacman" => "pacman -Qu 2>/dev/null | grep -c .",
+        "apk"    => "apk version -l '<' 2>/dev/null | grep -c .",
+        _ => return (pm.to_string(), 0),
+    };
+    let out = container_exec_cmd(runtime, container, &["sh", "-c", cmd]).output();
+    let count = out.ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<usize>().unwrap_or(0))
+        .unwrap_or(0);
+    (pm.to_string(), count)
+}
+
+/// POST /api/containers/updates/summary — quick update count for all running containers
+pub async fn container_updates_summary(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let docker = containers::docker_list_all();
+    let lxc = containers::lxc_list_all();
+    let mut results = serde_json::Map::new();
+
+    for c in docker.iter().chain(lxc.iter()) {
+        if c.state != "running" { continue; }
+        let key = format!("{}:{}", c.runtime, c.name);
+        let (pm, count) = quick_container_update_count(&c.runtime, &c.name);
+        results.insert(key, serde_json::json!({ "package_manager": pm, "count": count }));
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({ "ok": true, "containers": results }))
 }
 
 /// POST /api/containers/{runtime}/{id}/updates/check — check for updates inside a container
@@ -9999,6 +10038,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/{runtime}/{id}/cron", web::post().to(container_cron_save))
         .route("/api/containers/{runtime}/{id}/cron/{index}", web::delete().to(container_cron_delete))
         // Container Updates
+        .route("/api/containers/updates/summary", web::post().to(container_updates_summary))
         .route("/api/containers/{runtime}/{id}/updates/check", web::post().to(container_updates_check))
         .route("/api/containers/{runtime}/{id}/updates/apply", web::post().to(container_updates_apply))
         // Certificates
