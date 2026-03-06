@@ -26,17 +26,19 @@ pub fn wolfnet_init() {
 
 
 
-    // Enable IP forwarding (required for routing between wolfnet0 and lxcbr0)
-    let _ = Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]).output();
+    // Enable per-interface forwarding (required for routing between wolfnet0 and lxcbr0)
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.forwarding=1"]).output();
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.forwarding=1"]).output();
 
     // Disable reverse path filtering on wolfnet0 (packets arrive from tunnel,
     // source IPs don't match wolfnet0's directly-connected subnet)
     let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.rp_filter=0"]).output();
     let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.all.rp_filter=0"]).output();
 
-    // Disable ICMP redirects on wolfnet0 (we ARE the router for remote containers,
+    // Disable ICMP redirects (we ARE the router for remote containers,
     // the kernel shouldn't tell peers to "go direct")
     let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.send_redirects=0"]).output();
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.send_redirects=0"]).output();
     let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.all.send_redirects=0"]).output();
 
     // FORWARD chain: allow traffic between wolfnet0 and lxcbr0 in both directions
@@ -293,7 +295,10 @@ pub fn cleanup_stale_wolfnet_routes() {
     // Ensure iptables forwarding rules are at the TOP of FORWARD chain
     // (before DOCKER-USER/DOCKER-FORWARD which may DROP traffic)
     if docker_found {
-        let _ = Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]).output();
+        let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.forwarding=1"]).output();
+        let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.docker0.forwarding=1"]).output();
+        let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.send_redirects=0"]).output();
+        let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.docker0.send_redirects=0"]).output();
         let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.docker0.proxy_arp=1"]).output();
 
         // Remove old rules first (idempotent — ignore errors)
@@ -744,8 +749,9 @@ pub async fn sync_wolfnet_peer_routes() {
 /// Ensure the Docker 'wolfnet' network exists (macvlan on wolfnet0)
 /// Ensure networking requirements (just forwarding)
 pub fn ensure_docker_wolfnet_network() -> Result<(), String> {
-    // Enable forwarding so containers can route to WolfNet
-    let _ = Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]).output();
+    // Enable per-interface forwarding so containers can route to WolfNet
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.forwarding=1"]).output();
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.docker0.forwarding=1"]).output();
     Ok(())
 }
 
@@ -824,8 +830,11 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
     }
 
     // 5. Configure Host Side
-    // Enable forwarding
-    let _ = Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]).output();
+    // Enable per-interface forwarding
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.forwarding=1"]).output();
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.docker0.forwarding=1"]).output();
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.send_redirects=0"]).output();
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.docker0.send_redirects=0"]).output();
     let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.docker0.proxy_arp=1"]).output();
 
     // iptables FORWARD rules (idempotent — check before adding)
@@ -1091,8 +1100,11 @@ pub fn reapply_wolfnet_routes() {
         }
     }
 
-    // Ensure forwarding is on
-    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.all.forwarding=1"]).output();
+    // Ensure per-interface forwarding is on
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.forwarding=1"]).output();
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.forwarding=1"]).output();
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.send_redirects=0"]).output();
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.send_redirects=0"]).output();
     let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.proxy_arp=1"]).output();
 }
 
@@ -1284,7 +1296,10 @@ fn lxc_apply_wolfnet(container: &str) {
         }
 
         // Forwarding + iptables (common to both paths)
-        let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.all.forwarding=1"]).output();
+        let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.forwarding=1"]).output();
+        let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.forwarding=1"]).output();
+        let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.send_redirects=0"]).output();
+        let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.send_redirects=0"]).output();
         let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.proxy_arp=1"]).output();
         let check = Command::new("iptables")
             .args(["-C", "FORWARD", "-i", "wolfnet0", "-o", "lxcbr0", "-j", "ACCEPT"]).output();

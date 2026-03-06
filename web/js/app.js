@@ -3081,6 +3081,12 @@ function navigateToDir(path) {
     loadFiles(path);
 }
 
+function navigateUp() {
+    if (currentFilePath === '/') return;
+    const parent = currentFilePath.replace(/\/[^/]+\/?$/, '') || '/';
+    navigateToDir(parent);
+}
+
 function downloadFile(path) {
     if (containerFileMode && containerFileMode.type === 'docker') {
         window.open(apiUrl(`/api/files/docker/download?container=${encodeURIComponent(containerFileMode.name)}&path=${encodeURIComponent(path)}`), '_blank');
@@ -5672,7 +5678,7 @@ async function buildConfiguratorTargetSelector(componentName) {
         selector.style.cssText = 'display:flex; align-items:center; gap:6px; margin-left:12px;';
         selector.innerHTML = `
             <label style="font-size:12px; color:var(--text-muted); white-space:nowrap;">Target:</label>
-            <select class="form-control" style="font-size:12px; padding:2px 8px; width:auto; min-width:120px;"
+            <select class="form-control" style="font-size:12px; padding:2px 8px; width:auto; min-width:120px; max-width:250px;"
                 onchange="onConfiguratorTargetChange(this.value, '${escapeHtml(componentName)}')">
                 ${options}
             </select>`;

@@ -1426,7 +1426,7 @@
         <!-- ═══ Component Detail Page ═══ -->
         <div id="page-component-detail" class="page-view" style="display:none;">
             <div style="margin-bottom: 16px;">
-                <button class="btn btn-sm" onclick="navigateTo('components')" id="back-to-components">
+                <button class="btn btn-sm" onclick="selectServerView(currentNodeId, 'components')" id="back-to-components">
                     ← Back to Components
                 </button>
             </div>
@@ -1501,9 +1501,9 @@
 
             <!-- Configurator Panel (dynamically populated based on component type) -->
             <div id="detail-configurator-section" class="card" style="margin-bottom: 20px; display: none;">
-                <div class="card-header">
+                <div class="card-header" style="flex-wrap: wrap; gap: 8px;">
                     <h3 id="configurator-title">Configurator</h3>
-                    <div id="configurator-header-actions" style="display: flex; gap: 8px; align-items: center;"></div>
+                    <div id="configurator-header-actions" style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;"></div>
                 </div>
                 <div class="card-body" id="configurator-body">
                 </div>
@@ -3268,8 +3268,12 @@
                 </div>
                 <div class="card-body">
                     <!-- Breadcrumb navigation -->
-                    <div id="file-breadcrumb"
-                        style="display:flex; align-items:center; gap:4px; padding:8px 0; font-size:14px; flex-wrap:wrap; margin-bottom:8px;">
+                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                        <button class="btn btn-sm" onclick="navigateUp()" title="Up one directory"
+                            style="font-size:13px; padding:4px 10px; background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);">⬆ Up</button>
+                        <div id="file-breadcrumb"
+                            style="display:flex; align-items:center; gap:4px; padding:8px 0; font-size:14px; flex-wrap:wrap;">
+                        </div>
                     </div>
                     <!-- Search -->
                     <div style="margin-bottom:12px;">
