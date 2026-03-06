@@ -1795,6 +1795,200 @@ pub async fn cron_delete(req: HttpRequest, state: web::Data<AppState>, path: web
     }
 }
 
+// ─── Container Cron Job Management ───
+
+/// Build a Command to exec inside a container (docker or lxc).
+fn container_exec_cmd(runtime: &str, container: &str, cmd_args: &[&str]) -> std::process::Command {
+    if runtime == "docker" {
+        let mut cmd = std::process::Command::new("docker");
+        cmd.arg("exec").arg(container);
+        for a in cmd_args { cmd.arg(a); }
+        cmd
+    } else {
+        lxc_exec_cmd(container, cmd_args)
+    }
+}
+
+/// Build a Command with stdin piped for writing into a container.
+fn container_exec_cmd_stdin(runtime: &str, container: &str, cmd_args: &[&str]) -> std::process::Command {
+    if runtime == "docker" {
+        let mut cmd = std::process::Command::new("docker");
+        cmd.arg("exec").arg("-i").arg(container);
+        for a in cmd_args { cmd.arg(a); }
+        cmd.stdin(std::process::Stdio::piped());
+        cmd
+    } else {
+        let mut cmd = lxc_exec_cmd(container, cmd_args);
+        cmd.stdin(std::process::Stdio::piped());
+        cmd
+    }
+}
+
+fn read_container_crontab(runtime: &str, container: &str) -> (Vec<String>, String) {
+    let output = container_exec_cmd(runtime, container, &["crontab", "-l"]).output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let raw = String::from_utf8_lossy(&o.stdout).to_string();
+            let lines: Vec<String> = raw.lines().map(|l| l.to_string()).collect();
+            (lines, raw)
+        }
+        _ => (vec![], String::new()),
+    }
+}
+
+fn write_container_crontab(runtime: &str, container: &str, lines: &[String]) -> Result<(), String> {
+    let content = lines.join("\n") + "\n";
+    let mut child = container_exec_cmd_stdin(runtime, container, &["crontab", "-"])
+        .spawn()
+        .map_err(|e| format!("Failed to spawn crontab in container: {}", e))?;
+    use std::io::Write;
+    child.stdin.as_mut().unwrap()
+        .write_all(content.as_bytes())
+        .map_err(|e| format!("Failed to write crontab: {}", e))?;
+    let status = child.wait().map_err(|e| format!("crontab error: {}", e))?;
+    if status.success() { Ok(()) } else { Err("crontab in container exited with error".to_string()) }
+}
+
+/// GET /api/containers/{runtime}/{id}/cron — list cron entries inside a container
+pub async fn container_cron_list(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (runtime, container) = path.into_inner();
+    let (lines, raw) = read_container_crontab(&runtime, &container);
+    let entries: Vec<CronEntry> = lines.iter().enumerate()
+        .filter_map(|(i, line)| parse_crontab_line(line, i))
+        .collect();
+    HttpResponse::Ok().json(serde_json::json!({ "entries": entries, "raw": raw }))
+}
+
+/// POST /api/containers/{runtime}/{id}/cron — add or edit a cron entry inside a container
+pub async fn container_cron_save(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, body: web::Json<CronJobRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (runtime, container) = path.into_inner();
+    let (mut lines, _) = read_container_crontab(&runtime, &container);
+    let comment_suffix = if body.comment.is_empty() { String::new() } else { format!(" # {}", body.comment) };
+    let new_line = if body.enabled {
+        format!("{} {}{}", body.schedule, body.command, comment_suffix)
+    } else {
+        format!("# DISABLED: {} {}{}", body.schedule, body.command, comment_suffix)
+    };
+
+    if let Some(idx) = body.index {
+        if idx < lines.len() {
+            lines[idx] = new_line;
+        } else {
+            return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Index out of range" }));
+        }
+    } else {
+        lines.push(new_line);
+    }
+
+    match write_container_crontab(&runtime, &container, &lines) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "status": "saved" })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/containers/{runtime}/{id}/cron/{index} — remove a cron entry from a container
+pub async fn container_cron_delete(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String, usize)>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (runtime, container, idx) = path.into_inner();
+    let (mut lines, _) = read_container_crontab(&runtime, &container);
+    if idx >= lines.len() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Index out of range" }));
+    }
+    lines.remove(idx);
+    match write_container_crontab(&runtime, &container, &lines) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "status": "deleted" })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+// ─── Container Update Checking ───
+
+/// Detect which package manager is available inside a container.
+fn detect_container_pkg_manager(runtime: &str, container: &str) -> &'static str {
+    for pm in &["apt", "dnf", "yum", "pacman", "apk"] {
+        let out = container_exec_cmd(runtime, container, &["which", pm]).output();
+        if let Ok(o) = out {
+            if o.status.success() { return pm; }
+        }
+    }
+    "unknown"
+}
+
+/// POST /api/containers/{runtime}/{id}/updates/check — check for updates inside a container
+pub async fn container_updates_check(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (runtime, container) = path.into_inner();
+    let pkg_manager = detect_container_pkg_manager(&runtime, &container);
+
+    let output = match pkg_manager {
+        "apt" => {
+            let _ = container_exec_cmd(&runtime, &container, &["sh", "-c", "apt-get update -qq 2>/dev/null"]).output();
+            container_exec_cmd(&runtime, &container, &["sh", "-c", "apt list --upgradable 2>/dev/null | grep -v '^Listing'"])
+                .output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+        }
+        "dnf" => {
+            container_exec_cmd(&runtime, &container, &["sh", "-c", "dnf check-update --quiet 2>/dev/null"])
+                .output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+        }
+        "yum" => {
+            container_exec_cmd(&runtime, &container, &["sh", "-c", "yum check-update --quiet 2>/dev/null"])
+                .output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+        }
+        "pacman" => {
+            let _ = container_exec_cmd(&runtime, &container, &["sh", "-c", "pacman -Sy 2>/dev/null"]).output();
+            container_exec_cmd(&runtime, &container, &["sh", "-c", "pacman -Qu 2>/dev/null"])
+                .output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+        }
+        "apk" => {
+            let _ = container_exec_cmd(&runtime, &container, &["sh", "-c", "apk update 2>/dev/null"]).output();
+            container_exec_cmd(&runtime, &container, &["sh", "-c", "apk version -l '<' 2>/dev/null"])
+                .output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+        }
+        _ => String::new(),
+    };
+
+    let count = output.lines().filter(|l| !l.trim().is_empty()).count();
+    HttpResponse::Ok().json(serde_json::json!({
+        "ok": true,
+        "package_manager": pkg_manager,
+        "count": count,
+        "list": output.trim(),
+    }))
+}
+
+/// POST /api/containers/{runtime}/{id}/updates/apply — apply updates inside a container
+pub async fn container_updates_apply(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (runtime, container) = path.into_inner();
+    let pkg_manager = detect_container_pkg_manager(&runtime, &container);
+
+    let cmd = match pkg_manager {
+        "apt" => "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y 2>&1",
+        "dnf" => "dnf upgrade -y 2>&1",
+        "yum" => "yum update -y 2>&1",
+        "pacman" => "pacman -Syu --noconfirm 2>&1",
+        "apk" => "apk upgrade 2>&1",
+        _ => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "No supported package manager found in container" })),
+    };
+
+    let output = container_exec_cmd(&runtime, &container, &["sh", "-c", cmd]).output();
+    match output {
+        Ok(o) => {
+            let out = String::from_utf8_lossy(&o.stdout).to_string();
+            let err = String::from_utf8_lossy(&o.stderr).to_string();
+            let combined = if err.is_empty() { out } else { format!("{}\n{}", out, err) };
+            if o.status.success() {
+                HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": combined.trim() }))
+            } else {
+                HttpResponse::InternalServerError().json(serde_json::json!({ "error": combined.trim() }))
+            }
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Failed to execute: {}", e) })),
+    }
+}
+
 // ─── Certbot API ───
 
 #[derive(Deserialize)]
@@ -9800,6 +9994,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/cron", web::get().to(cron_list))
         .route("/api/cron", web::post().to(cron_save))
         .route("/api/cron/{index}", web::delete().to(cron_delete))
+        // Container Cron Jobs
+        .route("/api/containers/{runtime}/{id}/cron", web::get().to(container_cron_list))
+        .route("/api/containers/{runtime}/{id}/cron", web::post().to(container_cron_save))
+        .route("/api/containers/{runtime}/{id}/cron/{index}", web::delete().to(container_cron_delete))
+        // Container Updates
+        .route("/api/containers/{runtime}/{id}/updates/check", web::post().to(container_updates_check))
+        .route("/api/containers/{runtime}/{id}/updates/apply", web::post().to(container_updates_apply))
         // Certificates
         .route("/api/certificates", web::post().to(request_certificate))
         .route("/api/certificates/list", web::get().to(list_certificates))

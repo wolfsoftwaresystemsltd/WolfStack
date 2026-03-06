@@ -8435,6 +8435,8 @@ function renderDockerContainers(containers) {
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="browseContainerFiles('docker', '${c.name}')" title="Browse Files">📂</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openDockerSettings('${c.name}')" title="Settings">⚙️</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerConfigurator('docker', '${c.name}')" title="Configure">🔧</button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerUpdates('docker', '${c.name}')" title="Check Updates">📦</button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerCron('docker', '${c.name}')" title="Cron Jobs">⏰</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button>
                 <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>
             </td>
@@ -8982,9 +8984,11 @@ function renderLxcContainers(containers, stats) {
                 <button class="btn btn-sm" style="${btnStyle}" onclick="browseContainerFiles('lxc', '${c.name}', '${(c.storage_path || '').replace(/'/g, "\\'")}')" title="Browse Files">📂</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcSettings('${c.name}')" title="Settings">⚙️</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerConfigurator('lxc', '${c.name}')" title="Configure">🔧</button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerUpdates('lxc', '${c.name}')" title="Check Updates">📦</button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerCron('lxc', '${c.name}')" title="Cron Jobs">⏰</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="cloneLxcContainer('${c.name}')" title="Clone">📋</button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="migrateLxcContainer('${c.name}')" title="Migrate">🚀</button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="exportLxcContainer('${c.name}')" title="Export">📦</button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="exportLxcContainer('${c.name}')" title="Export">🗃️</button>
             </td>
         </tr>${statsSubRow}`;
     }).join('');
@@ -9049,6 +9053,259 @@ async function viewContainerLogs(runtime, container) {
 
 function closeContainerDetail() {
     document.getElementById('container-detail-modal').classList.remove('active');
+}
+
+// ─── Container Update Checking ───
+
+async function openContainerUpdates(runtime, container) {
+    const modal = document.getElementById('container-detail-modal');
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+    const icon = runtime === 'docker' ? '🐳' : '📦';
+
+    title.textContent = `${container} — Package Updates`;
+    body.innerHTML = `<p style="color:var(--text-muted);">Checking for updates inside ${icon} ${container}...</p>
+        <div style="text-align:center;padding:20px;"><span style="display:inline-block;width:24px;height:24px;border:3px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;"></span></div>`;
+    modal.classList.add('active');
+
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/${runtime}/${encodeURIComponent(container)}/updates/check`), { method: 'POST' });
+        const data = await resp.json();
+        const count = data.count || 0;
+        const list = data.list || '';
+        const pm = data.package_manager || 'unknown';
+
+        const countBadge = count > 0
+            ? `<span style="display:inline-block;padding:4px 12px;border-radius:8px;font-size:14px;font-weight:600;background:rgba(245,158,11,0.15);color:#f59e0b;">${count} update${count !== 1 ? 's' : ''} available</span>`
+            : '<span style="display:inline-block;padding:4px 12px;border-radius:8px;font-size:14px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;">System is up to date</span>';
+
+        body.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+                <div>
+                    ${countBadge}
+                    <span style="margin-left:12px;font-size:12px;color:var(--text-muted);">Package manager: <strong>${pm}</strong></span>
+                </div>
+                <div style="display:flex;gap:8px;">
+                    <button class="btn btn-sm" onclick="openContainerUpdates('${runtime}', '${container.replace(/'/g, "\\'")}')">🔄 Refresh</button>
+                    ${count > 0 ? `<button class="btn btn-sm btn-primary" onclick="applyContainerUpdates('${runtime}', '${container.replace(/'/g, "\\'")}')">⬆️ Apply Updates</button>` : ''}
+                </div>
+            </div>
+            ${list ? `<pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:var(--font-mono);font-size:12px;max-height:400px;overflow-y:auto;color:var(--text);white-space:pre-wrap;word-break:break-all;">${escapeHtml(list)}</pre>` : ''}
+        `;
+    } catch (e) {
+        body.innerHTML = `<p style="color:#ef4444;">Failed to check updates: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+async function applyContainerUpdates(runtime, container) {
+    if (!confirm(`Apply all pending updates inside ${container}? This may take a while.`)) return;
+
+    const body = document.getElementById('container-detail-body');
+    body.innerHTML = `<p style="color:var(--text-muted);">Applying updates inside ${container}...</p>
+        <div style="text-align:center;padding:20px;"><span style="display:inline-block;width:24px;height:24px;border:3px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;"></span></div>
+        <p style="color:var(--text-muted);font-size:12px;text-align:center;">This may take several minutes...</p>`;
+
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/${runtime}/${encodeURIComponent(container)}/updates/apply`), { method: 'POST' });
+        const data = await resp.json();
+        if (data.ok) {
+            body.innerHTML = `
+                <div style="margin-bottom:16px;">
+                    <span style="display:inline-block;padding:4px 12px;border-radius:8px;font-size:14px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;">Updates applied successfully</span>
+                    <button class="btn btn-sm" style="margin-left:12px;" onclick="openContainerUpdates('${runtime}', '${container.replace(/'/g, "\\'")}')">🔄 Check Again</button>
+                </div>
+                <pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:var(--font-mono);font-size:12px;max-height:400px;overflow-y:auto;color:var(--text);white-space:pre-wrap;word-break:break-all;">${escapeHtml(data.output || '')}</pre>`;
+            showToast('Updates applied to ' + container, 'success');
+        } else {
+            body.innerHTML = `<p style="color:#ef4444;">Failed to apply updates: ${escapeHtml(data.error || 'Unknown error')}</p>
+                <button class="btn btn-sm" onclick="openContainerUpdates('${runtime}', '${container.replace(/'/g, "\\'")}')">🔄 Check Again</button>`;
+        }
+    } catch (e) {
+        body.innerHTML = `<p style="color:#ef4444;">Failed: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+// ─── Container Cron Job Management ───
+
+var _containerCronRuntime = '';
+var _containerCronName = '';
+
+async function openContainerCron(runtime, container) {
+    _containerCronRuntime = runtime;
+    _containerCronName = container;
+
+    const modal = document.getElementById('container-detail-modal');
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+    const icon = runtime === 'docker' ? '🐳' : '📦';
+
+    title.textContent = `${container} — Cron Jobs`;
+    body.innerHTML = `<p style="color:var(--text-muted);">Loading cron jobs from ${icon} ${container}...</p>`;
+    modal.classList.add('active');
+
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/${runtime}/${encodeURIComponent(container)}/cron`));
+        const data = await resp.json();
+        const entries = data.entries || [];
+        const raw = data.raw || '';
+
+        let html = `
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-header"><h3 style="font-size:14px;">Add Cron Job</h3></div>
+                <div class="card-body">
+                    <div style="display:grid;grid-template-columns:180px 1fr auto;gap:10px;align-items:end;">
+                        <div>
+                            <label style="font-size:11px;color:var(--text-muted);">Schedule</label>
+                            <select id="ct-cron-preset" class="form-control" style="font-size:12px;" onchange="onCtCronPresetChange()">
+                                <option value="0 * * * *">Every Hour</option>
+                                <option value="*/5 * * * *">Every 5 Minutes</option>
+                                <option value="*/15 * * * *">Every 15 Minutes</option>
+                                <option value="0 0 * * *">Daily at Midnight</option>
+                                <option value="0 3 * * *">Daily at 3 AM</option>
+                                <option value="0 0 * * 1">Every Monday</option>
+                                <option value="0 0 1 * *">Monthly (1st)</option>
+                                <option value="@reboot">On Reboot</option>
+                                <option value="custom">Custom...</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size:11px;color:var(--text-muted);">Command</label>
+                            <input type="text" id="ct-cron-command" class="form-control" placeholder="e.g. /usr/bin/backup.sh" style="font-family:var(--font-mono);font-size:12px;">
+                        </div>
+                        <button class="btn btn-primary btn-sm" onclick="addContainerCronJob()" style="height:34px;">Add</button>
+                    </div>
+                    <div id="ct-cron-custom-group" hidden style="margin-top:8px;">
+                        <label style="font-size:11px;color:var(--text-muted);">Custom Schedule</label>
+                        <input type="text" id="ct-cron-custom" class="form-control" placeholder="* * * * *" style="font-family:var(--font-mono);font-size:12px;max-width:200px;">
+                    </div>
+                    <div style="margin-top:8px;">
+                        <label style="font-size:11px;color:var(--text-muted);">Comment (optional)</label>
+                        <input type="text" id="ct-cron-comment" class="form-control" placeholder="Description" style="font-size:12px;">
+                    </div>
+                </div>
+            </div>`;
+
+        if (entries.length === 0) {
+            html += '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px;">No cron jobs found in this container.</div>';
+        } else {
+            html += '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+            html += '<thead><tr style="border-bottom:2px solid var(--border);">' +
+                '<th style="padding:8px 10px;color:var(--text-muted);font-size:11px;text-transform:uppercase;">Status</th>' +
+                '<th style="padding:8px 10px;color:var(--text-muted);font-size:11px;text-transform:uppercase;">Schedule</th>' +
+                '<th style="padding:8px 10px;color:var(--text-muted);font-size:11px;text-transform:uppercase;">Command</th>' +
+                '<th style="padding:8px 10px;color:var(--text-muted);font-size:11px;text-transform:uppercase;">Comment</th>' +
+                '<th style="padding:8px 10px;color:var(--text-muted);font-size:11px;text-transform:uppercase;text-align:right;">Actions</th>' +
+                '</tr></thead><tbody>';
+
+            entries.forEach(function (e) {
+                var statusBadge = e.enabled
+                    ? '<span style="display:inline-block;padding:2px 6px;border-radius:6px;font-size:10px;font-weight:600;background:rgba(34,197,94,0.15);color:#22c55e;">Active</span>'
+                    : '<span style="display:inline-block;padding:2px 6px;border-radius:6px;font-size:10px;font-weight:600;background:rgba(239,68,68,0.15);color:#ef4444;">Disabled</span>';
+
+                html += '<tr style="border-bottom:1px solid var(--border);">' +
+                    '<td style="padding:8px 10px;">' + statusBadge + '</td>' +
+                    '<td style="padding:8px 10px;"><div style="font-weight:600;font-size:12px;">' + escapeHtml(e.human) + '</div>' +
+                    '<div style="font-size:10px;color:var(--text-muted);font-family:var(--font-mono);">' + escapeHtml(e.schedule) + '</div></td>' +
+                    '<td style="padding:8px 10px;font-family:var(--font-mono);font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(e.command) + '">' + escapeHtml(e.command) + '</td>' +
+                    '<td style="padding:8px 10px;color:var(--text-muted);font-size:11px;">' + escapeHtml(e.comment || '—') + '</td>' +
+                    '<td style="padding:8px 10px;text-align:right;white-space:nowrap;">' +
+                    '<button class="btn btn-sm" onclick="toggleContainerCronJob(' + e.index + ', ' + e.enabled + ', \'' + escapeHtml(e.schedule).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.command).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.comment).replace(/'/g, "\\'") + '\')" title="' + (e.enabled ? 'Disable' : 'Enable') + '" style="font-size:14px;">' + (e.enabled ? '⏸️' : '▶️') + '</button> ' +
+                    '<button class="btn btn-sm" onclick="deleteContainerCronJob(' + e.index + ')" title="Delete" style="color:var(--danger);font-size:14px;">🗑️</button>' +
+                    '</td></tr>';
+            });
+            html += '</tbody></table>';
+        }
+
+        if (raw) {
+            html += `<details style="margin-top:16px;">
+                <summary style="cursor:pointer;color:var(--text-muted);font-size:12px;">Raw Crontab</summary>
+                <pre style="margin-top:8px;background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:var(--font-mono);font-size:11px;color:var(--text);white-space:pre-wrap;word-break:break-all;">${escapeHtml(raw)}</pre>
+            </details>`;
+        }
+
+        body.innerHTML = html;
+    } catch (e) {
+        body.innerHTML = `<p style="color:#ef4444;">Failed to load cron jobs: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+function onCtCronPresetChange() {
+    var sel = document.getElementById('ct-cron-preset');
+    var custom = document.getElementById('ct-cron-custom-group');
+    if (sel && custom) custom.hidden = (sel.value !== 'custom');
+}
+
+async function addContainerCronJob() {
+    var sel = document.getElementById('ct-cron-preset');
+    var schedule = sel.value;
+    if (schedule === 'custom') {
+        schedule = (document.getElementById('ct-cron-custom') || {}).value || '';
+    }
+    var command = (document.getElementById('ct-cron-command') || {}).value || '';
+    var comment = (document.getElementById('ct-cron-comment') || {}).value || '';
+
+    if (!schedule || !command) {
+        showToast('Please enter both a schedule and a command.', 'warning');
+        return;
+    }
+
+    try {
+        var resp = await fetch(apiUrl(`/api/containers/${_containerCronRuntime}/${encodeURIComponent(_containerCronName)}/cron`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ schedule: schedule, command: command, comment: comment, enabled: true })
+        });
+        var data = await resp.json();
+        if (data.status === 'saved') {
+            showToast('Cron job added to ' + _containerCronName, 'success');
+            openContainerCron(_containerCronRuntime, _containerCronName);
+        } else {
+            showToast('Error: ' + (data.error || 'Failed to save'), 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function deleteContainerCronJob(index) {
+    if (!confirm('Delete this cron job from ' + _containerCronName + '?')) return;
+    try {
+        var resp = await fetch(apiUrl(`/api/containers/${_containerCronRuntime}/${encodeURIComponent(_containerCronName)}/cron/${index}`), { method: 'DELETE' });
+        var data = await resp.json();
+        if (data.status === 'deleted') {
+            showToast('Cron job deleted.', 'success');
+            openContainerCron(_containerCronRuntime, _containerCronName);
+        } else {
+            showToast('Error: ' + (data.error || 'Failed to delete'), 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function toggleContainerCronJob(index, currentlyEnabled, schedule, command, comment) {
+    try {
+        var resp = await fetch(apiUrl(`/api/containers/${_containerCronRuntime}/${encodeURIComponent(_containerCronName)}/cron`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                schedule: schedule,
+                command: command,
+                comment: comment || '',
+                index: index,
+                enabled: !currentlyEnabled
+            })
+        });
+        var data = await resp.json();
+        if (data.status === 'saved') {
+            showToast(currentlyEnabled ? 'Cron job disabled.' : 'Cron job enabled.', 'success');
+            openContainerCron(_containerCronRuntime, _containerCronName);
+        } else {
+            showToast('Error: ' + (data.error || 'Failed'), 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
 }
 
 // ─── LXC Settings Editor (Tabbed) ───
