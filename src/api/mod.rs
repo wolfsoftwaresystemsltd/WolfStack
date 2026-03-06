@@ -5029,6 +5029,268 @@ pub async fn pbs_config_save(
     }
 }
 
+// ─── Ceph Cluster API ───
+
+/// GET /api/ceph/status — full cluster status
+pub async fn ceph_status(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(crate::ceph::get_cluster_status())
+}
+
+/// GET /api/ceph/install-status — check what ceph components are installed
+pub async fn ceph_install_status(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(crate::ceph::get_install_status())
+}
+
+/// GET /api/ceph/devices — list available devices for OSD creation
+pub async fn ceph_devices(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match crate::ceph::get_available_devices() {
+        Ok(devices) => HttpResponse::Ok().json(devices),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CephBootstrapRequest {
+    #[serde(default)]
+    pub cluster_name: String,
+    pub public_network: String,
+    pub mon_ip: String,
+}
+
+/// POST /api/ceph/bootstrap — bootstrap a new cluster
+pub async fn ceph_bootstrap(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<CephBootstrapRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match crate::ceph::bootstrap_cluster(&body.cluster_name, &body.public_network, &body.mon_ip) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "message": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CephCreatePoolRequest {
+    pub name: String,
+    #[serde(default)]
+    pub pg_num: u32,
+    #[serde(default = "default_pool_type")]
+    pub pool_type: String,
+    #[serde(default)]
+    pub size: Option<u32>,
+    #[serde(default)]
+    pub crush_rule: Option<String>,
+    #[serde(default)]
+    pub application: Option<String>,
+}
+fn default_pool_type() -> String { "replicated".to_string() }
+
+/// POST /api/ceph/pools — create a pool
+pub async fn ceph_create_pool(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<CephCreatePoolRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match crate::ceph::create_pool(&body.name, body.pg_num, &body.pool_type, body.size, body.crush_rule.as_deref(), body.application.as_deref()) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "message": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+/// DELETE /api/ceph/pools/{name} — delete a pool
+pub async fn ceph_delete_pool(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let pool_name = path.into_inner();
+    match crate::ceph::delete_pool(&pool_name) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "message": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CephSetPoolOptionRequest {
+    pub key: String,
+    pub value: String,
+}
+
+/// PUT /api/ceph/pools/{name} — set pool options
+pub async fn ceph_set_pool_option(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<CephSetPoolOptionRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let pool_name = path.into_inner();
+    match crate::ceph::set_pool_option(&pool_name, &body.key, &body.value) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "message": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CephAddOsdRequest {
+    pub device: String,
+}
+
+/// POST /api/ceph/osds — add an OSD
+pub async fn ceph_add_osd(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<CephAddOsdRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match crate::ceph::add_osd(&body.device) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "message": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+/// DELETE /api/ceph/osds/{id} — remove an OSD
+pub async fn ceph_remove_osd(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<u32>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let osd_id = path.into_inner();
+    match crate::ceph::remove_osd(osd_id) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "message": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CephOsdActionRequest {
+    pub action: String,
+    #[serde(default)]
+    pub weight: Option<f64>,
+}
+
+/// POST /api/ceph/osds/{id}/action — mark in/out, reweight
+pub async fn ceph_osd_action(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<u32>,
+    body: web::Json<CephOsdActionRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let osd_id = path.into_inner();
+    let result = match body.action.as_str() {
+        "in" => crate::ceph::set_osd_in(osd_id, true),
+        "out" => crate::ceph::set_osd_in(osd_id, false),
+        "reweight" => {
+            let w = body.weight.unwrap_or(1.0);
+            crate::ceph::reweight_osd(osd_id, w)
+        },
+        _ => Err(format!("Unknown action: {}", body.action)),
+    };
+    match result {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "message": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CephCreateFsRequest {
+    pub name: String,
+    pub metadata_pool: String,
+    pub data_pool: String,
+}
+
+/// POST /api/ceph/fs — create a CephFS
+pub async fn ceph_create_fs(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<CephCreateFsRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match crate::ceph::create_filesystem(&body.name, &body.metadata_pool, &body.data_pool) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "message": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+/// DELETE /api/ceph/fs/{name} — remove a CephFS
+pub async fn ceph_delete_fs(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let fs_name = path.into_inner();
+    match crate::ceph::remove_filesystem(&fs_name) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "message": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+/// GET /api/ceph/rbd/{pool} — list RBD images
+pub async fn ceph_list_rbd(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let pool = path.into_inner();
+    match crate::ceph::list_rbd_images(&pool) {
+        Ok(images) => HttpResponse::Ok().json(images),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CephCreateRbdRequest {
+    pub pool: String,
+    pub name: String,
+    pub size_mb: u64,
+}
+
+/// POST /api/ceph/rbd — create RBD image
+pub async fn ceph_create_rbd(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<CephCreateRbdRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match crate::ceph::create_rbd_image(&body.pool, &body.name, body.size_mb) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "message": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+/// DELETE /api/ceph/rbd/{pool}/{image} — delete RBD image
+pub async fn ceph_delete_rbd(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let (pool, image) = path.into_inner();
+    match crate::ceph::delete_rbd_image(&pool, &image) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "message": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
 // ─── Storage Manager API ───
 
 /// GET /api/storage/mounts — list all storage mounts with live status
@@ -10120,6 +10382,22 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/ai/exec", web::post().to(ai_exec))
         .route("/api/ai/config/sync", web::post().to(ai_sync_config))
         .route("/api/ai/test-email", web::post().to(ai_test_email))
+        // Ceph Cluster
+        .route("/api/ceph/status", web::get().to(ceph_status))
+        .route("/api/ceph/install-status", web::get().to(ceph_install_status))
+        .route("/api/ceph/devices", web::get().to(ceph_devices))
+        .route("/api/ceph/bootstrap", web::post().to(ceph_bootstrap))
+        .route("/api/ceph/pools", web::post().to(ceph_create_pool))
+        .route("/api/ceph/pools/{name}", web::delete().to(ceph_delete_pool))
+        .route("/api/ceph/pools/{name}", web::put().to(ceph_set_pool_option))
+        .route("/api/ceph/osds", web::post().to(ceph_add_osd))
+        .route("/api/ceph/osds/{id}", web::delete().to(ceph_remove_osd))
+        .route("/api/ceph/osds/{id}/action", web::post().to(ceph_osd_action))
+        .route("/api/ceph/fs", web::post().to(ceph_create_fs))
+        .route("/api/ceph/fs/{name}", web::delete().to(ceph_delete_fs))
+        .route("/api/ceph/rbd/{pool}", web::get().to(ceph_list_rbd))
+        .route("/api/ceph/rbd", web::post().to(ceph_create_rbd))
+        .route("/api/ceph/rbd/{pool}/{image}", web::delete().to(ceph_delete_rbd))
         // Storage Manager
         .route("/api/storage/mounts", web::get().to(storage_list_mounts))
         .route("/api/storage/mounts", web::post().to(storage_create_mount))

@@ -557,6 +557,7 @@ function selectServerView(nodeId, view) {
         'terminal': 'Terminal',
         'syslogs': 'System Logs',
         'security': 'Security',
+        'ceph': 'Ceph',
     };
     document.getElementById('page-title').textContent = `${hostname} — ${viewTitles[view] || view}`;
     document.getElementById('hostname-display').textContent = `${hostname} (${node?.address}:${node?.port})`;
@@ -577,7 +578,7 @@ function selectServerView(nodeId, view) {
 
     // Load data for the view
     // Show a modern loading overlay for views that fetch data asynchronously
-    const asyncViews = ['components', 'services', 'containers', 'lxc', 'vms', 'storage', 'networking', 'backups', 'wolfnet', 'certificates', 'cron', 'pve-resources', 'mysql-editor', 'security'];
+    const asyncViews = ['components', 'services', 'containers', 'lxc', 'vms', 'storage', 'networking', 'backups', 'wolfnet', 'certificates', 'cron', 'pve-resources', 'mysql-editor', 'security', 'ceph'];
     if (asyncViews.includes(view) && el) {
         // Clear table bodies to prevent stale data showing
         el.querySelectorAll('tbody').forEach(tb => { tb.innerHTML = ''; });
@@ -638,6 +639,7 @@ function selectServerView(nodeId, view) {
     if (view === 'pve-resources') { renderPveResourcesView(nodeId); hidePageLoadingOverlay(el); }
     if (view === 'mysql-editor') { loadMySQLEditor(); hidePageLoadingOverlay(el); }
     if (view === 'security') loadNodeSecurity().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'ceph') loadCephStatus().finally(() => hidePageLoadingOverlay(el));
 }
 
 // ─── Server Tree ───
@@ -759,6 +761,9 @@ function buildServerTree(nodes) {
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="storage" onclick="selectServerView('${node.id}', 'storage')">
                             <span class="icon">💾</span> Storage
+                        </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="ceph" onclick="selectServerView('${node.id}', 'ceph')">
+                            <span class="icon">🔵</span> Ceph
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="files" onclick="selectServerView('${node.id}', 'files')">
                             <span class="icon">📂</span> Files
@@ -2516,6 +2521,469 @@ function renderVms(vms) {
             </tr>${storageSubRow}
         `;
     }).join('');
+}
+
+// ─── Ceph Cluster ───
+
+let _cephStatus = null;
+
+function _cephFmtBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    const units = ['B','KiB','MiB','GiB','TiB','PiB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+}
+
+async function loadCephStatus() {
+    try {
+        const [statusResp, installResp] = await Promise.all([
+            fetch(apiUrl('/api/ceph/status')),
+            fetch(apiUrl('/api/ceph/install-status')),
+        ]);
+        const status = await statusResp.json();
+        const install = await installResp.json();
+        _cephStatus = status;
+
+        const setupBanner = document.getElementById('ceph-setup-banner');
+        const clusterView = document.getElementById('ceph-cluster-view');
+
+        if (!install.installed) {
+            // Ceph not installed
+            setupBanner.style.display = 'block';
+            clusterView.style.display = 'none';
+            document.getElementById('ceph-install-status').innerHTML = `
+                <div style="display:flex; align-items:center; gap:12px; padding:16px; background:var(--bg-secondary); border-radius:8px; border:1px solid var(--border);">
+                    <span style="font-size:32px;">📦</span>
+                    <div>
+                        <div style="font-weight:600; margin-bottom:4px;">Ceph is not installed</div>
+                        <div style="font-size:13px; color:var(--text-muted);">Install Ceph packages to manage a distributed storage cluster.</div>
+                        <div style="margin-top:8px; font-size:12px; color:var(--text-muted);">
+                            Run: <code>apt install ceph ceph-common ceph-mon ceph-osd ceph-mgr ceph-mds ceph-volume</code> (Debian/Ubuntu)<br>
+                            or: <code>dnf install ceph ceph-common ceph-mon ceph-osd ceph-mgr ceph-mds ceph-volume</code> (Fedora/RHEL)
+                        </div>
+                    </div>
+                </div>`;
+            document.getElementById('ceph-bootstrap-form').style.display = 'none';
+            return;
+        }
+
+        if (!install.bootstrapped) {
+            // Installed but not bootstrapped
+            setupBanner.style.display = 'block';
+            clusterView.style.display = 'none';
+            const comps = install.components;
+            document.getElementById('ceph-install-status').innerHTML = `
+                <div style="margin-bottom:12px;">
+                    <div style="font-weight:600; margin-bottom:8px;">Ceph Components</div>
+                    <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                        ${['ceph_cli','ceph_mon','ceph_osd','ceph_mgr','ceph_mds','ceph_volume','radosgw'].map(c =>
+                            `<span style="padding:3px 10px; border-radius:6px; font-size:12px; background:${comps[c] ? 'var(--success)' : 'var(--bg-tertiary)'}; color:${comps[c] ? '#fff' : 'var(--text-muted)'};">${c.replace('_',' ')}: ${comps[c] ? 'Installed' : 'Missing'}</span>`
+                        ).join('')}
+                    </div>
+                </div>
+                <div style="font-size:13px; color:var(--text-muted); margin-bottom:8px;">No Ceph cluster found on this node. Bootstrap a new cluster or join an existing one.</div>`;
+            document.getElementById('ceph-bootstrap-form').style.display = 'block';
+            return;
+        }
+
+        // Cluster is running — show status
+        setupBanner.style.display = 'none';
+        clusterView.style.display = 'block';
+        renderCephStatus(status);
+    } catch (e) {
+        console.error('Failed to load Ceph status:', e);
+    }
+}
+
+function renderCephStatus(s) {
+    const healthColors = { ok: 'var(--success)', warn: '#f59e0b', error: 'var(--danger)', unknown: 'var(--text-muted)' };
+    const healthLabels = { ok: 'HEALTH_OK', warn: 'HEALTH_WARN', error: 'HEALTH_ERR', unknown: 'UNKNOWN' };
+    const hc = healthColors[s.health] || healthColors.unknown;
+    const hl = healthLabels[s.health] || 'UNKNOWN';
+
+    // Health grid
+    document.getElementById('ceph-health-grid').innerHTML = `
+        <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:14px;">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">Health</div>
+            <div style="font-size:18px; font-weight:700; color:${hc};">${hl}</div>
+        </div>
+        <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:14px;">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">Total Capacity</div>
+            <div style="font-size:18px; font-weight:700;">${_cephFmtBytes(s.total_bytes)}</div>
+        </div>
+        <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:14px;">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">Used</div>
+            <div style="font-size:18px; font-weight:700;">${_cephFmtBytes(s.used_bytes)}</div>
+        </div>
+        <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:14px;">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">Available</div>
+            <div style="font-size:18px; font-weight:700;">${_cephFmtBytes(s.available_bytes)}</div>
+        </div>
+        <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:14px;">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">Objects</div>
+            <div style="font-size:18px; font-weight:700;">${(s.objects || 0).toLocaleString()}</div>
+        </div>
+        <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:14px;">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">OSDs</div>
+            <div style="font-size:18px; font-weight:700;">${(s.osds || []).length} <span style="font-size:12px; color:var(--text-muted);">(${(s.osds||[]).filter(o=>o.up).length} up)</span></div>
+        </div>
+        <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:14px;">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">Pools</div>
+            <div style="font-size:18px; font-weight:700;">${(s.pools || []).length}</div>
+        </div>
+        <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:14px;">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">PG Summary</div>
+            <div style="font-size:13px; font-weight:600;">${s.pg_summary || '—'}</div>
+        </div>`;
+
+    // Health detail
+    const detailEl = document.getElementById('ceph-health-detail');
+    if (s.health_detail) {
+        detailEl.innerHTML = `<div style="padding:8px 12px; background:var(--bg-secondary); border-radius:6px; border-left:3px solid ${hc}; font-size:12px;">${s.health_detail}</div>`;
+    } else {
+        detailEl.innerHTML = '';
+    }
+    if (s.ceph_version) {
+        detailEl.innerHTML += `<div style="margin-top:8px; font-size:12px; color:var(--text-muted);">Version: ${s.ceph_version}${s.fsid ? ` | FSID: ${s.fsid}` : ''}</div>`;
+    }
+
+    // Monitors
+    document.getElementById('ceph-mons-table').innerHTML = (s.monitors || []).map(m => `
+        <tr>
+            <td style="font-weight:600;">${m.name}</td>
+            <td><span style="color:${m.in_quorum ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">● ${m.in_quorum ? 'In Quorum' : 'Out of Quorum'}</span></td>
+        </tr>`).join('') || '<tr><td colspan="2" style="text-align:center; color:var(--text-muted);">No monitors</td></tr>';
+
+    // Managers
+    document.getElementById('ceph-mgrs-table').innerHTML = (s.mgrs || []).map(m => `
+        <tr>
+            <td style="font-weight:600;">${m.name}</td>
+            <td><span style="color:${m.active ? 'var(--success)' : 'var(--text-muted)'}; font-weight:600;">● ${m.active ? 'Active' : 'Standby'}</span></td>
+        </tr>`).join('') || '<tr><td colspan="2" style="text-align:center; color:var(--text-muted);">No managers</td></tr>';
+
+    // OSDs
+    document.getElementById('ceph-osds-table').innerHTML = (s.osds || []).map(o => {
+        const pct = o.size_bytes > 0 ? ((o.used_bytes / o.size_bytes) * 100).toFixed(1) : '0.0';
+        return `<tr>
+            <td style="font-weight:600;">osd.${o.id}</td>
+            <td>${o.host || '—'}</td>
+            <td>${o.device_class || '—'}</td>
+            <td><span style="color:${o.up ? 'var(--success)' : 'var(--danger)'}; font-weight:600;">● ${o.up ? 'Up' : 'Down'}${o.in ? ', In' : ', Out'}</span></td>
+            <td>${o.weight.toFixed(4)}</td>
+            <td>${_cephFmtBytes(o.size_bytes)}</td>
+            <td>${_cephFmtBytes(o.used_bytes)} (${pct}%)</td>
+            <td>${_cephFmtBytes(o.available_bytes)}</td>
+            <td>${o.pgs}</td>
+            <td>
+                <div style="display:flex; gap:4px;">
+                    ${o.in ? `<button class="btn btn-sm" onclick="cephOsdAction(${o.id},'out')" style="font-size:11px; padding:2px 8px;">Mark Out</button>` : `<button class="btn btn-sm" onclick="cephOsdAction(${o.id},'in')" style="font-size:11px; padding:2px 8px;">Mark In</button>`}
+                    <button class="btn btn-sm" onclick="cephRemoveOsd(${o.id})" style="font-size:11px; padding:2px 8px; color:var(--danger);">Remove</button>
+                </div>
+            </td>
+        </tr>`;
+    }).join('') || '<tr><td colspan="10" style="text-align:center; color:var(--text-muted);">No OSDs</td></tr>';
+
+    // Pools
+    document.getElementById('ceph-pools-table').innerHTML = (s.pools || []).map(p => `
+        <tr>
+            <td style="font-weight:600;">${p.name}</td>
+            <td>${p.id}</td>
+            <td>${p.pool_type}</td>
+            <td>${p.size}x</td>
+            <td>${p.pg_num}</td>
+            <td>${_cephFmtBytes(p.stored_bytes)}</td>
+            <td>${_cephFmtBytes(p.used_bytes)}</td>
+            <td>${(p.percent_used * 100).toFixed(2)}%</td>
+            <td>${_cephFmtBytes(p.max_avail)}</td>
+            <td>${p.application || '—'}</td>
+            <td><button class="btn btn-sm" onclick="cephDeletePool('${p.name}')" style="font-size:11px; padding:2px 8px; color:var(--danger);">Delete</button></td>
+        </tr>`).join('') || '<tr><td colspan="11" style="text-align:center; color:var(--text-muted);">No pools</td></tr>';
+
+    // CephFS
+    const fsTable = document.getElementById('ceph-fs-table');
+    const fsEmpty = document.getElementById('ceph-fs-empty');
+    if ((s.filesystems || []).length === 0) {
+        fsTable.innerHTML = '';
+        fsEmpty.style.display = 'block';
+    } else {
+        fsEmpty.style.display = 'none';
+        fsTable.innerHTML = s.filesystems.map(f => `
+            <tr>
+                <td style="font-weight:600;">${f.name}</td>
+                <td>${f.metadata_pool}</td>
+                <td>${(f.data_pools || []).join(', ')}</td>
+                <td><button class="btn btn-sm" onclick="cephDeleteFs('${f.name}')" style="font-size:11px; padding:2px 8px; color:var(--danger);">Delete</button></td>
+            </tr>`).join('');
+    }
+
+    // CRUSH Rules
+    document.getElementById('ceph-crush-table').innerHTML = (s.crush_rules || []).map(r => `
+        <tr><td>${r.id}</td><td style="font-weight:600;">${r.name}</td><td>${r.rule_type}</td></tr>`).join('')
+        || '<tr><td colspan="3" style="text-align:center; color:var(--text-muted);">No CRUSH rules</td></tr>';
+}
+
+// ── Bootstrap ──
+async function cephBootstrapCluster() {
+    const clusterName = document.getElementById('ceph-cluster-name')?.value.trim() || 'ceph';
+    const monIp = document.getElementById('ceph-mon-ip')?.value.trim();
+    const publicNetwork = document.getElementById('ceph-public-network')?.value.trim();
+    if (!monIp || !publicNetwork) {
+        showModal('<p>Monitor IP and Public Network are required.</p>', 'Missing Fields');
+        return;
+    }
+    const html = `<p>This will bootstrap a new Ceph cluster on this node with:</p>
+        <ul><li>Cluster: <b>${clusterName}</b></li><li>Monitor IP: <b>${monIp}</b></li><li>Network: <b>${publicNetwork}</b></li></ul>
+        <p>This creates monitor and manager daemons. Continue?</p>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
+            <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+            <button class="btn btn-primary" onclick="this.closest('.modal-overlay').remove(); _doCephBootstrap('${clusterName}','${monIp}','${publicNetwork}')">Bootstrap</button>
+        </div>`;
+    showModal(html, 'Bootstrap Ceph Cluster', { noOk: true });
+}
+
+async function _doCephBootstrap(clusterName, monIp, publicNetwork) {
+    showModal('<p>Bootstrapping Ceph cluster... This may take a minute.</p>', 'Bootstrapping...', { noOk: true });
+    try {
+        const resp = await fetch(apiUrl('/api/ceph/bootstrap'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cluster_name: clusterName, public_network: publicNetwork, mon_ip: monIp }),
+        });
+        const data = await resp.json();
+        document.querySelector('.modal-overlay')?.remove();
+        if (data.ok) {
+            showModal(`<p style="color:var(--success);">${data.message}</p>`, 'Cluster Bootstrapped');
+            loadCephStatus();
+        } else {
+            showModal(`<p style="color:var(--danger);">${data.error || 'Bootstrap failed'}</p>`, 'Error');
+        }
+    } catch (e) {
+        document.querySelector('.modal-overlay')?.remove();
+        showModal(`<p style="color:var(--danger);">Request failed: ${e.message}</p>`, 'Error');
+    }
+}
+
+// ── Pool Management ──
+function showCephCreatePoolModal() {
+    const crushOpts = (_cephStatus?.crush_rules || []).map(r => `<option value="${r.name}">${r.name}</option>`).join('');
+    const html = `<div style="display:flex; flex-direction:column; gap:8px;">
+        <label style="font-size:12px; color:var(--text-muted);">Pool Name</label>
+        <input type="text" id="ceph-pool-name" class="form-control" placeholder="mypool" style="width:100%;">
+        <label style="font-size:12px; color:var(--text-muted);">Type</label>
+        <select id="ceph-pool-type" class="form-control" style="width:100%;">
+            <option value="replicated">Replicated</option>
+            <option value="erasure">Erasure Coded</option>
+        </select>
+        <label style="font-size:12px; color:var(--text-muted);">Replication Size</label>
+        <input type="number" id="ceph-pool-size" class="form-control" value="3" min="1" max="10" style="width:100%;">
+        <label style="font-size:12px; color:var(--text-muted);">PG Count</label>
+        <input type="number" id="ceph-pool-pg" class="form-control" value="32" min="1" style="width:100%;">
+        <label style="font-size:12px; color:var(--text-muted);">CRUSH Rule</label>
+        <select id="ceph-pool-crush" class="form-control" style="width:100%;">
+            <option value="">Default</option>
+            ${crushOpts}
+        </select>
+        <label style="font-size:12px; color:var(--text-muted);">Application</label>
+        <select id="ceph-pool-app" class="form-control" style="width:100%;">
+            <option value="">None</option>
+            <option value="rbd">RBD (Block Storage)</option>
+            <option value="cephfs">CephFS</option>
+            <option value="rgw">RGW (Object Gateway)</option>
+        </select>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:8px;">
+            <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+            <button class="btn btn-primary" onclick="cephCreatePool()">Create Pool</button>
+        </div>
+    </div>`;
+    showModal(html, 'Create Ceph Pool', { noOk: true });
+}
+
+async function cephCreatePool() {
+    const name = document.getElementById('ceph-pool-name')?.value.trim();
+    if (!name) return;
+    const body = {
+        name,
+        pool_type: document.getElementById('ceph-pool-type')?.value || 'replicated',
+        size: parseInt(document.getElementById('ceph-pool-size')?.value) || 3,
+        pg_num: parseInt(document.getElementById('ceph-pool-pg')?.value) || 32,
+        crush_rule: document.getElementById('ceph-pool-crush')?.value || null,
+        application: document.getElementById('ceph-pool-app')?.value || null,
+    };
+    document.querySelector('.modal-overlay')?.remove();
+    try {
+        const resp = await fetch(apiUrl('/api/ceph/pools'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (data.ok) { loadCephStatus(); } else { showModal(`<p style="color:var(--danger);">${data.error}</p>`, 'Error'); }
+    } catch (e) {
+        showModal(`<p style="color:var(--danger);">Failed: ${e.message}</p>`, 'Error');
+    }
+}
+
+async function cephDeletePool(name) {
+    const html = `<p>Are you sure you want to delete pool <b>${name}</b>?</p>
+        <p style="color:var(--danger); font-size:13px;">This will permanently destroy all data in this pool.</p>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
+            <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+            <button class="btn" style="background:var(--danger); color:#fff;" onclick="this.closest('.modal-overlay').remove(); _doCephDeletePool('${name}')">Delete Pool</button>
+        </div>`;
+    showModal(html, 'Delete Pool', { noOk: true });
+}
+
+async function _doCephDeletePool(name) {
+    try {
+        const resp = await fetch(apiUrl(`/api/ceph/pools/${encodeURIComponent(name)}`), { method: 'DELETE' });
+        const data = await resp.json();
+        if (data.ok) { loadCephStatus(); } else { showModal(`<p style="color:var(--danger);">${data.error}</p>`, 'Error'); }
+    } catch (e) {
+        showModal(`<p style="color:var(--danger);">Failed: ${e.message}</p>`, 'Error');
+    }
+}
+
+// ── OSD Management ──
+function showCephAddOsdModal() {
+    const html = `<div style="display:flex; flex-direction:column; gap:8px;">
+        <label style="font-size:12px; color:var(--text-muted);">Device Path</label>
+        <input type="text" id="ceph-osd-device" class="form-control" placeholder="/dev/sdb" style="width:100%;">
+        <div id="ceph-device-list" style="font-size:12px; color:var(--text-muted);">Loading available devices...</div>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:8px;">
+            <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+            <button class="btn btn-primary" onclick="cephAddOsd()">Add OSD</button>
+        </div>
+    </div>`;
+    showModal(html, 'Add OSD', { noOk: true });
+    // Load device list
+    fetch(apiUrl('/api/ceph/devices')).then(r => r.json()).then(data => {
+        const el = document.getElementById('ceph-device-list');
+        if (!el) return;
+        const devices = data.blockdevices || data || [];
+        if (Array.isArray(devices) && devices.length > 0) {
+            el.innerHTML = '<div style="margin-bottom:4px; font-weight:600;">Available Devices:</div>' +
+                devices.filter(d => d.type === 'disk' && !d.mountpoint).map(d =>
+                    `<div style="padding:4px 8px; background:var(--bg-secondary); border-radius:4px; margin-bottom:4px; cursor:pointer;" onclick="document.getElementById('ceph-osd-device').value='/dev/${d.name}'">
+                        <b>/dev/${d.name}</b> — ${_cephFmtBytes(d.size)} ${d.model || ''}</div>`
+                ).join('');
+        } else {
+            el.textContent = 'No unused block devices found.';
+        }
+    }).catch(() => {
+        const el = document.getElementById('ceph-device-list');
+        if (el) el.textContent = 'Could not load device list.';
+    });
+}
+
+async function cephAddOsd() {
+    const device = document.getElementById('ceph-osd-device')?.value.trim();
+    if (!device) return;
+    document.querySelector('.modal-overlay')?.remove();
+    try {
+        const resp = await fetch(apiUrl('/api/ceph/osds'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device }),
+        });
+        const data = await resp.json();
+        if (data.ok) {
+            showModal(`<p style="color:var(--success);">${data.message}</p>`, 'OSD Added');
+            loadCephStatus();
+        } else {
+            showModal(`<p style="color:var(--danger);">${data.error}</p>`, 'Error');
+        }
+    } catch (e) {
+        showModal(`<p style="color:var(--danger);">Failed: ${e.message}</p>`, 'Error');
+    }
+}
+
+async function cephOsdAction(osdId, action) {
+    try {
+        const resp = await fetch(apiUrl(`/api/ceph/osds/${osdId}/action`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action }),
+        });
+        const data = await resp.json();
+        if (data.ok) { loadCephStatus(); } else { showModal(`<p style="color:var(--danger);">${data.error}</p>`, 'Error'); }
+    } catch (e) {
+        showModal(`<p style="color:var(--danger);">Failed: ${e.message}</p>`, 'Error');
+    }
+}
+
+async function cephRemoveOsd(osdId) {
+    const html = `<p>Remove <b>osd.${osdId}</b>? This will mark it out, stop the daemon, and purge it.</p>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
+            <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+            <button class="btn" style="background:var(--danger); color:#fff;" onclick="this.closest('.modal-overlay').remove(); _doCephRemoveOsd(${osdId})">Remove OSD</button>
+        </div>`;
+    showModal(html, 'Remove OSD', { noOk: true });
+}
+
+async function _doCephRemoveOsd(osdId) {
+    try {
+        const resp = await fetch(apiUrl(`/api/ceph/osds/${osdId}`), { method: 'DELETE' });
+        const data = await resp.json();
+        if (data.ok) { loadCephStatus(); } else { showModal(`<p style="color:var(--danger);">${data.error}</p>`, 'Error'); }
+    } catch (e) {
+        showModal(`<p style="color:var(--danger);">Failed: ${e.message}</p>`, 'Error');
+    }
+}
+
+// ── CephFS Management ──
+function showCephCreateFsModal() {
+    const poolOpts = (_cephStatus?.pools || []).map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+    const html = `<div style="display:flex; flex-direction:column; gap:8px;">
+        <label style="font-size:12px; color:var(--text-muted);">Filesystem Name</label>
+        <input type="text" id="ceph-fs-name" class="form-control" placeholder="myfs" style="width:100%;">
+        <label style="font-size:12px; color:var(--text-muted);">Metadata Pool</label>
+        <select id="ceph-fs-meta-pool" class="form-control" style="width:100%;">${poolOpts}</select>
+        <label style="font-size:12px; color:var(--text-muted);">Data Pool</label>
+        <select id="ceph-fs-data-pool" class="form-control" style="width:100%;">${poolOpts}</select>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:8px;">
+            <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+            <button class="btn btn-primary" onclick="cephCreateFs()">Create Filesystem</button>
+        </div>
+    </div>`;
+    showModal(html, 'Create CephFS Filesystem', { noOk: true });
+}
+
+async function cephCreateFs() {
+    const name = document.getElementById('ceph-fs-name')?.value.trim();
+    const metaPool = document.getElementById('ceph-fs-meta-pool')?.value;
+    const dataPool = document.getElementById('ceph-fs-data-pool')?.value;
+    if (!name || !metaPool || !dataPool) return;
+    document.querySelector('.modal-overlay')?.remove();
+    try {
+        const resp = await fetch(apiUrl('/api/ceph/fs'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, metadata_pool: metaPool, data_pool: dataPool }),
+        });
+        const data = await resp.json();
+        if (data.ok) { loadCephStatus(); } else { showModal(`<p style="color:var(--danger);">${data.error}</p>`, 'Error'); }
+    } catch (e) {
+        showModal(`<p style="color:var(--danger);">Failed: ${e.message}</p>`, 'Error');
+    }
+}
+
+async function cephDeleteFs(name) {
+    const html = `<p>Delete CephFS filesystem <b>${name}</b>?</p>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
+            <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+            <button class="btn" style="background:var(--danger); color:#fff;" onclick="this.closest('.modal-overlay').remove(); _doCephDeleteFs('${name}')">Delete</button>
+        </div>`;
+    showModal(html, 'Delete CephFS', { noOk: true });
+}
+
+async function _doCephDeleteFs(name) {
+    try {
+        const resp = await fetch(apiUrl(`/api/ceph/fs/${encodeURIComponent(name)}`), { method: 'DELETE' });
+        const data = await resp.json();
+        if (data.ok) { loadCephStatus(); } else { showModal(`<p style="color:var(--danger);">${data.error}</p>`, 'Error'); }
+    } catch (e) {
+        showModal(`<p style="color:var(--danger);">Failed: ${e.message}</p>`, 'Error');
+    }
 }
 
 // ─── Storage Manager ───
