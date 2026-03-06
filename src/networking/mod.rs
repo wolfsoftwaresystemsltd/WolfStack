@@ -2786,7 +2786,7 @@ fn cleanup_bridge_nat(bridge: &WireGuardBridge) {
 }
 
 /// Detect WolfNet interface name (wn0 or wolfnet0)
-fn detect_wolfnet_iface() -> Option<String> {
+pub fn detect_wolfnet_iface() -> Option<String> {
     let interfaces = list_interfaces();
     interfaces.iter()
         .find(|i| i.name.starts_with("wn") || i.name.starts_with("wolfnet"))

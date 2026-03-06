@@ -9,6 +9,7 @@ use std::process::Command;
 use tracing::{error, warn};
 use rand::Rng;
 use crate::containers;
+use crate::networking;
 
 /// A storage volume that can be attached to a VM
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1052,9 +1053,24 @@ impl VmManager {
 
     /// Set up host-side routing and forwarding for WolfNet IP through a TAP
     fn setup_wolfnet_routing(&self, tap: &str, wolfnet_ip: &str) -> Result<(), String> {
-        // Enable IP forwarding
+        let wn_iface = networking::detect_wolfnet_iface().unwrap_or_else(|| "wolfnet0".to_string());
+
+        // Enable IP forwarding globally and per-interface on TAP + WolfNet
         let _ = Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]).output();
+        let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.forwarding=1", tap)]).output();
+        let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.forwarding=1", wn_iface)]).output();
+
+        // Proxy ARP on both sides so the host answers ARP on behalf of routed IPs
         let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.proxy_arp=1", tap)]).output();
+        let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.proxy_arp=1", wn_iface)]).output();
+
+        // Disable reverse-path filtering — packets arrive from tunnel/TAP with
+        // source IPs that don't match the directly-connected subnet
+        let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.rp_filter=0", tap)]).output();
+        let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.rp_filter=0", wn_iface)]).output();
+
+        // Suppress ICMP redirects — we handle routing ourselves
+        let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.send_redirects=0", tap)]).output();
 
         // Add route: wolfnet_ip/32 via TAP
         let _ = Command::new("ip").args(["route", "del", &format!("{}/32", wolfnet_ip)]).output();
@@ -1066,28 +1082,32 @@ impl VmManager {
         if !route_result.status.success() {
             let err = String::from_utf8_lossy(&route_result.stderr);
             if !err.contains("File exists") {
-
+                warn!("Failed to add route for {}/32 dev {}: {}", wolfnet_ip, tap, err);
             }
         }
 
-        // iptables FORWARD rules between wolfnet0 and TAP (idempotent)
-        let check = Command::new("iptables")
-            .args(["-C", "FORWARD", "-i", "wolfnet0", "-o", tap, "-j", "ACCEPT"]).output();
-        if check.map(|o| !o.status.success()).unwrap_or(true) {
+        // iptables FORWARD: allow all traffic to/from the TAP (not just wolfnet0,
+        // so the VM can also reach the internet when FORWARD chain default is DROP)
+        let check_in = Command::new("iptables")
+            .args(["-C", "FORWARD", "-i", tap, "-j", "ACCEPT"]).output();
+        if check_in.map(|o| !o.status.success()).unwrap_or(true) {
             let _ = Command::new("iptables")
-                .args(["-I", "FORWARD", "-i", "wolfnet0", "-o", tap, "-j", "ACCEPT"]).output();
+                .args(["-I", "FORWARD", "-i", tap, "-j", "ACCEPT"]).output();
+        }
+        let check_out = Command::new("iptables")
+            .args(["-C", "FORWARD", "-o", tap, "-j", "ACCEPT"]).output();
+        if check_out.map(|o| !o.status.success()).unwrap_or(true) {
             let _ = Command::new("iptables")
-                .args(["-I", "FORWARD", "-i", tap, "-o", "wolfnet0", "-j", "ACCEPT"]).output();
+                .args(["-I", "FORWARD", "-o", tap, "-j", "ACCEPT"]).output();
         }
 
-        // Also allow TAP to reach the outside (masquerade)
+        // NAT masquerade so the VM can reach the outside world
         let check_nat = Command::new("iptables")
             .args(["-t", "nat", "-C", "POSTROUTING", "-s", &format!("{}/32", wolfnet_ip), "-j", "MASQUERADE"]).output();
         if check_nat.map(|o| !o.status.success()).unwrap_or(true) {
             let _ = Command::new("iptables")
                 .args(["-t", "nat", "-A", "POSTROUTING", "-s", &format!("{}/32", wolfnet_ip), "-j", "MASQUERADE"]).output();
         }
-
 
         Ok(())
     }
@@ -1096,7 +1116,12 @@ impl VmManager {
     fn cleanup_tap(&self, tap: &str) -> Result<(), String> {
         let _ = Command::new("ip").args(["link", "set", tap, "down"]).output();
         let _ = Command::new("ip").args(["tuntap", "del", "dev", tap, "mode", "tap"]).output();
-        // Clean up iptables rules
+        // Clean up iptables FORWARD rules (generic form used since v11.28)
+        let _ = Command::new("iptables")
+            .args(["-D", "FORWARD", "-i", tap, "-j", "ACCEPT"]).output();
+        let _ = Command::new("iptables")
+            .args(["-D", "FORWARD", "-o", tap, "-j", "ACCEPT"]).output();
+        // Also clean up old-style wolfnet0-specific rules from before v11.28
         let _ = Command::new("iptables")
             .args(["-D", "FORWARD", "-i", "wolfnet0", "-o", tap, "-j", "ACCEPT"]).output();
         let _ = Command::new("iptables")

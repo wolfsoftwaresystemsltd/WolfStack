@@ -17176,6 +17176,8 @@ async function openWolfRunAdoptModal() {
     document.getElementById('wolfrun-adopt-modal').classList.add('active');
     document.getElementById('wolfrun-adopt-scanning').style.display = '';
     document.getElementById('wolfrun-adopt-list').style.display = 'none';
+    document.getElementById('wolfrun-adopt-search-wrap').style.display = 'none';
+    document.getElementById('wolfrun-adopt-search').value = '';
     document.getElementById('wolfrun-adopt-btn').disabled = true;
     wolfrunAdoptSelected = null;
 
@@ -17328,12 +17330,22 @@ async function openWolfRunAdoptModal() {
         return;
     }
 
-    listEl.innerHTML = allContainers.map((c, i) => {
+    window._wolfrunAdoptContainers = allContainers;
+    document.getElementById('wolfrun-adopt-search-wrap').style.display = '';
+    renderWolfRunAdoptItems(allContainers);
+    document.getElementById('wolfrun-adopt-search').focus();
+}
+
+function renderWolfRunAdoptItems(containers) {
+    const listEl = document.getElementById('wolfrun-adopt-list');
+    listEl.innerHTML = containers.map((c) => {
+        const idx = window._wolfrunAdoptContainers.indexOf(c);
         const runtimeIcon = c.runtime === 'lxc' ? '📦' : '🐳';
         const statusColor = c.status === 'running' ? '#10b981' : (c.status === 'exited' || c.status === 'stopped') ? '#ef4444' : '#eab308';
-        return `<div class="wolfrun-adopt-item" data-idx="${i}" onclick="selectWolfrunAdopt(${i})"
-            style="display:flex; align-items:center; gap:12px; padding:12px 16px; border:1px solid var(--border); border-radius:8px; margin-bottom:8px; cursor:pointer; transition:all 0.15s;">
-            <input type="radio" name="wolfrun-adopt" style="accent-color:var(--accent); flex-shrink:0;">
+        const selected = wolfrunAdoptSelected === idx;
+        return `<div class="wolfrun-adopt-item" data-idx="${idx}" onclick="selectWolfrunAdopt(${idx})"
+            style="display:flex; align-items:center; gap:12px; padding:12px 16px; border:1px solid ${selected ? 'var(--accent)' : 'var(--border)'}; border-radius:8px; margin-bottom:8px; cursor:pointer; transition:all 0.15s;${selected ? ' background:rgba(99,102,241,0.06);' : ''}">
+            <input type="radio" name="wolfrun-adopt" style="accent-color:var(--accent); flex-shrink:0;"${selected ? ' checked' : ''}>
             <span style="font-size:18px;">${runtimeIcon}</span>
             <div style="flex:1; min-width:0;">
                 <div style="font-weight:600; font-size:13px;">${c.name}</div>
@@ -17345,7 +17357,25 @@ async function openWolfRunAdoptModal() {
         </div>`;
     }).join('');
 
-    window._wolfrunAdoptContainers = allContainers;
+    if (containers.length === 0) {
+        listEl.innerHTML = `<div style="padding:24px; text-align:center; color:var(--text-muted); font-size:13px;">No containers match your search.</div>`;
+    }
+}
+
+function filterWolfRunAdoptList() {
+    const query = (document.getElementById('wolfrun-adopt-search').value || '').toLowerCase().trim();
+    const all = window._wolfrunAdoptContainers || [];
+    if (!query) {
+        renderWolfRunAdoptItems(all);
+        return;
+    }
+    const filtered = all.filter(c =>
+        c.name.toLowerCase().includes(query) ||
+        c.image.toLowerCase().includes(query) ||
+        c.hostname.toLowerCase().includes(query) ||
+        c.runtime.toLowerCase().includes(query)
+    );
+    renderWolfRunAdoptItems(filtered);
 }
 
 function selectWolfrunAdopt(idx) {

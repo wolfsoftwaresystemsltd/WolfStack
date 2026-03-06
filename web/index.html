@@ -955,7 +955,12 @@
                         <div class="page-loading-spinner" style="margin:0 auto 12px;"></div>
                         Scanning cluster for containers...
                     </div>
-                    <div id="wolfrun-adopt-list" style="display:none; max-height:350px; overflow-y:auto;">
+                    <div id="wolfrun-adopt-search-wrap" style="display:none; margin-bottom:10px;">
+                        <input id="wolfrun-adopt-search" type="text" placeholder="Search containers..."
+                            style="width:100%; padding:8px 12px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:14px; box-sizing:border-box;"
+                            oninput="filterWolfRunAdoptList()">
+                    </div>
+                    <div id="wolfrun-adopt-list" style="display:none; max-height:400px; overflow-y:auto;">
                         <!-- Populated by JS -->
                     </div>
                 </div>
