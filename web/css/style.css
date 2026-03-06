@@ -1724,6 +1724,9 @@ body.sidebar-collapsed .main-content {
     border-radius: var(--radius-lg);
     width: 90%;
     max-width: 500px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
     box-shadow: var(--shadow-lg);
     transform: translateY(20px);
     transition: var(--transition);
@@ -1765,6 +1768,9 @@ body.sidebar-collapsed .main-content {
 
 .modal-body {
     padding: 24px;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
 }
 
 .modal-footer {

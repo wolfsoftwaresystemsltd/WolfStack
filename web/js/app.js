@@ -324,7 +324,7 @@ function showModal(message, title, opts) {
     var overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
     var modal = document.createElement('div');
-    modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:560px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit';
+    modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:560px;width:90%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit';
     var h = document.createElement('div');
     h.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:14px;color:var(--accent-light,#60a5fa);display:flex;align-items:center;gap:8px';
     h.textContent = title;
@@ -365,7 +365,7 @@ function showConfirm(message, title) {
         var overlay = document.createElement('div');
         overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
         var modal = document.createElement('div');
-        modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:480px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit';
+        modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:480px;width:90%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit';
         var h = document.createElement('div');
         h.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:14px;color:var(--accent-light,#60a5fa);display:flex;align-items:center;gap:8px';
         h.textContent = title;
@@ -405,7 +405,7 @@ function showPrompt(message, title, defaultValue) {
         var overlay = document.createElement('div');
         overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
         var modal = document.createElement('div');
-        modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:480px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit';
+        modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:480px;width:90%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit';
         var h = document.createElement('div');
         h.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:14px;color:var(--accent-light,#60a5fa);display:flex;align-items:center;gap:8px';
         h.textContent = title;
@@ -15989,9 +15989,9 @@ async function scanForIssues() {
             scaffoldHtml += '<span style="font-size:12px; color:var(--text-muted);">' + clusterNodes.length + ' node' + (clusterNodes.length !== 1 ? 's' : '') + '</span>';
             scaffoldHtml += '</div>';
             // Table
-            scaffoldHtml += '<div class="card-body" style="padding:0; overflow-x:auto;">';
+            scaffoldHtml += '<div class="card-body" style="padding:0; overflow-x:auto; max-height:520px; overflow-y:auto;">';
             scaffoldHtml += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
-            scaffoldHtml += '<thead><tr style="background:var(--bg-secondary); border-bottom:1px solid var(--border);">';
+            scaffoldHtml += '<thead style="position:sticky; top:0; z-index:1;"><tr style="background:var(--bg-secondary); border-bottom:1px solid var(--border);">';
             scaffoldHtml += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Node</th>';
             scaffoldHtml += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">WolfStack</th>';
             scaffoldHtml += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Issues</th>';
@@ -16225,9 +16225,9 @@ function renderIssueResults(results, latestVersion, clusters, clusterKeys) {
         }
         html += '</div>';
         // Table
-        html += '<div class="card-body" style="padding:0; overflow-x:auto;">';
+        html += '<div class="card-body" style="padding:0; overflow-x:auto; max-height:520px; overflow-y:auto;">';
         html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
-        html += '<thead><tr style="background:var(--bg-secondary); border-bottom:1px solid var(--border);">';
+        html += '<thead style="position:sticky; top:0; z-index:1;"><tr style="background:var(--bg-secondary); border-bottom:1px solid var(--border);">';
         html += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Node</th>';
         html += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">WolfStack</th>';
         html += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Issues</th>';
@@ -16307,10 +16307,10 @@ function showIssuesConfirm(icon, title, description, items, confirmLabel, confir
     return new Promise(function (resolve, reject) {
         var overlay = document.createElement('div');
         overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
-        var itemsHtml = items.length ? '<div style="padding:12px 16px; background:var(--bg-secondary); border-radius:10px; margin-bottom:20px;">'
+        var itemsHtml = items.length ? '<div style="padding:12px 16px; background:var(--bg-secondary); border-radius:10px; margin-bottom:20px; max-height:280px; overflow-y:auto;">'
             + items.map(function (i) { return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;color:var(--text-primary);font-size:13px;">' + i + '</div>'; }).join('')
             + '</div>' : '';
-        overlay.innerHTML = '<div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:480px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.5);">'
+        overlay.innerHTML = '<div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:480px; width:90%; max-height:90vh; overflow-y:auto; box-shadow:0 20px 60px rgba(0,0,0,0.5);">'
             + '<div style="text-align:center; margin-bottom:20px;">'
             + '<div style="font-size:48px; margin-bottom:8px;">' + icon + '</div>'
             + '<h3 style="font-size:18px; font-weight:700; color:var(--text-primary); margin:0 0 10px;">' + title + '</h3>'
@@ -16331,7 +16331,7 @@ function showIssuesConfirm(icon, title, description, items, confirmLabel, confir
 function showProgressModal(icon, title) {
     var overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
-    overlay.innerHTML = '<div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:520px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.5);">'
+    overlay.innerHTML = '<div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:520px; width:90%; max-height:90vh; overflow-y:auto; box-shadow:0 20px 60px rgba(0,0,0,0.5);">'
         + '<div style="text-align:center; margin-bottom:16px;">'
         + '<div style="font-size:48px; margin-bottom:8px;">' + icon + '</div>'
         + '<h3 class="pm-title" style="font-size:18px; font-weight:700; color:var(--text-primary); margin:0 0 6px;">' + title + '</h3>'
