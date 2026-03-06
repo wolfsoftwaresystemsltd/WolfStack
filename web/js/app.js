@@ -2719,7 +2719,7 @@ async function unmountStorage(id) {
 }
 
 async function deleteStorageMount(id, name) {
-    if (!confirm(`Delete storage mount "${name}"? This will unmount and remove the configuration.`)) return;
+    if (!(await showConfirm(`Delete storage mount "${name}"? This will unmount and remove the configuration.`))) return;
     try {
         const resp = await fetch(apiUrl(`/api/storage/mounts/${id}`), { method: 'DELETE' });
         const data = await resp.json();
@@ -3048,7 +3048,7 @@ function updateFileSelection() {
 async function bulkDeleteFiles() {
     const paths = getSelectedFiles();
     if (paths.length === 0) return;
-    if (!confirm(`Delete ${paths.length} item(s)?\n\nThis cannot be undone.`)) return;
+    if (!(await showConfirm(`Delete ${paths.length} item(s)?\n\nThis cannot be undone.`))) return;
     for (const p of paths) {
         try {
             const endpoint = containerFileMode && containerFileMode.type === 'docker'
@@ -3184,7 +3184,7 @@ function downloadFile(path) {
 }
 
 async function deleteFile(path, name) {
-    if (!confirm(`Delete '${name}'?\n\nThis cannot be undone.`)) return;
+    if (!(await showConfirm(`Delete '${name}'?\n\nThis cannot be undone.`))) return;
     try {
         let resp;
         if (containerFileMode && containerFileMode.type === 'docker') {
@@ -4023,7 +4023,7 @@ async function vmAction(name, action, btn) {
 }
 
 async function deleteVm(name) {
-    if (!confirm(`Delete VM "${name}"? This will delete the disk image permanently.`)) return;
+    if (!(await showConfirm(`Delete VM "${name}"? This will delete the disk image permanently.`))) return;
 
     try {
         const resp = await fetch(apiUrl(`/api/vms/${name}`), { method: 'DELETE' });
@@ -4205,7 +4205,7 @@ async function addCronJob() {
 }
 
 async function deleteCronJob(index) {
-    if (!confirm('Delete this cron job?')) return;
+    if (!(await showConfirm('Delete this cron job?'))) return;
     try {
         var resp = await fetch(apiUrl('/api/cron/' + index), { method: 'DELETE' });
         var data = await resp.json();
@@ -4256,7 +4256,7 @@ var PREMADE_CRON_JOBS = {
 async function addPremadeCron(type) {
     var job = PREMADE_CRON_JOBS[type];
     if (!job) return;
-    if (!confirm('Add premade cron job?\n\nSchedule: ' + job.schedule + '\nCommand: ' + job.command + '\nComment: ' + job.comment)) return;
+    if (!(await showConfirm('Add premade cron job?\n\nSchedule: ' + job.schedule + '\nCommand: ' + job.command + '\nComment: ' + job.comment))) return;
     try {
         var resp = await fetch(apiUrl('/api/cron'), {
             method: 'POST',
@@ -4606,14 +4606,14 @@ async function removeServer(id) {
     }
 }
 
-function confirmRemoveServer(id, hostname) {
-    if (confirm(`Remove server "${hostname}" from the cluster?`)) {
+async function confirmRemoveServer(id, hostname) {
+    if (await showConfirm(`Remove server "${hostname}" from the cluster?`)) {
         removeServer(id);
     }
 }
 
 async function confirmRemovePveCluster(clusterName, nodeIds) {
-    if (!confirm(`Remove Proxmox cluster "${clusterName}" and all ${nodeIds.length} node(s)?`)) return;
+    if (!(await showConfirm(`Remove Proxmox cluster "${clusterName}" and all ${nodeIds.length} node(s)?`))) return;
     for (const id of nodeIds) {
         try {
             await fetch(`/api/nodes/${id}`, { method: 'DELETE' });
@@ -5290,12 +5290,12 @@ async function loadNodeVersionInfo(node) {
     }
 }
 
-function upgradeNode(nodeId) {
+async function upgradeNode(nodeId) {
     const node = allNodes.find(n => n.id === nodeId);
     if (!node) return;
 
     const machine = node.is_self ? 'this machine (local)' : (node.hostname + ' (' + node.address + ')');
-    if (!confirm('⚡ Upgrade WolfStack on ' + machine + '?\n\nThis will run the upgrade script. A terminal window will open so you can monitor progress.\n\nThe service will restart after upgrading — refresh your browser when done.\n\nProceed?')) return;
+    if (!(await showConfirm('⚡ Upgrade WolfStack on ' + machine + '?\n\nThis will run the upgrade script. A terminal window will open so you can monitor progress.\n\nThe service will restart after upgrading — refresh your browser when done.\n\nProceed?'))) return;
 
     // Open console popup with type=upgrade
     let url = '/console.html?type=upgrade&name=wolfstack';
@@ -6851,9 +6851,9 @@ function applyUpdateBadges() {
         const key = el.getAttribute('data-update-badge');
         const info = containerUpdateCounts[key];
         if (info && info.count > 0) {
-            el.innerHTML = `<span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:600;background:rgba(245,158,11,0.15);color:#f59e0b;">${info.count} update${info.count !== 1 ? 's' : ''}</span>`;
+            el.innerHTML = `<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b44;">${info.count} update${info.count !== 1 ? 's' : ''}</span>`;
         } else if (info) {
-            el.innerHTML = '<span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;">up to date</span>';
+            el.innerHTML = '<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:#10b98122;color:#10b981;border:1px solid #10b98144;">up to date</span>';
         }
     });
 }
@@ -7220,9 +7220,9 @@ function addDnsNameserver() {
     saveDns(updated, currentDns.search_domains);
 }
 
-function removeDnsNameserver(index) {
+async function removeDnsNameserver(index) {
     const ns = currentDns.nameservers[index];
-    if (!confirm(`Remove nameserver ${ns}?`)) return;
+    if (!(await showConfirm(`Remove nameserver ${ns}?`))) return;
     const updated = currentDns.nameservers.filter((_, i) => i !== index);
     saveDns(updated, currentDns.search_domains);
 }
@@ -7237,15 +7237,15 @@ function addDnsSearchDomain() {
     saveDns(currentDns.nameservers, updated);
 }
 
-function removeDnsSearchDomain(index) {
+async function removeDnsSearchDomain(index) {
     const domain = currentDns.search_domains[index];
-    if (!confirm(`Remove search domain ${domain}?`)) return;
+    if (!(await showConfirm(`Remove search domain ${domain}?`))) return;
     const updated = currentDns.search_domains.filter((_, i) => i !== index);
     saveDns(currentDns.nameservers, updated);
 }
 
 async function toggleInterface(name, up) {
-    if (!confirm(`${up ? 'Bring up' : 'Bring down'} interface ${name}?`)) return;
+    if (!(await showConfirm(`${up ? 'Bring up' : 'Bring down'} interface ${name}?`))) return;
     try {
         const resp = await fetch(apiUrl(`/api/networking/interfaces/${name}/state`), {
             method: 'POST',
@@ -7295,7 +7295,7 @@ async function addIpAddress() {
 }
 
 async function removeIpAddress(iface, address, prefix) {
-    if (!confirm(`Remove ${address}/${prefix} from ${iface}?`)) return;
+    if (!(await showConfirm(`Remove ${address}/${prefix} from ${iface}?`))) return;
     try {
         const resp = await fetch(apiUrl(`/api/networking/interfaces/${iface}/ip`), {
             method: 'DELETE',
@@ -7350,7 +7350,7 @@ async function createVlan() {
 }
 
 async function deleteVlan(name) {
-    if (!confirm(`Delete VLAN interface ${name}? This will remove the interface immediately.`)) return;
+    if (!(await showConfirm(`Delete VLAN interface ${name}? This will remove the interface immediately.`))) return;
     try {
         const resp = await fetch(apiUrl(`/api/networking/vlans/${name}`), { method: 'DELETE' });
         const data = await resp.json();
@@ -7617,7 +7617,7 @@ async function createIpMapping() {
 }
 
 async function removeIpMapping(id, publicIp, wolfnetIp) {
-    if (!confirm(`Remove mapping ${publicIp} → ${wolfnetIp}? This will also remove the iptables rules.`)) return;
+    if (!(await showConfirm(`Remove mapping ${publicIp} → ${wolfnetIp}? This will also remove the iptables rules.`))) return;
     try {
         const resp = await fetch(apiUrl(`/api/networking/ip-mappings/${id}`), { method: 'DELETE' });
         const data = await resp.json();
@@ -8220,7 +8220,7 @@ function copyJoinConfig() {
 }
 
 async function removeWolfNetPeer(name) {
-    if (!confirm(`Remove peer "${name}"? WolfNet will be restarted.`)) return;
+    if (!(await showConfirm(`Remove peer "${name}"? WolfNet will be restarted.`))) return;
     try {
         const resp = await fetch(apiUrl('/api/networking/wolfnet/peers'), {
             method: 'DELETE',
@@ -8237,7 +8237,7 @@ async function removeWolfNetPeer(name) {
 }
 
 async function saveWolfNetSettings() {
-    if (!confirm('Save settings and restart WolfNet?')) return;
+    if (!(await showConfirm('Save settings and restart WolfNet?'))) return;
     // Read current config and update the [network] section values
     const editor = document.getElementById('wolfnet-config-editor');
     let config = editor ? editor.value : '';
@@ -8288,7 +8288,7 @@ async function saveWolfNetSettings() {
 async function saveWolfNetConfig() {
     const editor = document.getElementById('wolfnet-config-editor');
     const config = editor.value;
-    if (!confirm('Save raw configuration and restart WolfNet?')) return;
+    if (!(await showConfirm('Save raw configuration and restart WolfNet?'))) return;
     try {
         const resp = await fetch(apiUrl('/api/networking/wolfnet/config'), {
             method: 'PUT',
@@ -8354,8 +8354,8 @@ async function loadDockerContainers() {
         renderDockerContainers(containers);
         renderDockerStats(stats);
         renderDockerImages(images);
-        // Apply cached update badges immediately, then offer refresh
         applyUpdateBadges();
+        fetchContainerUpdateSummary();
     } catch (e) {
         console.error('Failed to load Docker containers:', e);
     }
@@ -8430,13 +8430,14 @@ function renderDockerContainers(containers) {
             <div style="display:flex;align-items:center;gap:16px;font-size:11px;">${statsSegs.join('')}</div>
         </td></tr>` : '';
 
-        const svcBadges = (c.services && c.services.length > 0) ? '<div style="margin-top:3px;">' + c.services.map(s => {
+        const svcItems = (c.services && c.services.length > 0) ? c.services.map(s => {
             const sColor = s.status === 'running' ? '#10b981' : '#ef4444';
-            return `<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:${sColor}22;color:${sColor};border:1px solid ${sColor}44;margin-right:4px;">${s.name}</span>`;
-        }).join('') + '</div>' : '';
+            return `<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:${sColor}22;color:${sColor};border:1px solid ${sColor}44;">${s.name}</span>`;
+        }).join('') : '';
+        const badgeRow = `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:3px;">${svcItems}<span data-update-badge="docker:${c.name}"></span></div>`;
 
         return `<tr data-name="${c.name}">
-            <td><strong>${c.name}</strong>${svcBadges}<span data-update-badge="docker:${c.name}" style="margin-left:6px;"></span><br><span style="font-size:11px;color:var(--text-muted)">${c.id.substring(0, 12)}</span></td>
+            <td><strong>${c.name}</strong>${badgeRow}<span style="font-size:11px;color:var(--text-muted)">${c.id.substring(0, 12)}</span></td>
             <td>${c.image}</td>
             <td><span style="color:${stateColor}">●</span> ${c.status}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
@@ -8542,7 +8543,7 @@ function renderDockerImages(images) {
 }
 
 async function deleteDockerImage(id, name) {
-    if (!confirm(`Delete Docker image '${name}'?\n\nThis will fail if the image is used by any container.`)) return;
+    if (!(await showConfirm(`Delete Docker image '${name}'?\n\nThis will fail if the image is used by any container.`))) return;
 
     try {
         const resp = await fetch(apiUrl(`/api/containers/docker/images/${encodeURIComponent(id)}`), {
@@ -8562,7 +8563,7 @@ async function deleteDockerImage(id, name) {
 
 
 async function dockerAction(container, action, btn) {
-    if (action === 'remove' && !confirm(`Remove container '${container}'? This cannot be undone.`)) return;
+    if (action === 'remove' && !(await showConfirm(`Remove container '${container}'? This cannot be undone.`))) return;
 
     activityStart();
     const row = btn?.closest('tr');
@@ -8935,6 +8936,7 @@ async function loadLxcContainers() {
 
         renderLxcContainers(containers, lxcStats);
         applyUpdateBadges();
+        fetchContainerUpdateSummary();
     } catch (e) {
         console.error('Failed to load LXC containers:', e);
     }
@@ -8993,13 +8995,14 @@ function renderLxcContainers(containers, stats) {
             <div style="display:flex;align-items:center;gap:16px;font-size:11px;">${statsSegs.join('')}</div>
         </td></tr>` : '';
 
-        const lxcSvcBadges = (c.services && c.services.length > 0) ? '<div style="margin-top:3px;">' + c.services.map(s => {
+        const lxcSvcItems = (c.services && c.services.length > 0) ? c.services.map(s => {
             const sColor = s.status === 'running' ? '#10b981' : '#ef4444';
-            return `<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:${sColor}22;color:${sColor};border:1px solid ${sColor}44;margin-right:4px;">${s.name}</span>`;
-        }).join('') + '</div>' : '';
+            return `<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:${sColor}22;color:${sColor};border:1px solid ${sColor}44;">${s.name}</span>`;
+        }).join('') : '';
+        const lxcBadgeRow = `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:3px;">${lxcSvcItems}<span data-update-badge="lxc:${c.name}"></span></div>`;
 
         return `<tr>
-            <td><strong>${c.hostname || c.name}</strong>${lxcSvcBadges}<span data-update-badge="lxc:${c.name}" style="margin-left:6px;"></span>${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
+            <td><strong>${c.hostname || c.name}</strong>${lxcBadgeRow}${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
             <td style="font-size:12px;color:var(--text-secondary);">${c.version || '<span style="color:var(--text-muted)">—</span>'}</td>
             <td><span style="color:${stateColor}">●</span> ${c.state}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
@@ -9026,7 +9029,7 @@ function renderLxcContainers(containers, stats) {
 }
 
 async function lxcAction(container, action, btn) {
-    if (action === 'destroy' && !confirm(`Destroy LXC container '${container}'? This cannot be undone.`)) return;
+    if (action === 'destroy' && !(await showConfirm(`Destroy LXC container '${container}'? This cannot be undone.`))) return;
 
     activityStart();
     const row = btn?.closest('tr');
@@ -9129,7 +9132,7 @@ async function openContainerUpdates(runtime, container) {
 }
 
 async function applyContainerUpdates(runtime, container) {
-    if (!confirm(`Apply all pending updates inside ${container}? This may take a while.`)) return;
+    if (!(await showConfirm(`Apply all pending updates inside ${container}? This may take a while.`))) return;
 
     const body = document.getElementById('container-detail-body');
     body.innerHTML = `<p style="color:var(--text-muted);">Applying updates inside ${container}...</p>
@@ -9284,7 +9287,7 @@ var CONTAINER_PREMADE_CRON_JOBS = {
 async function addContainerPremadeCron(type) {
     var job = CONTAINER_PREMADE_CRON_JOBS[type];
     if (!job) return;
-    if (!confirm('Add premade cron job to ' + _containerCronName + '?\n\nSchedule: ' + job.schedule + '\nCommand: ' + job.command + '\nComment: ' + job.comment)) return;
+    if (!(await showConfirm('Add premade cron job to ' + _containerCronName + '?\n\nSchedule: ' + job.schedule + '\nCommand: ' + job.command + '\nComment: ' + job.comment))) return;
     try {
         var resp = await fetch(apiUrl(`/api/containers/${_containerCronRuntime}/${encodeURIComponent(_containerCronName)}/cron`), {
             method: 'POST',
@@ -9342,7 +9345,7 @@ async function addContainerCronJob() {
 }
 
 async function deleteContainerCronJob(index) {
-    if (!confirm('Delete this cron job from ' + _containerCronName + '?')) return;
+    if (!(await showConfirm('Delete this cron job from ' + _containerCronName + '?'))) return;
     try {
         var resp = await fetch(apiUrl(`/api/containers/${_containerCronRuntime}/${encodeURIComponent(_containerCronName)}/cron/${index}`), { method: 'DELETE' });
         var data = await resp.json();
@@ -10046,7 +10049,7 @@ async function addWolfDiskMount(name) {
 }
 
 async function removeLxcMount(name, hostPath) {
-    if (!confirm(`Remove mount ${hostPath}?`)) return;
+    if (!(await showConfirm(`Remove mount ${hostPath}?`))) return;
     try {
         var resp = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`), {
             method: 'DELETE', headers: { 'Content-Type': 'application/json' },
@@ -10604,7 +10607,7 @@ async function doMigrateLxc(name) {
 }
 
 async function exportLxcContainer(name) {
-    if (!confirm(`Export container '${name}'? The container will be briefly stopped.`)) return;
+    if (!(await showConfirm(`Export container '${name}'? The container will be briefly stopped.`))) return;
     showToast(`Exporting ${name}...`, 'info');
 
     try {
@@ -11909,7 +11912,7 @@ async function addVmVolume(vmName) {
 }
 
 async function removeVmVolume(vmName, volName) {
-    if (!confirm(`Delete volume '${volName}'? This will permanently delete the disk file.`)) return;
+    if (!(await showConfirm(`Delete volume '${volName}'? This will permanently delete the disk file.`))) return;
     try {
         const resp = await fetch(apiUrl(`/api/vms/${vmName}/volumes/${encodeURIComponent(volName)}`), { method: 'DELETE' });
         const data = await resp.json();
@@ -12447,7 +12450,7 @@ async function backupSelected() {
 }
 
 async function deleteBackup(id) {
-    if (!confirm('Delete this backup? The backup file will be permanently removed.')) return;
+    if (!(await showConfirm('Delete this backup? The backup file will be permanently removed.'))) return;
     try {
         const res = await fetch(apiUrl(`/api/backups/${id}`), { method: 'DELETE' });
         const data = await res.json();
@@ -12460,7 +12463,7 @@ async function deleteBackup(id) {
 }
 
 async function restoreBackup(id) {
-    if (!confirm('Restore from this backup? This will overwrite existing data for the target.')) return;
+    if (!(await showConfirm('Restore from this backup? This will overwrite existing data for the target.'))) return;
     // Find the button and show progress
     const btn = event && event.target;
     const origText = btn ? btn.textContent : '';
@@ -12543,7 +12546,7 @@ async function createSchedule() {
 }
 
 async function deleteSchedule(id) {
-    if (!confirm('Delete this backup schedule?')) return;
+    if (!(await showConfirm('Delete this backup schedule?'))) return;
     try {
         const res = await fetch(apiUrl(`/api/backups/schedules/${id}`), { method: 'DELETE' });
         const data = await res.json();
@@ -12804,7 +12807,7 @@ async function restorePbsSnapshot(snapshot, backupType) {
     if (backupType === 'ct') targetDir = '/var/lib/lxc';
     else if (backupType === 'vm') targetDir = '/var/lib/wolfstack/vms';
 
-    if (!confirm('Restore PBS snapshot:\n' + snapshot + '\n\nRestore to: ' + targetDir + '\n\nThis will download and restore the data to this node.')) return;
+    if (!(await showConfirm('Restore PBS snapshot:\n' + snapshot + '\n\nRestore to: ' + targetDir + '\n\nThis will download and restore the data to this node.'))) return;
 
     // Find the clicked button and show progress
     var btn = event && event.target;
@@ -13283,9 +13286,9 @@ async function importConfigFile(input) {
         const text = await file.text();
         const json = JSON.parse(text);
 
-        if (!confirm('Import config from "' + (json.exported_from || 'unknown') +
+        if (!(await showConfirm('Import config from "' + (json.exported_from || 'unknown') +
             '" (exported ' + (json.exported_at || 'unknown') + ')?\n\n' +
-            'This will merge cluster nodes and overwrite settings.')) {
+            'This will merge cluster nodes and overwrite settings.'))) {
             input.value = '';
             return;
         }
@@ -15705,7 +15708,7 @@ async function fleetShowVmLogs(nodeId, name) {
 
 // Fleet delete VM
 async function fleetDeleteVm(nodeId, name) {
-    if (!confirm('Delete VM "' + name + '"? This will delete the disk image permanently.')) return;
+    if (!(await showConfirm('Delete VM "' + name + '"? This will delete the disk image permanently.'))) return;
     activityStart();
     try {
         var resp = await fetch(fleetApiUrl(nodeId, '/api/vms/' + encodeURIComponent(name)), { method: 'DELETE', credentials: 'include' });
@@ -15724,7 +15727,7 @@ async function fleetDeleteVm(nodeId, name) {
 }
 
 async function fleetAction(nodeId, runtime, container, action, btn) {
-    if ((action === 'remove' || action === 'destroy') && !confirm((runtime === 'docker' ? 'Remove' : 'Destroy') + " '" + container + "'? This cannot be undone.")) return;
+    if ((action === 'remove' || action === 'destroy') && !(await showConfirm((runtime === 'docker' ? 'Remove' : 'Destroy') + " '" + container + "'? This cannot be undone."))) return;
 
     activityStart();
     var endpoint = fleetApiUrl(nodeId, runtime === 'vm' ? ('/api/vms/' + encodeURIComponent(container) + '/action') : ('/api/containers/' + runtime + '/' + encodeURIComponent(container) + '/action'));
@@ -16269,7 +16272,7 @@ async function loadInstalledApps() {
 }
 
 async function uninstallApp(installId, name) {
-    if (!confirm(`Uninstall ${name}? This will remove the container or service.`)) return;
+    if (!(await showConfirm(`Uninstall ${name}? This will remove the container or service.`))) return;
     try {
         const res = await fetch(`/api/appstore/installed/${installId}`, { method: 'DELETE' });
         const data = await res.json();
@@ -16737,7 +16740,7 @@ async function loadClusterSecretStatus() {
 }
 
 async function generateClusterSecret() {
-    if (!confirm('Generate a new cluster secret and propagate it to all online nodes?\n\nExisting nodes will accept both the old and new secret.\nThe new secret takes full effect after each node restarts.')) return;
+    if (!(await showConfirm('Generate a new cluster secret and propagate it to all online nodes?\n\nExisting nodes will accept both the old and new secret.\nThe new secret takes full effect after each node restarts.'))) return;
     var btn = document.getElementById('btn-generate-secret');
     var origHtml = btn.innerHTML;
     btn.disabled = true;
@@ -17997,7 +18000,7 @@ async function loadStorageProviders() {
 }
 
 async function installProvider(name) {
-    if (!confirm(`Install storage provider "${name}"? This may take a moment.`)) return;
+    if (!(await showConfirm(`Install storage provider "${name}"? This may take a moment.`))) return;
     showToast(`Installing ${name}...`, 'info');
     try {
         const resp = await fetch(apiUrl(`/api/storage/providers/${name}/install`), { method: 'POST' });
@@ -18627,7 +18630,7 @@ async function saveMonitor() {
 }
 
 async function deleteMonitor(id) {
-    if (!confirm('Delete this monitor?')) return;
+    if (!(await showConfirm('Delete this monitor?'))) return;
     try {
         await fetch(spUrl(`statuspage/monitors/${id}`), { method: 'DELETE' });
         showToast('Monitor deleted', 'success');
@@ -18731,7 +18734,7 @@ async function saveStatusPage() {
 }
 
 async function deleteStatusPage(id) {
-    if (!confirm('Delete this status page? This cannot be undone.')) return;
+    if (!(await showConfirm('Delete this status page? This cannot be undone.'))) return;
     try {
         await fetch(spUrl(`statuspage/pages/${id}`), { method: 'DELETE' });
         showToast('Status page deleted', 'success');
@@ -18932,7 +18935,7 @@ async function saveIncident() {
 }
 
 async function deleteIncident(incidentId) {
-    if (!confirm('Delete this incident?')) return;
+    if (!(await showConfirm('Delete this incident?'))) return;
 
     try {
         const res = await fetch(spUrl(`statuspage/incidents/${incidentId}`), {
