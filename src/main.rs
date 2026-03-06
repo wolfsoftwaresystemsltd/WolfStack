@@ -508,60 +508,290 @@ async fn main() -> std::io::Result<()> {
                                 "[WolfStack Daily] {} issue(s) across {} node(s)",
                                 all_issues.len(), total_nodes
                             );
-                            let mut body = format!(
-                                "📋 Daily Issues Report\nDate: {}\nWolfStack v{}\nNodes scanned: {}\n",
-                                today, env!("CARGO_PKG_VERSION"), total_nodes
-                            );
 
-                            // Node inventory grouped by cluster
+                            // ─── Build HTML daily report ───
+                            let fmt_bytes = |b: u64| -> String {
+                                if b == 0 { return "0 B".to_string(); }
+                                let units = ["B", "KB", "MB", "GB", "TB"];
+                                let i = (b as f64).log(1024.0).floor() as usize;
+                                let i = i.min(units.len() - 1);
+                                format!("{:.1} {}", b as f64 / 1024f64.powi(i as i32), units[i])
+                            };
+
+                            let mut html = String::from(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f0f1a;color:#e0e0e0;margin:0;padding:20px;}
+.container{max-width:900px;margin:0 auto;background:#1a1a2e;border-radius:12px;padding:24px;border:1px solid #2a2a3e;}
+h1{color:#818cf8;font-size:22px;margin-top:0;}
+h2{color:#a5b4fc;font-size:16px;margin:24px 0 12px;border-bottom:1px solid #2a2a3e;padding-bottom:8px;}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px;}
+th{background:#16162b;color:#a5b4fc;text-align:left;padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #2a2a3e;}
+td{padding:8px 12px;border-bottom:1px solid #1e1e32;}
+tr:hover td{background:#1e1e35;}
+.badge{display:inline-block;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600;}
+.online{background:rgba(34,197,94,0.15);color:#22c55e;}
+.offline{background:rgba(239,68,68,0.15);color:#ef4444;}
+.running{background:rgba(34,197,94,0.15);color:#22c55e;}
+.stopped{background:rgba(156,163,175,0.15);color:#9ca3af;}
+.paused{background:rgba(234,179,8,0.15);color:#eab308;}
+.frozen{background:rgba(59,130,246,0.15);color:#3b82f6;}
+.critical{background:rgba(239,68,68,0.15);color:#ef4444;}
+.warning{background:rgba(245,158,11,0.15);color:#f59e0b;}
+.info{background:rgba(59,130,246,0.15);color:#3b82f6;}
+.bar{height:8px;border-radius:4px;overflow:hidden;background:#2a2a3e;min-width:60px;}
+.bar-fill{height:100%;border-radius:4px;}
+.meta{color:#888;font-size:11px;}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px;}
+.summary-card{background:#16162b;border:1px solid #2a2a3e;border-radius:8px;padding:12px;text-align:center;}
+.summary-value{font-size:24px;font-weight:700;color:#818cf8;}
+.summary-label{font-size:11px;color:#888;text-transform:uppercase;margin-top:4px;}
+</style></head><body><div class="container">"#);
+
+                            // Header
+                            html.push_str(&format!(
+                                r#"<h1>WolfStack Daily Report</h1>
+                                <p style="color:#888;margin-top:-8px;">Date: {} &bull; WolfStack v{} &bull; {} node(s) scanned</p>"#,
+                                today, env!("CARGO_PKG_VERSION"), total_nodes
+                            ));
+
+                            // Summary cards
+                            html.push_str(&format!(
+                                r#"<div class="summary-grid">
+                                <div class="summary-card"><div class="summary-value">{}</div><div class="summary-label">Nodes</div></div>
+                                <div class="summary-card"><div class="summary-value" style="color:{}">{}</div><div class="summary-label">Critical</div></div>
+                                <div class="summary-card"><div class="summary-value" style="color:{}">{}</div><div class="summary-label">Warnings</div></div>
+                                <div class="summary-card"><div class="summary-value" style="color:#3b82f6">{}</div><div class="summary-label">Info</div></div>
+                                </div>"#,
+                                total_nodes,
+                                if critical_count > 0 { "#ef4444" } else { "#22c55e" }, critical_count,
+                                if warning_count > 0 { "#f59e0b" } else { "#22c55e" }, warning_count,
+                                info_count
+                            ));
+
+                            // ─── Node Inventory Table ───
+                            let all_nodes = scan_cluster.get_all_nodes();
+                            html.push_str(r#"<h2>Node Inventory</h2>
+                            <table><thead><tr><th>Node</th><th>Status</th><th>CPU</th><th>Memory</th><th>Docker</th><th>LXC</th><th>VMs</th></tr></thead><tbody>"#);
+                            for n in all_nodes.iter().filter(|n| n.node_type != "proxmox") {
+                                let status_class = if n.online { "online" } else { "offline" };
+                                let status_text = if n.online { "Online" } else { "Offline" };
+                                let (cpu_str, mem_str) = if let Some(ref m) = n.metrics {
+                                    let cpu = m.cpu_usage_percent;
+                                    let mem_pct = if m.memory_total_bytes > 0 {
+                                        (m.memory_used_bytes as f64 / m.memory_total_bytes as f64 * 100.0) as u64
+                                    } else { 0 };
+                                    let cpu_color = if cpu > 80.0 { "#ef4444" } else if cpu > 50.0 { "#f59e0b" } else { "#22c55e" };
+                                    let mem_color = if mem_pct > 90 { "#ef4444" } else if mem_pct > 70 { "#f59e0b" } else { "#22c55e" };
+                                    (
+                                        format!(r#"<div class="bar"><div class="bar-fill" style="width:{}%;background:{}"></div></div><span class="meta">{:.0}%</span>"#, cpu.min(100.0), cpu_color, cpu),
+                                        format!(r#"<div class="bar"><div class="bar-fill" style="width:{}%;background:{}"></div></div><span class="meta">{} / {}</span>"#, mem_pct.min(100), mem_color, fmt_bytes(m.memory_used_bytes), fmt_bytes(m.memory_total_bytes)),
+                                    )
+                                } else {
+                                    ("—".to_string(), "—".to_string())
+                                };
+                                let addr = if n.address.is_empty() { &n.hostname } else { &n.address };
+                                html.push_str(&format!(
+                                    r#"<tr><td><strong>{}</strong><br><span class="meta">{}:{}</span></td><td><span class="badge {}">{}</span></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>"#,
+                                    n.hostname, addr, n.port, status_class, status_text, cpu_str, mem_str,
+                                    if n.has_docker { format!("{}", n.docker_count) } else { "—".to_string() },
+                                    if n.has_lxc { format!("{}", n.lxc_count) } else { "—".to_string() },
+                                    if n.has_kvm { format!("{}", n.vm_count) } else { "—".to_string() },
+                                ));
+                            }
+                            // PVE nodes as separate rows
+                            for n in all_nodes.iter().filter(|n| n.node_type == "proxmox") {
+                                let status_class = if n.online { "online" } else { "offline" };
+                                let status_text = if n.online { "Online" } else { "Offline" };
+                                let (cpu_str, mem_str) = if let Some(ref m) = n.metrics {
+                                    let cpu = m.cpu_usage_percent;
+                                    let mem_pct = if m.memory_total_bytes > 0 { (m.memory_used_bytes as f64 / m.memory_total_bytes as f64 * 100.0) as u64 } else { 0 };
+                                    let cpu_color = if cpu > 80.0 { "#ef4444" } else if cpu > 50.0 { "#f59e0b" } else { "#22c55e" };
+                                    let mem_color = if mem_pct > 90 { "#ef4444" } else if mem_pct > 70 { "#f59e0b" } else { "#22c55e" };
+                                    (
+                                        format!(r#"<div class="bar"><div class="bar-fill" style="width:{}%;background:{}"></div></div><span class="meta">{:.0}%</span>"#, cpu.min(100.0), cpu_color, cpu),
+                                        format!(r#"<div class="bar"><div class="bar-fill" style="width:{}%;background:{}"></div></div><span class="meta">{} / {}</span>"#, mem_pct.min(100), mem_color, fmt_bytes(m.memory_used_bytes), fmt_bytes(m.memory_total_bytes)),
+                                    )
+                                } else {
+                                    ("—".to_string(), "—".to_string())
+                                };
+                                html.push_str(&format!(
+                                    r#"<tr><td><strong>{}</strong> <span class="badge info">PVE</span><br><span class="meta">{}:{}</span></td><td><span class="badge {}">{}</span></td><td>{}</td><td>{}</td><td>—</td><td>{}</td><td>{}</td></tr>"#,
+                                    n.hostname, n.address, n.port, status_class, status_text, cpu_str, mem_str, n.lxc_count, n.vm_count,
+                                ));
+                            }
+                            html.push_str("</tbody></table>");
+
+                            // ─── Docker Containers Table ───
                             {
-                                let all_nodes = scan_cluster.get_all_nodes();
-                                let mut clusters: std::collections::BTreeMap<String, Vec<&crate::agent::Node>> = std::collections::BTreeMap::new();
-                                for n in all_nodes.iter().filter(|n| n.node_type != "proxmox") {
-                                    let c = n.cluster_name.as_deref().unwrap_or("Default").to_string();
-                                    clusters.entry(c).or_default().push(n);
+                                let local_docker = crate::containers::docker_list_all();
+                                // Also fetch from remote WolfStack nodes
+                                let mut all_docker: Vec<(String, crate::containers::ContainerInfo)> = Vec::new();
+                                let local_host = {
+                                    let nodes = scan_cluster.get_all_nodes();
+                                    nodes.iter().find(|n| n.is_self).map(|n| n.hostname.clone()).unwrap_or_else(|| "localhost".to_string())
+                                };
+                                for c in local_docker {
+                                    all_docker.push((local_host.clone(), c));
                                 }
-                                body.push_str("\n━━━ Node Inventory ━━━\n");
-                                for (cluster, nodes) in &clusters {
-                                    body.push_str(&format!("\n🏷️ Cluster: {}\n", cluster));
-                                    for n in nodes {
-                                        let status = if n.online { "🟢 online" } else { "🔴 offline" };
-                                        let addr = if n.address.is_empty() { &n.hostname } else { &n.address };
-                                        body.push_str(&format!("  📍 {} ({}:{})\n", n.hostname, addr, n.port));
-                                        body.push_str(&format!("     Status: {}  |  TLS: {}\n", status, if n.tls { "yes" } else { "no" }));
-                                        // Metrics summary if available
-                                        if let Some(ref m) = n.metrics {
-                                            let cpu = m.cpu_usage_percent;
-                                            let mem_pct = if m.memory_total_bytes > 0 {
-                                                (m.memory_used_bytes as f64 / m.memory_total_bytes as f64 * 100.0) as u64
-                                            } else { 0 };
-                                            body.push_str(&format!("     CPU: {:.0}%  |  RAM: {}%\n", cpu, mem_pct));
-                                        }
-                                        // Workload counts
-                                        let mut workloads = Vec::new();
-                                        if n.has_docker { workloads.push(format!("{} containers", n.docker_count)); }
-                                        if n.has_lxc { workloads.push(format!("{} LXC", n.lxc_count)); }
-                                        if n.has_kvm { workloads.push(format!("{} VMs", n.vm_count)); }
-                                        if !workloads.is_empty() {
-                                            body.push_str(&format!("     Workloads: {}\n", workloads.join("  |  ")));
+                                // Fetch from remote nodes
+                                for node in all_nodes.iter().filter(|n| !n.is_self && n.online && n.node_type != "proxmox" && n.has_docker) {
+                                    let url = format!("http://{}:{}/api/containers/docker", node.address, node.port);
+                                    if let Ok(resp) = http_client.get(&url)
+                                        .header("X-WolfStack-Secret", scan_secret.as_str())
+                                        .timeout(std::time::Duration::from_secs(15))
+                                        .send().await
+                                    {
+                                        if let Ok(containers) = resp.json::<Vec<crate::containers::ContainerInfo>>().await {
+                                            for c in containers {
+                                                all_docker.push((node.hostname.clone(), c));
+                                            }
                                         }
                                     }
                                 }
+
+                                if !all_docker.is_empty() {
+                                    html.push_str(r#"<h2>Docker Containers</h2>
+                                    <table><thead><tr><th>Container</th><th>Node</th><th>Image</th><th>State</th><th>IP</th><th>Ports</th></tr></thead><tbody>"#);
+                                    for (host, c) in &all_docker {
+                                        let state_class = match c.state.as_str() { "running" => "running", "paused" => "paused", _ => "stopped" };
+                                        let ports = if c.ports.is_empty() { "—".to_string() } else { c.ports.join(", ") };
+                                        html.push_str(&format!(
+                                            r#"<tr><td><strong>{}</strong></td><td class="meta">{}</td><td class="meta">{}</td><td><span class="badge {}">{}</span></td><td class="meta">{}</td><td class="meta" style="font-size:10px;">{}</td></tr>"#,
+                                            c.name, host, c.image, state_class, c.state, if c.ip_address.is_empty() { "—" } else { &c.ip_address }, ports,
+                                        ));
+                                    }
+                                    html.push_str("</tbody></table>");
+                                }
                             }
 
+                            // ─── LXC Containers Table ───
+                            {
+                                let local_lxc = crate::containers::lxc_list_all();
+                                let mut all_lxc: Vec<(String, crate::containers::ContainerInfo)> = Vec::new();
+                                let local_host = {
+                                    let nodes = scan_cluster.get_all_nodes();
+                                    nodes.iter().find(|n| n.is_self).map(|n| n.hostname.clone()).unwrap_or_else(|| "localhost".to_string())
+                                };
+                                for c in local_lxc {
+                                    all_lxc.push((local_host.clone(), c));
+                                }
+                                for node in all_nodes.iter().filter(|n| !n.is_self && n.online && n.node_type != "proxmox" && n.has_lxc) {
+                                    let url = format!("http://{}:{}/api/containers/lxc", node.address, node.port);
+                                    if let Ok(resp) = http_client.get(&url)
+                                        .header("X-WolfStack-Secret", scan_secret.as_str())
+                                        .timeout(std::time::Duration::from_secs(15))
+                                        .send().await
+                                    {
+                                        if let Ok(containers) = resp.json::<Vec<crate::containers::ContainerInfo>>().await {
+                                            for c in containers {
+                                                all_lxc.push((node.hostname.clone(), c));
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if !all_lxc.is_empty() {
+                                    html.push_str(r#"<h2>LXC Containers</h2>
+                                    <table><thead><tr><th>Container</th><th>Node</th><th>Version</th><th>State</th><th>IP</th><th>Autostart</th></tr></thead><tbody>"#);
+                                    for (host, c) in &all_lxc {
+                                        let state_class = match c.state.as_str() { "running" | "RUNNING" => "running", "frozen" | "FROZEN" => "frozen", _ => "stopped" };
+                                        let display_name = if c.hostname.is_empty() { &c.name } else { &c.hostname };
+                                        html.push_str(&format!(
+                                            r#"<tr><td><strong>{}</strong>{}</td><td class="meta">{}</td><td class="meta">{}</td><td><span class="badge {}">{}</span></td><td class="meta">{}</td><td>{}</td></tr>"#,
+                                            display_name,
+                                            if !c.hostname.is_empty() && c.hostname != c.name { format!(r#"<br><span class="meta">CT {}</span>"#, c.name) } else { String::new() },
+                                            host,
+                                            c.version.as_deref().unwrap_or("—"),
+                                            state_class, c.state,
+                                            if c.ip_address.is_empty() { "—" } else { &c.ip_address },
+                                            if c.autostart { "Yes" } else { "No" },
+                                        ));
+                                    }
+                                    html.push_str("</tbody></table>");
+                                }
+                            }
+
+                            // ─── VMs Table (local) ───
+                            {
+                                let vms = scan_state.vms.lock().unwrap().list_vms();
+                                if !vms.is_empty() {
+                                    html.push_str(r#"<h2>Virtual Machines</h2>
+                                    <table><thead><tr><th>VM</th><th>State</th><th>CPUs</th><th>Memory</th><th>Disk</th><th>Autostart</th></tr></thead><tbody>"#);
+                                    for vm in &vms {
+                                        let state_class = if vm.running { "running" } else { "stopped" };
+                                        let state_text = if vm.running { "Running" } else { "Stopped" };
+                                        html.push_str(&format!(
+                                            r#"<tr><td><strong>{}</strong></td><td><span class="badge {}">{}</span></td><td>{}</td><td>{} MB</td><td>{} GB</td><td>{}</td></tr>"#,
+                                            vm.name, state_class, state_text, vm.cpus, vm.memory_mb, vm.disk_size_gb,
+                                            if vm.auto_start { "Yes" } else { "No" },
+                                        ));
+                                    }
+                                    html.push_str("</tbody></table>");
+                                }
+                            }
+
+                            // ─── Proxmox VE Guests Table ───
+                            {
+                                let mut pve_guests: Vec<(String, crate::proxmox::PveGuest)> = Vec::new();
+                                for node in all_nodes.iter().filter(|n| n.node_type == "proxmox" && n.online) {
+                                    if let (Some(token), Some(pve_name)) = (&node.pve_token, &node.pve_node_name) {
+                                        let fp = node.pve_fingerprint.as_deref();
+                                        if let Ok((_status, _lc, _vc, _cn, guests)) = crate::proxmox::poll_pve_node(&node.address, node.port, token, fp, pve_name).await {
+                                            let label = node.pve_cluster_name.as_deref().unwrap_or(&node.hostname);
+                                            for g in guests {
+                                                pve_guests.push((label.to_string(), g));
+                                            }
+                                        }
+                                    }
+                                }
+                                if !pve_guests.is_empty() {
+                                    html.push_str(r#"<h2>Proxmox VE Guests</h2>
+                                    <table><thead><tr><th>Guest</th><th>PVE Node</th><th>Type</th><th>State</th><th>CPUs</th><th>Memory</th><th>Disk</th><th>Uptime</th></tr></thead><tbody>"#);
+                                    for (label, g) in &pve_guests {
+                                        let state_class = match g.status.as_str() { "running" => "running", "paused" => "paused", _ => "stopped" };
+                                        let type_label = if g.guest_type == "qemu" { "VM" } else { "CT" };
+                                        let uptime_str = if g.uptime == 0 { "—".to_string() } else {
+                                            let d = g.uptime / 86400; let h = (g.uptime % 86400) / 3600;
+                                            if d > 0 { format!("{}d {}h", d, h) } else { format!("{}h", h) }
+                                        };
+                                        let mem_pct = if g.maxmem > 0 { (g.mem as f64 / g.maxmem as f64 * 100.0) as u64 } else { 0 };
+                                        let disk_pct = if g.maxdisk > 0 { (g.disk as f64 / g.maxdisk as f64 * 100.0) as u64 } else { 0 };
+                                        html.push_str(&format!(
+                                            r#"<tr><td><strong>{}</strong><br><span class="meta">ID {}</span></td><td class="meta">{}</td><td><span class="badge info">{}</span></td><td><span class="badge {}">{}</span></td><td>{}</td><td>{} / {}<br><span class="meta">{}%</span></td><td>{} / {}<br><span class="meta">{}%</span></td><td>{}</td></tr>"#,
+                                            g.name, g.vmid, label, type_label, state_class, g.status, g.cpus,
+                                            fmt_bytes(g.mem), fmt_bytes(g.maxmem), mem_pct,
+                                            fmt_bytes(g.disk), fmt_bytes(g.maxdisk), disk_pct,
+                                            uptime_str,
+                                        ));
+                                    }
+                                    html.push_str("</tbody></table>");
+                                }
+                            }
+
+                            // ─── Issues Table ───
                             if all_issues.is_empty() {
-                                body.push_str("\n✅ No issues detected — all systems healthy.\n");
+                                html.push_str(r#"<h2>Issues</h2><p style="color:#22c55e;text-align:center;padding:20px;">All systems healthy — no issues detected.</p>"#);
                             } else {
-                                body.push_str(&format_grouped(&all_issues, None));
-                                body.push_str(&format!(
-                                    "\n━━━ Summary ━━━\n{} critical, {} warning, {} info\n",
-                                    critical_count, warning_count, info_count
-                                ));
+                                html.push_str(r#"<h2>Issues</h2>
+                                <table><thead><tr><th>Severity</th><th>Node</th><th>Issue</th><th>Detail</th></tr></thead><tbody>"#);
+                                for (cluster, host, issue) in &all_issues {
+                                    let sev_class = match issue.severity.as_str() { "critical" => "critical", "warning" => "warning", _ => "info" };
+                                    html.push_str(&format!(
+                                        r#"<tr><td><span class="badge {}">{}</span></td><td><strong>{}</strong><br><span class="meta">{}</span></td><td>{}</td><td class="meta">{}</td></tr>"#,
+                                        sev_class, issue.severity, host, cluster, issue.title, issue.detail,
+                                    ));
+                                }
+                                html.push_str("</tbody></table>");
                             }
-                            if let Err(e) = ai::send_alert_email(&config, &subject, &body) {
-                                tracing::warn!("Failed to send daily issues email: {}", e);
-                            } else {
 
+                            // Footer
+                            html.push_str(&format!(
+                                r#"<p style="color:#555;font-size:11px;text-align:center;margin-top:24px;border-top:1px solid #2a2a3e;padding-top:12px;">WolfStack v{} &bull; Generated {}</p>"#,
+                                env!("CARGO_PKG_VERSION"), chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+                            ));
+                            html.push_str("</div></body></html>");
+
+                            if let Err(e) = ai::send_html_email(&config, &subject, &html) {
+                                tracing::warn!("Failed to send daily report email: {}", e);
                             }
                         }
                     }

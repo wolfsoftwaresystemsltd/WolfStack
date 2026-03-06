@@ -960,6 +960,50 @@ pub fn send_alert_email(config: &AiConfig, subject: &str, body: &str) -> Result<
     Ok(())
 }
 
+/// Send an HTML email (used for the daily report with tables)
+pub fn send_html_email(config: &AiConfig, subject: &str, html_body: &str) -> Result<(), String> {
+    use lettre::{Message, SmtpTransport, Transport};
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::message::{SinglePart, header::ContentType};
+
+    let email = Message::builder()
+        .from(format!("WolfStack AI <{}>", config.smtp_user).parse().map_err(|e| format!("Email from: {}", e))?)
+        .to(config.email_to.parse().map_err(|e| format!("Email to: {}", e))?)
+        .subject(subject)
+        .singlepart(SinglePart::builder()
+            .header(ContentType::TEXT_HTML)
+            .body(html_body.to_string()))
+        .map_err(|e| format!("Email build: {}", e))?;
+
+    let creds = Credentials::new(config.smtp_user.clone(), config.smtp_pass.clone());
+
+    let mailer = match config.smtp_tls.as_str() {
+        "tls" => {
+            SmtpTransport::relay(&config.smtp_host)
+                .map_err(|e| format!("SMTP relay: {}", e))?
+                .port(config.smtp_port)
+                .credentials(creds)
+                .build()
+        }
+        "none" => {
+            SmtpTransport::builder_dangerous(&config.smtp_host)
+                .port(config.smtp_port)
+                .credentials(creds)
+                .build()
+        }
+        _ => {
+            SmtpTransport::starttls_relay(&config.smtp_host)
+                .map_err(|e| format!("SMTP STARTTLS: {}", e))?
+                .port(config.smtp_port)
+                .credentials(creds)
+                .build()
+        }
+    };
+
+    mailer.send(&email).map_err(|e| format!("SMTP send: {}", e))?;
+    Ok(())
+}
+
 // ─── Metrics Summary Builder ───
 
 pub fn build_metrics_summary(
