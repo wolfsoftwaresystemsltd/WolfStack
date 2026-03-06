@@ -1055,10 +1055,10 @@ impl VmManager {
     fn setup_wolfnet_routing(&self, tap: &str, wolfnet_ip: &str) -> Result<(), String> {
         let wn_iface = networking::detect_wolfnet_iface().unwrap_or_else(|| "wolfnet0".to_string());
 
-        // Enable IP forwarding globally and per-interface on TAP + WolfNet
-        let _ = Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]).output();
+        // Enable per-interface forwarding on TAP + WolfNet
         let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.forwarding=1", tap)]).output();
         let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.forwarding=1", wn_iface)]).output();
+        let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.send_redirects=0", wn_iface)]).output();
 
         // Proxy ARP on both sides so the host answers ARP on behalf of routed IPs
         let _ = Command::new("sysctl").args(["-w", &format!("net.ipv4.conf.{}.proxy_arp=1", tap)]).output();
@@ -1101,12 +1101,17 @@ impl VmManager {
                 .args(["-I", "FORWARD", "-o", tap, "-j", "ACCEPT"]).output();
         }
 
-        // NAT masquerade so the VM can reach the outside world
+        // NAT masquerade so the VM can reach the outside world.
+        // Exclude WolfNet-destined traffic so the VM appears as its own WolfNet IP,
+        // not the host's IP, when communicating with other WolfNet nodes.
+        // Remove old overly-broad rule if it exists, then add the correct one.
+        let _ = Command::new("iptables")
+            .args(["-t", "nat", "-D", "POSTROUTING", "-s", &format!("{}/32", wolfnet_ip), "-j", "MASQUERADE"]).output();
         let check_nat = Command::new("iptables")
-            .args(["-t", "nat", "-C", "POSTROUTING", "-s", &format!("{}/32", wolfnet_ip), "-j", "MASQUERADE"]).output();
+            .args(["-t", "nat", "-C", "POSTROUTING", "-s", &format!("{}/32", wolfnet_ip), "!", "-d", "10.10.10.0/24", "-j", "MASQUERADE"]).output();
         if check_nat.map(|o| !o.status.success()).unwrap_or(true) {
             let _ = Command::new("iptables")
-                .args(["-t", "nat", "-A", "POSTROUTING", "-s", &format!("{}/32", wolfnet_ip), "-j", "MASQUERADE"]).output();
+                .args(["-t", "nat", "-A", "POSTROUTING", "-s", &format!("{}/32", wolfnet_ip), "!", "-d", "10.10.10.0/24", "-j", "MASQUERADE"]).output();
         }
 
         Ok(())
