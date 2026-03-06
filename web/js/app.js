@@ -82,15 +82,11 @@ function renderBookmarks() {
 let _bookmarkOverlay = null;
 function showAddBookmarkModal() {
     const html = `
-        <div style="display:flex;flex-direction:column;gap:12px;">
-            <div>
-                <label style="font-size:13px;color:var(--text-muted);margin-bottom:4px;display:block;">Name</label>
-                <input type="text" id="bookmark-name" class="form-control" placeholder="e.g. GitHub" style="width:100%;">
-            </div>
-            <div>
-                <label style="font-size:13px;color:var(--text-muted);margin-bottom:4px;display:block;">URL</label>
-                <input type="url" id="bookmark-url" class="form-control" placeholder="https://github.com" style="width:100%;">
-            </div>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+            <label style="font-size:12px;color:var(--text-muted);">Name</label>
+            <input type="text" id="bookmark-name" class="form-control" placeholder="e.g. GitHub" style="width:100%;margin-bottom:4px;">
+            <label style="font-size:12px;color:var(--text-muted);">URL</label>
+            <input type="url" id="bookmark-url" class="form-control" placeholder="https://github.com" style="width:100%;margin-bottom:6px;">
             <div style="display:flex;gap:8px;justify-content:flex-end;">
                 <button class="btn btn-secondary" onclick="dismissBookmarkModal()">Cancel</button>
                 <button class="btn btn-primary" onclick="addBookmark()">Add Bookmark</button>
@@ -99,6 +95,9 @@ function showAddBookmarkModal() {
     showModal(html, '🔖 Add Bookmark');
     // Grab the overlay we just created (last child of body)
     _bookmarkOverlay = document.body.lastElementChild;
+    // Hide the default OK button that showModal adds
+    const okBtn = _bookmarkOverlay.querySelector('div[style*="text-align:right"]');
+    if (okBtn) okBtn.style.display = 'none';
     setTimeout(() => document.getElementById('bookmark-name')?.focus(), 100);
 }
 function dismissBookmarkModal() {
