@@ -21,9 +21,9 @@ jobs:
 
           # Gather commits from this push
           if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
-            COMMITS=$(git log --pretty=format:'- **%s**%n  %b' -5 | sed '/^$/d')
+            COMMITS=$(git log --pretty=format:'- **%s**' -5)
           else
-            COMMITS=$(git log --pretty=format:'- **%s**%n  %b' ${{ github.event.before }}..${{ github.event.after }} | sed '/^$/d')
+            COMMITS=$(git log --pretty=format:'- **%s**' ${{ github.event.before }}..${{ github.event.after }})
           fi
 
           # Count files changed
