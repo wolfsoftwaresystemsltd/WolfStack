@@ -322,16 +322,19 @@ pub fn get_cluster_status() -> CephClusterStatus {
             }).collect();
         }
 
-        // Manager info
-        if let Some(mgrmap) = val.get("mgrmap") {
-            if let Some(active_name) = mgrmap.get("active_name").and_then(|n| n.as_str()) {
-                status.mgrs.push(CephManager {
-                    name: active_name.to_string(),
-                    active: true,
-                    available: true,
-                });
+        // Manager info — ceph status only has a summary (available, num_standbys),
+        // so we need "ceph mgr dump" for the actual active_name and standbys list
+        if let Ok(mgr_dump) = ceph_json(&["mgr", "dump"]) {
+            if let Some(active_name) = mgr_dump.get("active_name").and_then(|n| n.as_str()) {
+                if !active_name.is_empty() {
+                    status.mgrs.push(CephManager {
+                        name: active_name.to_string(),
+                        active: true,
+                        available: true,
+                    });
+                }
             }
-            if let Some(standbys) = mgrmap.get("standbys").and_then(|s| s.as_array()) {
+            if let Some(standbys) = mgr_dump.get("standbys").and_then(|s| s.as_array()) {
                 for sb in standbys {
                     if let Some(name) = sb.get("name").and_then(|n| n.as_str()) {
                         status.mgrs.push(CephManager {
