@@ -822,10 +822,12 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
             Err(_e) => {},
         }
 
-        // Add route to WolfNet subnet via gateway so container can reach other WolfNet hosts
+        // Add route to WolfNet subnet via gateway so container can reach other WolfNet hosts.
+        // The `src` hint ensures the kernel uses the WolfNet IP as source, not the
+        // Docker bridge IP — critical for cross-node connectivity.
         let subnet = "10.10.10.0/24";
         let _ = Command::new("nsenter")
-            .args(["--target", &container_pid, "--net", "ip", "route", "replace", subnet, "via", &gateway])
+            .args(["--target", &container_pid, "--net", "ip", "route", "replace", subnet, "via", &gateway, "src", ip])
             .output();
     }
 
@@ -947,7 +949,7 @@ pub fn ensure_lxc_bridge() {
     let _ = Command::new("ip").args(["link", "set", "lxcbr0", "up"]).output();
 
     // ALWAYS ensure NAT + forwarding for internet access (even if lxc-net is running)
-    let _ = Command::new("sh").args(["-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"]).output();
+    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.forwarding=1"]).output();
     let nat_check = Command::new("iptables")
         .args(["-t", "nat", "-C", "POSTROUTING", "-s", "10.0.3.0/24", "!", "-d", "10.0.3.0/24", "-j", "MASQUERADE"])
         .output();
@@ -1178,8 +1180,11 @@ fn lxc_apply_wolfnet(container: &str) {
 
             // Route WolfNet subnet through wn0 via lxcbr0 gateway — without this,
             // 10.10.10.x traffic goes out via eth0/vmbr0 where WolfNet is unreachable.
+            // The `src` hint ensures the kernel uses the WolfNet IP as source, not the
+            // bridge IP — critical for cross-node connectivity (remote hosts reply to the
+            // WolfNet IP, which gets routed back through the overlay).
             let mut args: Vec<String> = attach_prefix.clone();
-            args.extend(["ip", "route", "replace", "10.10.10.0/24", "via", "10.0.3.1", "dev", "wn0"].iter().map(|s| s.to_string()));
+            args.extend(["ip", "route", "replace", "10.10.10.0/24", "via", "10.0.3.1", "dev", "wn0", "src", ip].iter().map(|s| s.to_string()));
             let _ = Command::new("lxc-attach").args(&args).output();
 
             // Try to bring up eth0 via NetworkManager (write DHCP config if missing)
@@ -1279,6 +1284,13 @@ fn lxc_apply_wolfnet(container: &str) {
 
             let mut args: Vec<String> = attach_prefix.clone();
             args.extend(["ip", "route", "replace", "default", "via", "10.0.3.1"].iter().map(|s| s.to_string()));
+            let _ = Command::new("lxc-attach").args(&args).output();
+
+            // Route WolfNet subnet with correct source IP — ensures the container
+            // uses its WolfNet IP (not the bridge IP) as source when talking to
+            // remote WolfNet hosts, so replies get routed back correctly.
+            let mut args: Vec<String> = attach_prefix.clone();
+            args.extend(["ip", "route", "replace", "10.10.10.0/24", "via", "10.0.3.1", "src", ip].iter().map(|s| s.to_string()));
             let _ = Command::new("lxc-attach").args(&args).output();
 
             // Host route — via bridge IP so ARP resolves on lxcbr0

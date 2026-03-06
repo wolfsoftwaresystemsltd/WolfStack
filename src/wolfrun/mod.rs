@@ -1488,7 +1488,13 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String], lb_
     static VIP_INFRA_READY: AtomicBool = AtomicBool::new(false);
     if !VIP_INFRA_READY.load(Ordering::Relaxed) {
         let _ = std::process::Command::new("sysctl")
-            .args(["-w", "net.ipv4.ip_forward=1"])
+            .args(["-w", "net.ipv4.conf.wolfnet0.forwarding=1"])
+            .output();
+        let _ = std::process::Command::new("sysctl")
+            .args(["-w", "net.ipv4.conf.docker0.forwarding=1"])
+            .output();
+        let _ = std::process::Command::new("sysctl")
+            .args(["-w", "net.ipv4.conf.lxcbr0.forwarding=1"])
             .output();
         // Disable reverse path filtering on wolfnet0 — required because after DNAT
         // the source IP is a remote WolfNet peer but the reply goes via a different path
