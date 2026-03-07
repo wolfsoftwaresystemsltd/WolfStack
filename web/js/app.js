@@ -7890,9 +7890,10 @@ function tomlToggleRaw(component, displayName) {
 }
 
 // ─── Polling Loop ───
+const POLL_INTERVAL = isMobileView() ? 30000 : 10000;
 fetchNodes();
 fetchMetricsHistory(); // Initial history load
-setInterval(fetchNodes, 10000);  // Refresh tree + metrics every 10s
+setInterval(fetchNodes, POLL_INTERVAL);
 
 // ─── Container Management ───
 
