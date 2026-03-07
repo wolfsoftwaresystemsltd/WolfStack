@@ -19,18 +19,41 @@ let displayRange = 150; // default 5 minutes (150 samples at 2s)
 let currentConfiguratorTarget = null; // null = host, {runtime:'docker'|'lxc', target:'name'} for containers
 
 // ─── Sidebar Toggle ───
+function isMobileView() {
+    return window.innerWidth <= 768;
+}
+
 function toggleSidebar() {
-    document.body.classList.toggle('sidebar-collapsed');
-    const collapsed = document.body.classList.contains('sidebar-collapsed');
-    localStorage.setItem('wolfstack_sidebar_collapsed', collapsed ? '1' : '0');
+    if (isMobileView()) {
+        // Mobile: toggle overlay sidebar
+        const isOpen = document.body.classList.toggle('sidebar-open');
+        const backdrop = document.querySelector('.sidebar-backdrop');
+        if (backdrop) backdrop.style.display = isOpen ? 'block' : 'none';
+    } else {
+        // Desktop: toggle collapsed sidebar
+        document.body.classList.toggle('sidebar-collapsed');
+        const collapsed = document.body.classList.contains('sidebar-collapsed');
+        localStorage.setItem('wolfstack_sidebar_collapsed', collapsed ? '1' : '0');
+    }
     // Invalidate map size after transition
     setTimeout(() => { if (worldMap) worldMap.invalidateSize(); }, 350);
 }
 
-// Restore sidebar state on load
+function closeSidebarMobile() {
+    document.body.classList.remove('sidebar-open');
+    const backdrop = document.querySelector('.sidebar-backdrop');
+    if (backdrop) backdrop.style.display = 'none';
+}
+
+// Restore sidebar state on load (desktop only)
 if (localStorage.getItem('wolfstack_sidebar_collapsed') === '1') {
     document.body.classList.add('sidebar-collapsed');
 }
+
+// Clean up mobile sidebar state on resize to desktop
+window.addEventListener('resize', () => {
+    if (!isMobileView()) closeSidebarMobile();
+});
 
 // ─── Map Collapse Toggle ───
 let mapCollapsed = localStorage.getItem('wolfstack_map_collapsed') === '1'; // default expanded
@@ -493,6 +516,7 @@ function configuratorApiUrl(path) {
 
 // ─── Page Navigation ───
 function selectView(page) {
+    closeSidebarMobile();
     currentPage = page;
     currentNodeId = null;
 
@@ -526,6 +550,7 @@ function selectView(page) {
 }
 
 function selectServerView(nodeId, view) {
+    closeSidebarMobile();
     currentNodeId = nodeId;
     currentPage = view;
 
@@ -18012,6 +18037,7 @@ let wolfrunCurrentCluster = '';
 let wolfrunRefreshTimer = null;
 
 function showWolfRunPage(clusterName) {
+    closeSidebarMobile();
     wolfrunCurrentCluster = clusterName;
     currentPage = 'wolfrun';
     currentNodeId = null;
@@ -19253,6 +19279,7 @@ function spPublicUrl(slug, cluster) {
 }
 
 function showStatusPagesForCluster(clusterName) {
+    closeSidebarMobile();
     spCurrentCluster = clusterName;
     currentPage = 'statuspage';
     currentNodeId = null;

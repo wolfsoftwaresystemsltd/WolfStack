@@ -93,6 +93,9 @@
 </head>
 
 <body>
+    <!-- Mobile sidebar backdrop -->
+    <div class="sidebar-backdrop" onclick="closeSidebarMobile()"></div>
+
     <!-- Sidebar Navigation -->
     <aside class="sidebar">
         <div class="sidebar-logo">
@@ -212,7 +215,7 @@
             <div id="page-datacenter" class="page-view">
 
                 <!-- Map + Bookmarks Row -->
-                <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 12px; margin-bottom: 12px;">
+                <div class="dc-top-row" style="display: grid; grid-template-columns: 1fr 2fr; gap: 12px; margin-bottom: 12px;">
                     <!-- World Map -->
                     <div class="card" id="map-card" style="overflow: hidden;">
                         <div class="card-header" style="cursor:pointer;" onclick="toggleMapCollapse()">

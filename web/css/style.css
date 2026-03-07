@@ -2416,6 +2416,23 @@ body.sidebar-collapsed .main-content {
 }
 
 /* ─── Responsive ─── */
+/* ─── Sidebar Backdrop (mobile overlay) ─── */
+.sidebar-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(4px);
+    z-index: 99;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.sidebar-backdrop.active {
+    opacity: 1;
+}
+
+/* ─── Tablet (1024px) ─── */
 @media (max-width: 1024px) {
     .sidebar {
         width: 200px;
@@ -2436,23 +2453,165 @@ body.sidebar-collapsed .main-content {
     .grid-3 {
         grid-template-columns: 1fr 1fr;
     }
+
+    /* Hide enterprise banner on tablet */
+    .top-bar-actions a[href*="enterprise"] {
+        display: none !important;
+    }
 }
 
+/* ─── Mobile (768px) ─── */
 @media (max-width: 768px) {
+    /* Sidebar becomes a slide-over overlay */
     .sidebar {
+        width: 280px;
         transform: translateX(-100%);
+        box-shadow: none;
+    }
+
+    body.sidebar-open .sidebar {
+        transform: translateX(0);
+        box-shadow: var(--shadow-lg);
+    }
+
+    body.sidebar-open .sidebar-backdrop {
+        display: block;
+        opacity: 1;
+    }
+
+    /* Collapsed state has no effect on mobile — sidebar-open controls it */
+    body.sidebar-collapsed .sidebar {
+        transform: translateX(-100%);
+    }
+
+    body.sidebar-collapsed.sidebar-open .sidebar {
+        transform: translateX(0);
     }
 
     .main-content {
         margin-left: 0;
     }
 
+    body.sidebar-collapsed .main-content {
+        margin-left: 0;
+    }
+
+    /* Top bar compact */
+    .top-bar {
+        padding: 8px 12px;
+    }
+
+    .top-bar h2 {
+        font-size: 16px;
+    }
+
+    /* Hide social links, enterprise banner, hostname on mobile */
+    .top-bar-actions a[href*="youtube"],
+    .top-bar-actions a[href*="discord"],
+    .top-bar-actions a[href*="enterprise"],
+    .top-bar-actions a[href*="reddit"],
+    #hostname-display {
+        display: none !important;
+    }
+
+    /* Page content compact */
+    .page-content {
+        padding: 6px 10px 12px;
+    }
+
+    .main-content > .page-view {
+        padding: 6px 10px 12px;
+    }
+
+    /* Stats grid responsive */
     .stats-grid {
         grid-template-columns: repeat(2, 1fr) !important;
+        gap: 8px !important;
+    }
+
+    .stat-card {
+        padding: 10px 12px;
+    }
+
+    .stat-value {
+        font-size: 22px;
     }
 
     .grid-2,
     .grid-3 {
         grid-template-columns: 1fr;
+    }
+
+    /* Cards compact */
+    .card-header {
+        padding: 12px 14px;
+    }
+
+    .card-body {
+        padding: 14px;
+    }
+
+    /* Modal full-width on mobile */
+    .modal {
+        width: 95%;
+        max-height: 85vh;
+        border-radius: var(--radius);
+    }
+
+    .modal-header {
+        padding: 14px 16px;
+    }
+
+    .modal-body {
+        padding: 16px;
+    }
+
+    .modal-footer {
+        padding: 12px 16px;
+    }
+
+    /* Tables horizontally scroll */
+    .data-table th,
+    .data-table td {
+        padding: 8px 10px;
+        font-size: 12px;
+        white-space: nowrap;
+    }
+
+    /* Datacenter top row stacks vertically */
+    .dc-top-row {
+        grid-template-columns: 1fr !important;
+    }
+}
+
+/* ─── Small Mobile (480px) ─── */
+@media (max-width: 480px) {
+    .stats-grid {
+        grid-template-columns: 1fr !important;
+    }
+
+    .top-bar h2 {
+        font-size: 14px;
+    }
+
+    .sidebar-toggle {
+        width: 30px;
+        height: 30px;
+        font-size: 16px;
+        margin-right: 8px;
+    }
+
+    .card-header h3 {
+        font-size: 13px;
+    }
+
+    /* Stack modal footer buttons */
+    .modal-footer {
+        flex-wrap: wrap;
+    }
+
+    .modal-footer .btn {
+        flex: 1;
+        min-width: 0;
     }
 }
