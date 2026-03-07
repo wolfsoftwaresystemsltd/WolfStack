@@ -2495,15 +2495,20 @@ body.sidebar-collapsed .main-content {
 
     .top-bar h2 {
         font-size: 16px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
-    /* Hide social links, enterprise banner, hostname on mobile */
-    .top-bar-actions a[href*="youtube"],
-    .top-bar-actions a[href*="discord"],
-    .top-bar-actions a[href*="enterprise"],
-    .top-bar-actions a[href*="reddit"],
-    #hostname-display {
+    /* Hide entire actions bar on mobile — all children are hidden anyway */
+    .top-bar-actions {
         display: none !important;
+    }
+
+    /* Prevent horizontal overflow */
+    .main-content {
+        max-width: 100vw;
+        overflow-x: hidden;
     }
 
     /* Page content compact */
