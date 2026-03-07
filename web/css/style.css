@@ -2462,12 +2462,17 @@ body.sidebar-collapsed .main-content {
 
 /* ─── Mobile (768px) ─── */
 @media (max-width: 768px) {
+    /* Kill all transitions/animations on mobile for speed */
+    *, *::before, *::after {
+        transition: none !important;
+        animation: none !important;
+    }
+
     /* Sidebar becomes a slide-over overlay */
     .sidebar {
         width: 280px;
         transform: translateX(-100%) !important;
         box-shadow: none;
-        transition: transform 0.25s ease !important;
     }
 
     /* sidebar-open overrides everything on mobile */
