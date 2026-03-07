@@ -2185,41 +2185,52 @@ async function fetchNodes() {
         // Track server TLS state for URL generation
         if (data.tls_enabled !== undefined) serverTlsEnabled = data.tls_enabled;
 
-        // Only rebuild sidebar tree if node list structure changed (NOT online status)
-        var treeChanged = false;
+        // Only full-rebuild when nodes are added/removed or clusters change
+        var structureChanged = false;
         if (!allNodes || allNodes.length !== nodes.length) {
-            treeChanged = true;
+            structureChanged = true;
         } else {
             for (var i = 0; i < nodes.length; i++) {
                 var old = allNodes.find(function (n) { return n.id === nodes[i].id; });
-                if (!old ||
-                    old.docker_count !== nodes[i].docker_count ||
-                    old.lxc_count !== nodes[i].lxc_count ||
-                    old.vm_count !== nodes[i].vm_count ||
-                    old.hostname !== nodes[i].hostname ||
-                    old.cluster_name !== nodes[i].cluster_name ||
-                    (old.components || []).filter(function (c) { return c.installed; }).length !==
-                    (nodes[i].components || []).filter(function (c) { return c.installed; }).length) {
-                    treeChanged = true;
+                if (!old || old.hostname !== nodes[i].hostname || old.cluster_name !== nodes[i].cluster_name) {
+                    structureChanged = true;
                     break;
                 }
             }
         }
 
         allNodes = nodes;
-        if (treeChanged) {
+        if (structureChanged) {
             buildServerTree(nodes);
         } else {
-            // Update online/offline dots in-place without rebuilding the tree
+            // Update dots and badges in-place without rebuilding
             nodes.forEach(function (n) {
-                // Update individual node dots (child items share the node header dot)
                 var nodeHeader = document.querySelector(`.server-node-header[data-node-id="${n.id}"]`);
-                if (nodeHeader) {
-                    var dot = nodeHeader.querySelector('.server-dot');
-                    if (dot) {
-                        dot.className = 'server-dot ' + (n.online ? 'online' : 'offline');
+                if (!nodeHeader) return;
+                var dot = nodeHeader.querySelector('.server-dot');
+                if (dot) dot.className = 'server-dot ' + (n.online ? 'online' : 'offline');
+                // Update badges in the node's children panel
+                var children = document.getElementById('children-' + n.id);
+                if (!children) return;
+                var items = children.querySelectorAll('.server-child-item');
+                items.forEach(function (item) {
+                    var view = item.getAttribute('data-view');
+                    var badge = item.querySelector('.badge');
+                    if (view === 'components' && badge) {
+                        badge.textContent = (n.components || []).filter(function (c) { return c.installed; }).length;
+                    } else if (view === 'containers' && n.docker_count) {
+                        if (badge) { badge.textContent = n.docker_count; }
+                        else { item.insertAdjacentHTML('beforeend', `<span class="badge" style="font-size:10px; padding:1px 6px;">${n.docker_count}</span>`); }
+                    } else if (view === 'lxc' && n.lxc_count) {
+                        if (badge) { badge.textContent = n.lxc_count; }
+                        else { item.insertAdjacentHTML('beforeend', `<span class="badge" style="font-size:10px; padding:1px 6px;">${n.lxc_count}</span>`); }
+                    } else if (view === 'vms' && n.vm_count) {
+                        if (badge) { badge.textContent = n.vm_count; }
+                        else { item.insertAdjacentHTML('beforeend', `<span class="badge" style="font-size:10px; padding:1px 6px;">${n.vm_count}</span>`); }
+                    } else if ((view === 'containers' || view === 'lxc' || view === 'vms') && badge && !n[view === 'containers' ? 'docker_count' : view === 'lxc' ? 'lxc_count' : 'vm_count']) {
+                        badge.remove();
                     }
-                }
+                });
             });
             // Update cluster-level dots (any online = green)
             document.querySelectorAll('.server-node-header[data-cluster-id]').forEach(function (header) {
