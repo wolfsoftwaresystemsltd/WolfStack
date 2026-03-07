@@ -2468,16 +2468,16 @@ body.sidebar-collapsed .main-content {
         animation: none !important;
     }
 
-    /* Sidebar becomes a slide-over overlay */
+    /* Sidebar: hidden by default, shown instantly on toggle */
     .sidebar {
         width: 280px;
-        transform: translateX(-100%) !important;
+        display: none !important;
+        transform: none !important;
         box-shadow: none;
     }
 
-    /* sidebar-open overrides everything on mobile */
     body.sidebar-open .sidebar {
-        transform: translateX(0) !important;
+        display: flex !important;
         box-shadow: var(--shadow-lg);
     }
 
