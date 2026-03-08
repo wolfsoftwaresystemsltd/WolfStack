@@ -367,7 +367,11 @@ async fn main() -> std::io::Result<()> {
             let mut last_scan_time = std::time::Instant::now();
             // Run first scan immediately after startup delay
             let mut should_scan_now = true;
-            let http_client = reqwest::Client::new();
+            let http_client = reqwest::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap_or_default();
             loop {
                 // Re-read config each loop to pick up schedule changes
                 let config = scan_ai.config.lock().unwrap().clone();
@@ -409,7 +413,7 @@ async fn main() -> std::io::Result<()> {
                         let nodes = scan_cluster.get_all_nodes();
                         for node in nodes.iter().filter(|n| !n.is_self && n.online && n.node_type != "proxmox") {
                             let cluster = node.cluster_name.clone().unwrap_or_else(|| "Default".to_string());
-                            let url = format!("http://{}:{}/api/issues/scan", node.address, node.port);
+                            let url = node_api_url(node, "/api/issues/scan");
                             match http_client.get(&url)
                                 .header("X-WolfStack-Secret", scan_secret.as_str())
                                 .timeout(std::time::Duration::from_secs(30))
@@ -571,6 +575,8 @@ tr:hover td{background:#1e1e35;}
 .summary-card{background:#16162b;border:1px solid #2a2a3e;border-radius:8px;padding:12px;text-align:center;}
 .summary-value{font-size:24px;font-weight:700;color:#818cf8;}
 .summary-label{font-size:11px;color:#888;text-transform:uppercase;margin-top:4px;}
+a{color:#eab308;text-decoration:none;}a:hover{text-decoration:underline;}
+.ai-box{background:#16162b;border:1px solid #2a2a3e;border-radius:8px;padding:16px;margin-top:16px;white-space:pre-wrap;font-size:13px;line-height:1.6;}
 </style></head><body><div class="container">"#);
 
                             // Header
@@ -661,7 +667,7 @@ tr:hover td{background:#1e1e35;}
                                 }
                                 // Fetch from remote nodes
                                 for node in all_nodes.iter().filter(|n| !n.is_self && n.online && n.node_type != "proxmox" && n.has_docker) {
-                                    let url = format!("http://{}:{}/api/containers/docker", node.address, node.port);
+                                    let url = node_api_url(node, "/api/containers/docker");
                                     if let Ok(resp) = http_client.get(&url)
                                         .header("X-WolfStack-Secret", scan_secret.as_str())
                                         .timeout(std::time::Duration::from_secs(15))
@@ -702,7 +708,7 @@ tr:hover td{background:#1e1e35;}
                                     all_lxc.push((local_host.clone(), c));
                                 }
                                 for node in all_nodes.iter().filter(|n| !n.is_self && n.online && n.node_type != "proxmox" && n.has_lxc) {
-                                    let url = format!("http://{}:{}/api/containers/lxc", node.address, node.port);
+                                    let url = node_api_url(node, "/api/containers/lxc");
                                     if let Ok(resp) = http_client.get(&url)
                                         .header("X-WolfStack-Secret", scan_secret.as_str())
                                         .timeout(std::time::Duration::from_secs(15))
@@ -737,18 +743,42 @@ tr:hover td{background:#1e1e35;}
                                 }
                             }
 
-                            // ─── VMs Table (local) ───
+                            // ─── VMs Table (all nodes) ───
                             {
-                                let vms = scan_state.vms.lock().unwrap().list_vms();
-                                if !vms.is_empty() {
+                                let local_vms = scan_state.vms.lock().unwrap().list_vms();
+                                let mut all_vms: Vec<(String, crate::vms::manager::VmConfig)> = Vec::new();
+                                let local_host = {
+                                    let nodes = scan_cluster.get_all_nodes();
+                                    nodes.iter().find(|n| n.is_self).map(|n| n.hostname.clone()).unwrap_or_else(|| "localhost".to_string())
+                                };
+                                for vm in local_vms {
+                                    all_vms.push((local_host.clone(), vm));
+                                }
+                                // Fetch from remote nodes that have KVM
+                                for node in all_nodes.iter().filter(|n| !n.is_self && n.online && n.node_type != "proxmox" && n.has_kvm) {
+                                    let url = node_api_url(node, "/api/vms");
+                                    if let Ok(resp) = http_client.get(&url)
+                                        .header("X-WolfStack-Secret", scan_secret.as_str())
+                                        .timeout(std::time::Duration::from_secs(15))
+                                        .send().await
+                                    {
+                                        if let Ok(vms) = resp.json::<Vec<crate::vms::manager::VmConfig>>().await {
+                                            for vm in vms {
+                                                all_vms.push((node.hostname.clone(), vm));
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if !all_vms.is_empty() {
                                     html.push_str(r#"<h2>Virtual Machines</h2>
-                                    <table><thead><tr><th>VM</th><th>State</th><th>CPUs</th><th>Memory</th><th>Disk</th><th>Autostart</th></tr></thead><tbody>"#);
-                                    for vm in &vms {
+                                    <table><thead><tr><th>VM</th><th>Node</th><th>State</th><th>CPUs</th><th>Memory</th><th>Disk</th><th>Autostart</th></tr></thead><tbody>"#);
+                                    for (host, vm) in &all_vms {
                                         let state_class = if vm.running { "running" } else { "stopped" };
                                         let state_text = if vm.running { "Running" } else { "Stopped" };
                                         html.push_str(&format!(
-                                            r#"<tr><td><strong>{}</strong></td><td><span class="badge {}">{}</span></td><td>{}</td><td>{} MB</td><td>{} GB</td><td>{}</td></tr>"#,
-                                            vm.name, state_class, state_text, vm.cpus, vm.memory_mb, vm.disk_size_gb,
+                                            r#"<tr><td><strong>{}</strong></td><td class="meta">{}</td><td><span class="badge {}">{}</span></td><td>{}</td><td>{} MB</td><td>{} GB</td><td>{}</td></tr>"#,
+                                            vm.name, host, state_class, state_text, vm.cpus, vm.memory_mb, vm.disk_size_gb,
                                             if vm.auto_start { "Yes" } else { "No" },
                                         ));
                                     }
@@ -808,6 +838,31 @@ tr:hover td{background:#1e1e35;}
                                     ));
                                 }
                                 html.push_str("</tbody></table>");
+                            }
+
+                            // ─── AI Recommendations ───
+                            if !all_issues.is_empty() {
+                                let issues_summary: String = all_issues.iter()
+                                    .map(|(_, host, i)| format!("- [{}] {} on {}: {}", i.severity, i.title, host, i.detail))
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                let ai_recs = scan_ai.analyze_issue(
+                                    &format!(
+                                        "Here is today's WolfStack daily report with {} issue(s) across {} node(s). \
+                                         Provide a brief prioritised summary of what the admin should address first, \
+                                         with specific commands or steps for each issue. Servers may be running different \
+                                         Linux distributions.\n\n{}",
+                                        all_issues.len(), total_nodes, issues_summary
+                                    )
+                                ).await.unwrap_or_default();
+                                if !ai_recs.is_empty() {
+                                    // Escape HTML in AI output
+                                    let escaped = ai_recs.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+                                    html.push_str(&format!(
+                                        r#"<h2>🤖 AI Recommendations</h2><div class="ai-box">{}</div>"#,
+                                        escaped
+                                    ));
+                                }
                             }
 
                             // Footer
@@ -1550,6 +1605,16 @@ tr:hover td{background:#1e1e35;}
             }
             Ok(())
         }
+    }
+}
+
+/// Build the preferred inter-node HTTP URL for a given node and API path.
+/// TLS nodes serve HTTPS on main port and plain HTTP on port+1 for inter-node calls.
+fn node_api_url(node: &crate::agent::Node, path: &str) -> String {
+    if node.tls {
+        format!("http://{}:{}{}", node.address, node.port + 1, path)
+    } else {
+        format!("http://{}:{}{}", node.address, node.port, path)
     }
 }
 
