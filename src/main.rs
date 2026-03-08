@@ -576,7 +576,7 @@ tr:hover td{background:#1e1e35;}
 .summary-value{font-size:24px;font-weight:700;color:#818cf8;}
 .summary-label{font-size:11px;color:#888;text-transform:uppercase;margin-top:4px;}
 a{color:#eab308;text-decoration:none;}a:hover{text-decoration:underline;}
-.ai-box{background:#16162b;border:1px solid #2a2a3e;border-radius:8px;padding:16px;margin-top:16px;white-space:pre-wrap;font-size:13px;line-height:1.6;}
+.ai-box{background:#16162b;border:1px solid #eab308;border-radius:8px;padding:16px;margin-top:16px;white-space:pre-wrap;font-size:13px;line-height:1.6;color:#f0f0f0;}
 </style></head><body><div class="container">"#);
 
                             // Header
@@ -859,7 +859,7 @@ a{color:#eab308;text-decoration:none;}a:hover{text-decoration:underline;}
                                     // Escape HTML in AI output
                                     let escaped = ai_recs.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
                                     html.push_str(&format!(
-                                        r#"<h2>🤖 AI Recommendations</h2><div class="ai-box">{}</div>"#,
+                                        r#"<h2 style="color:#eab308;">🤖 AI Recommendations</h2><div class="ai-box">{}</div>"#,
                                         escaped
                                     ));
                                 }
