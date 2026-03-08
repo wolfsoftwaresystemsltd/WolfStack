@@ -8795,6 +8795,11 @@ pub fn collect_issues(metrics: &crate::monitoring::SystemMetrics) -> Vec<Issue> 
 
     // ── Disk checks (free space, not just %) ──
     for disk in &metrics.disks {
+        // Skip /boot/ mounts unless >99% — the OS manages /boot/ automatically
+        if disk.mount_point.starts_with("/boot") && disk.usage_percent <= 99.0 {
+            continue;
+        }
+
         let total_gb = disk.total_bytes as f64 / 1_073_741_824.0;
         let used_gb = disk.used_bytes as f64 / 1_073_741_824.0;
         let free_gb = disk.available_bytes as f64 / 1_073_741_824.0;

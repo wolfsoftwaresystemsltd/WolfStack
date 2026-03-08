@@ -398,7 +398,9 @@ impl AiAgent {
         let prompt = format!(
             "You are a server monitoring AI for WolfStack. Analyze these metrics and report ONLY if there are concerns. \
              If everything looks healthy, respond with exactly 'ALL_OK'. \
-             If there are issues, list them concisely with severity (INFO/WARNING/CRITICAL).\n\n\
+             If there are issues, list them concisely with severity (INFO/WARNING/CRITICAL).\n\
+             IMPORTANT: Ignore /boot and /boot/efi partition usage — the OS manages these automatically. \
+             Only flag /boot if it is over 99% full.\n\n\
              Current server metrics:\n{}",
             metrics_summary
         );
@@ -455,6 +457,19 @@ impl AiAgent {
                         }
                     }
 
+                    // Also send to Discord/Telegram/Slack via the alerting system
+                    let alert_config = crate::alerting::AlertConfig::load();
+                    if alert_config.enabled && alert_config.has_channels() {
+                        let title = format!(
+                            "[WolfStack AI {}] Health alert on {}",
+                            severity.to_uppercase(), hostname
+                        );
+                        let body = response.clone();
+                        tokio::spawn(async move {
+                            crate::alerting::send_alert(&alert_config, &title, &body).await;
+                        });
+                    }
+
                     Some(response)
                 } else {
 
@@ -463,6 +478,46 @@ impl AiAgent {
             }
             Err(e) => {
                 warn!("AI health check failed: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Analyze reboot diagnostics and suggest remediation steps
+    pub async fn analyze_reboot(&self, hostname: &str, diagnostics: &str) -> Option<String> {
+        self.analyze_issue(
+            &format!(
+                "Server '{}' has unexpectedly rebooted. Determine the most likely cause \
+                 (OOM kill, kernel panic, power loss, unattended upgrade, hardware watchdog, \
+                 manual reboot, etc.) and provide 2-3 specific actionable steps to prevent it.\n\n\
+                 Diagnostics:\n{}",
+                hostname, diagnostics
+            )
+        ).await
+    }
+
+    /// General-purpose issue analysis — takes a description of the problem and returns
+    /// AI-powered diagnosis with actionable remediation steps.
+    /// Works across different Linux distributions and system types.
+    pub async fn analyze_issue(&self, issue_description: &str) -> Option<String> {
+        let config = self.config.lock().unwrap().clone();
+        if !config.is_configured() { return None; }
+
+        let system = "You are a Linux server administration expert working with WolfStack, a server management platform. \
+                       Servers may run different Linux distributions (Ubuntu, Debian, Fedora, RHEL, Arch, etc.) and \
+                       different configurations. When suggesting fixes, give commands that work across common distros \
+                       or note when a command is distro-specific. Be concise and technical — max 5-6 lines. \
+                       Focus on actionable steps the admin can take right now.";
+
+        let result = match config.provider.as_str() {
+            "gemini" => call_gemini(&self.client, &config.gemini_api_key, &config.model, system, &[], issue_description).await,
+            _ => call_claude(&self.client, &config.claude_api_key, &config.model, system, &[], issue_description).await,
+        };
+
+        match result {
+            Ok(response) => Some(response),
+            Err(e) => {
+                warn!("AI issue analysis failed: {}", e);
                 None
             }
         }

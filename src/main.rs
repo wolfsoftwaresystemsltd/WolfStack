@@ -492,11 +492,37 @@ async fn main() -> std::io::Result<()> {
                             if warning_count > 0 {
                                 body.push_str(&format!("\n\n⚠️ Also {} warning(s) — see daily report for details.\n", warning_count));
                             }
+
+                            // AI analysis of all critical issues
+                            let critical_summary: String = all_issues.iter()
+                                .filter(|(_, _, i)| i.severity == "critical")
+                                .map(|(_, host, i)| format!("- {} on {}: {}", i.title, host, i.detail))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let ai_suggestion = scan_ai.analyze_issue(
+                                &format!(
+                                    "These critical issues were detected across a WolfStack cluster. \
+                                     For each issue, suggest what the admin should do to fix it:\n\n{}",
+                                    critical_summary
+                                )
+                            ).await.unwrap_or_default();
+                            if !ai_suggestion.is_empty() {
+                                body.push_str(&format!("\n\n🤖 AI Recommendations:\n{}", ai_suggestion));
+                            }
+
                             body.push_str(&format!("\nWolfStack v{}", env!("CARGO_PKG_VERSION")));
                             if let Err(e) = ai::send_alert_email(&config, &subject, &body) {
                                 tracing::warn!("Failed to send critical issues email: {}", e);
-                            } else {
+                            }
 
+                            // Also send to webhook channels
+                            let alert_config = crate::alerting::AlertConfig::load();
+                            if alert_config.enabled && alert_config.has_channels() {
+                                let s = subject.clone();
+                                let b = body.clone();
+                                tokio::spawn(async move {
+                                    crate::alerting::send_alert(&alert_config, &s, &b).await;
+                                });
                             }
                         }
 
@@ -885,6 +911,13 @@ tr:hover td{background:#1e1e35;}
 
         // Background: alerting threshold monitor (CPU, memory, disk) for ALL nodes
         let alert_cluster = cluster.clone();
+        let alert_secret = cluster_secret.clone();
+        let alert_ai = ai_agent.clone();
+        let alert_http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap_or_default();
         tokio::spawn(async move {
             // Wait 90 seconds after startup before first check (let metrics stabilise)
             tokio::time::sleep(Duration::from_secs(90)).await;
@@ -907,6 +940,14 @@ tr:hover td{background:#1e1e35;}
                             let cpu_pct = metrics.cpu_usage_percent;
                             let mem_pct = metrics.memory_percent;
                             let disk_pct = metrics.disks.iter()
+                                .filter(|d| {
+                                    // Skip /boot/ mounts unless >99% — the OS manages /boot/ automatically
+                                    if d.mount_point.starts_with("/boot") {
+                                        d.usage_percent > 99.0
+                                    } else {
+                                        true
+                                    }
+                                })
                                 .map(|d| d.usage_percent)
                                 .fold(0.0_f32, f32::max);
 
@@ -926,11 +967,21 @@ tr:hover td{background:#1e1e35;}
                                         "disk" => "Disk",
                                         _ => &alert.alert_type,
                                     };
+
+                                    // AI analysis of the issue
+                                    let ai_suggestion = alert_ai.analyze_issue(
+                                        &format!(
+                                            "{} usage on '{}' is at {:.1}% (threshold: {:.0}%). \
+                                             What are the most likely causes and how can the admin fix this?",
+                                            type_label, display_name, alert.current, alert.threshold
+                                        )
+                                    ).await.unwrap_or_default();
+
                                     let title = format!(
                                         "[WolfStack ALERT] {} {} at {:.1}% on {}",
                                         type_label, "threshold exceeded", alert.current, display_name
                                     );
-                                    let body = format!(
+                                    let mut body = format!(
                                         "⚠️ {} Threshold Alert\n\n\
                                          Hostname: {}\n\
                                          Metric: {} usage\n\
@@ -942,6 +993,11 @@ tr:hover td{background:#1e1e35;}
                                         alert.current, alert.threshold,
                                         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
                                     );
+                                    if !ai_suggestion.is_empty() {
+                                        body.push_str(&format!(
+                                            "\n\n🤖 AI Recommendations:\n{}", ai_suggestion
+                                        ));
+                                    }
 
                                     let cfg = config.clone();
                                     let t = title.clone();
@@ -997,6 +1053,57 @@ tr:hover td{background:#1e1e35;}
                                     alerting::clear_cooldown(&mut cooldowns, &node.id, check_type);
                                 }
                             }
+                            // ── Reboot detection ──
+                            // If uptime is under 10 minutes, the node recently rebooted
+                            if metrics.uptime_secs < 600 {
+                                let reboot_key = format!("{}:reboot", node.id);
+                                if !cooldowns.contains_key(&reboot_key) {
+                                    let uptime_mins = metrics.uptime_secs / 60;
+
+                                    // Gather reboot reason diagnostics
+                                    let diag = if node.is_self {
+                                        gather_reboot_reason_local()
+                                    } else {
+                                        gather_reboot_reason_remote(
+                                            &alert_http, &node.address, node.port, node.tls, &alert_secret
+                                        ).await
+                                    };
+
+                                    // If AI is configured, analyze the diagnostics
+                                    let ai_analysis = alert_ai.analyze_reboot(display_name, &diag).await
+                                        .unwrap_or_default();
+
+                                    let title = format!(
+                                        "[WolfStack ALERT] {} rebooted — uptime {}m",
+                                        display_name, uptime_mins
+                                    );
+                                    let mut body = format!(
+                                        "🔄 Server Reboot Detected\n\n\
+                                         Hostname: {}\n\
+                                         Current Uptime: {} minutes\n\
+                                         Time: {}\n\n\
+                                         Reboot Diagnostics:\n{}",
+                                        display_name, uptime_mins,
+                                        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
+                                        diag
+                                    );
+                                    if !ai_analysis.is_empty() {
+                                        body.push_str(&format!(
+                                            "\n\n🤖 AI Analysis & Recommendations:\n{}",
+                                            ai_analysis
+                                        ));
+                                    }
+
+                                    let cfg = config.clone();
+                                    let t = title.clone();
+                                    let b = body.clone();
+                                    tokio::spawn(async move {
+                                        alerting::send_alert(&cfg, &t, &b).await;
+                                    });
+                                    // Use a long cooldown (1 hour) so we don't re-alert for the same reboot
+                                    cooldowns.insert(reboot_key, std::time::Instant::now());
+                                }
+                            }
                     }
 
                     // ── Container memory monitoring (local node only) ──
@@ -1019,11 +1126,21 @@ tr:hover td{background:#1e1e35;}
                             let cooldown_key = format!("container:{}:memory", alert.container_name);
                             if !alerting::is_in_cooldown(&cooldowns, &cooldown_key, "memory") {
                                 let runtime_label = if alert.runtime == "docker" { "Docker" } else { "LXC" };
+
+                                let ai_suggestion = alert_ai.analyze_issue(
+                                    &format!(
+                                        "{} container '{}' memory usage is at {:.1}% ({} / {}). \
+                                         What are the likely causes and how can the admin reduce memory usage or increase limits?",
+                                        runtime_label, alert.container_name, alert.memory_percent,
+                                        format_bytes(alert.memory_usage), format_bytes(alert.memory_limit)
+                                    )
+                                ).await.unwrap_or_default();
+
                                 let title = format!(
                                     "[WolfStack ALERT] {} container '{}' memory at {:.1}%",
                                     runtime_label, alert.container_name, alert.memory_percent
                                 );
-                                let body = format!(
+                                let mut body = format!(
                                     "⚠️ Container Memory Alert\n\n\
                                      Container: {} ({})\n\
                                      Memory Used: {} / {}\n\
@@ -1036,6 +1153,11 @@ tr:hover td{background:#1e1e35;}
                                     alert.memory_percent, alert.threshold,
                                     chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
                                 );
+                                if !ai_suggestion.is_empty() {
+                                    body.push_str(&format!(
+                                        "\n\n🤖 AI Recommendations:\n{}", ai_suggestion
+                                    ));
+                                }
 
                                 let cfg = config.clone();
                                 let t = title.clone();
@@ -1145,6 +1267,7 @@ tr:hover td{background:#1e1e35;}
         });
 
         // Background: WolfNet auto-restart watchdog (check every 60s, restart at most once/hour)
+        let wolfnet_ai = ai_agent.clone();
         tokio::spawn(async move {
             // Wait for system to stabilise before first check
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -1187,10 +1310,15 @@ tr:hover td{background:#1e1e35;}
                                     warn!("WolfNet auto-restart failed — service did not come up");
                                     if !restart_failed {
                                         restart_failed = true;
+                                        let ai_suggestion = wolfnet_ai.analyze_issue(
+                                            "WolfNet overlay network service is down and an automatic restart failed. \
+                                             The service did not come up after 'systemctl restart wolfnet'. \
+                                             What should the admin check and how can they fix this?"
+                                        ).await.unwrap_or_default();
                                         let config = alerting::AlertConfig::load();
                                         if config.enabled && config.has_channels() {
                                             let title = "[WolfStack ALERT] WolfNet down — auto-restart failed".to_string();
-                                            let body = format!(
+                                            let mut body = format!(
                                                 "⚠️ WolfNet Down\n\n\
                                                  WolfNet was detected as down and an automatic restart was attempted but failed.\n\
                                                  Manual intervention may be required.\n\
@@ -1198,6 +1326,11 @@ tr:hover td{background:#1e1e35;}
                                                  Next restart attempt in 1 hour.",
                                                 chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
                                             );
+                                            if !ai_suggestion.is_empty() {
+                                                body.push_str(&format!(
+                                                    "\n\n🤖 AI Recommendations:\n{}", ai_suggestion
+                                                ));
+                                            }
                                             tokio::spawn(async move {
                                                 alerting::send_alert(&config, &title, &body).await;
                                             });
@@ -1210,10 +1343,16 @@ tr:hover td{background:#1e1e35;}
                                 warn!("WolfNet auto-restart command failed: {}", e);
                                 if !restart_failed {
                                     restart_failed = true;
+                                    let ai_suggestion = wolfnet_ai.analyze_issue(
+                                        &format!(
+                                            "WolfNet overlay network service is down. The 'systemctl restart wolfnet' \
+                                             command failed with error: {}. What should the admin check?", e
+                                        )
+                                    ).await.unwrap_or_default();
                                     let config = alerting::AlertConfig::load();
                                     if config.enabled && config.has_channels() {
                                         let title = "[WolfStack ALERT] WolfNet down — auto-restart failed".to_string();
-                                        let body = format!(
+                                        let mut body = format!(
                                             "⚠️ WolfNet Down\n\n\
                                              WolfNet was detected as down and an automatic restart was attempted but failed.\n\
                                              Error: {}\n\
@@ -1222,6 +1361,11 @@ tr:hover td{background:#1e1e35;}
                                              Next restart attempt in 1 hour.",
                                             e, chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
                                         );
+                                        if !ai_suggestion.is_empty() {
+                                            body.push_str(&format!(
+                                                "\n\n🤖 AI Recommendations:\n{}", ai_suggestion
+                                            ));
+                                        }
                                         tokio::spawn(async move {
                                             alerting::send_alert(&config, &title, &body).await;
                                         });
@@ -1407,6 +1551,101 @@ tr:hover td{background:#1e1e35;}
             Ok(())
         }
     }
+}
+
+/// Gather reboot reason diagnostics from the local machine
+fn gather_reboot_reason_local() -> String {
+    let commands = [
+        ("Last shutdown/reboot entries", "last -x reboot shutdown -n 5 2>/dev/null || last reboot -n 5 2>/dev/null"),
+        ("Previous boot final logs", "journalctl -b -1 -n 30 --no-pager -p warning 2>/dev/null"),
+        ("Kernel panic check", "journalctl -b -1 --no-pager -k 2>/dev/null | grep -i -E 'panic|oom|killed|segfault|error|watchdog' | tail -10"),
+        ("Unattended upgrades", "tail -20 /var/log/unattended-upgrades/unattended-upgrades.log 2>/dev/null || echo '(no unattended-upgrades log)'"),
+    ];
+
+    let mut result = String::new();
+    for (label, cmd) in &commands {
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(cmd)
+            .output();
+        let text = match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let trimmed = stdout.trim().to_string();
+                if trimmed.is_empty() { "(no output)".to_string() } else { trimmed }
+            }
+            Err(e) => format!("(failed: {})", e),
+        };
+        result.push_str(&format!("\n--- {} ---\n{}\n", label, text));
+    }
+
+    // Truncate if too long for notification
+    if result.len() > 3000 {
+        result.truncate(3000);
+        result.push_str("\n[truncated]");
+    }
+    result
+}
+
+/// Gather reboot reason diagnostics from a remote node via /api/ai/exec
+async fn gather_reboot_reason_remote(
+    client: &reqwest::Client,
+    address: &str,
+    port: u16,
+    tls: bool,
+    secret: &str,
+) -> String {
+    let commands = [
+        ("Last shutdown/reboot entries", "last -x reboot shutdown -n 5 2>/dev/null || last reboot -n 5 2>/dev/null"),
+        ("Previous boot final logs", "journalctl -b -1 -n 30 --no-pager -p warning 2>/dev/null"),
+        ("Kernel panic check", "journalctl -b -1 --no-pager -k 2>/dev/null | grep -i -E 'panic|oom|killed|segfault|error|watchdog' | tail -10"),
+    ];
+
+    // Build URL — try inter-node HTTP on port+1 first if TLS, else main port
+    let urls: Vec<String> = if tls {
+        vec![
+            format!("http://{}:{}/api/ai/exec", address, port + 1),
+            format!("https://{}:{}/api/ai/exec", address, port),
+        ]
+    } else {
+        vec![format!("http://{}:{}/api/ai/exec", address, port)]
+    };
+
+    let mut result = String::new();
+    for (label, cmd) in &commands {
+        let mut output = format!("(could not reach node)");
+        for url in &urls {
+            let resp = client
+                .post(url)
+                .header("X-WolfStack-Secret", secret)
+                .json(&serde_json::json!({ "command": *cmd }))
+                .send()
+                .await;
+            match resp {
+                Ok(r) => {
+                    let text = r.text().await.unwrap_or_default();
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(err) = json["error"].as_str() {
+                            output = format!("(error: {})", err);
+                        } else {
+                            output = json["output"].as_str().unwrap_or("(no output)").to_string();
+                        }
+                    } else {
+                        output = "(invalid response)".to_string();
+                    }
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+        result.push_str(&format!("\n--- {} ---\n{}\n", label, output));
+    }
+
+    if result.len() > 3000 {
+        result.truncate(3000);
+        result.push_str("\n[truncated]");
+    }
+    result
 }
 
 /// Find the web directory — check multiple locations
