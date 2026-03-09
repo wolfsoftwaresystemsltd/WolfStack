@@ -17845,6 +17845,33 @@ function switchSettingsTab(tabName) {
 
 // ─── Patreon Integration ───
 
+// Update the header Patreon badge with the user's tier
+async function loadPatreonHeaderBadge() {
+    try {
+        var resp = await fetch('/api/patreon/status');
+        if (!resp.ok) return;
+        var data = await resp.json();
+        var textEl = document.getElementById('patreon-header-text');
+        var badgeEl = document.getElementById('patreon-header-badge');
+        if (!badgeEl) return;
+        if (data.linked && data.tier && data.tier !== 'none') {
+            var tierNames = { free: 'Free', basic: 'Basic', advanced: 'Advanced', platinum: 'Platinum', enterprise: 'Enterprise' };
+            var tierColors = {
+                free: 'linear-gradient(135deg, #6b7280, #9ca3af)',
+                basic: 'linear-gradient(135deg, #16a34a, #22c55e)',
+                advanced: 'linear-gradient(135deg, #2563eb, #3b82f6)',
+                platinum: 'linear-gradient(135deg, #7c3aed, #a855f7)',
+                enterprise: 'linear-gradient(135deg, #dc2626, #ef4444)'
+            };
+            badgeEl.style.background = tierColors[data.tier] || tierColors.basic;
+            badgeEl.textContent = tierNames[data.tier] || data.tier;
+            if (textEl) textEl.textContent = 'Patron \u2014 ' + (data.user_name || 'Linked');
+        }
+    } catch (e) { /* silent */ }
+}
+// Load on page startup
+document.addEventListener('DOMContentLoaded', loadPatreonHeaderBadge);
+
 async function loadPatreonStatus() {
     var statusEl = document.getElementById('patreon-link-status');
     var infoEl = document.getElementById('patreon-linked-info');
