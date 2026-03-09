@@ -829,12 +829,22 @@ if [ ! -f "/etc/wolfstack/config.toml" ]; then
     prompt_read WS_PORT
     WS_PORT=$(echo "$WS_PORT" | tr -d '[:space:][:cntrl:]')
     WS_PORT=${WS_PORT:-8553}
+    # Validate port is a number between 1-65535, fallback to default
+    if ! echo "$WS_PORT" | grep -qE '^[0-9]+$' || [ "$WS_PORT" -lt 1 ] 2>/dev/null || [ "$WS_PORT" -gt 65535 ] 2>/dev/null; then
+        echo "  ⚠ Invalid port '$WS_PORT' — using default 8553"
+        WS_PORT=8553
+    fi
 
     # Prompt for bind address
     echo -n "Bind address [0.0.0.0]: "
     prompt_read WS_BIND
     WS_BIND=$(echo "$WS_BIND" | tr -d '[:cntrl:]' | xargs)
     WS_BIND=${WS_BIND:-0.0.0.0}
+    # Validate bind is a valid IP pattern, fallback to default
+    if ! echo "$WS_BIND" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo "  ⚠ Invalid bind address '$WS_BIND' — using default 0.0.0.0"
+        WS_BIND="0.0.0.0"
+    fi
 
     # Write config
     mkdir -p /etc/wolfstack
