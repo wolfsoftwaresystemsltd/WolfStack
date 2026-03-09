@@ -3844,21 +3844,33 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
 
 /// Update LXC container autostart specifically
 pub fn lxc_set_autostart(container: &str, enabled: bool) -> Result<String, String> {
-    let path = format!("{}/{}/config", lxc_base_dir(container), container);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Config not found: {}", e))?;
+    if is_proxmox() {
+        let val = if enabled { "1" } else { "0" };
+        let output = Command::new("pct")
+            .args(["set", container, "--onboot", val])
+            .output()
+            .map_err(|e| format!("Failed to run pct set: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("pct set failed: {}", stderr));
+        }
+    } else {
+        let path = format!("{}/{}/config", lxc_base_dir(container), container);
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Config not found: {}", e))?;
 
-    let mut new_lines: Vec<String> = content.lines()
-        .filter(|l| !l.trim().starts_with("lxc.start.auto") && !l.trim().starts_with("lxc.start.delay"))
-        .map(|l| l.to_string())
-        .collect();
+        let mut new_lines: Vec<String> = content.lines()
+            .filter(|l| !l.trim().starts_with("lxc.start.auto") && !l.trim().starts_with("lxc.start.delay"))
+            .map(|l| l.to_string())
+            .collect();
 
-    if enabled {
-        new_lines.push("lxc.start.auto = 1".to_string());
-        new_lines.push("lxc.start.delay = 5".to_string());
+        if enabled {
+            new_lines.push("lxc.start.auto = 1".to_string());
+            new_lines.push("lxc.start.delay = 5".to_string());
+        }
+
+        std::fs::write(&path, new_lines.join("\n")).map_err(|e| e.to_string())?;
     }
-
-    std::fs::write(&path, new_lines.join("\n")).map_err(|e| e.to_string())?;
     Ok(format!("Autostart set to {}", enabled))
 }
 
