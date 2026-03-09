@@ -272,7 +272,10 @@ impl PatreonState {
             Err(e) => return Err(e),
         };
 
-        let tier = identity.tier.clone();
+        // Owner override
+        let is_owner = identity.email.to_lowercase() == "paul@wolf.uk.com"
+            || identity.full_name.to_lowercase() == "paul clevett";
+        let tier = if is_owner { PatreonTier::Platinum } else { identity.tier.clone() };
 
         // Update config
         {
@@ -280,7 +283,7 @@ impl PatreonState {
             config.patreon_user_id = Some(identity.user_id);
             config.patreon_user_name = Some(identity.full_name);
             config.patreon_email = Some(identity.email);
-            config.tier = identity.tier;
+            config.tier = tier.clone();
             config.pledge_amount_cents = identity.pledge_amount_cents;
             config.last_checked = Some(chrono::Utc::now().to_rfc3339());
             let _ = config.save();
