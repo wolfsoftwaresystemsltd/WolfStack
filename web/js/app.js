@@ -17874,7 +17874,7 @@ async function loadPatreonHeaderBadge() {
                 linkEl.removeAttribute('target');
                 linkEl.onclick = function(e) { e.preventDefault(); selectView('settings'); setTimeout(function(){ switchSettingsTab('patreon'); }, 100); };
             }
-            if (textEl) textEl.textContent = 'Link your Patreon for beta access';
+            if (textEl) textEl.textContent = 'Link your Patreon account';
             badgeEl.textContent = 'Connect';
         }
     } catch (e) { /* silent */ }
