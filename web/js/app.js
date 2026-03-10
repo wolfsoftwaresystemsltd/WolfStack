@@ -751,7 +751,7 @@ function buildServerTree(nodes) {
                     <span class="wolfrun-svc-count" id="wolfrun-count-${clusterId}" style="margin-left:auto; font-size:10px; padding:1px 6px; background:var(--primary-color,#6366f1); color:#fff; border-radius:10px; display:none;"></span>
                 </a>
                 <a class="nav-item server-child-item cluster-backups-item" data-cluster="${escapedName}" data-view="cluster-backups" onclick="showClusterBackupsPage('${escapedName}')" style="margin-left: 8px; padding: 6px 10px; display:flex; align-items:center; gap:6px;">
-                    <span class="icon" style="font-size:15px;">🛡️</span> <span style="font-weight:600;">Backups</span>
+                    <span class="icon" style="font-size:15px;">💾</span> <span style="font-weight:600;">Backups</span>
                 </a>`;
 
         // Each node within the cluster
@@ -802,7 +802,7 @@ function buildServerTree(nodes) {
                             <span class="icon">🌐</span> Networking
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="backups" onclick="selectServerView('${node.id}', 'backups')">
-                            <span class="icon">🛡️</span> Backups
+                            <span class="icon">💾</span> Backups
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="wolfnet" onclick="selectServerView('${node.id}', 'wolfnet')">
                             <span class="icon">🔗</span> WolfNet
