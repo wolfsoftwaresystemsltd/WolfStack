@@ -32,6 +32,7 @@ mod statuspage;
 mod ceph;
 mod configurator;
 mod patreon;
+mod tui;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_files;

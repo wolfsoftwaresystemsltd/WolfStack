@@ -10641,6 +10641,7 @@ async fn patreon_disconnect(req: HttpRequest, state: web::Data<AppState>) -> Htt
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
         .configure(crate::vms::api::config)
+        .configure(crate::tui::configure)
         // Auth (no auth required)
         .route("/api/auth/login", web::post().to(login))
         .route("/api/auth/logout", web::post().to(logout))
