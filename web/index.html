@@ -1922,7 +1922,7 @@
                 </div>
                 <div class="card-body">
                     <p style="font-size:13px; color:var(--text-secondary); margin-bottom:16px;">
-                        Create a "backup all" schedule and push it to selected nodes. Each node will back up its own containers, VMs, and config on the schedule you define.
+                        Create a backup schedule and push it to selected nodes. Choose to back up everything or pick specific containers, VMs, and configs per node.
                     </p>
                     <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:12px; margin-bottom:16px;">
                         <div class="form-group">
@@ -1951,6 +1951,30 @@
                                 <option value="local">Local — /var/lib/wolfstack/backups</option>
                                 <option value="pbs">PBS (uses each node's PBS config)</option>
                             </select>
+                        </div>
+                    </div>
+                    <!-- Backup scope toggle -->
+                    <div style="margin-bottom:16px;">
+                        <label style="font-size:13px; font-weight:600; color:var(--text-primary); display:block; margin-bottom:8px;">What to Back Up</label>
+                        <div style="display:flex; gap:10px; margin-bottom:12px;">
+                            <label style="display:flex; align-items:center; gap:6px; padding:8px 16px; background:var(--bg-input); border:2px solid var(--primary-color, #6366f1); border-radius:var(--radius-sm); cursor:pointer; font-size:13px; font-weight:500;"
+                                id="cb-scope-all-label">
+                                <input type="radio" name="cb-schedule-scope" value="all" checked onchange="toggleClusterScheduleScope('all')"> Everything on each node
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; padding:8px 16px; background:var(--bg-input); border:2px solid var(--border); border-radius:var(--radius-sm); cursor:pointer; font-size:13px; font-weight:500;"
+                                id="cb-scope-select-label">
+                                <input type="radio" name="cb-schedule-scope" value="select" onchange="toggleClusterScheduleScope('select')"> Select specific targets
+                            </label>
+                        </div>
+                        <!-- Per-node target picker (hidden by default) -->
+                        <div id="cb-schedule-targets-section" style="display:none;">
+                            <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                                <button class="btn btn-sm" onclick="fetchClusterScheduleTargets()" style="background:var(--bg-secondary); border:1px solid var(--border);">
+                                    🔄 Load Targets from Nodes
+                                </button>
+                                <span id="cb-schedule-targets-status" style="font-size:12px; color:var(--text-muted);"></span>
+                            </div>
+                            <div id="cb-schedule-targets-list"></div>
                         </div>
                     </div>
                     <!-- Node selection for schedule -->

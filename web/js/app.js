@@ -14324,6 +14324,9 @@ async function copyPbsConfigToNodes() {
     loadClusterBackups();
 }
 
+// Cached per-node targets for cluster schedule
+let _clusterScheduleTargets = {}; // nodeId -> [targets]
+
 function renderScheduleNodeCheckboxes(clusterNodes) {
     const container = document.getElementById('cb-schedule-node-checkboxes');
     if (!container) return;
@@ -14344,6 +14347,105 @@ function renderScheduleNodeCheckboxes(clusterNodes) {
     }).join('');
 }
 
+function toggleClusterScheduleScope(scope) {
+    const targetsSection = document.getElementById('cb-schedule-targets-section');
+    const allLabel = document.getElementById('cb-scope-all-label');
+    const selLabel = document.getElementById('cb-scope-select-label');
+    if (scope === 'all') {
+        if (targetsSection) targetsSection.style.display = 'none';
+        if (allLabel) allLabel.style.borderColor = 'var(--primary-color, #6366f1)';
+        if (selLabel) selLabel.style.borderColor = 'var(--border)';
+    } else {
+        if (targetsSection) targetsSection.style.display = '';
+        if (allLabel) allLabel.style.borderColor = 'var(--border)';
+        if (selLabel) selLabel.style.borderColor = 'var(--primary-color, #6366f1)';
+        // Auto-fetch targets if we haven't yet
+        if (Object.keys(_clusterScheduleTargets).length === 0) fetchClusterScheduleTargets();
+    }
+}
+
+async function fetchClusterScheduleTargets() {
+    const selectedIds = [...document.querySelectorAll('.cb-sched-node-cb:checked')].map(cb => cb.value);
+    const nodes = allNodes.filter(n => selectedIds.includes(n.id) && n.online);
+    if (nodes.length === 0) { showToast('No online nodes selected', 'error'); return; }
+
+    const statusEl = document.getElementById('cb-schedule-targets-status');
+    if (statusEl) statusEl.textContent = 'Loading targets from nodes...';
+
+    _clusterScheduleTargets = {};
+    const results = await Promise.allSettled(nodes.map(async (node) => {
+        try {
+            const res = await fetch(nodeApiUrl(node.id, '/api/backups/targets'));
+            if (!res.ok) return { node, targets: [] };
+            const targets = await res.json();
+            return { node, targets: Array.isArray(targets) ? targets : [] };
+        } catch (e) {
+            return { node, targets: [] };
+        }
+    }));
+
+    let totalTargets = 0;
+    for (const r of results) {
+        const res = r.status === 'fulfilled' ? r.value : null;
+        if (res && res.node) {
+            _clusterScheduleTargets[res.node.id] = { node: res.node, targets: res.targets };
+            totalTargets += res.targets.length;
+        }
+    }
+
+    if (statusEl) statusEl.textContent = `Found ${totalTargets} target(s) across ${Object.keys(_clusterScheduleTargets).length} node(s)`;
+    renderClusterScheduleTargets();
+}
+
+function renderClusterScheduleTargets() {
+    const container = document.getElementById('cb-schedule-targets-list');
+    if (!container) return;
+
+    const EMOJIS = { docker: '🐳', lxc: '📦', vm: '🖥️', config: '⚙️' };
+    const sorted = sortNodesByClusterThenName(Object.values(_clusterScheduleTargets).map(v => v.node));
+
+    let html = '';
+    for (const node of sorted) {
+        const entry = _clusterScheduleTargets[node.id];
+        if (!entry) continue;
+        const targets = entry.targets;
+        const nodeIdSafe = node.id.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const cluster = node.cluster_name || 'WolfStack';
+
+        html += `<div style="margin-bottom:12px; border:1px solid var(--border); border-radius:var(--radius-sm); overflow:hidden;">
+            <div style="display:flex; align-items:center; gap:8px; padding:10px 14px; background:var(--bg-secondary); border-bottom:1px solid var(--border);">
+                <span class="server-dot ${node.online ? 'online' : 'offline'}" style="display:inline-block;"></span>
+                <strong style="font-size:13px;">${escapeHtml(node.hostname)}</strong>
+                <span style="font-size:11px; color:var(--text-muted);">${escapeHtml(cluster)}</span>
+                <span style="margin-left:auto; font-size:11px; color:var(--text-muted);">${targets.length} targets</span>
+                <label style="font-size:12px; cursor:pointer; display:flex; align-items:center; gap:4px;">
+                    <input type="checkbox" checked onchange="document.querySelectorAll('.cb-target-${nodeIdSafe}').forEach(cb => cb.checked = this.checked)"> All
+                </label>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:6px; padding:10px;">`;
+
+        if (targets.length === 0) {
+            html += `<span style="color:var(--text-muted); font-size:12px; grid-column:1/-1;">No backup targets found</span>`;
+        } else {
+            for (const t of targets) {
+                const emoji = EMOJIS[t.type] || '📄';
+                const label = t.type === 'config' ? 'WolfStack Config' : (t.name || t.type);
+                const val = JSON.stringify({ type: t.type, name: t.name || '' }).replace(/"/g, '&quot;');
+                html += `<label style="display:flex; align-items:center; gap:8px; padding:6px 10px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); cursor:pointer; font-size:12px;"
+                    onmouseover="this.style.borderColor='var(--border-light)'" onmouseout="this.style.borderColor='var(--border)'">
+                    <input type="checkbox" class="cb-target-${nodeIdSafe}" data-node-id="${node.id}" value="${val}" checked>
+                    <span>${emoji}</span>
+                    <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(label)}</span>
+                    <span style="margin-left:auto; font-size:10px; color:var(--text-muted); text-transform:uppercase;">${t.type}</span>
+                </label>`;
+            }
+        }
+        html += `</div></div>`;
+    }
+
+    container.innerHTML = html || '<p style="color:var(--text-muted); font-size:13px;">Click "Load Targets from Nodes" to fetch available backup targets.</p>';
+}
+
 async function pushClusterSchedule() {
     const name = (document.getElementById('cb-schedule-name') || {}).value?.trim();
     if (!name) { showToast('Enter a schedule name', 'error'); return; }
@@ -14352,12 +14454,35 @@ async function pushClusterSchedule() {
     const time = (document.getElementById('cb-schedule-time') || {}).value?.trim() || '02:00';
     const retention = parseInt((document.getElementById('cb-schedule-retention') || {}).value) || 0;
     const storageType = (document.getElementById('cb-schedule-storage') || {}).value || 'local';
+    const scope = document.querySelector('input[name="cb-schedule-scope"]:checked')?.value || 'all';
 
     const selectedIds = [...document.querySelectorAll('.cb-sched-node-cb:checked')].map(cb => cb.value);
     if (selectedIds.length === 0) { showToast('No nodes selected', 'error'); return; }
 
     const nodes = allNodes.filter(n => selectedIds.includes(n.id));
-    if (!await showConfirm(`Create schedule "${name}" (${frequency} at ${time} UTC) on ${nodes.length} node(s)?\n\n${nodes.map(n => n.hostname).join(', ')}`)) return;
+
+    // Build per-node target lists if scope is "select"
+    let perNodeTargets = {};
+    if (scope === 'select') {
+        for (const node of nodes) {
+            const nodeIdSafe = node.id.replace(/[^a-zA-Z0-9_-]/g, '_');
+            const checked = document.querySelectorAll(`.cb-target-${nodeIdSafe}:checked`);
+            const allCbs = document.querySelectorAll(`.cb-target-${nodeIdSafe}`);
+            if (allCbs.length > 0 && checked.length === allCbs.length) {
+                perNodeTargets[node.id] = null; // all selected = backup_all
+            } else {
+                const targets = [];
+                checked.forEach(cb => {
+                    try { targets.push(JSON.parse(cb.value)); } catch (e) {}
+                });
+                perNodeTargets[node.id] = targets;
+            }
+        }
+    }
+
+    const summary = scope === 'all' ? 'backing up everything'
+        : 'backing up selected targets';
+    if (!await showConfirm(`Create schedule "${name}" (${frequency} at ${time} UTC) on ${nodes.length} node(s), ${summary}?\n\n${nodes.map(n => n.hostname).join(', ')}`)) return;
 
     let storage;
     if (storageType === 'pbs') {
@@ -14366,19 +14491,21 @@ async function pushClusterSchedule() {
         storage = { type: 'local', path: '/var/lib/wolfstack/backups' };
     }
 
-    const body = {
-        name,
-        frequency,
-        time,
-        retention,
-        backup_all: true,
-        targets: [],
-        storage,
-        enabled: true,
-    };
-
     let success = 0, failed = 0;
     const results = await Promise.allSettled(nodes.map(async (node) => {
+        let backupAll = true;
+        let targets = [];
+        if (scope === 'select' && perNodeTargets[node.id] !== undefined) {
+            if (perNodeTargets[node.id] === null) {
+                backupAll = true;
+            } else {
+                backupAll = false;
+                targets = perNodeTargets[node.id];
+            }
+        }
+
+        const body = { name, frequency, time, retention, backup_all: backupAll, targets, storage, enabled: true };
+
         try {
             const url = nodeApiUrl(node.id, '/api/backups/schedules');
             const res = await fetch(url, {
