@@ -4995,6 +4995,24 @@ pub struct PbsConfigRequest {
     pub pbs_namespace: String,
 }
 
+/// GET /api/backups/pbs/config/full — return PBS config INCLUDING secrets (for node-to-node copy)
+pub async fn pbs_config_get_full(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let config = backup::load_pbs_config();
+    HttpResponse::Ok().json(serde_json::json!({
+        "pbs_server": config.pbs_server,
+        "pbs_datastore": config.pbs_datastore,
+        "pbs_user": config.pbs_user,
+        "pbs_token_name": config.pbs_token_name,
+        "pbs_token_secret": config.pbs_token_secret,
+        "pbs_password": config.pbs_password,
+        "pbs_fingerprint": config.pbs_fingerprint,
+        "pbs_namespace": config.pbs_namespace,
+    }))
+}
+
 /// POST /api/backups/pbs/config — save PBS configuration
 pub async fn pbs_config_save(
     req: HttpRequest, state: web::Data<AppState>,
@@ -10866,6 +10884,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups/pbs/restore/progress", web::get().to(pbs_restore_progress))
         .route("/api/backups/pbs/config", web::get().to(pbs_config_get))
         .route("/api/backups/pbs/config", web::post().to(pbs_config_save))
+        .route("/api/backups/pbs/config/full", web::get().to(pbs_config_get_full))
         // Generic backup {id} routes — after specific routes
         .route("/api/backups/{id}", web::delete().to(backup_delete))
         .route("/api/backups/{id}/restore", web::post().to(backup_restore))

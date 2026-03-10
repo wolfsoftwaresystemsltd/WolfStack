@@ -1915,6 +1915,55 @@
                 </div>
             </div>
 
+            <!-- Create Schedule Across Nodes -->
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>📅 Create Cluster Schedule</h3>
+                </div>
+                <div class="card-body">
+                    <p style="font-size:13px; color:var(--text-secondary); margin-bottom:16px;">
+                        Create a "backup all" schedule and push it to selected nodes. Each node will back up its own containers, VMs, and config on the schedule you define.
+                    </p>
+                    <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:12px; margin-bottom:16px;">
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary);">Schedule Name</label>
+                            <input type="text" id="cb-schedule-name" class="form-control" placeholder="Nightly Cluster Backup">
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary);">Frequency</label>
+                            <select id="cb-schedule-frequency" class="form-control">
+                                <option value="daily">Daily</option>
+                                <option value="weekly">Weekly</option>
+                                <option value="monthly">Monthly</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary);">Time (UTC, HH:MM)</label>
+                            <input type="text" id="cb-schedule-time" class="form-control" placeholder="02:00" value="02:00">
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary);">Retention (0 = unlimited)</label>
+                            <input type="number" id="cb-schedule-retention" class="form-control" value="7" min="0">
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:12px; color:var(--text-secondary);">Storage</label>
+                            <select id="cb-schedule-storage" class="form-control">
+                                <option value="local">Local — /var/lib/wolfstack/backups</option>
+                                <option value="pbs">PBS (uses each node's PBS config)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <!-- Node selection for schedule -->
+                    <div style="margin-bottom:16px;">
+                        <label style="font-size:13px; font-weight:600; color:var(--text-primary); display:block; margin-bottom:8px;">Target Nodes</label>
+                        <div id="cb-schedule-node-checkboxes" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:8px;"></div>
+                    </div>
+                    <button class="btn btn-primary" onclick="pushClusterSchedule()" style="font-weight:600;">
+                        📅 Push Schedule to Selected Nodes
+                    </button>
+                </div>
+            </div>
+
             <!-- PBS Configuration — Copy to All Nodes -->
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">

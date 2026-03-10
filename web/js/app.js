@@ -6553,15 +6553,38 @@ function activityStop() {
 
 // ─── Toast Notifications ───
 function showToast(message, type = 'info', duration = 5000, id = null) {
-    const container = document.getElementById('toast-container');
-    if (!container) return;
+    let container = document.getElementById('toast-container');
+    if (!container) {
+        // Create container if it doesn't exist
+        container = document.createElement('div');
+        container.id = 'toast-container';
+        container.className = 'toast-container';
+        Object.assign(container.style, {
+            position: 'fixed', top: '20px', right: '20px', zIndex: '10000',
+            display: 'flex', flexDirection: 'column', gap: '10px', pointerEvents: 'none'
+        });
+        document.body.appendChild(container);
+    }
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
     if (id) toast.id = id;
     const icons = { success: '✅', error: '❌', info: 'ℹ️' };
+    const bgColors = { success: 'linear-gradient(135deg, #166534, #14532d)', error: 'linear-gradient(135deg, #991b1b, #7f1d1d)', info: 'linear-gradient(135deg, #1e3a5f, #172554)' };
+    const borderColors = { success: '#4ade80', error: '#f87171', info: '#60a5fa' };
+    // Inline styles as guaranteed fallback
+    Object.assign(toast.style, {
+        padding: '14px 20px', background: bgColors[type] || bgColors.info,
+        borderLeft: '4px solid ' + (borderColors[type] || borderColors.info),
+        borderRadius: '8px', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+        display: 'flex', alignItems: 'center', gap: '10px',
+        fontSize: '14px', fontWeight: '500', color: '#fff',
+        minWidth: '280px', maxWidth: '440px', pointerEvents: 'auto',
+        animation: 'toastSlideIn 0.35s cubic-bezier(0.21,1.02,0.73,1) forwards',
+        transition: 'opacity 0.3s ease, transform 0.3s ease'
+    });
     toast.innerHTML = `<span style="font-size:18px; flex-shrink:0;">${icons[type] || 'ℹ️'}</span>
-        <span class="toast-message" style="flex:1;">${message}</span>
-        <span onclick="this.parentElement.remove()" style="cursor:pointer; opacity:0.6; font-size:16px; flex-shrink:0; margin-left:8px;" title="Dismiss">&times;</span>`;
+        <span style="flex:1;">${message}</span>
+        <span onclick="this.parentElement.remove()" style="cursor:pointer; opacity:0.7; font-size:18px; flex-shrink:0; margin-left:8px; line-height:1;" title="Dismiss">&times;</span>`;
     container.appendChild(toast);
     if (duration > 0) {
         setTimeout(() => {
@@ -14096,6 +14119,7 @@ async function loadClusterBackups() {
     renderClusterSchedules(allSchedules);
     renderClusterPbsNodeStatus(nodeResults);
     renderPbsNodeCheckboxes(allWsNodes);
+    renderScheduleNodeCheckboxes(clusterNodes);
 }
 
 function renderClusterBackupHistory(backups) {
@@ -14176,7 +14200,14 @@ function renderClusterPbsNodeStatus(nodeResults) {
     const container = document.getElementById('cb-pbs-node-status');
     if (!container) return;
 
-    const rows = nodeResults.filter(nr => nr && nr.node).map(nr => {
+    const sorted = nodeResults.filter(nr => nr && nr.node).sort((a, b) => {
+        const ca = (a.node.cluster_name || 'WolfStack').toLowerCase();
+        const cb = (b.node.cluster_name || 'WolfStack').toLowerCase();
+        if (ca !== cb) return ca.localeCompare(cb);
+        return (a.node.hostname || '').toLowerCase().localeCompare((b.node.hostname || '').toLowerCase());
+    });
+
+    const rows = sorted.map(nr => {
         const pbs = nr.pbs;
         let statusHtml;
         if (!pbs) {
@@ -14200,13 +14231,24 @@ function renderClusterPbsNodeStatus(nodeResults) {
         : '<p style="color:var(--text-muted); font-size:13px;">No nodes available to check.</p>';
 }
 
+function sortNodesByClusterThenName(nodes) {
+    return [...nodes].sort((a, b) => {
+        const ca = (a.cluster_name || 'WolfStack').toLowerCase();
+        const cb = (b.cluster_name || 'WolfStack').toLowerCase();
+        if (ca !== cb) return ca.localeCompare(cb);
+        return (a.hostname || '').toLowerCase().localeCompare((b.hostname || '').toLowerCase());
+    });
+}
+
 function renderPbsNodeCheckboxes(wsNodes) {
     const container = document.getElementById('cb-pbs-node-checkboxes');
     if (!container) return;
 
+    const sorted = sortNodesByClusterThenName(wsNodes);
+
     container.innerHTML = `<label style="display:flex; align-items:center; gap:8px; padding:8px 12px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); cursor:pointer; font-size:13px; font-weight:600;">
-        <input type="checkbox" id="cb-pbs-select-all" checked onchange="toggleClusterPbsNodes(this.checked)"> Select All (${wsNodes.length} nodes)
-    </label>` + wsNodes.map(n => {
+        <input type="checkbox" id="cb-pbs-select-all" checked onchange="toggleClusterPbsNodes(this.checked)"> Select All (${sorted.length} nodes)
+    </label>` + sorted.map(n => {
         const cluster = n.cluster_name || 'WolfStack';
         return `<label style="display:flex; align-items:center; gap:8px; padding:8px 12px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); cursor:pointer; font-size:13px;"
             onmouseover="this.style.borderColor='var(--border-light)'" onmouseout="this.style.borderColor='var(--border)'">
@@ -14282,50 +14324,200 @@ async function copyPbsConfigToNodes() {
     loadClusterBackups();
 }
 
+function renderScheduleNodeCheckboxes(clusterNodes) {
+    const container = document.getElementById('cb-schedule-node-checkboxes');
+    if (!container) return;
+
+    const sorted = sortNodesByClusterThenName(clusterNodes);
+
+    container.innerHTML = `<label style="display:flex; align-items:center; gap:8px; padding:8px 12px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); cursor:pointer; font-size:13px; font-weight:600;">
+        <input type="checkbox" id="cb-sched-select-all" checked onchange="document.querySelectorAll('.cb-sched-node-cb:not(:disabled)').forEach(cb => cb.checked = this.checked)"> Select All (${sorted.length} nodes)
+    </label>` + sorted.map(n => {
+        const cluster = n.cluster_name || 'WolfStack';
+        return `<label style="display:flex; align-items:center; gap:8px; padding:8px 12px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); cursor:pointer; font-size:13px;"
+            onmouseover="this.style.borderColor='var(--border-light)'" onmouseout="this.style.borderColor='var(--border)'">
+            <input type="checkbox" class="cb-sched-node-cb" value="${n.id}" checked ${!n.online ? 'disabled' : ''}>
+            <span class="server-dot ${n.online ? 'online' : 'offline'}" style="display:inline-block;"></span>
+            <span style="flex:1;">${escapeHtml(n.hostname)}</span>
+            <span style="font-size:11px; color:var(--text-muted);">${escapeHtml(cluster)}</span>
+        </label>`;
+    }).join('');
+}
+
+async function pushClusterSchedule() {
+    const name = (document.getElementById('cb-schedule-name') || {}).value?.trim();
+    if (!name) { showToast('Enter a schedule name', 'error'); return; }
+
+    const frequency = (document.getElementById('cb-schedule-frequency') || {}).value || 'daily';
+    const time = (document.getElementById('cb-schedule-time') || {}).value?.trim() || '02:00';
+    const retention = parseInt((document.getElementById('cb-schedule-retention') || {}).value) || 0;
+    const storageType = (document.getElementById('cb-schedule-storage') || {}).value || 'local';
+
+    const selectedIds = [...document.querySelectorAll('.cb-sched-node-cb:checked')].map(cb => cb.value);
+    if (selectedIds.length === 0) { showToast('No nodes selected', 'error'); return; }
+
+    const nodes = allNodes.filter(n => selectedIds.includes(n.id));
+    if (!await showConfirm(`Create schedule "${name}" (${frequency} at ${time} UTC) on ${nodes.length} node(s)?\n\n${nodes.map(n => n.hostname).join(', ')}`)) return;
+
+    let storage;
+    if (storageType === 'pbs') {
+        storage = { type: 'pbs' };
+    } else {
+        storage = { type: 'local', path: '/var/lib/wolfstack/backups' };
+    }
+
+    const body = {
+        name,
+        frequency,
+        time,
+        retention,
+        backup_all: true,
+        targets: [],
+        storage,
+        enabled: true,
+    };
+
+    let success = 0, failed = 0;
+    const results = await Promise.allSettled(nodes.map(async (node) => {
+        try {
+            const url = nodeApiUrl(node.id, '/api/backups/schedules');
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            return { node, ok: true };
+        } catch (e) {
+            return { node, ok: false, error: e.message };
+        }
+    }));
+
+    for (const r of results) {
+        const res = r.status === 'fulfilled' ? r.value : { ok: false };
+        if (res.ok) success++;
+        else failed++;
+    }
+
+    if (failed === 0) {
+        showToast(`Schedule "${name}" created on all ${success} node(s)`, 'success');
+    } else {
+        showToast(`Schedule: ${success} succeeded, ${failed} failed`, failed > 0 ? 'error' : 'success');
+    }
+
+    loadClusterBackups();
+}
+
 async function loadPbsConfigFromNode() {
-    // Find the first online WolfStack node that has PBS configured
     const wsNodes = getAllWolfStackNodes().filter(n => n.online);
     if (wsNodes.length === 0) {
         showToast('No online nodes available', 'error');
         return;
     }
 
-    let foundCfg = null;
-    let fromNode = null;
-    for (const node of wsNodes) {
+    // Scan all nodes for PBS config in parallel
+    const scans = await Promise.allSettled(wsNodes.map(async (node) => {
         try {
             const res = await fetch(nodeApiUrl(node.id, '/api/backups/pbs/config'));
-            if (res.ok) {
-                const cfg = await res.json();
-                if (cfg.pbs_server) {
-                    foundCfg = cfg;
-                    fromNode = node;
-                    break;
-                }
-            }
-        } catch (e) { /* skip */ }
+            if (!res.ok) return { node, configured: false };
+            const cfg = await res.json();
+            return { node, configured: !!cfg.pbs_server, cfg };
+        } catch (e) {
+            return { node, configured: false };
+        }
+    }));
+
+    const nodeStatuses = scans.map(r => r.status === 'fulfilled' ? r.value : null).filter(Boolean);
+
+    // Remove any existing modal
+    const existing = document.getElementById('pbs-pull-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'pbs-pull-modal';
+    modal.className = 'modal-overlay active';
+
+    const nodeRows = nodeStatuses.map(ns => {
+        const cluster = ns.node.cluster_name || 'WolfStack';
+        const configured = ns.configured;
+        const statusBadge = configured
+            ? `<span class="badge" style="background:#22c55e; color:#fff; font-size:11px;">PBS Configured</span>`
+            : `<span class="badge" style="background:#6b7280; color:#fff; font-size:11px;">Not Configured</span>`;
+        const summary = configured
+            ? `<span style="font-size:11px; color:var(--text-muted);">${escapeHtml(ns.cfg.pbs_server)} / ${escapeHtml(ns.cfg.pbs_datastore)}</span>`
+            : '';
+        const btn = configured
+            ? `<button class="btn btn-sm btn-primary" onclick="pullPbsFromNode('${ns.node.id}')" style="font-size:11px; padding:3px 12px;">Pull</button>`
+            : '';
+        return `<div style="display:flex; align-items:center; gap:10px; padding:10px 14px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm);">
+            <span class="server-dot online" style="display:inline-block;"></span>
+            <div style="flex:1; min-width:0;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <strong style="font-size:13px;">${escapeHtml(ns.node.hostname)}</strong>
+                    <span style="font-size:11px; color:var(--text-muted);">${escapeHtml(cluster)}</span>
+                    ${statusBadge}
+                </div>
+                ${summary ? `<div style="margin-top:2px;">${summary}</div>` : ''}
+            </div>
+            ${btn}
+        </div>`;
+    }).join('');
+
+    const configuredCount = nodeStatuses.filter(ns => ns.configured).length;
+
+    modal.innerHTML = `
+        <div class="modal" style="max-width:560px;">
+            <div class="modal-header">
+                <h3>📥 Pull PBS Config from Node</h3>
+                <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="font-size:13px; color:var(--text-secondary); margin-bottom:14px;">
+                    ${configuredCount} of ${nodeStatuses.length} online node(s) have PBS configured.
+                    Choose a node to pull the full configuration from (including passwords and secrets).
+                </p>
+                <div style="display:grid; gap:8px;">
+                    ${nodeRows}
+                </div>
+                ${configuredCount === 0 ? '<p style="text-align:center; padding:16px; color:var(--text-muted);">No nodes have PBS configured yet. Enter the details manually above.</p>' : ''}
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="this.closest('.modal-overlay').remove()">Close</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+}
+
+async function pullPbsFromNode(nodeId) {
+    const node = allNodes.find(n => n.id === nodeId);
+    if (!node) return;
+
+    try {
+        // Use the /full endpoint to get secrets too
+        const res = await fetch(nodeApiUrl(nodeId, '/api/backups/pbs/config/full'));
+        if (!res.ok) throw new Error('Failed to fetch config');
+        const cfg = await res.json();
+
+        const setVal = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || ''; };
+        setVal('cb-pbs-server', cfg.pbs_server);
+        setVal('cb-pbs-datastore', cfg.pbs_datastore);
+        setVal('cb-pbs-user', cfg.pbs_user);
+        setVal('cb-pbs-token-name', cfg.pbs_token_name);
+        setVal('cb-pbs-token-secret', cfg.pbs_token_secret);
+        setVal('cb-pbs-password', cfg.pbs_password);
+        setVal('cb-pbs-fingerprint', cfg.pbs_fingerprint);
+        setVal('cb-pbs-namespace', cfg.pbs_namespace);
+
+        // Close the modal
+        const modal = document.getElementById('pbs-pull-modal');
+        if (modal) modal.remove();
+
+        showToast(`Pulled full PBS config from ${node.hostname} — ready to push to other nodes`, 'success');
+    } catch (e) {
+        showToast(`Failed to pull config from ${node.hostname}: ${e.message}`, 'error');
     }
-
-    if (!foundCfg) {
-        showToast('No PBS configuration found on any node', 'error');
-        return;
-    }
-
-    // Populate the form fields
-    const setVal = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || ''; };
-    setVal('cb-pbs-server', foundCfg.pbs_server);
-    setVal('cb-pbs-datastore', foundCfg.pbs_datastore);
-    setVal('cb-pbs-user', foundCfg.pbs_user);
-    setVal('cb-pbs-token-name', foundCfg.pbs_token_name);
-    setVal('cb-pbs-fingerprint', foundCfg.pbs_fingerprint);
-    setVal('cb-pbs-namespace', foundCfg.pbs_namespace);
-    // Don't populate secrets — they aren't returned by the API
-    const secEl = document.getElementById('cb-pbs-token-secret');
-    if (secEl && foundCfg.has_token_secret) secEl.placeholder = '(saved on node — re-enter to push)';
-    const pwEl = document.getElementById('cb-pbs-password');
-    if (pwEl && foundCfg.has_password) pwEl.placeholder = '(saved on node — re-enter to push)';
-
-    showToast(`Pulled PBS config from ${fromNode.hostname}. Re-enter password/token secret to push to other nodes.`, 'success');
 }
 
 // ═══════════════════════════════════════════════════
