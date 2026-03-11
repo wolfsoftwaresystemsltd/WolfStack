@@ -294,12 +294,95 @@ echo "✓ Storage directories configured"
 if ! command -v docker &> /dev/null; then
     echo ""
     echo "Installing Docker..."
-    if curl -fsSL https://get.docker.com | sh; then
+    DOCKER_INSTALLED=false
+
+    # Try the official convenience script first (works for Ubuntu, Debian, Fedora, CentOS, RHEL)
+    if curl -fsSL https://get.docker.com | sh 2>/dev/null; then
+        DOCKER_INSTALLED=true
+    else
+        # Convenience script failed — likely a derivative distro (Nobara, Rocky, Alma, etc.)
+        # Detect the distro family from /etc/os-release and set up Docker repo manually
+        echo "  Convenience script failed — trying manual Docker repo setup..."
+        DISTRO_ID=$(. /etc/os-release 2>/dev/null && echo "$ID")
+        DISTRO_LIKE=$(. /etc/os-release 2>/dev/null && echo "$ID_LIKE")
+        DISTRO_VERSION=$(. /etc/os-release 2>/dev/null && echo "$VERSION_ID")
+
+        if echo "$DISTRO_ID $DISTRO_LIKE" | grep -qiE "fedora"; then
+            # Fedora family (Nobara, Ultramarine, etc.) — use Fedora Docker repo
+            # Use the major Fedora version the derivative is based on
+            FEDORA_VER="$DISTRO_VERSION"
+            # For derivatives, try to detect the Fedora base version
+            if [ "$DISTRO_ID" != "fedora" ]; then
+                PLATFORM_ID=$(. /etc/os-release 2>/dev/null && echo "$PLATFORM_ID")
+                if echo "$PLATFORM_ID" | grep -q "fedora"; then
+                    FEDORA_VER=$(echo "$PLATFORM_ID" | grep -oP 'f\K[0-9]+' || echo "$DISTRO_VERSION")
+                fi
+            fi
+            echo "  Detected Fedora family (${DISTRO_ID} based on Fedora ${FEDORA_VER})"
+            dnf -y install dnf-plugins-core 2>/dev/null || true
+            dnf config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo 2>/dev/null || \
+                dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo 2>/dev/null || true
+            # Override $releasever with actual Fedora version for derivatives
+            if [ "$DISTRO_ID" != "fedora" ] && [ -n "$FEDORA_VER" ]; then
+                sed -i "s/\$releasever/${FEDORA_VER}/g" /etc/yum.repos.d/docker-ce.repo 2>/dev/null || true
+            fi
+            if dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+                DOCKER_INSTALLED=true
+            fi
+        elif echo "$DISTRO_ID $DISTRO_LIKE" | grep -qiE "rhel|centos"; then
+            # RHEL family (Rocky, Alma, Oracle, etc.) — use CentOS Docker repo
+            echo "  Detected RHEL/CentOS family (${DISTRO_ID})"
+            yum install -y yum-utils 2>/dev/null || true
+            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || \
+                dnf config-manager addrepo --from-repofile=https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || true
+            if yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || \
+               dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null; then
+                DOCKER_INSTALLED=true
+            fi
+        elif echo "$DISTRO_ID $DISTRO_LIKE" | grep -qiE "suse|sles"; then
+            # openSUSE/SLES — use distro docker packages
+            echo "  Detected SUSE family (${DISTRO_ID})"
+            if zypper install -y docker docker-compose 2>/dev/null; then
+                DOCKER_INSTALLED=true
+            fi
+        elif echo "$DISTRO_ID $DISTRO_LIKE" | grep -qiE "debian|ubuntu"; then
+            # Debian derivatives (Mint, Pop!_OS, etc.) — use Debian/Ubuntu Docker repo
+            UPSTREAM="debian"
+            CODENAME=$(. /etc/os-release 2>/dev/null && echo "$UBUNTU_CODENAME")
+            if [ -n "$CODENAME" ]; then
+                UPSTREAM="ubuntu"
+            else
+                CODENAME=$(. /etc/os-release 2>/dev/null && echo "$VERSION_CODENAME")
+                # For derivatives, fall back to a known stable codename
+                if [ -z "$CODENAME" ]; then CODENAME="bookworm"; fi
+            fi
+            echo "  Detected Debian family (${DISTRO_ID}, using ${UPSTREAM}/${CODENAME})"
+            apt update -qq 2>/dev/null
+            apt install -y ca-certificates curl gnupg 2>/dev/null
+            install -m 0755 -d /etc/apt/keyrings
+            curl -fsSL "https://download.docker.com/linux/${UPSTREAM}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
+            chmod a+r /etc/apt/keyrings/docker.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${UPSTREAM} ${CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+            apt update -qq 2>/dev/null
+            if apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+                DOCKER_INSTALLED=true
+            fi
+        elif echo "$DISTRO_ID $DISTRO_LIKE" | grep -qiE "arch|manjaro"; then
+            # Arch family
+            echo "  Detected Arch family (${DISTRO_ID})"
+            if pacman -Sy --noconfirm docker docker-compose 2>/dev/null; then
+                DOCKER_INSTALLED=true
+            fi
+        fi
+    fi
+
+    if [ "$DOCKER_INSTALLED" = true ]; then
         systemctl enable docker 2>/dev/null || true
         systemctl start docker 2>/dev/null || true
         echo "✓ Docker installed"
     else
-        echo "⚠ Failed to install Docker automatically. Please install manually."
+        echo "⚠ Failed to install Docker automatically."
+        echo "  Please install Docker manually: https://docs.docker.com/engine/install/"
     fi
 else
     echo "✓ Docker already installed"
