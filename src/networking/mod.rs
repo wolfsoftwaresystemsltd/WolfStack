@@ -1089,16 +1089,23 @@ pub fn generate_wolfnet_invite() -> Result<serde_json::Value, String> {
 
 /// Detect public IP address (used for invite tokens)
 fn detect_public_ip() -> Option<String> {
-    // Try curl to ipify  
-    let output = Command::new("curl")
-        .args(["-s", "--connect-timeout", "5", "https://api.ipify.org"])
-        .output()
-        .ok()?;
-    
-    if output.status.success() {
-        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if ip.parse::<std::net::Ipv4Addr>().is_ok() {
-            return Some(ip);
+    let services = [
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+        "https://checkip.amazonaws.com",
+    ];
+    for url in &services {
+        if let Ok(output) = Command::new("curl")
+            .args(["-sf", "--connect-timeout", "3", url])
+            .output()
+        {
+            if output.status.success() {
+                let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if ip.parse::<std::net::Ipv4Addr>().is_ok() {
+                    return Some(ip);
+                }
+            }
         }
     }
     None
@@ -2831,14 +2838,25 @@ fn detect_wolfnet_subnet() -> Option<String> {
 
 /// Detect the best endpoint address for clients to connect to
 fn detect_server_endpoint(port: u16) -> String {
-    // Try public IP first
-    if let Ok(output) = Command::new("curl")
-        .args(["-s", "--connect-timeout", "3", "https://ifconfig.me/ip"])
-        .output()
-    {
-        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !ip.is_empty() && output.status.success() {
-            return format!("{}:{}", ip, port);
+    // Try multiple public IP services with -f (fail on HTTP errors like 403)
+    let services = [
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+        "https://checkip.amazonaws.com",
+    ];
+    for url in &services {
+        if let Ok(output) = Command::new("curl")
+            .args(["-sf", "--connect-timeout", "3", url])
+            .output()
+        {
+            let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // Validate it looks like an IP address (not HTML or garbage)
+            if output.status.success() && !ip.is_empty() && !ip.contains('<')
+                && ip.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ':')
+            {
+                return format!("{}:{}", ip, port);
+            }
         }
     }
 

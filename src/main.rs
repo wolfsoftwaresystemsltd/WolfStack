@@ -169,15 +169,31 @@ async fn main() -> std::io::Result<()> {
     // Load per-installation cluster secret for inter-node authentication
     let cluster_secret = auth::load_cluster_secret();
 
-    // Fetch public IP (best effort)
-    let public_ip = match reqwest::Client::builder().timeout(Duration::from_secs(2)).build() {
-        Ok(client) => {
-            match client.get("https://ifconfig.me/ip").send().await {
-                Ok(resp) => resp.text().await.ok(),
-                Err(_) => None,
+    // Fetch public IP (best effort — try multiple services)
+    let public_ip = {
+        let services = [
+            "https://api.ipify.org",
+            "https://ifconfig.me/ip",
+            "https://icanhazip.com",
+            "https://checkip.amazonaws.com",
+        ];
+        let mut detected: Option<String> = None;
+        if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(3)).build() {
+            for url in &services {
+                if let Ok(resp) = client.get(*url).send().await {
+                    if resp.status().is_success() {
+                        if let Ok(text) = resp.text().await {
+                            let ip = text.trim().to_string();
+                            if ip.parse::<std::net::Ipv4Addr>().is_ok() {
+                                detected = Some(ip);
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
-        Err(_) => None,
+        detected
     };
     if let Some(ip) = &public_ip {
         info!("  Public IP:  {}", ip);
