@@ -3464,6 +3464,8 @@ pub struct DockerUpdateConfigReq {
     pub autostart: Option<bool>,
     pub memory_mb: Option<u64>,
     pub cpus: Option<f32>,
+    #[serde(default)]
+    pub wolfnet_ip: Option<String>,
 }
 
 pub async fn docker_update_config(
@@ -3474,8 +3476,8 @@ pub async fn docker_update_config(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
-    
-    match containers::docker_update_config(&id, body.autostart, body.memory_mb, body.cpus) {
+
+    match containers::docker_update_config(&id, body.autostart, body.memory_mb, body.cpus, body.wolfnet_ip.clone()) {
          Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
          Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
     }

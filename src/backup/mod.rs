@@ -247,6 +247,12 @@ pub struct BackupEntry {
     /// Schedule ID that created this, if any
     #[serde(default)]
     pub schedule_id: String,
+    /// Description of what was backed up (e.g. container image, LXC rootfs, VM disks)
+    #[serde(default)]
+    pub comments: String,
+    /// Hostname of the node that performed the backup
+    #[serde(default)]
+    pub node_hostname: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -615,10 +621,55 @@ pub fn backup_all(storage: &BackupStorage) -> Vec<BackupEntry> {
     entries
 }
 
+/// Get the local hostname for backup entries
+fn local_hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .map(|h| h.trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Generate a descriptive comment for a backup target
+fn backup_comments(target: &BackupTarget) -> String {
+    match target.target_type {
+        BackupTargetType::Docker => {
+            // Get image name and container info
+            let image = Command::new("docker")
+                .args(["inspect", "--format", "{{.Config.Image}}", &target.name])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            if image.is_empty() {
+                format!("Docker container: {}", target.name)
+            } else {
+                format!("Docker container: {} (image: {})", target.name, image)
+            }
+        }
+        BackupTargetType::Lxc => {
+            format!("LXC container: {} (rootfs + config)", target.name)
+        }
+        BackupTargetType::Vm => {
+            // Check if it's a Proxmox VM or local QEMU VM
+            let config_path = format!("/var/lib/wolfstack/vms/{}.json", target.name);
+            if let Ok(data) = std::fs::read_to_string(&config_path) {
+                if let Ok(vm) = serde_json::from_str::<serde_json::Value>(&data) {
+                    let os = vm.get("os").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let mem = vm.get("memory_mb").and_then(|v| v.as_u64()).unwrap_or(0);
+                    return format!("VM: {} (OS: {}, {}MB RAM, disks + config)", target.name, os, mem);
+                }
+            }
+            format!("VM: {} (disks + config)", target.name)
+        }
+        BackupTargetType::Config => "WolfStack configuration files".to_string(),
+    }
+}
+
 /// Create a single backup entry — performs the backup and stores it
 fn create_backup_entry(target: BackupTarget, storage: &BackupStorage) -> BackupEntry {
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
+    let hostname = local_hostname();
+    let comments = backup_comments(&target);
 
     let result = match target.target_type {
         BackupTargetType::Docker => backup_docker(&target.name),
@@ -648,6 +699,8 @@ fn create_backup_entry(target: BackupTarget, storage: &BackupStorage) -> BackupE
                         status: BackupStatus::Completed,
                         error: String::new(),
                         schedule_id: String::new(),
+                        comments,
+                        node_hostname: hostname,
                     }
                 },
                 Err(e) => {
@@ -663,6 +716,8 @@ fn create_backup_entry(target: BackupTarget, storage: &BackupStorage) -> BackupE
                         status: BackupStatus::Failed,
                         error: e,
                         schedule_id: String::new(),
+                        comments,
+                        node_hostname: hostname,
                     }
                 }
             }
@@ -679,6 +734,8 @@ fn create_backup_entry(target: BackupTarget, storage: &BackupStorage) -> BackupE
                 status: BackupStatus::Failed,
                 error: e,
                 schedule_id: String::new(),
+                comments,
+                node_hostname: hostname,
             }
         }
     }
@@ -1349,6 +1406,8 @@ pub fn import_backup(data: &[u8], filename: &str) -> Result<String, String> {
         status: BackupStatus::Completed,
         error: String::new(),
         schedule_id: String::new(),
+        comments: format!("Imported backup: {}", filename),
+        node_hostname: local_hostname(),
     });
     let _ = save_config(&config);
 

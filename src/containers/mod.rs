@@ -266,7 +266,7 @@ pub fn cleanup_stale_wolfnet_routes() {
 
     }
 
-    // Ensure Docker containers with wolfnet.ip labels have correct host routes
+    // Ensure Docker containers with WolfNet IPs have correct host routes
     // (route via docker0, not lxcbr0 or missing entirely)
     let mut docker_found = false;
     if let Ok(output) = Command::new("docker")
@@ -275,58 +275,56 @@ pub fn cleanup_stale_wolfnet_routes() {
     {
         let text = String::from_utf8_lossy(&output.stdout);
         for name in text.lines().filter(|l| !l.is_empty()) {
-            if let Ok(inspect) = Command::new("docker")
-                .args(["inspect", "--format", "{{index .Config.Labels \"wolfnet.ip\"}}", name])
+            // Check override file first, then Docker label
+            let label = match docker_effective_wolfnet_ip(name) {
+                Some(ip) => ip,
+                None => continue,
+            };
+
+            // Check if the container is running (needs a PID for nsenter)
+            let pid_out = Command::new("docker")
+                .args(["inspect", "--format", "{{.State.Pid}}", name])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            if pid_out.is_empty() || pid_out == "0" { continue; }
+
+            docker_found = true;
+
+            // Ensure host route via docker0 (idempotent — replace if exists)
+            let _ = Command::new("ip")
+                .args(["route", "replace", &format!("{}/32", label), "dev", "docker0"])
+                .output();
+
+            // Ensure static ARP entry (get MAC via docker inspect)
+            if let Ok(mac_out) = Command::new("docker")
+                .args(["inspect", "--format", "{{range .NetworkSettings.Networks}}{{.MacAddress}}{{end}}", name])
                 .output()
             {
-                let label = String::from_utf8_lossy(&inspect.stdout).trim().to_string();
-                if label.is_empty() || label == "<no value>" { continue; }
-
-                // Check if the container is running (needs a PID for nsenter)
-                let pid_out = Command::new("docker")
-                    .args(["inspect", "--format", "{{.State.Pid}}", name])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .unwrap_or_default();
-                if pid_out.is_empty() || pid_out == "0" { continue; }
-
-                docker_found = true;
-
-                // Ensure host route via docker0 (idempotent — replace if exists)
-                let _ = Command::new("ip")
-                    .args(["route", "replace", &format!("{}/32", label), "dev", "docker0"])
-                    .output();
-
-                // Ensure static ARP entry (get MAC via docker inspect)
-                if let Ok(mac_out) = Command::new("docker")
-                    .args(["inspect", "--format", "{{range .NetworkSettings.Networks}}{{.MacAddress}}{{end}}", name])
-                    .output()
-                {
-                    let mac = String::from_utf8_lossy(&mac_out.stdout).trim().to_string();
-                    if !mac.is_empty() {
-                        let _ = Command::new("ip")
-                            .args(["neigh", "replace", &label, "lladdr", &mac, "dev", "docker0", "nud", "permanent"])
-                            .output();
-                    }
+                let mac = String::from_utf8_lossy(&mac_out.stdout).trim().to_string();
+                if !mac.is_empty() {
+                    let _ = Command::new("ip")
+                        .args(["neigh", "replace", &label, "lladdr", &mac, "dev", "docker0", "nud", "permanent"])
+                        .output();
                 }
-
-                // Ensure container has the WolfNet IP alias on eth0 (via nsenter)
-                let _ = Command::new("nsenter")
-                    .args(["--target", &pid_out, "--net", "ip", "addr", "add", &format!("{}/32", label), "dev", "eth0"])
-                    .output(); // Silently ignores EEXIST
-
-                // Ensure container can route WolfNet subnet via bridge gateway
-                // with src hint so the container uses its WolfNet IP as source
-                let gateway = Command::new("docker")
-                    .args(["network", "inspect", "bridge", "--format", "{{range .IPAM.Config}}{{.Gateway}}{{end}}"])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .unwrap_or_else(|_| "172.17.0.1".to_string());
-                let gw = if gateway.is_empty() { "172.17.0.1".to_string() } else { gateway };
-                let _ = Command::new("nsenter")
-                    .args(["--target", &pid_out, "--net", "ip", "route", "replace", "10.10.10.0/24", "via", &gw, "src", &label])
-                    .output();
             }
+
+            // Ensure container has the WolfNet IP alias on eth0 (via nsenter)
+            let _ = Command::new("nsenter")
+                .args(["--target", &pid_out, "--net", "ip", "addr", "add", &format!("{}/32", label), "dev", "eth0"])
+                .output(); // Silently ignores EEXIST
+
+            // Ensure container can route WolfNet subnet via bridge gateway
+            // with src hint so the container uses its WolfNet IP as source
+            let gateway = Command::new("docker")
+                .args(["network", "inspect", "bridge", "--format", "{{range .IPAM.Config}}{{.Gateway}}{{end}}"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|_| "172.17.0.1".to_string());
+            let gw = if gateway.is_empty() { "172.17.0.1".to_string() } else { gateway };
+            let _ = Command::new("nsenter")
+                .args(["--target", &pid_out, "--net", "ip", "route", "replace", "10.10.10.0/24", "via", &gw, "src", &label])
+                .output();
         }
     }
 
@@ -464,24 +462,18 @@ pub fn wolfnet_allocate_ip(host_ip: &str, extra_used: &[u8]) -> String {
         }
     }
 
-    // Check Docker containers with wolfnet.ip labels
+    // Check Docker containers with WolfNet IPs (override file or label)
     if let Ok(output) = Command::new("docker")
         .args(["ps", "-a", "--format", "{{.Names}}"])
         .output()
     {
         let text = String::from_utf8_lossy(&output.stdout);
         for name in text.lines().filter(|l| !l.is_empty()) {
-            if let Ok(inspect) = Command::new("docker")
-                .args(["inspect", "--format", "{{index .Config.Labels \"wolfnet.ip\"}}", name])
-                .output()
-            {
-                let label = String::from_utf8_lossy(&inspect.stdout).trim().to_string();
-                if !label.is_empty() && label != "<no value>" {
-                    let ip_parts: Vec<&str> = label.split('.').collect();
-                    if ip_parts.len() == 4 {
-                        if let Ok(last) = ip_parts[3].parse::<u8>() {
-                            used_ips.insert(last);
-                        }
+            if let Some(ip) = docker_effective_wolfnet_ip(name) {
+                let ip_parts: Vec<&str> = ip.split('.').collect();
+                if ip_parts.len() == 4 {
+                    if let Ok(last) = ip_parts[3].parse::<u8>() {
+                        used_ips.insert(last);
                     }
                 }
             }
@@ -611,20 +603,16 @@ pub fn wolfnet_used_ips() -> Vec<String> {
         }
     }
 
-    // Docker containers with wolfnet.ip labels (host-routed WolfNet — primary method)
+    // Docker containers with WolfNet IPs (override file or label)
     if let Ok(output) = Command::new("docker")
         .args(["ps", "-a", "--format", "{{.Names}}"])
         .output()
     {
         let text = String::from_utf8_lossy(&output.stdout);
         for name in text.lines().filter(|l| !l.is_empty()) {
-            if let Ok(inspect) = Command::new("docker")
-                .args(["inspect", "--format", "{{index .Config.Labels \"wolfnet.ip\"}}", name])
-                .output()
-            {
-                let label = String::from_utf8_lossy(&inspect.stdout).trim().to_string();
-                if !label.is_empty() && label != "<no value>" && !ips.contains(&label) {
-                    ips.push(label);
+            if let Some(ip) = docker_effective_wolfnet_ip(name) {
+                if !ips.contains(&ip) {
+                    ips.push(ip);
                 }
             }
         }
@@ -1649,6 +1637,12 @@ pub struct ContainerInfo {
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<ContainerService>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gateway: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mac_address: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub network_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1877,8 +1871,8 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                     let name = parts.get(1).unwrap_or(&"").to_string();
                     let state = parts.get(4).unwrap_or(&"").to_string();
 
-                    // Get WolfNet IP label and network IPs in one inspect call
-                    let inspect_fmt = "{{index .Config.Labels \"wolfnet.ip\"}}|{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}";
+                    // Get network IPs, gateway, and MAC in one inspect call
+                    let inspect_fmt = "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}|{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}|{{range .NetworkSettings.Networks}}{{.MacAddress}} {{end}}";
                     let inspect_out = Command::new("docker")
                         .args(["inspect", "-f", inspect_fmt, &name])
                         .output()
@@ -1886,21 +1880,13 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                         .unwrap_or_default();
 
-                    let inspect_parts: Vec<&str> = inspect_out.splitn(2, '|').collect();
-                    let wolfnet_label = inspect_parts.first().unwrap_or(&"").trim();
-                    let raw_net_ips = inspect_parts.get(1).unwrap_or(&"").trim();
+                    let inspect_parts: Vec<&str> = inspect_out.splitn(3, '|').collect();
+                    let raw_net_ips = inspect_parts.first().unwrap_or(&"").trim();
+                    let raw_gateways = inspect_parts.get(1).unwrap_or(&"").trim();
+                    let raw_macs = inspect_parts.get(2).unwrap_or(&"").trim();
 
-                    // Parse WolfNet IP from label (valid even when container is not running)
-                    let wolfnet_ip = if !wolfnet_label.is_empty() && wolfnet_label != "<no value>" {
-                        let wparts: Vec<&str> = wolfnet_label.split('.').collect();
-                        if wparts.len() == 4 && wparts.iter().all(|p| p.parse::<u8>().is_ok()) {
-                            Some(wolfnet_label.to_string())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
+                    // Parse WolfNet IP — override file takes priority, then Docker label
+                    let wolfnet_ip = docker_effective_wolfnet_ip(&name);
 
                     // Parse bridge/network IP (only valid when running)
                     let bridge_ip = raw_net_ips.split_whitespace()
@@ -1908,6 +1894,16 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                             let iparts: Vec<&str> = s.split('.').collect();
                             iparts.len() == 4 && iparts.iter().all(|p| p.parse::<u8>().is_ok())
                         })
+                        .unwrap_or("")
+                        .to_string();
+
+                    // Parse gateway and MAC
+                    let container_gateway = raw_gateways.split_whitespace()
+                        .find(|s| !s.is_empty() && *s != "<no value>")
+                        .unwrap_or("")
+                        .to_string();
+                    let container_mac = raw_macs.split_whitespace()
+                        .find(|s| !s.is_empty() && s.contains(':'))
                         .unwrap_or("")
                         .to_string();
 
@@ -1950,6 +1946,8 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                         vec![]
                     };
 
+                    let net_name = parts.get(7).unwrap_or(&"").to_string();
+
                     ContainerInfo {
                         id: parts.first().unwrap_or(&"").to_string(),
                         name,
@@ -1972,6 +1970,9 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                         fs_type: ft,
                         version: None,
                         services,
+                        gateway: container_gateway,
+                        mac_address: container_mac,
+                        network_name: net_name,
                     }
                 })
                 .collect()
@@ -2039,19 +2040,11 @@ pub fn docker_logs(container: &str, lines: u32) -> Vec<String> {
 pub fn docker_start(container: &str) -> Result<String, String> {
     let result = run_docker_cmd(&["start", container])?;
 
-    // Re-apply WolfNet IP if configured
-    // Check if container has a wolfnet label
-    if let Ok(output) = Command::new("docker")
-        .args(["inspect", "--format", "{{index .Config.Labels \"wolfnet.ip\"}}", container])
-        .output()
-    {
-        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !ip.is_empty() && ip != "<no value>" {
+    // Re-apply WolfNet IP if configured (check override file first, then label)
+    if let Some(ip) = docker_effective_wolfnet_ip(container) {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if let Err(_e) = docker_connect_wolfnet(container, &ip) {
 
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            if let Err(_e) = docker_connect_wolfnet(container, &ip) {
-
-            }
         }
     }
 
@@ -2109,9 +2102,20 @@ pub fn docker_images() -> Vec<ContainerImage> {
 }
 
 /// Update Docker container configuration
-pub fn docker_update_config(container: &str, autostart: Option<bool>, memory_mb: Option<u64>, cpus: Option<f32>) -> Result<String, String> {
+pub fn docker_update_config(container: &str, autostart: Option<bool>, memory_mb: Option<u64>, cpus: Option<f32>, wolfnet_ip: Option<String>) -> Result<String, String> {
+    let mut messages = Vec::new();
+
+    // Handle WolfNet IP change
+    if let Some(ref wip) = wolfnet_ip {
+        let ip = if wip.trim().is_empty() { None } else { Some(wip.trim()) };
+        match docker_set_wolfnet_ip(container, ip) {
+            Ok(msg) => messages.push(msg),
+            Err(e) => return Err(format!("Failed to set WolfNet IP: {}", e)),
+        }
+    }
+
     let mut args = vec!["update"];
-    
+
     // Autostart policy
     let policy_str;
     if let Some(autostart) = autostart {
@@ -2136,12 +2140,17 @@ pub fn docker_update_config(container: &str, autostart: Option<bool>, memory_mb:
         args.push(&cpus_str);
     }
 
-    if args.len() == 1 {
+    if args.len() > 1 {
+        args.push(container);
+        let result = run_docker_cmd(&args)?;
+        messages.push(result);
+    }
+
+    if messages.is_empty() {
         return Ok("No changes requested".to_string());
     }
 
-    args.push(container);
-    run_docker_cmd(&args)
+    Ok(messages.join("; "))
 }
 
 /// Inspect a Docker container and return raw JSON
@@ -2159,14 +2168,100 @@ pub fn docker_inspect(container: &str) -> Result<serde_json::Value, String> {
         .map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
     // docker inspect returns an array, take the first element if possible
-    if let Some(arr) = json.as_array() {
-        if let Some(obj) = arr.first() {
-            return Ok(obj.clone());
+    let mut obj = if let Some(arr) = json.as_array() {
+        arr.first().cloned().unwrap_or(json.clone())
+    } else {
+        json
+    };
+
+    // Inject WolfNet IP override from config file into the labels
+    // so the frontend always sees the effective WolfNet IP
+    if let Some(override_ip) = docker_get_wolfnet_ip(container) {
+        if let Some(labels) = obj.pointer_mut("/Config/Labels") {
+            if let Some(map) = labels.as_object_mut() {
+                map.insert("wolfnet.ip".to_string(), serde_json::Value::String(override_ip));
+            }
         }
     }
-    
-    // If not array or empty array
-    Ok(json)
+
+    Ok(obj)
+}
+
+/// Config file path for Docker WolfNet IP overrides
+const DOCKER_WOLFNET_CONFIG: &str = "/etc/wolfstack/docker-wolfnet.json";
+
+/// Get the WolfNet IP override for a Docker container from the config file
+pub fn docker_get_wolfnet_ip(container: &str) -> Option<String> {
+    let data = std::fs::read_to_string(DOCKER_WOLFNET_CONFIG).ok()?;
+    let map: std::collections::HashMap<String, String> = serde_json::from_str(&data).ok()?;
+    map.get(container).cloned().filter(|ip| !ip.is_empty())
+}
+
+/// Get the effective WolfNet IP for a Docker container (override file first, then label)
+pub fn docker_effective_wolfnet_ip(container: &str) -> Option<String> {
+    // Check override file first
+    if let Some(ip) = docker_get_wolfnet_ip(container) {
+        return Some(ip);
+    }
+    // Fall back to Docker label
+    if let Ok(output) = Command::new("docker")
+        .args(["inspect", "--format", "{{index .Config.Labels \"wolfnet.ip\"}}", container])
+        .output()
+    {
+        let label = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !label.is_empty() && label != "<no value>" {
+            return Some(label);
+        }
+    }
+    None
+}
+
+/// Set or remove the WolfNet IP for a Docker container.
+/// Persists to config file and applies live if the container is running.
+pub fn docker_set_wolfnet_ip(container: &str, ip: Option<&str>) -> Result<String, String> {
+    // Read existing overrides
+    let mut map: std::collections::HashMap<String, String> = std::fs::read_to_string(DOCKER_WOLFNET_CONFIG)
+        .ok()
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_default();
+
+    let old_ip = docker_effective_wolfnet_ip(container);
+
+    match ip {
+        Some(new_ip) if !new_ip.trim().is_empty() => {
+            let new_ip = new_ip.trim();
+            map.insert(container.to_string(), new_ip.to_string());
+
+            // Save config
+            let data = serde_json::to_string_pretty(&map).map_err(|e| e.to_string())?;
+            std::fs::write(DOCKER_WOLFNET_CONFIG, data).map_err(|e| e.to_string())?;
+
+            // Apply live if running: remove old routes, apply new
+            if let Some(ref old) = old_ip {
+                if old != new_ip {
+                    let _ = Command::new("ip").args(["route", "del", &format!("{}/32", old), "dev", "docker0"]).output();
+                }
+            }
+            // Connect to WolfNet (idempotent)
+            let _ = docker_connect_wolfnet(container, new_ip);
+
+            Ok(format!("WolfNet IP set to {}", new_ip))
+        }
+        _ => {
+            // Remove override
+            map.remove(container);
+
+            let data = serde_json::to_string_pretty(&map).map_err(|e| e.to_string())?;
+            std::fs::write(DOCKER_WOLFNET_CONFIG, data).map_err(|e| e.to_string())?;
+
+            // Remove old route if any
+            if let Some(ref old) = old_ip {
+                let _ = Command::new("ip").args(["route", "del", &format!("{}/32", old), "dev", "docker0"]).output();
+            }
+
+            Ok("WolfNet IP removed".to_string())
+        }
+    }
 }
 
 /// Remove a Docker image by ID or name
@@ -2272,12 +2367,27 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                 }
             }
 
-            // Read config for autostart and hostname
+            // Read config for autostart, hostname, gateway, MAC
             let config_path = format!("{}/{}/config", base_path, name);
             let config_content = std::fs::read_to_string(&config_path).unwrap_or_default();
             let autostart = config_content.lines().any(|l| l.trim() == "lxc.start.auto = 1");
             let hostname = config_content.lines()
                 .find(|l| l.trim().starts_with("lxc.uts.name"))
+                .and_then(|l| l.split('=').nth(1))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let lxc_gateway = config_content.lines()
+                .find(|l| l.trim().starts_with("lxc.net.0.ipv4.gateway"))
+                .and_then(|l| l.split('=').nth(1))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let lxc_mac = config_content.lines()
+                .find(|l| l.trim().starts_with("lxc.net.0.hwaddr"))
+                .and_then(|l| l.split('=').nth(1))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let lxc_link = config_content.lines()
+                .find(|l| l.trim().starts_with("lxc.net.0.link"))
                 .and_then(|l| l.split('=').nth(1))
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default();
@@ -2316,6 +2426,9 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
                 fs_type: ft,
                 version,
                 services,
+                gateway: lxc_gateway,
+                mac_address: lxc_mac,
+                network_name: lxc_link,
             });
         }
     }
@@ -2392,10 +2505,13 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                     }
                 }
 
-                // Parse config for hostname, autostart, rootfs
+                // Parse config for hostname, autostart, rootfs, gateway, MAC
                 let mut hostname = pct_name.clone();
                 let mut autostart = false;
                 let mut rootfs_storage = String::new();
+                let mut pve_gateway = String::new();
+                let mut pve_mac = String::new();
+                let mut pve_bridge = String::new();
                 for cline in cfg_text.lines() {
                     let cline = cline.trim();
                     if cline.starts_with("hostname:") {
@@ -2405,11 +2521,21 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                     } else if cline.starts_with("rootfs:") {
                         rootfs_storage = cline.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
                     }
-                    if ip.is_empty() && cline.starts_with("net") && cline.contains("ip=") {
-                        if let Some(ip_part) = cline.split(',').find(|p| p.trim().starts_with("ip=")) {
-                            let configured_ip = ip_part.trim().trim_start_matches("ip=");
-                            if !configured_ip.is_empty() && configured_ip != "dhcp" {
-                                ip = configured_ip.to_string();
+                    if cline.starts_with("net") && cline.contains('=') {
+                        let net_value = cline.splitn(2, ':').nth(1).unwrap_or("").trim();
+                        for part in net_value.split(',') {
+                            let part = part.trim();
+                            if part.starts_with("ip=") && ip.is_empty() {
+                                let configured_ip = part.trim_start_matches("ip=");
+                                if !configured_ip.is_empty() && configured_ip != "dhcp" {
+                                    ip = configured_ip.to_string();
+                                }
+                            } else if part.starts_with("gw=") && pve_gateway.is_empty() {
+                                pve_gateway = part.trim_start_matches("gw=").to_string();
+                            } else if part.starts_with("hwaddr=") && pve_mac.is_empty() {
+                                pve_mac = part.trim_start_matches("hwaddr=").to_string();
+                            } else if part.starts_with("bridge=") && pve_bridge.is_empty() {
+                                pve_bridge = part.trim_start_matches("bridge=").to_string();
                             }
                         }
                     }
@@ -2485,6 +2611,9 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                     fs_type: ft,
                     version,
                     services,
+                    gateway: pve_gateway,
+                    mac_address: pve_mac,
+                    network_name: pve_bridge,
                 }
             })
         }).collect();

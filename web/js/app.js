@@ -3624,13 +3624,53 @@ function renderFileBreadcrumb(path) {
 
 let cachedFileEntries = [];
 let fileSearchTimer = null;
+let fileSortColumn = 'name';
+let fileSortAsc = true;
+
+function sortFileList(column) {
+    if (fileSortColumn === column) {
+        fileSortAsc = !fileSortAsc;
+    } else {
+        fileSortColumn = column;
+        fileSortAsc = true;
+    }
+    // Update sort indicators
+    ['name', 'size', 'modified', 'permissions'].forEach(c => {
+        const el = document.getElementById('fms-' + c);
+        if (el) el.textContent = c === fileSortColumn ? (fileSortAsc ? '▲' : '▼') : '';
+    });
+    const sorted = sortFileEntries(cachedFileEntries.slice());
+    renderFilteredFileList(sorted, false);
+}
+
+function sortFileEntries(entries) {
+    // Directories always first, then sort within each group
+    const dirs = entries.filter(e => e.is_dir);
+    const files = entries.filter(e => !e.is_dir);
+    const cmp = (a, b) => {
+        let va, vb;
+        switch (fileSortColumn) {
+            case 'name': va = (a.name || '').toLowerCase(); vb = (b.name || '').toLowerCase(); break;
+            case 'size': va = a.size || 0; vb = b.size || 0; break;
+            case 'modified': va = a.modified || 0; vb = b.modified || 0; break;
+            case 'permissions': va = a.permissions || ''; vb = b.permissions || ''; break;
+            default: va = (a.name || '').toLowerCase(); vb = (b.name || '').toLowerCase();
+        }
+        if (va < vb) return fileSortAsc ? -1 : 1;
+        if (va > vb) return fileSortAsc ? 1 : -1;
+        return 0;
+    };
+    dirs.sort(cmp);
+    files.sort(cmp);
+    return [...dirs, ...files];
+}
 
 function renderFileList(entries) {
     const table = document.getElementById('file-list-table');
     if (!table) return;
 
     cachedFileEntries = entries;
-    renderFilteredFileList(entries, false);
+    renderFilteredFileList(sortFileEntries(entries.slice()), false);
 }
 
 function renderFilteredFileList(entries, isSearch) {
@@ -9555,7 +9595,7 @@ function renderDockerContainers(containers) {
             <td><strong>${c.name}</strong>${badgeRow}<span style="font-size:11px;color:var(--text-muted)">${c.id.substring(0, 12)}</span></td>
             <td>${c.image}</td>
             <td><span style="color:${stateColor}">●</span> ${c.status}</td>
-            <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
+            <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}${c.gateway ? '<div style="font-size:10px;color:var(--text-muted);">GW: ' + escapeHtml(c.gateway) + '</div>' : ''}${c.mac_address ? '<div style="font-size:10px;color:var(--text-muted);">MAC: ' + escapeHtml(c.mac_address) + '</div>' : ''}</td>
             <td style="font-size:11px;">${ports}</td>
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleDockerAutostart('${c.id}', this.checked)"></td>
             <td style="white-space:nowrap;">
@@ -10004,6 +10044,8 @@ async function saveDockerSettings(name) {
         return;
     }
 
+    var wolfnetIp = (document.getElementById('docker-wolfnet-ip') || {}).value || '';
+
     try {
         const resp = await fetch(apiUrl(`/api/containers/docker/${encodeURIComponent(name)}/config`), {
             method: 'POST',
@@ -10012,6 +10054,7 @@ async function saveDockerSettings(name) {
                 autostart: autostart,
                 memory_mb: memoryMb,
                 cpus: cpus,
+                wolfnet_ip: wolfnetIp,
             })
         });
         const data = await resp.json();
@@ -10134,7 +10177,7 @@ function renderLxcContainers(containers, stats) {
             <td><strong>${c.hostname || c.name}</strong>${lxcBadgeRow}${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
             <td style="font-size:12px;color:var(--text-secondary);">${c.version || '<span style="color:var(--text-muted)">—</span>'}</td>
             <td><span style="color:${stateColor}">●</span> ${c.state}</td>
-            <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}</td>
+            <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}${c.gateway ? '<div style="font-size:10px;color:var(--text-muted);">GW: ' + escapeHtml(c.gateway) + '</div>' : ''}${c.mac_address ? '<div style="font-size:10px;color:var(--text-muted);">MAC: ' + escapeHtml(c.mac_address) + '</div>' : ''}</td>
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleLxcAutostart('${c.name}', this.checked)"></td>
             <td style="white-space:nowrap;">
                 <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'start', this)"` : ''} title="Start">▶️</button>
@@ -13374,10 +13417,13 @@ function renderBackupHistory(backups) {
             : b.status === 'failed'
                 ? `<span class="badge" style="background:#ef4444; color:#fff;">✗ Failed</span>`
                 : '<span class="badge" style="background:#f59e0b; color:#000;">⏳ In Progress</span>';
+        const comments = b.comments ? `<div style="font-size:11px; color:var(--text-muted); margin-top:2px;">${escapeHtml(b.comments)}</div>` : '';
+        const nodeLabel = b.node_hostname ? `<span style="font-size:11px; color:var(--text-muted);">${escapeHtml(b.node_hostname)}</span>` : '';
 
         return `<tr>
-            <td>${typeEmoji} ${escapeHtml(targetName)}</td>
+            <td>${typeEmoji} ${escapeHtml(targetName)}${comments}</td>
             <td>${typeName}</td>
+            <td>${nodeLabel}</td>
             <td>${escapeHtml(storageLabel)}</td>
             <td>${size}</td>
             <td>${date}</td>
@@ -17731,7 +17777,8 @@ async function loadFleetContainers() {
                         diskP, diskP >= 0 ? (formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + diskP + '%)') : ''
                     );
                     var dSvcBadges = (c.services && c.services.length > 0) ? '<div style="margin-top:3px;">' + c.services.map(function(s) { var sc = s.status === 'running' ? '#10b981' : '#ef4444'; return '<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:' + sc + '22;color:' + sc + ';border:1px solid ' + sc + '44;margin-right:4px;">' + escapeHtml(s.name) + '</span>'; }).join('') + '</div>' : '';
-                    rowsHtml += '<tr><td>🐳 Docker</td><td><strong>' + escapeHtml(c.name) + '</strong>' + dSvcBadges + '</td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || c.status || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + dockerButtons(nodeId, c.name, c.state) + '</td></tr>' + sub;
+                    var dNetExtra = (c.gateway ? '<div style="font-size:10px;color:var(--text-muted);">GW: ' + escapeHtml(c.gateway) + '</div>' : '') + (c.mac_address ? '<div style="font-size:10px;color:var(--text-muted);">MAC: ' + escapeHtml(c.mac_address) + '</div>' : '');
+                    rowsHtml += '<tr><td>🐳 Docker</td><td><strong>' + escapeHtml(c.name) + '</strong>' + dSvcBadges + '</td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || c.status || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + dNetExtra + '</td><td>' + dockerButtons(nodeId, c.name, c.state) + '</td></tr>' + sub;
                 });
             }
         } catch (e) { }
@@ -17758,7 +17805,8 @@ async function loadFleetContainers() {
                         diskP, diskP >= 0 ? (formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + diskP + '%)') : ''
                     );
                     var lSvcBadges = (c.services && c.services.length > 0) ? '<div style="margin-top:3px;">' + c.services.map(function(s) { var sc = s.status === 'running' ? '#10b981' : '#ef4444'; return '<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:' + sc + '22;color:' + sc + ';border:1px solid ' + sc + '44;margin-right:4px;">' + escapeHtml(s.name) + '</span>'; }).join('') + '</div>' : '';
-                    rowsHtml += '<tr><td>📦 LXC</td><td><strong>' + escapeHtml(c.hostname || c.name) + '</strong>' + lSvcBadges + (c.hostname ? '<div style="font-size:11px;color:var(--text-muted);">CT ' + escapeHtml(c.name) + '</div>' : '') + '</td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + '</td><td>' + lxcButtons(nodeId, c.name, c.state, c.storage_path) + '</td></tr>' + sub;
+                    var lNetExtra = (c.gateway ? '<div style="font-size:10px;color:var(--text-muted);">GW: ' + escapeHtml(c.gateway) + '</div>' : '') + (c.mac_address ? '<div style="font-size:10px;color:var(--text-muted);">MAC: ' + escapeHtml(c.mac_address) + '</div>' : '');
+                    rowsHtml += '<tr><td>📦 LXC</td><td><strong>' + escapeHtml(c.hostname || c.name) + '</strong>' + lSvcBadges + (c.hostname ? '<div style="font-size:11px;color:var(--text-muted);">CT ' + escapeHtml(c.name) + '</div>' : '') + '</td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + lNetExtra + '</td><td>' + lxcButtons(nodeId, c.name, c.state, c.storage_path) + '</td></tr>' + sub;
                 });
             }
         } catch (e) { }

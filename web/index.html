@@ -1648,6 +1648,7 @@
                             <tr>
                                 <th>Target</th>
                                 <th>Type</th>
+                                <th>Node</th>
                                 <th>Storage</th>
                                 <th>Size</th>
                                 <th>Date</th>
@@ -3870,20 +3871,22 @@
                             onclick="bulkDeleteFiles()">🗑️ Delete Selected</button>
                     </div>
                     <!-- File listing table -->
-                    <table class="data-table">
+                    <div style="overflow-x:auto; max-width:100%;">
+                    <table class="data-table" style="min-width:600px;">
                         <thead>
                             <tr>
                                 <th style="width:30px;"><input type="checkbox" onchange="toggleSelectAll(this)"
                                         title="Select all"></th>
-                                <th style="width:38%;">Name</th>
-                                <th>Size</th>
-                                <th>Modified</th>
-                                <th>Permissions</th>
+                                <th style="width:38%; cursor:pointer; user-select:none;" onclick="sortFileList('name')" id="fmh-name">Name <span id="fms-name"></span></th>
+                                <th style="cursor:pointer; user-select:none;" onclick="sortFileList('size')" id="fmh-size">Size <span id="fms-size"></span></th>
+                                <th style="cursor:pointer; user-select:none;" onclick="sortFileList('modified')" id="fmh-modified">Modified <span id="fms-modified"></span></th>
+                                <th style="cursor:pointer; user-select:none;" onclick="sortFileList('permissions')" id="fmh-permissions">Permissions <span id="fms-permissions"></span></th>
                                 <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody id="file-list-table"></tbody>
                     </table>
+                    </div>
                     <p id="file-empty" style="display:none; text-align:center; padding:20px; color:var(--text-muted);">
                         This directory is empty.
                     </p>
