@@ -18727,7 +18727,7 @@ async function loadPatreonHeaderBadge() {
         var badgeEl = document.getElementById('patreon-header-badge');
         var linkEl = document.getElementById('patreon-header-link');
         if (!badgeEl) return;
-        if (data.linked && data.tier && data.tier !== 'none') {
+        if (data.linked && data.tier && data.tier !== 'none' && data.tier !== 'free') {
             var tierNames = { free: 'Free', basic: 'Basic', advanced: 'Advanced', platinum: 'Platinum', enterprise: 'Enterprise' };
             var tierColors = {
                 free: 'linear-gradient(135deg, #6b7280, #9ca3af)',
@@ -18754,7 +18754,7 @@ async function loadPatreonHeaderBadge() {
             if (!sessionStorage.getItem('ws_patreon_toast')) {
                 sessionStorage.setItem('ws_patreon_toast', '1');
                 setTimeout(() => {
-                    showToast('Enjoying WolfStack? <a href="#" onclick="event.preventDefault();selectView(\'settings\');setTimeout(function(){switchSettingsTab(\'patreon\');},100);this.closest(\'.toast\')?.remove();" style="color:#facc15;text-decoration:underline;">Support us on Patreon</a> to unlock extra features and help fund development.', 'info', 10000);
+                    showToast('Enjoying WolfStack? <a href="#" onclick="event.preventDefault();selectView(\'settings\');setTimeout(function(){switchSettingsTab(\'patreon\');},100);this.closest(\'.toast\')?.remove();" style="color:#facc15;text-decoration:underline;">Support us on Patreon</a> to unlock extra features and remove this message.', 'info', 10000);
                 }, 4000);
             }
         }
