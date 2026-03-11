@@ -18108,10 +18108,9 @@ async function populateAppStoreStorage() {
             });
         } else {
             data.storages.forEach(s => {
-                if (s.id !== '/') {
-                    const free = formatBytes(s.available_bytes);
-                    sel.innerHTML += `<option value="${escapeHtml(s.id)}">${escapeHtml(s.id)} (${free} free)</option>`;
-                }
+                const free = formatBytes(s.available_bytes);
+                const label = s.id === '/' ? `/ (root, ${free} free)` : `${s.id} (${free} free)`;
+                sel.innerHTML += `<option value="${escapeHtml(s.id)}">${escapeHtml(label)}</option>`;
             });
         }
 
