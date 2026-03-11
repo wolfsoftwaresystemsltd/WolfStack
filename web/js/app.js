@@ -6593,25 +6593,25 @@ function activityStop() {
 
 // ─── Toast Notifications ───
 function showToast(message, type = 'info', duration = 5000, id = null) {
+    // Always create container on document.body so it's never trapped inside
+    // a parent with transforms/transitions that break position:fixed
     let container = document.getElementById('toast-container');
-    if (!container) {
-        // Create container if it doesn't exist
+    if (!container || container.parentElement !== document.body) {
+        if (container) container.remove();
         container = document.createElement('div');
         container.id = 'toast-container';
-        container.className = 'toast-container';
-        Object.assign(container.style, {
-            position: 'fixed', top: '20px', right: '20px', zIndex: '10000',
-            display: 'flex', flexDirection: 'column', gap: '10px', pointerEvents: 'none'
-        });
         document.body.appendChild(container);
     }
+    Object.assign(container.style, {
+        position: 'fixed', top: '20px', right: '20px', zIndex: '99999',
+        display: 'flex', flexDirection: 'column', gap: '10px', pointerEvents: 'none'
+    });
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
     if (id) toast.id = id;
-    const icons = { success: '✅', error: '❌', info: 'ℹ️' };
-    const bgColors = { success: 'linear-gradient(135deg, #166534, #14532d)', error: 'linear-gradient(135deg, #991b1b, #7f1d1d)', info: 'linear-gradient(135deg, #1e3a5f, #172554)' };
-    const borderColors = { success: '#4ade80', error: '#f87171', info: '#60a5fa' };
-    // Inline styles as guaranteed fallback
+    const icons = { success: '✅', error: '❌', warning: '⚠️', info: 'ℹ️' };
+    const bgColors = { success: 'linear-gradient(135deg, #166534, #14532d)', error: 'linear-gradient(135deg, #991b1b, #7f1d1d)', warning: 'linear-gradient(135deg, #854d0e, #713f12)', info: 'linear-gradient(135deg, #1e3a5f, #172554)' };
+    const borderColors = { success: '#4ade80', error: '#f87171', warning: '#facc15', info: '#60a5fa' };
     Object.assign(toast.style, {
         padding: '14px 20px', background: bgColors[type] || bgColors.info,
         borderLeft: '4px solid ' + (borderColors[type] || borderColors.info),
@@ -6619,18 +6619,25 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
         display: 'flex', alignItems: 'center', gap: '10px',
         fontSize: '14px', fontWeight: '500', color: '#fff',
         minWidth: '280px', maxWidth: '440px', pointerEvents: 'auto',
-        animation: 'toastSlideIn 0.35s cubic-bezier(0.21,1.02,0.73,1) forwards',
-        transition: 'opacity 0.3s ease, transform 0.3s ease'
+        transform: 'translateX(120%)', opacity: '0',
+        transition: 'opacity 0.35s ease, transform 0.35s cubic-bezier(0.21,1.02,0.73,1)'
     });
     toast.innerHTML = `<span style="font-size:18px; flex-shrink:0;">${icons[type] || 'ℹ️'}</span>
-        <span style="flex:1;">${message}</span>
+        <span class="toast-message" style="flex:1;">${message}</span>
         <span onclick="this.parentElement.remove()" style="cursor:pointer; opacity:0.7; font-size:18px; flex-shrink:0; margin-left:8px; line-height:1;" title="Dismiss">&times;</span>`;
     container.appendChild(toast);
+    // Trigger slide-in via transition (not @keyframes — works without stylesheet)
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            toast.style.transform = 'translateX(0)';
+            toast.style.opacity = '1';
+        });
+    });
     if (duration > 0) {
         setTimeout(() => {
             toast.style.opacity = '0';
             toast.style.transform = 'translateX(120%)';
-            setTimeout(() => toast.remove(), 300);
+            setTimeout(() => toast.remove(), 350);
         }, duration);
     }
 }
@@ -7961,7 +7968,11 @@ function tomlToggleRaw(component, displayName) {
 
 // ─── Polling Loop ───
 const POLL_INTERVAL = isMobileView() ? 30000 : 10000;
-fetchNodes();
+fetchNodes().then(() => {
+    const count = allNodes.length;
+    const nodeWord = count === 1 ? 'node' : 'nodes';
+    showToast(`Connected — ${count} ${nodeWord} online`, 'success', 3000);
+});
 fetchMetricsHistory(); // Initial history load
 setInterval(fetchNodes, POLL_INTERVAL);
 

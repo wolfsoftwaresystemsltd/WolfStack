@@ -2007,7 +2007,7 @@ body.sidebar-collapsed .main-content {
     position: fixed;
     top: 20px;
     right: 20px;
-    z-index: 10000;
+    z-index: 99999;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -2041,6 +2041,11 @@ body.sidebar-collapsed .main-content {
 .toast.error {
     background: linear-gradient(135deg, #991b1b, #7f1d1d);
     border-left-color: #f87171;
+}
+
+.toast.warning {
+    background: linear-gradient(135deg, #854d0e, #713f12);
+    border-left-color: #facc15;
 }
 
 .toast.info {
