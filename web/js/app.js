@@ -9863,13 +9863,19 @@ async function openDockerSettings(name) {
         // Format network info
         var networkRows = '';
         for (const [netName, netInfo] of Object.entries(networks)) {
-            networkRows += `<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;margin-bottom:4px;background:var(--bg-primary);border-radius:6px;border:1px solid var(--border);">
-                <span style="font-size:14px;">🔌</span>
-                <div style="flex:1;">
-                    <div style="font-weight:600;font-size:12px;">${escapeHtml(netName)}</div>
-                    <div style="font-size:11px;color:var(--text-muted);font-family:monospace;">
-                        IP: ${netInfo.IPAddress || '-'} · MAC: ${netInfo.MacAddress || '-'} · Gateway: ${netInfo.Gateway || '-'}
-                    </div>
+            const prefix = netInfo.IPPrefixLen ? `/${netInfo.IPPrefixLen}` : '';
+            const ip6 = netInfo.GlobalIPv6Address ? `<span>IPv6: ${netInfo.GlobalIPv6Address}/${netInfo.GlobalIPv6PrefixLen || 0}</span>` : '';
+            const ip6gw = netInfo.IPv6Gateway ? `<span>IPv6 GW: ${netInfo.IPv6Gateway}</span>` : '';
+            networkRows += `<div style="padding:8px 10px;margin-bottom:4px;background:var(--bg-primary);border-radius:6px;border:1px solid var(--border);">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                    <span style="font-size:14px;">🔌</span>
+                    <span style="font-weight:600;font-size:12px;">${escapeHtml(netName)}</span>
+                </div>
+                <div style="font-size:11px;color:var(--text-muted);font-family:monospace;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:2px 12px;padding-left:24px;">
+                    <span>IP: ${netInfo.IPAddress || '-'}${prefix}</span>
+                    <span>Gateway: ${netInfo.Gateway || '-'}</span>
+                    <span>MAC: ${netInfo.MacAddress || '-'}</span>
+                    ${ip6}${ip6gw}
                 </div>
             </div>`;
         }
@@ -10894,8 +10900,16 @@ async function openLxcSettings(name) {
                             <span style="font-size:16px;">🔌</span>
                             <div style="flex:1;min-width:0;">
                                 <div style="font-weight:600;font-size:13px;">net${nic.index} — ${escapeHtml(nic.name || 'eth' + nic.index)}</div>
-                                <div style="font-size:11px;color:var(--text-muted);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                                    ${escapeHtml(nic.ipv4) || 'DHCP'} · ${escapeHtml(nic.link) || 'no bridge'} · ${escapeHtml(nic.hwaddr) || 'no MAC'}
+                                <div style="font-size:11px;color:var(--text-muted);font-family:monospace;display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:2px 12px;">
+                                    <span>IP: ${escapeHtml(nic.ipv4) || 'DHCP'}</span>
+                                    <span>GW: ${escapeHtml(nic.ipv4_gw) || '-'}</span>
+                                    <span>MAC: ${escapeHtml(nic.hwaddr) || '-'}</span>
+                                    <span>Bridge: ${escapeHtml(nic.link) || '-'}</span>
+                                    <span>Type: ${escapeHtml(nic.net_type) || 'veth'}</span>
+                                    ${nic.mtu ? `<span>MTU: ${escapeHtml(nic.mtu)}</span>` : ''}
+                                    ${nic.vlan ? `<span>VLAN: ${escapeHtml(nic.vlan)}</span>` : ''}
+                                    ${nic.ipv6 ? `<span>IPv6: ${escapeHtml(nic.ipv6)}</span>` : ''}
+                                    ${nic.ipv6_gw ? `<span>IPv6 GW: ${escapeHtml(nic.ipv6_gw)}</span>` : ''}
                                 </div>
                             </div>
                             <span class="lxc-nic-arrow" id="lxc-nic-arrow-${nic.index}" style="font-size:12px;color:var(--text-muted);transition:transform .2s;">▶</span>
@@ -12957,9 +12971,6 @@ async function showVmSettings(name) {
                     <label>OS Disk Size (GiB) <small style="color:var(--text-muted);">(can only grow)</small></label>
                     <input type="number" class="form-control" id="edit-vm-disk" value="${vm.disk_size_gb}" min="${vm.disk_size_gb}">
                 </div>
-                <div class="form-group" style="margin-top:4px;">
-                    <label style="color:var(--text-muted); font-size:13px;">MAC Address: ${vm.mac_address || 'auto'}</label>
-                </div>
             </div>
 
             <!-- ═══ Tab 2: Disks ═══ -->
@@ -13011,27 +13022,16 @@ async function showVmSettings(name) {
 
             <!-- ═══ Tab 3: Network & Boot ═══ -->
             <div class="vms-tab-page" id="vms-tab-3" style="display:none;">
-                <div class="form-group">
-                    <label>ISO Path</label>
-                    <input type="text" class="form-control" id="edit-vm-iso" value="${vm.iso_path || ''}" 
-                        placeholder="Leave empty to detach ISO">
-                    <small style="color:var(--text-muted);">Set to empty to boot from disk on next start</small>
-                </div>
-                <div class="form-group" style="margin-top:12px;">
-                    <label>VirtIO Drivers ISO</label>
-                    <input type="text" class="form-control" id="edit-vm-drivers-iso" value="${vm.drivers_iso || ''}" 
-                        placeholder="/var/lib/wolfstack/isos/virtio-win.iso">
-                    <small style="color:var(--text-muted);">Secondary CD-ROM for VirtIO drivers (Windows)</small>
-                </div>
-                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px;">
-                    <div class="form-group">
-                        <label>OS Disk Bus</label>
-                        <select class="form-control" id="edit-vm-os-bus" style="font-size:13px;">
-                            <option value="virtio"${vm.os_disk_bus === 'virtio' ? ' selected' : ''}>VirtIO (fastest)</option>
-                            <option value="ide"${vm.os_disk_bus === 'ide' ? ' selected' : ''}>IDE (Windows)</option>
-                            <option value="sata"${vm.os_disk_bus === 'sata' ? ' selected' : ''}>SATA</option>
-                        </select>
+                <div style="padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);margin-bottom:12px;">
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">🔌 Network Interface</h4>
+                    <div style="font-size:11px;color:var(--text-muted);font-family:monospace;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:2px 12px;padding:6px 8px;background:var(--bg-primary);border-radius:6px;border:1px solid var(--border);">
+                        <span>MAC: ${escapeHtml(vm.mac_address || 'auto')}</span>
+                        <span>Model: ${escapeHtml(vm.net_model || 'virtio')}</span>
+                        <span>Bridge: ${escapeHtml(vm.bridge || 'user-mode')}</span>
+                        ${vm.wolfnet_ip ? `<span>WolfNet: ${escapeHtml(vm.wolfnet_ip)}</span>` : ''}
                     </div>
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
                     <div class="form-group">
                         <label>Network Adapter</label>
                         <select class="form-control" id="edit-vm-net-model" style="font-size:13px;">
@@ -13040,11 +13040,34 @@ async function showVmSettings(name) {
                             <option value="rtl8139"${vm.net_model === 'rtl8139' ? ' selected' : ''}>Realtek RTL8139</option>
                         </select>
                     </div>
+                    <div class="form-group">
+                        <label>WolfNet IP</label>
+                        <input type="text" class="form-control" id="edit-vm-wolfnet-ip" value="${vm.wolfnet_ip || ''}"
+                            placeholder="Leave empty for user-mode networking">
+                    </div>
                 </div>
-                <div class="form-group" style="margin-top:12px;">
-                    <label>WolfNet IP</label>
-                    <input type="text" class="form-control" id="edit-vm-wolfnet-ip" value="${vm.wolfnet_ip || ''}"
-                        placeholder="Leave empty for user-mode networking">
+                <div style="padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);margin-top:12px;">
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">💿 Boot Options</h4>
+                    <div class="form-group">
+                        <label>ISO Path</label>
+                        <input type="text" class="form-control" id="edit-vm-iso" value="${vm.iso_path || ''}"
+                            placeholder="Leave empty to detach ISO">
+                        <small style="color:var(--text-muted);">Set to empty to boot from disk on next start</small>
+                    </div>
+                    <div class="form-group" style="margin-top:12px;">
+                        <label>VirtIO Drivers ISO</label>
+                        <input type="text" class="form-control" id="edit-vm-drivers-iso" value="${vm.drivers_iso || ''}"
+                            placeholder="/var/lib/wolfstack/isos/virtio-win.iso">
+                        <small style="color:var(--text-muted);">Secondary CD-ROM for VirtIO drivers (Windows)</small>
+                    </div>
+                    <div class="form-group" style="margin-top:12px;">
+                        <label>OS Disk Bus</label>
+                        <select class="form-control" id="edit-vm-os-bus" style="font-size:13px;">
+                            <option value="virtio"${vm.os_disk_bus === 'virtio' ? ' selected' : ''}>VirtIO (fastest)</option>
+                            <option value="ide"${vm.os_disk_bus === 'ide' ? ' selected' : ''}>IDE (Windows)</option>
+                            <option value="sata"${vm.os_disk_bus === 'sata' ? ' selected' : ''}>SATA</option>
+                        </select>
+                    </div>
                 </div>
             </div>
 
