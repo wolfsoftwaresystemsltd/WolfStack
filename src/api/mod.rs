@@ -8664,10 +8664,32 @@ pub async fn k8s_storage_overview(req: HttpRequest, state: web::Data<AppState>, 
     let classes = crate::kubernetes::get_storage_classes(&cluster.kubeconfig_path);
     let pvs = crate::kubernetes::get_persistent_volumes(&cluster.kubeconfig_path);
     let pvcs = crate::kubernetes::get_persistent_volume_claims(&cluster.kubeconfig_path, ns);
+    // Include WolfStack storage mounts that are currently mounted (available as backing storage)
+    let wolfstack_mounts: Vec<serde_json::Value> = crate::storage::list_mounts()
+        .iter()
+        .filter(|m| m.status == "mounted")
+        .map(|m| {
+            let type_label = match m.mount_type {
+                crate::storage::MountType::Nfs => "NFS",
+                crate::storage::MountType::Sshfs => "SSHFS",
+                crate::storage::MountType::Directory => "Directory",
+                crate::storage::MountType::S3 => "S3",
+                crate::storage::MountType::Wolfdisk => "WolfDisk",
+            };
+            serde_json::json!({
+                "id": m.id,
+                "name": m.name,
+                "mount_type": type_label,
+                "source": m.source,
+                "mount_point": m.mount_point,
+            })
+        })
+        .collect();
     HttpResponse::Ok().json(serde_json::json!({
         "storage_classes": classes,
         "persistent_volumes": pvs,
         "pvcs": pvcs,
+        "wolfstack_mounts": wolfstack_mounts,
     }))
 }
 
@@ -8676,12 +8698,26 @@ pub async fn k8s_storage_overview(req: HttpRequest, state: web::Data<AppState>, 
 pub struct K8sCreatePvcRequest {
     pub name: String,
     pub namespace: String,
+    #[serde(default)]
     pub storage_class: String,
     pub size: String,
     #[serde(default = "default_access_mode")]
     pub access_mode: String,
+    /// Storage type: "dynamic" (default, uses storage_class), "host_path", "nfs", "wolfstack_mount"
+    #[serde(default = "default_storage_type")]
+    pub storage_type: String,
+    #[serde(default)]
+    pub host_path: Option<String>,
+    #[serde(default)]
+    pub nfs_server: Option<String>,
+    #[serde(default)]
+    pub nfs_path: Option<String>,
+    /// WolfStack mount ID — resolved to its mount_point or NFS source
+    #[serde(default)]
+    pub wolfstack_mount_id: Option<String>,
 }
 fn default_access_mode() -> String { "ReadWriteOnce".to_string() }
+fn default_storage_type() -> String { "dynamic".to_string() }
 
 pub async fn k8s_create_pvc(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<K8sCreatePvcRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
@@ -8689,9 +8725,75 @@ pub async fn k8s_create_pvc(req: HttpRequest, state: web::Data<AppState>, path: 
         Some(c) => c,
         None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
     };
-    match crate::kubernetes::create_pvc(&cluster.kubeconfig_path, &body.name, &body.namespace, &body.storage_class, &body.size, &body.access_mode) {
-        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+
+    match body.storage_type.as_str() {
+        "dynamic" | "" => {
+            // Dynamic provisioning via StorageClass (existing behavior)
+            match crate::kubernetes::create_pvc(&cluster.kubeconfig_path, &body.name, &body.namespace, &body.storage_class, &body.size, &body.access_mode) {
+                Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+            }
+        }
+        "host_path" => {
+            match crate::kubernetes::create_pv_and_pvc(
+                &cluster.kubeconfig_path, &body.name, &body.namespace, &body.size, &body.access_mode,
+                "host_path", body.host_path.as_deref(), None, None,
+            ) {
+                Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+            }
+        }
+        "nfs" => {
+            match crate::kubernetes::create_pv_and_pvc(
+                &cluster.kubeconfig_path, &body.name, &body.namespace, &body.size, &body.access_mode,
+                "nfs", None, body.nfs_server.as_deref(), body.nfs_path.as_deref(),
+            ) {
+                Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+            }
+        }
+        "wolfstack_mount" => {
+            // Resolve WolfStack mount ID to NFS source or local path
+            let mount_id = match &body.wolfstack_mount_id {
+                Some(id) => id.clone(),
+                None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "wolfstack_mount_id is required" })),
+            };
+            let mounts = crate::storage::list_mounts();
+            let mount = match mounts.iter().find(|m| m.id == mount_id) {
+                Some(m) => m.clone(),
+                None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "WolfStack mount not found" })),
+            };
+            // NFS mounts → use NFS PV; local/directory mounts → use hostPath PV
+            match mount.mount_type {
+                crate::storage::MountType::Nfs => {
+                    // source is "server:/path"
+                    let parts: Vec<&str> = mount.source.splitn(2, ':').collect();
+                    if parts.len() != 2 {
+                        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid NFS source format" }));
+                    }
+                    match crate::kubernetes::create_pv_and_pvc(
+                        &cluster.kubeconfig_path, &body.name, &body.namespace, &body.size, &body.access_mode,
+                        "nfs", None, Some(parts[0]), Some(parts[1]),
+                    ) {
+                        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+                        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+                    }
+                }
+                _ => {
+                    // Use mount_point as hostPath
+                    match crate::kubernetes::create_pv_and_pvc(
+                        &cluster.kubeconfig_path, &body.name, &body.namespace, &body.size, &body.access_mode,
+                        "host_path", Some(&mount.mount_point), None, None,
+                    ) {
+                        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+                        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+                    }
+                }
+            }
+        }
+        other => {
+            HttpResponse::BadRequest().json(serde_json::json!({ "error": format!("Unknown storage type: {}", other) }))
+        }
     }
 }
 

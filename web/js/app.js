@@ -23646,106 +23646,187 @@ function renderK8sStorage(data) {
 }
 
 function showK8sCreatePvcModal() {
-    // Fetch storage classes first for the dropdown
-    fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/storage`)
-        .then(r => r.json())
-        .then(data => {
-            const classes = data.storage_classes || [];
-            let classOptions = '';
-            if (classes.length === 0) {
-                classOptions = '<option value="" disabled selected>No storage classes available</option>';
-            } else {
-                classes.forEach(sc => {
-                    const def = sc.is_default ? ' (default)' : '';
-                    const selected = sc.is_default ? ' selected' : '';
-                    classOptions += `<option value="${escapeHtml(sc.name)}"${selected}>${escapeHtml(sc.name)}${def}</option>`;
-                });
-            }
+    // Fetch storage data (classes + wolfstack mounts) and namespaces in parallel
+    Promise.all([
+        fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/storage`).then(r => r.json()),
+        fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/namespaces`).then(r => r.json()),
+    ]).then(([data, namespaces]) => {
+        const classes = data.storage_classes || [];
+        const wsMounts = data.wolfstack_mounts || [];
+        const nsList = Array.isArray(namespaces) ? namespaces : [];
 
-            // Also fetch namespaces for the dropdown
-            fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/namespaces`)
-                .then(r => r.json())
-                .then(namespaces => {
-                    const nsList = Array.isArray(namespaces) ? namespaces : [];
-                    let nsOptions = nsList.map(ns =>
-                        `<option value="${escapeHtml(ns.name)}" ${ns.name === (k8sCurrentNamespace || 'default') ? 'selected' : ''}>${escapeHtml(ns.name)}</option>`
-                    ).join('');
+        let classOptions = '';
+        if (classes.length === 0) {
+            classOptions = '<option value="" disabled selected>No storage classes available</option>';
+        } else {
+            classes.forEach(sc => {
+                const def = sc.is_default ? ' (default)' : '';
+                const selected = sc.is_default ? ' selected' : '';
+                classOptions += `<option value="${escapeHtml(sc.name)}"${selected}>${escapeHtml(sc.name)}${def}</option>`;
+            });
+        }
 
-                    const overlay = document.createElement('div');
-                    overlay.className = 'modal-overlay active';
-                    overlay.onclick = e => { if (e.target === overlay) closeModal(); };
-                    overlay.innerHTML = `
-                        <div class="modal" style="max-width:500px;">
-                            <div class="modal-header">
-                                <h3>Create Persistent Volume Claim</h3>
-                                <button class="modal-close" onclick="closeModal()">&times;</button>
+        let nsOptions = nsList.map(ns =>
+            `<option value="${escapeHtml(ns.name)}" ${ns.name === (k8sCurrentNamespace || 'default') ? 'selected' : ''}>${escapeHtml(ns.name)}</option>`
+        ).join('');
+
+        let mountOptions = '<option value="" disabled selected>Select a WolfStack mount...</option>';
+        wsMounts.forEach(m => {
+            mountOptions += `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)} (${escapeHtml(m.mount_type)} &mdash; ${escapeHtml(m.source)})</option>`;
+        });
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay active';
+        overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:540px;">
+                <div class="modal-header">
+                    <h3>Create Persistent Volume</h3>
+                    <button class="modal-close" onclick="closeModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p style="color:var(--text-muted); font-size:12px; margin:0 0 16px 0;">Create a new volume to provide persistent storage for your deployments.</p>
+                    <div class="form-group" style="margin-bottom:12px;">
+                        <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Name</label>
+                        <input type="text" id="k8s-pvc-name" class="form-control" placeholder="e.g. my-app-data" style="font-size:13px;">
+                        <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Lowercase, letters, numbers, and hyphens only</div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:12px;">
+                        <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Namespace</label>
+                        <select id="k8s-pvc-namespace" class="form-control" style="font-size:13px;">
+                            ${nsOptions}
+                        </select>
+                    </div>
+                    <div class="form-group" style="margin-bottom:12px;">
+                        <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Storage Source</label>
+                        <select id="k8s-pvc-storage-type" class="form-control" style="font-size:13px;" onchange="k8sPvcStorageTypeChanged()">
+                            <option value="dynamic" selected>Dynamic (Storage Class provisioner)</option>
+                            <option value="host_path">Local Path (directory on this server)</option>
+                            <option value="nfs">NFS Share (network file system)</option>
+                            ${wsMounts.length > 0 ? '<option value="wolfstack_mount">WolfStack Mount (existing storage)</option>' : ''}
+                        </select>
+                    </div>
+                    <div id="k8s-pvc-dynamic-fields">
+                        <div class="form-group" style="margin-bottom:12px;">
+                            <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Storage Class</label>
+                            <select id="k8s-pvc-class" class="form-control" style="font-size:13px;">
+                                ${classOptions}
+                            </select>
+                        </div>
+                    </div>
+                    <div id="k8s-pvc-hostpath-fields" style="display:none;">
+                        <div class="form-group" style="margin-bottom:12px;">
+                            <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Directory Path</label>
+                            <input type="text" id="k8s-pvc-host-path" class="form-control" placeholder="/mnt/data/my-app" style="font-size:13px;">
+                            <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">The directory will be created if it doesn't exist</div>
+                        </div>
+                    </div>
+                    <div id="k8s-pvc-nfs-fields" style="display:none;">
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                            <div class="form-group" style="margin-bottom:12px;">
+                                <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">NFS Server</label>
+                                <input type="text" id="k8s-pvc-nfs-server" class="form-control" placeholder="192.168.1.10" style="font-size:13px;">
                             </div>
-                            <div class="modal-body">
-                                <p style="color:var(--text-muted); font-size:12px; margin:0 0 16px 0;">Create a new volume claim to provide persistent storage for your deployments.</p>
-                                <div class="form-group" style="margin-bottom:12px;">
-                                    <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Name</label>
-                                    <input type="text" id="k8s-pvc-name" class="form-control" placeholder="e.g. my-app-data" style="font-size:13px;">
-                                    <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Lowercase, letters, numbers, and hyphens only</div>
-                                </div>
-                                <div class="form-group" style="margin-bottom:12px;">
-                                    <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Namespace</label>
-                                    <select id="k8s-pvc-namespace" class="form-control" style="font-size:13px;">
-                                        ${nsOptions}
-                                    </select>
-                                </div>
-                                <div class="form-group" style="margin-bottom:12px;">
-                                    <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Storage Class</label>
-                                    <select id="k8s-pvc-class" class="form-control" style="font-size:13px;">
-                                        ${classOptions}
-                                    </select>
-                                </div>
-                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
-                                    <div class="form-group" style="margin-bottom:12px;">
-                                        <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Size</label>
-                                        <div style="display:flex; gap:6px;">
-                                            <input type="number" id="k8s-pvc-size" class="form-control" value="1" min="1" style="font-size:13px; flex:1;">
-                                            <select id="k8s-pvc-size-unit" class="form-control" style="font-size:13px; width:auto;">
-                                                <option value="Gi" selected>GB</option>
-                                                <option value="Mi">MB</option>
-                                                <option value="Ti">TB</option>
-                                            </select>
-                                        </div>
-                                    </div>
-                                    <div class="form-group" style="margin-bottom:12px;">
-                                        <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Access Mode</label>
-                                        <select id="k8s-pvc-access" class="form-control" style="font-size:13px;">
-                                            <option value="ReadWriteOnce" selected>ReadWriteOnce (single pod)</option>
-                                            <option value="ReadWriteMany">ReadWriteMany (shared)</option>
-                                            <option value="ReadOnlyMany">ReadOnlyMany (read-only shared)</option>
-                                        </select>
-                                    </div>
-                                </div>
-                                <div style="padding:10px 14px; background:rgba(99,102,241,0.06); border-radius:6px; border-left:3px solid #6366f1; font-size:12px; color:var(--text-secondary);">
-                                    <strong>Tip:</strong> Use <strong>ReadWriteOnce</strong> for databases or single-app storage. Use <strong>ReadWriteMany</strong> to share files between multiple deployments (e.g. shared uploads, config).
-                                </div>
+                            <div class="form-group" style="margin-bottom:12px;">
+                                <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">NFS Path</label>
+                                <input type="text" id="k8s-pvc-nfs-path" class="form-control" placeholder="/export/data" style="font-size:13px;">
                             </div>
-                            <div class="modal-footer">
-                                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-                                <button class="btn btn-primary" onclick="k8sCreatePvc()" style="background:#326ce5; border-color:#326ce5;">Create Volume</button>
+                        </div>
+                        <div style="padding:8px 12px; background:rgba(16,185,129,0.06); border-radius:6px; font-size:11px; color:var(--text-muted); margin-bottom:12px;">
+                            NFS volumes support ReadWriteMany &mdash; multiple pods across different nodes can access the same data simultaneously.
+                        </div>
+                    </div>
+                    <div id="k8s-pvc-wsmount-fields" style="display:none;">
+                        <div class="form-group" style="margin-bottom:12px;">
+                            <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">WolfStack Mount</label>
+                            <select id="k8s-pvc-ws-mount" class="form-control" style="font-size:13px;">
+                                ${mountOptions}
+                            </select>
+                            <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Uses an existing WolfStack storage mount as backing. NFS mounts are recommended for multi-node clusters.</div>
+                        </div>
+                    </div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                        <div class="form-group" style="margin-bottom:12px;">
+                            <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Size</label>
+                            <div style="display:flex; gap:6px;">
+                                <input type="number" id="k8s-pvc-size" class="form-control" value="1" min="1" style="font-size:13px; flex:1;">
+                                <select id="k8s-pvc-size-unit" class="form-control" style="font-size:13px; width:auto;">
+                                    <option value="Gi" selected>GB</option>
+                                    <option value="Mi">MB</option>
+                                    <option value="Ti">TB</option>
+                                </select>
                             </div>
-                        </div>`;
-                    document.body.appendChild(overlay);
-                });
-        })
-        .catch(e => showToast('Failed to load storage classes: ' + e.message, 'error'));
+                        </div>
+                        <div class="form-group" style="margin-bottom:12px;">
+                            <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Access Mode</label>
+                            <select id="k8s-pvc-access" class="form-control" style="font-size:13px;">
+                                <option value="ReadWriteOnce" selected>ReadWriteOnce (single pod)</option>
+                                <option value="ReadWriteMany">ReadWriteMany (shared)</option>
+                                <option value="ReadOnlyMany">ReadOnlyMany (read-only shared)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="k8sCreatePvc()" style="background:#326ce5; border-color:#326ce5;">Create Volume</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+    }).catch(e => showToast('Failed to load storage info: ' + e.message, 'error'));
+}
+
+function k8sPvcStorageTypeChanged() {
+    const type = document.getElementById('k8s-pvc-storage-type')?.value;
+    document.getElementById('k8s-pvc-dynamic-fields').style.display = type === 'dynamic' ? '' : 'none';
+    document.getElementById('k8s-pvc-hostpath-fields').style.display = type === 'host_path' ? '' : 'none';
+    document.getElementById('k8s-pvc-nfs-fields').style.display = type === 'nfs' ? '' : 'none';
+    document.getElementById('k8s-pvc-wsmount-fields').style.display = type === 'wolfstack_mount' ? '' : 'none';
+    // Auto-select ReadWriteMany for NFS
+    if (type === 'nfs') {
+        document.getElementById('k8s-pvc-access').value = 'ReadWriteMany';
+    }
 }
 
 async function k8sCreatePvc() {
     const name = document.getElementById('k8s-pvc-name')?.value.trim();
     const namespace = document.getElementById('k8s-pvc-namespace')?.value;
+    const storageType = document.getElementById('k8s-pvc-storage-type')?.value || 'dynamic';
     const storageClass = document.getElementById('k8s-pvc-class')?.value;
     const size = document.getElementById('k8s-pvc-size')?.value;
     const sizeUnit = document.getElementById('k8s-pvc-size-unit')?.value;
     const accessMode = document.getElementById('k8s-pvc-access')?.value;
 
     if (!name) { showToast('Enter a volume name', 'error'); return; }
-    if (!storageClass) { showToast('Select a storage class', 'error'); return; }
     if (!size || parseInt(size) < 1) { showToast('Enter a valid size', 'error'); return; }
+
+    const body = {
+        name,
+        namespace,
+        storage_type: storageType,
+        size: `${size}${sizeUnit}`,
+        access_mode: accessMode,
+    };
+
+    if (storageType === 'dynamic') {
+        if (!storageClass) { showToast('Select a storage class', 'error'); return; }
+        body.storage_class = storageClass;
+    } else if (storageType === 'host_path') {
+        const hostPath = document.getElementById('k8s-pvc-host-path')?.value.trim();
+        if (!hostPath || !hostPath.startsWith('/')) { showToast('Enter a valid directory path starting with /', 'error'); return; }
+        body.host_path = hostPath;
+    } else if (storageType === 'nfs') {
+        const nfsServer = document.getElementById('k8s-pvc-nfs-server')?.value.trim();
+        const nfsPath = document.getElementById('k8s-pvc-nfs-path')?.value.trim();
+        if (!nfsServer) { showToast('Enter the NFS server address', 'error'); return; }
+        if (!nfsPath || !nfsPath.startsWith('/')) { showToast('Enter a valid NFS export path starting with /', 'error'); return; }
+        body.nfs_server = nfsServer;
+        body.nfs_path = nfsPath;
+    } else if (storageType === 'wolfstack_mount') {
+        const mountId = document.getElementById('k8s-pvc-ws-mount')?.value;
+        if (!mountId) { showToast('Select a WolfStack mount', 'error'); return; }
+        body.wolfstack_mount_id = mountId;
+    }
 
     closeModal();
     showToast('Creating volume...', 'info', 5000);
@@ -23753,13 +23834,7 @@ async function k8sCreatePvc() {
         const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/storage/pvcs`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                name,
-                namespace,
-                storage_class: storageClass,
-                size: `${size}${sizeUnit}`,
-                access_mode: accessMode,
-            }),
+            body: JSON.stringify(body),
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(data.error || 'Failed');
@@ -23890,7 +23965,7 @@ function renderK8sWolfNet(status, cluster, deployments) {
                     <li><strong>Load balanced across pods</strong> &mdash; Kubernetes spreads traffic across all running pods automatically. If you scale to 3 replicas, all 3 share the load.</li>
                 </ol>
                 <div style="margin-top:12px; padding:10px 14px; background:rgba(99,102,241,0.08); border-radius:6px; border-left:3px solid #6366f1;">
-                    <strong>Tip:</strong> Enable "Auto-assign WolfNet IP" in <a href="#" onclick="switchK8sTab('settings'); return false;" style="color:#818cf8;">Settings</a> to automatically assign a WolfNet IP every time you deploy an app. You can also assign IPs manually from this page.
+                    <strong>Tip:</strong> Auto-assign WolfNet IP is enabled by default &mdash; every app you deploy automatically gets a private WolfNet IP. You can disable this in <a href="#" onclick="switchK8sTab('settings'); return false;" style="color:#818cf8;">Settings</a>, or assign IPs manually from this page.
                 </div>
             </div>
         </div>
@@ -23918,7 +23993,7 @@ function renderK8sWolfNet(status, cluster, deployments) {
             </div>`;
 
     if (nodes.length > 0) {
-        html += `<table class="table" style="font-size:13px;">
+        html += `<table class="data-table" style="font-size:13px;">
             <thead><tr><th>Node</th><th>Status</th><th>Roles</th><th>WolfNet IP</th><th>Connected</th></tr></thead>
             <tbody>`;
         nodes.forEach(n => {
@@ -23963,7 +24038,7 @@ function renderK8sWolfNet(status, cluster, deployments) {
             </div>`;
 
     if (routes.length > 0) {
-        html += `<table class="table" style="font-size:13px;">
+        html += `<table class="data-table" style="font-size:13px;">
             <thead><tr><th>Deployment</th><th>Namespace</th><th>WolfNet IP</th><th>Port Mappings</th><th>Access</th><th></th></tr></thead>
             <tbody>`;
         routes.forEach(r => {
@@ -23986,7 +24061,7 @@ function renderK8sWolfNet(status, cluster, deployments) {
     } else {
         html += `<div style="padding:20px; text-align:center; color:var(--text-muted); font-size:13px; background:var(--bg-secondary); border-radius:8px;">
             No deployments have WolfNet IPs assigned yet.<br>
-            <span style="font-size:12px;">Deploy an app from the App Store with auto-assign enabled, or assign an IP manually below.</span>
+            <span style="font-size:12px;">Deploy an app from the App Store and it will automatically get a WolfNet IP, or assign one manually below.</span>
         </div>`;
     }
 

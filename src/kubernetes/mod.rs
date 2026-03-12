@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+
+fn default_true() -> bool { true }
 use tracing::{error, info, warn};
 
 const CONFIG_FILE: &str = "/etc/wolfstack/kubernetes.json";
@@ -88,7 +90,7 @@ pub struct K8sCluster {
     pub wolfnet_server: String,
     #[serde(default)]
     pub wolfnet_network: String,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub wolfnet_auto_deploy: bool,
     #[serde(default)]
     pub wolfnet_routes: Vec<K8sWolfNetRoute>,
@@ -249,7 +251,7 @@ pub fn add_cluster(
         nodes: Vec::new(),
         wolfnet_server: String::new(),
         wolfnet_network: String::new(),
-        wolfnet_auto_deploy: false,
+        wolfnet_auto_deploy: true,
         wolfnet_routes: Vec::new(),
     };
 
@@ -2471,10 +2473,88 @@ spec:
     result
 }
 
-/// Delete a PersistentVolumeClaim
+/// Create a PersistentVolume + PVC with a specific backing storage (hostPath or NFS)
+pub fn create_pv_and_pvc(
+    kubeconfig: &str,
+    name: &str,
+    namespace: &str,
+    size: &str,
+    access_mode: &str,
+    storage_type: &str,
+    host_path: Option<&str>,
+    nfs_server: Option<&str>,
+    nfs_path: Option<&str>,
+) -> Result<String, String> {
+    let pv_name = format!("{}-pv", name);
+
+    let volume_source = match storage_type {
+        "host_path" | "local" => {
+            let path = host_path.ok_or("host_path is required for local storage")?;
+            info!("Creating hostPath PV '{}' at '{}' + PVC '{}'", pv_name, path, name);
+            format!("  hostPath:\n    path: {}\n    type: DirectoryOrCreate", path)
+        }
+        "nfs" => {
+            let server = nfs_server.ok_or("nfs_server is required for NFS storage")?;
+            let path = nfs_path.ok_or("nfs_path is required for NFS storage")?;
+            info!("Creating NFS PV '{}' ({}:{}) + PVC '{}'", pv_name, server, path, name);
+            format!("  nfs:\n    server: {}\n    path: {}", server, path)
+        }
+        _ => return Err(format!("Unknown storage type: {}", storage_type)),
+    };
+
+    let yaml = format!(
+        r#"apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {pv_name}
+  labels:
+    wolfstack-pvc: {name}
+spec:
+  capacity:
+    storage: {size}
+  accessModes:
+    - {access_mode}
+  persistentVolumeReclaimPolicy: Retain
+{volume_source}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {name}
+  namespace: {namespace}
+spec:
+  accessModes:
+    - {access_mode}
+  resources:
+    requests:
+      storage: {size}
+  storageClassName: ""
+  selector:
+    matchLabels:
+      wolfstack-pvc: {name}"#,
+        pv_name = pv_name,
+        name = name,
+        namespace = namespace,
+        size = size,
+        access_mode = access_mode,
+        volume_source = volume_source,
+    );
+
+    let tmp = format!("/tmp/wolfstack-pv-pvc-{}.yaml", uuid::Uuid::new_v4());
+    std::fs::write(&tmp, &yaml).map_err(|e| format!("Failed to write temp YAML: {}", e))?;
+    let result = kubectl(kubeconfig, &["apply", "-f", &tmp]);
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
+/// Delete a PersistentVolumeClaim (and its associated PV if created by WolfStack)
 pub fn delete_pvc(kubeconfig: &str, name: &str, namespace: &str) -> Result<String, String> {
     info!("Deleting PVC '{}' in namespace '{}'", name, namespace);
-    kubectl(kubeconfig, &["delete", "pvc", name, "-n", namespace])
+    let result = kubectl(kubeconfig, &["delete", "pvc", name, "-n", namespace]);
+    // Also try to delete the associated PV (created by create_pv_and_pvc)
+    let pv_name = format!("{}-pv", name);
+    let _ = kubectl(kubeconfig, &["delete", "pv", &pv_name, "--ignore-not-found"]);
+    result
 }
 
 /// Add a PVC volume mount to a deployment via kubectl patch
