@@ -18061,6 +18061,20 @@ function switchAppStoreTab(tab) {
 }
 
 // ─── Install Modal ───
+// Build a set of node addresses/hostnames that are part of a k8s cluster
+function getK8sNodeAddresses() {
+    const addrs = new Set();
+    for (const c of k8sClusters) {
+        if (c.api_url) {
+            try {
+                const u = new URL(c.api_url);
+                addrs.add(u.hostname.toLowerCase());
+            } catch (e) {}
+        }
+    }
+    return addrs;
+}
+
 function openAppStoreInstallModal(appId) {
     appStoreInstallAppId = appId;
     const app = appStoreApps.find(a => a.id === appId);
@@ -18069,39 +18083,77 @@ function openAppStoreInstallModal(appId) {
     document.getElementById('appstore-install-title').textContent = `Install ${app.name}`;
     document.getElementById('appstore-install-name').value = app.id.replace(/_/g, '-');
 
-    // Populate host selector from allNodes (show all, mark offline) — sorted alphabetically
+    const k8sAddrs = getK8sNodeAddresses();
+
+    // Populate host selector from allNodes (show all, mark offline + k8s) — sorted alphabetically
     const hostSelect = document.getElementById('appstore-install-host');
     const sortedNodes = [...allNodes].sort((a, b) => a.hostname.localeCompare(b.hostname));
     hostSelect.innerHTML = sortedNodes.map(n => {
         const status = n.online ? '' : ' [offline]';
         const self = n.is_self ? ' — this server' : '';
-        const label = `${n.hostname} (${n.address})${self}${status}`;
-        return `<option value="${n.id}" ${n.is_self ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+        const hasK8s = k8sAddrs.has(n.address.toLowerCase()) || k8sAddrs.has(n.hostname.toLowerCase());
+        const k8sBadge = hasK8s ? ' ⎈ k8s' : '';
+        const label = `${n.hostname} (${n.address})${self}${k8sBadge}${status}`;
+        return `<option value="${n.id}" data-k8s="${hasK8s}" ${n.is_self ? 'selected' : ''}>${escapeHtml(label)}</option>`;
     }).join('');
     if (allNodes.length === 0) {
         hostSelect.innerHTML = '<option value="">No servers found</option>';
     }
 
-    // Populate storage when host changes
-    hostSelect.onchange = () => populateAppStoreStorage();
+    // Rebuild targets when host changes
+    hostSelect.onchange = () => {
+        populateAppStoreStorage();
+        rebuildAppStoreTargets(app);
+    };
     populateAppStoreStorage();
 
-    // Build target buttons
+    // Build target buttons (checks if selected host has k8s)
+    rebuildAppStoreTargets(app);
+
+    // Build user input fields
+    const inputsEl = document.getElementById('appstore-install-inputs');
+    if (app.user_inputs && app.user_inputs.length > 0) {
+        inputsEl.innerHTML = app.user_inputs.map(inp => `
+            <div style="margin-bottom:12px;">
+                <label style="font-size:13px; font-weight:500; display:block; margin-bottom:4px; color:var(--text-secondary);">${escapeHtml(inp.label)}</label>
+                <input type="${inp.input_type === 'password' ? 'password' : 'text'}" class="form-control appstore-user-input"
+                    data-key="${escapeHtml(inp.id)}" placeholder="${escapeHtml(inp.placeholder || inp.default || '')}" value="${escapeHtml(inp.default || '')}">
+            </div>
+        `).join('');
+    } else {
+        inputsEl.innerHTML = '';
+    }
+
+    // Show modal
+    const modal = document.getElementById('appstore-install-modal');
+    modal.style.display = 'flex';
+    setTimeout(() => modal.classList.add('active'), 10);
+}
+
+function rebuildAppStoreTargets(app) {
     const targetsEl = document.getElementById('appstore-install-targets');
-    let targetHtml = '';
+    if (!targetsEl) return;
+
+    const hostSelect = document.getElementById('appstore-install-host');
+    const selectedOpt = hostSelect?.selectedOptions[0];
+    const selectedNodeHasK8s = selectedOpt?.dataset?.k8s === 'true';
+
     const targets = [];
     if (app.docker) targets.push({ key: 'docker', label: '🐳 Docker' });
     if (app.lxc) targets.push({ key: 'lxc', label: '📦 LXC' });
     if (app.bare_metal) targets.push({ key: 'bare_metal', label: '🖥️ Host' });
-    if (app.docker && k8sClusters.length > 0) targets.push({ key: 'kubernetes', label: '&#9784; WolfKube' });
+    if (app.docker && selectedNodeHasK8s && k8sClusters.length > 0) targets.push({ key: 'kubernetes', label: '&#9784; WolfKube' });
 
-    appStoreInstallTarget = targets[0]?.key || 'docker';
-    targetHtml = targets.map(t =>
+    // Keep current target if still valid, else default to first
+    if (!targets.some(t => t.key === appStoreInstallTarget)) {
+        appStoreInstallTarget = targets[0]?.key || 'docker';
+    }
+
+    targetsEl.innerHTML = targets.map(t =>
         `<button class="appstore-target-pill ${t.key === appStoreInstallTarget ? 'active' : ''}" onclick="selectInstallTarget('${t.key}')">${t.label}</button>`
     ).join('');
-    targetsEl.innerHTML = targetHtml;
 
-    // Build k8s options (cluster + namespace selector)
+    // Build/update k8s options
     let k8sOptsEl = document.getElementById('appstore-k8s-options');
     if (!k8sOptsEl) {
         k8sOptsEl = document.createElement('div');
@@ -18126,28 +18178,15 @@ function openAppStoreInstallModal(appId) {
                 <input type="number" id="appstore-k8s-replicas" class="form-control" value="1" min="1" max="100" style="width:100px;">
             </div>`;
     } else {
-        k8sOptsEl.innerHTML = '<div style="margin-top:8px; font-size:12px; color:var(--text-muted);">No clusters configured. Go to WolfKube to add one.</div>';
+        k8sOptsEl.innerHTML = '';
     }
     k8sOptsEl.style.display = appStoreInstallTarget === 'kubernetes' ? '' : 'none';
 
-    // Build user input fields
-    const inputsEl = document.getElementById('appstore-install-inputs');
-    if (app.user_inputs && app.user_inputs.length > 0) {
-        inputsEl.innerHTML = app.user_inputs.map(inp => `
-            <div style="margin-bottom:12px;">
-                <label style="font-size:13px; font-weight:500; display:block; margin-bottom:4px; color:var(--text-secondary);">${escapeHtml(inp.label)}</label>
-                <input type="${inp.input_type === 'password' ? 'password' : 'text'}" class="form-control appstore-user-input"
-                    data-key="${escapeHtml(inp.id)}" placeholder="${escapeHtml(inp.placeholder || inp.default || '')}" value="${escapeHtml(inp.default || '')}">
-            </div>
-        `).join('');
-    } else {
-        inputsEl.innerHTML = '';
-    }
-
-    // Show modal
-    const modal = document.getElementById('appstore-install-modal');
-    modal.style.display = 'flex';
-    setTimeout(() => modal.classList.add('active'), 10);
+    // Show/hide host/storage based on target
+    const hostRow = document.getElementById('appstore-install-host')?.closest('.form-group');
+    const storageRow = document.getElementById('appstore-install-storage')?.closest('.form-group');
+    if (hostRow) hostRow.style.display = appStoreInstallTarget === 'kubernetes' ? 'none' : '';
+    if (storageRow) storageRow.style.display = appStoreInstallTarget === 'kubernetes' ? 'none' : '';
 }
 
 function selectInstallTarget(target) {
