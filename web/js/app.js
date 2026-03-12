@@ -21766,20 +21766,28 @@ async function k8sDeleteService(name, namespace) {
 // ─── K8s Modals ───
 
 function showK8sScaleModal(name, namespace, currentReplicas) {
-    showModal(`
-        <div style="margin-bottom:20px;">
-            <h3 style="margin:0 0 4px 0; font-size:18px; font-weight:700;">Scale Deployment</h3>
-            <p style="color:var(--text-muted); font-size:12px; margin:0;">Adjust replicas for <strong>${escapeHtml(name)}</strong> in <code>${escapeHtml(namespace)}</code></p>
-        </div>
-        <div class="form-group" style="margin-bottom:20px;">
-            <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Replicas</label>
-            <input type="number" id="k8s-scale-replicas" class="form-control" value="${currentReplicas}" min="0" max="100" style="font-size:16px; padding:10px 12px; width:120px;">
-        </div>
-        <div style="display:flex; gap:8px; justify-content:flex-end;">
-            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="k8sScaleDeployment('${escapeHtml(name)}', '${escapeHtml(namespace)}')" style="background:#326ce5; border-color:#326ce5; padding:10px 24px;">Scale</button>
-        </div>
-    `);
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+    overlay.innerHTML = `
+        <div class="modal" style="max-width:420px;">
+            <div class="modal-header">
+                <h3>Scale Deployment</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="color:var(--text-muted); font-size:12px; margin:0 0 16px 0;">Adjust replicas for <strong>${escapeHtml(name)}</strong> in <code>${escapeHtml(namespace)}</code></p>
+                <div class="form-group">
+                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Replicas</label>
+                    <input type="number" id="k8s-scale-replicas" class="form-control" value="${currentReplicas}" min="0" max="100" style="font-size:16px; padding:10px 12px; width:120px;">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="k8sScaleDeployment('${escapeHtml(name)}', '${escapeHtml(namespace)}')" style="background:#326ce5; border-color:#326ce5;">Scale</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
 }
 
 async function k8sScaleDeployment(name, namespace) {
@@ -21798,20 +21806,28 @@ async function k8sScaleDeployment(name, namespace) {
 }
 
 function showK8sCreateNamespaceModal() {
-    showModal(`
-        <div style="margin-bottom:20px;">
-            <h3 style="margin:0 0 4px 0; font-size:18px; font-weight:700;">Create Namespace</h3>
-            <p style="color:var(--text-muted); font-size:12px; margin:0;">Create a new Kubernetes namespace for isolating workloads.</p>
-        </div>
-        <div class="form-group" style="margin-bottom:20px;">
-            <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Namespace Name</label>
-            <input type="text" id="k8s-ns-name" class="form-control" placeholder="my-namespace" style="font-size:14px; padding:10px 12px;">
-        </div>
-        <div style="display:flex; gap:8px; justify-content:flex-end;">
-            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="k8sCreateNamespace()" style="background:#326ce5; border-color:#326ce5; padding:10px 24px;">Create</button>
-        </div>
-    `);
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+    overlay.innerHTML = `
+        <div class="modal" style="max-width:420px;">
+            <div class="modal-header">
+                <h3>Create Namespace</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="color:var(--text-muted); font-size:12px; margin:0 0 16px 0;">Create a new Kubernetes namespace for isolating workloads.</p>
+                <div class="form-group">
+                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Namespace Name</label>
+                    <input type="text" id="k8s-ns-name" class="form-control" placeholder="my-namespace" style="font-size:14px; padding:10px 12px;">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="k8sCreateNamespace()" style="background:#326ce5; border-color:#326ce5;">Create</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
 }
 
 async function k8sCreateNamespace() {
@@ -21831,7 +21847,23 @@ async function k8sCreateNamespace() {
 }
 
 async function showK8sPodLogs(pod, namespace) {
-    showModal(`<h3 style="margin-bottom:8px;">Logs: ${escapeHtml(pod)}</h3><pre id="k8s-log-content" style="max-height:500px; overflow:auto; background:var(--bg-secondary); padding:12px; border-radius:8px; font-size:12px; white-space:pre-wrap;">Loading...</pre>`);
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+    overlay.innerHTML = `
+        <div class="modal" style="max-width:700px;">
+            <div class="modal-header">
+                <h3>Logs: ${escapeHtml(pod)}</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <pre id="k8s-log-content" style="max-height:500px; overflow:auto; background:var(--bg-secondary); padding:12px; border-radius:8px; font-size:12px; white-space:pre-wrap;">Loading...</pre>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
     try {
         const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/logs/${pod}?namespace=${encodeURIComponent(namespace)}&tail=200`);
         const el = document.getElementById('k8s-log-content');
@@ -21845,24 +21877,32 @@ async function showK8sPodLogs(pod, namespace) {
 }
 
 function showK8sApplyYamlModal() {
-    showModal(`
-        <div style="margin-bottom:20px;">
-            <h3 style="margin:0 0 4px 0; font-size:18px; font-weight:700;">Apply YAML Manifest</h3>
-            <p style="color:var(--text-muted); font-size:12px; margin:0;">Apply a Kubernetes YAML manifest to this cluster.</p>
-        </div>
-        <div class="form-group" style="margin-bottom:16px;">
-            <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Namespace <span style="font-weight:400; color:var(--text-muted);">(optional)</span></label>
-            <input type="text" id="k8s-apply-ns" class="form-control" placeholder="default" value="${escapeHtml(k8sCurrentNamespace || '')}" style="font-size:14px; padding:10px 12px;">
-        </div>
-        <div class="form-group" style="margin-bottom:20px;">
-            <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">YAML</label>
-            <textarea id="k8s-apply-yaml" class="form-control" rows="15" style="font-family:monospace; font-size:12px; padding:12px;" placeholder="apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-app\n..."></textarea>
-        </div>
-        <div style="display:flex; gap:8px; justify-content:flex-end;">
-            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="k8sApplyYaml()" style="background:#326ce5; border-color:#326ce5; padding:10px 24px;">Apply</button>
-        </div>
-    `);
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+    overlay.innerHTML = `
+        <div class="modal" style="max-width:640px;">
+            <div class="modal-header">
+                <h3>Apply YAML Manifest</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="color:var(--text-muted); font-size:12px; margin:0 0 16px 0;">Apply a Kubernetes YAML manifest to this cluster.</p>
+                <div class="form-group" style="margin-bottom:16px;">
+                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Namespace <span style="font-weight:400; color:var(--text-muted);">(optional)</span></label>
+                    <input type="text" id="k8s-apply-ns" class="form-control" placeholder="default" value="${escapeHtml(k8sCurrentNamespace || '')}" style="font-size:14px; padding:10px 12px;">
+                </div>
+                <div class="form-group">
+                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">YAML</label>
+                    <textarea id="k8s-apply-yaml" class="form-control" rows="15" style="font-family:monospace; font-size:12px; padding:12px;" placeholder="apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-app\n..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="k8sApplyYaml()" style="background:#326ce5; border-color:#326ce5;">Apply</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
 }
 
 async function k8sApplyYaml() {
@@ -21886,65 +21926,78 @@ async function k8sApplyYaml() {
 // ─── Provision Cluster Modal ───
 
 function showK8sProvisionModal() {
-    const sortedNodes = [...allNodes].sort((a, b) => a.hostname.localeCompare(b.hostname));
+    // Filter nodes to only those in the current WolfStack cluster
+    const clusterName = k8sWolfStackCluster || 'WolfStack';
+    const clusterFilteredNodes = allNodes.filter(n => (n.cluster_name || 'WolfStack') === clusterName);
+    const sortedNodes = [...clusterFilteredNodes].sort((a, b) => a.hostname.localeCompare(b.hostname));
     const nodeOpts = sortedNodes.map(n => {
         const self = n.is_self ? ' (this server)' : '';
         return `<option value="${n.id}">${escapeHtml(n.hostname)} (${n.address})${self}</option>`;
     }).join('');
 
-    showModal(`
-        <div style="margin-bottom:20px;">
-            <div style="display:flex; align-items:center; gap:12px; margin-bottom:4px;">
-                <div style="width:40px; height:40px; background:linear-gradient(135deg,#326ce5,#54a3ff); border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:20px;">&#9784;</div>
-                <h3 style="margin:0; font-size:18px; font-weight:700;">Provision Kubernetes Cluster</h3>
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+    overlay.innerHTML = `
+        <div class="modal" style="max-width:700px;">
+            <div class="modal-header" style="background:linear-gradient(135deg, rgba(50,108,229,0.12), rgba(50,108,229,0.04));">
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <div style="width:40px; height:40px; background:linear-gradient(135deg,#326ce5,#54a3ff); border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:20px;">&#9784;</div>
+                    <div>
+                        <h3 style="margin:0; font-size:17px; font-weight:700;">Provision Kubernetes Cluster</h3>
+                        <p style="color:var(--text-muted); font-size:11px; margin:2px 0 0 0;">Install and configure a Kubernetes distribution on <strong>${escapeHtml(clusterName)}</strong></p>
+                    </div>
+                </div>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
             </div>
-            <p style="color:var(--text-muted); font-size:12px; margin:4px 0 0 52px;">Install and configure a Kubernetes distribution across your nodes.</p>
-        </div>
-        <div class="form-group" style="margin-bottom:16px;">
-            <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Cluster Name</label>
-            <input type="text" id="k8s-provision-name" class="form-control" placeholder="my-cluster" value="k8s-cluster" style="font-size:14px; padding:10px 12px;">
-        </div>
-        <div class="form-group" style="margin-bottom:16px;">
-            <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Distribution</label>
-            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;" id="k8s-dist-selector">
-                <label style="display:flex; align-items:center; gap:8px; padding:12px; border:2px solid #326ce5; border-radius:10px; cursor:pointer; background:rgba(50,108,229,0.08); transition:all 0.15s;" onclick="k8sSelectDist('k3s')">
-                    <input type="radio" name="k8s-dist" value="k3s" checked style="accent-color:#326ce5;">
-                    <div>
-                        <div style="font-weight:700; font-size:13px;">k3s</div>
-                        <div style="font-size:10px; color:var(--text-muted);">Lightweight, ideal for edge/IoT</div>
+            <div class="modal-body">
+                <div class="form-group" style="margin-bottom:16px;">
+                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Cluster Name</label>
+                    <input type="text" id="k8s-provision-name" class="form-control" placeholder="my-cluster" value="k8s-cluster" style="font-size:14px; padding:10px 12px;">
+                </div>
+                <div class="form-group" style="margin-bottom:16px;">
+                    <label style="font-weight:600; font-size:13px; margin-bottom:8px; display:block;">Distribution</label>
+                    <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;" id="k8s-dist-selector">
+                        <label style="display:flex; align-items:center; gap:8px; padding:12px; border:2px solid #326ce5; border-radius:10px; cursor:pointer; background:rgba(50,108,229,0.08); transition:all 0.15s;" onclick="k8sSelectDist('k3s')">
+                            <input type="radio" name="k8s-dist" value="k3s" checked style="accent-color:#326ce5;">
+                            <div>
+                                <div style="font-weight:700; font-size:13px;">k3s</div>
+                                <div style="font-size:10px; color:var(--text-muted);">Lightweight, ideal for edge/IoT</div>
+                            </div>
+                        </label>
+                        <label style="display:flex; align-items:center; gap:8px; padding:12px; border:2px solid var(--border); border-radius:10px; cursor:pointer; transition:all 0.15s;" onclick="k8sSelectDist('microk8s')">
+                            <input type="radio" name="k8s-dist" value="microk8s" style="accent-color:#326ce5;">
+                            <div>
+                                <div style="font-weight:700; font-size:13px;">MicroK8s</div>
+                                <div style="font-size:10px; color:var(--text-muted);">Snap-based, batteries included</div>
+                            </div>
+                        </label>
+                        <label style="display:flex; align-items:center; gap:8px; padding:12px; border:2px solid var(--border); border-radius:10px; cursor:pointer; transition:all 0.15s;" onclick="k8sSelectDist('kubeadm')">
+                            <input type="radio" name="k8s-dist" value="kubeadm" style="accent-color:#326ce5;">
+                            <div>
+                                <div style="font-weight:700; font-size:13px;">kubeadm</div>
+                                <div style="font-size:10px; color:var(--text-muted);">Full Kubernetes, production-grade</div>
+                            </div>
+                        </label>
                     </div>
-                </label>
-                <label style="display:flex; align-items:center; gap:8px; padding:12px; border:2px solid var(--border); border-radius:10px; cursor:pointer; transition:all 0.15s;" onclick="k8sSelectDist('microk8s')">
-                    <input type="radio" name="k8s-dist" value="microk8s" style="accent-color:#326ce5;">
-                    <div>
-                        <div style="font-weight:700; font-size:13px;">MicroK8s</div>
-                        <div style="font-size:10px; color:var(--text-muted);">Snap-based, batteries included</div>
-                    </div>
-                </label>
-                <label style="display:flex; align-items:center; gap:8px; padding:12px; border:2px solid var(--border); border-radius:10px; cursor:pointer; transition:all 0.15s;" onclick="k8sSelectDist('kubeadm')">
-                    <input type="radio" name="k8s-dist" value="kubeadm" style="accent-color:#326ce5;">
-                    <div>
-                        <div style="font-weight:700; font-size:13px;">kubeadm</div>
-                        <div style="font-size:10px; color:var(--text-muted);">Full Kubernetes, production-grade</div>
-                    </div>
-                </label>
+                </div>
+                <div class="form-group" style="margin-bottom:16px;">
+                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Server Node <span style="font-weight:400; color:var(--text-muted);">(control plane)</span></label>
+                    <select id="k8s-provision-server" class="form-control" style="font-size:14px; padding:10px 12px;">${nodeOpts}</select>
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">The Kubernetes control plane will be installed on this node.</div>
+                </div>
+                <div class="form-group">
+                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Worker Nodes <span style="font-weight:400; color:var(--text-muted);">(optional)</span></label>
+                    <select id="k8s-provision-agents" class="form-control" multiple style="height:100px; font-size:14px; padding:8px;">${nodeOpts}</select>
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Hold Ctrl/Cmd to select multiple. These will join as worker nodes.</div>
+                </div>
             </div>
-        </div>
-        <div class="form-group" style="margin-bottom:16px;">
-            <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Server Node <span style="font-weight:400; color:var(--text-muted);">(control plane)</span></label>
-            <select id="k8s-provision-server" class="form-control" style="font-size:14px; padding:10px 12px;">${nodeOpts}</select>
-            <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">The Kubernetes control plane will be installed on this node.</div>
-        </div>
-        <div class="form-group" style="margin-bottom:20px;">
-            <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Worker Nodes <span style="font-weight:400; color:var(--text-muted);">(optional)</span></label>
-            <select id="k8s-provision-agents" class="form-control" multiple style="height:100px; font-size:14px; padding:8px;">${nodeOpts}</select>
-            <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Hold Ctrl/Cmd to select multiple. These will join as worker nodes.</div>
-        </div>
-        <div style="display:flex; gap:8px; justify-content:flex-end;">
-            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="k8sProvision()" style="background:#326ce5; border-color:#326ce5; padding:10px 24px; font-size:14px;">Provision Cluster</button>
-        </div>
-    `);
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="k8sProvision()" style="background:#326ce5; border-color:#326ce5; padding:10px 24px; font-size:14px;">Provision Cluster</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
 }
 
 function k8sSelectDist(dist) {
@@ -22210,27 +22263,37 @@ function k8sProvisionDone() {
 // ─── Import Cluster Modal ───
 
 function showK8sImportModal() {
-    showModal(`
-        <div style="margin-bottom:20px;">
-            <div style="display:flex; align-items:center; gap:12px; margin-bottom:4px;">
-                <div style="width:40px; height:40px; background:linear-gradient(135deg,#326ce5,#54a3ff); border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:20px;">&#9784;</div>
-                <h3 style="margin:0; font-size:18px; font-weight:700;">Import Kubernetes Cluster</h3>
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+    overlay.innerHTML = `
+        <div class="modal" style="max-width:600px;">
+            <div class="modal-header" style="background:linear-gradient(135deg, rgba(50,108,229,0.12), rgba(50,108,229,0.04));">
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <div style="width:40px; height:40px; background:linear-gradient(135deg,#326ce5,#54a3ff); border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:20px;">&#9784;</div>
+                    <div>
+                        <h3 style="margin:0; font-size:17px; font-weight:700;">Import Kubernetes Cluster</h3>
+                        <p style="color:var(--text-muted); font-size:11px; margin:2px 0 0 0;">Paste a kubeconfig to add an existing cluster to WolfKube.</p>
+                    </div>
+                </div>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
             </div>
-            <p style="color:var(--text-muted); font-size:12px; margin:4px 0 0 52px;">Paste a kubeconfig to add an existing cluster to WolfKube.</p>
-        </div>
-        <div class="form-group" style="margin-bottom:16px;">
-            <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Cluster Name</label>
-            <input type="text" id="k8s-import-name" class="form-control" placeholder="production-cluster" style="font-size:14px; padding:10px 12px;">
-        </div>
-        <div class="form-group" style="margin-bottom:20px;">
-            <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Kubeconfig YAML</label>
-            <textarea id="k8s-import-kubeconfig" class="form-control" rows="12" style="font-family:monospace; font-size:11px; padding:12px;" placeholder="apiVersion: v1\nclusters:\n- cluster:\n    server: https://...\n  name: my-cluster\n..."></textarea>
-        </div>
-        <div style="display:flex; gap:8px; justify-content:flex-end;">
-            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="k8sImportCluster()" style="background:#326ce5; border-color:#326ce5; padding:10px 24px; font-size:14px;">Import Cluster</button>
-        </div>
-    `);
+            <div class="modal-body">
+                <div class="form-group" style="margin-bottom:16px;">
+                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Cluster Name</label>
+                    <input type="text" id="k8s-import-name" class="form-control" placeholder="production-cluster" style="font-size:14px; padding:10px 12px;">
+                </div>
+                <div class="form-group">
+                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Kubeconfig YAML</label>
+                    <textarea id="k8s-import-kubeconfig" class="form-control" rows="12" style="font-family:monospace; font-size:11px; padding:12px;" placeholder="apiVersion: v1\nclusters:\n- cluster:\n    server: https://...\n  name: my-cluster\n..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="k8sImportCluster()" style="background:#326ce5; border-color:#326ce5; padding:10px 24px; font-size:14px;">Import Cluster</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
 }
 
 async function k8sImportCluster() {
