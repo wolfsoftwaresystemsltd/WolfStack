@@ -263,13 +263,17 @@ async fn console_session(
                 let _ = session.close(None).await;
                 return;
             }
+            // Use script(1) to create a clean PTY session that closes properly
+            // even if background processes (e.g. k3s systemd service) inherit fds.
+            // The exec at the end ensures the shell exits when the script finishes.
             cmd.arg(format!(
-                "bash {} ; EXIT_CODE=$?; rm -f {} ; \
+                "exec bash -c 'bash {} 2>&1; EXIT_CODE=$?; rm -f {}; \
                  if [ $EXIT_CODE -ne 0 ]; then \
-                   echo '' ; printf '\\033[1;31m━━━ Installation failed (exit code %s) ━━━\\033[0m\\n' $EXIT_CODE ; \
-                   printf '\\033[0;90mScroll up to see the error details.\\033[0m\\n' ; \
-                 fi ; \
-                 echo '' ; printf '\\033[0;90mDone.\\033[0m\\n'",
+                   echo; printf \"\\033[1;31m━━━ Installation failed (exit code %s) ━━━\\033[0m\\n\" $EXIT_CODE; \
+                   printf \"\\033[0;90mScroll up to see the error details.\\033[0m\\n\"; \
+                 fi; \
+                 echo; printf \"\\033[0;90mDone.\\033[0m\\n\"; \
+                 exit $EXIT_CODE'",
                 script_path, script_path
             ));
         }
@@ -280,7 +284,7 @@ async fn console_session(
         }
     }
 
-    let mut child = match pty_pair.slave.spawn_command(cmd) {
+    let child = match pty_pair.slave.spawn_command(cmd) {
         Ok(child) => child,
         Err(e) => {
             error!("Failed to spawn command: {}", e);
@@ -333,6 +337,24 @@ async fn console_session(
         }
     });
 
+    // For script-based sessions (installs, provisioning), monitor when the child
+    // process exits. Background processes (e.g. k3s systemd services) can inherit
+    // PTY file descriptors, which prevents the PTY reader from getting EOF even
+    // after the main script finishes. By watching the child directly, we can close
+    // the session promptly when the script completes.
+    let is_script_session = ctype == "install" || ctype == "appstore-install" || ctype == "k8s-provision";
+    let (child_exit_tx, mut child_exit_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut child_opt = Some(child);
+    let child_exit_handle = if is_script_session {
+        let mut child = child_opt.take().unwrap();
+        Some(tokio::task::spawn_blocking(move || {
+            let _ = child.wait();
+            let _ = child_exit_tx.send(());
+        }))
+    } else {
+        None
+    };
+
     // Main loop: multiplex between PTY output and WebSocket input
     loop {
         tokio::select! {
@@ -342,6 +364,16 @@ async fn console_session(
                 if session.text(text).await.is_err() {
                     break;
                 }
+            }
+            // Child process exited — drain remaining output, then close
+            Ok(()) = &mut child_exit_rx => {
+                // Give PTY reader a moment to flush remaining output
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                while let Ok(data) = rx.try_recv() {
+                    let text = String::from_utf8_lossy(&data).to_string();
+                    if session.text(text).await.is_err() { break; }
+                }
+                break;
             }
             // WebSocket input → PTY
             Some(Ok(msg)) = msg_stream.recv() => {
@@ -388,7 +420,11 @@ async fn console_session(
     }
 
     // Cleanup
-    let _ = child.kill();
+    if let Some(mut child) = child_opt {
+        // Non-script sessions: child is still owned here
+        let _ = child.kill();
+    }
+    if let Some(h) = child_exit_handle { h.abort(); }
     read_handle.abort();
     let _ = session.close(None).await;
 
