@@ -2080,6 +2080,22 @@ pub fn deploy_app_to_k8s(
     volumes: &[String],
     replicas: u32,
 ) -> Result<String, String> {
+    // Sanitize container name for k8s (lowercase, alphanumeric + hyphens only)
+    let container_name: String = container_name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    let app_name: String = app_name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+
     info!(
         "Deploying app '{}' (container: {}, image: {}) to namespace '{}' with {} replicas",
         app_name, container_name, image, namespace, replicas
@@ -2152,10 +2168,18 @@ pub fn deploy_app_to_k8s(
                     "        - name: {}\n          mountPath: {}",
                     vol_name, parts[1]
                 ));
-                vols.push(format!(
-                    "      - name: {}\n        hostPath:\n          path: {}",
-                    vol_name, parts[0]
-                ));
+                // Named Docker volumes (no leading /) → emptyDir; actual paths → hostPath
+                if parts[0].starts_with('/') {
+                    vols.push(format!(
+                        "      - name: {}\n        hostPath:\n          path: {}",
+                        vol_name, parts[0]
+                    ));
+                } else {
+                    vols.push(format!(
+                        "      - name: {}\n        emptyDir: {{}}",
+                        vol_name
+                    ));
+                }
             }
         }
 
@@ -2178,7 +2202,8 @@ pub fn deploy_app_to_k8s(
     } else {
         let svc_port_entries: Vec<String> = ports
             .iter()
-            .filter_map(|p| {
+            .enumerate()
+            .filter_map(|(i, p)| {
                 let parts: Vec<&str> = p.split(':').collect();
                 if parts.len() == 2 {
                     let host_port = parts[0].parse::<u32>().ok()?;
@@ -2190,8 +2215,8 @@ pub fn deploy_app_to_k8s(
                         None
                     };
                     let mut entry = format!(
-                        "  - port: {}\n    targetPort: {}",
-                        container_port, container_port
+                        "  - name: port-{}\n    port: {}\n    targetPort: {}",
+                        i, container_port, container_port
                     );
                     if let Some(np) = node_port {
                         entry.push_str(&format!("\n    nodePort: {}", np));
@@ -2199,7 +2224,7 @@ pub fn deploy_app_to_k8s(
                     Some(entry)
                 } else {
                     let port = parts[0].parse::<u32>().ok()?;
-                    Some(format!("  - port: {}\n    targetPort: {}", port, port))
+                    Some(format!("  - name: port-{}\n    port: {}\n    targetPort: {}", i, port, port))
                 }
             })
             .collect();
@@ -2210,8 +2235,8 @@ pub fn deploy_app_to_k8s(
         }
     };
 
-    // Assemble the full YAML
-    let yaml = format!(
+    // Assemble the Deployment YAML
+    let mut yaml = format!(
         r#"apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -2233,7 +2258,22 @@ spec:
       containers:
       - name: {container_name}
         image: {image}
-{container_ports}{env}{volume_mounts}{volumes_spec}---
+{container_ports}{env}{volume_mounts}{volumes_spec}"#,
+        container_name = container_name,
+        namespace = namespace,
+        app_name = app_name,
+        replicas = replicas,
+        image = image,
+        container_ports = container_ports_yaml,
+        env = env_yaml,
+        volume_mounts = volume_mounts_yaml,
+        volumes_spec = volumes_yaml,
+    );
+
+    // Only create a Service if the app exposes ports
+    if !service_ports_yaml.is_empty() {
+        yaml.push_str(&format!(
+            r#"---
 apiVersion: v1
 kind: Service
 metadata:
@@ -2244,17 +2284,11 @@ spec:
     app: {container_name}
 {service_ports}  type: NodePort
 "#,
-        container_name = container_name,
-        namespace = namespace,
-        app_name = app_name,
-        replicas = replicas,
-        image = image,
-        container_ports = container_ports_yaml,
-        env = env_yaml,
-        volume_mounts = volume_mounts_yaml,
-        volumes_spec = volumes_yaml,
-        service_ports = service_ports_yaml,
-    );
+            container_name = container_name,
+            namespace = namespace,
+            service_ports = service_ports_yaml,
+        ));
+    }
 
     apply_yaml(kubeconfig, &yaml)
 }

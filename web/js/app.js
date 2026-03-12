@@ -18195,11 +18195,13 @@ function rebuildAppStoreTargets(app) {
     }
     k8sOptsEl.style.display = appStoreInstallTarget === 'kubernetes' ? '' : 'none';
 
-    // Show/hide host/storage based on target
+    // Show/hide host/storage/inputs based on target
     const hostRow = document.getElementById('appstore-install-host')?.closest('.form-group');
     const storageRow = document.getElementById('appstore-install-storage')?.closest('.form-group');
+    const inputsEl2 = document.getElementById('appstore-install-inputs');
     if (hostRow) hostRow.style.display = appStoreInstallTarget === 'kubernetes' ? 'none' : '';
     if (storageRow) storageRow.style.display = appStoreInstallTarget === 'kubernetes' ? 'none' : '';
+    if (inputsEl2) inputsEl2.style.display = appStoreInstallTarget === 'kubernetes' ? 'none' : '';
 }
 
 function selectInstallTarget(target) {
@@ -18210,11 +18212,13 @@ function selectInstallTarget(target) {
     // Show/hide k8s options
     const k8sOpts = document.getElementById('appstore-k8s-options');
     if (k8sOpts) k8sOpts.style.display = target === 'kubernetes' ? '' : 'none';
-    // Show/hide host/storage (not needed for k8s)
+    // Show/hide host/storage/inputs (not needed for k8s)
     const hostRow = document.getElementById('appstore-install-host')?.closest('.form-group');
     const storageRow = document.getElementById('appstore-install-storage')?.closest('.form-group');
+    const inputsEl = document.getElementById('appstore-install-inputs');
     if (hostRow) hostRow.style.display = target === 'kubernetes' ? 'none' : '';
     if (storageRow) storageRow.style.display = target === 'kubernetes' ? 'none' : '';
+    if (inputsEl) inputsEl.style.display = target === 'kubernetes' ? 'none' : '';
 }
 
 async function populateAppStoreStorage() {
@@ -21565,6 +21569,12 @@ async function checkK8sClusterStatus(clusterId) {
             el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:4px;"><span style="width:6px;height:6px;border-radius:50%;background:#10b981;display:inline-block;"></span> Healthy (${status.nodes_ready}/${status.nodes_total} nodes)</span>`;
         } else {
             el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:4px;"><span style="width:6px;height:6px;border-radius:50%;background:#ef4444;display:inline-block;"></span> Unhealthy</span>`;
+        }
+        // Update the node count cell with live data
+        const row = el.closest('tr');
+        if (row && status.nodes_total != null) {
+            const nodeCell = row.children[2];
+            if (nodeCell) nodeCell.textContent = `${status.nodes_total} node${status.nodes_total !== 1 ? 's' : ''}`;
         }
     } catch (e) {
         const el = document.getElementById(`k8s-status-${clusterId}`);
