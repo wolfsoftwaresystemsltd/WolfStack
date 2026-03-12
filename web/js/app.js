@@ -21588,11 +21588,18 @@ async function openK8sCluster(clusterId) {
     k8sCurrentNamespace = '';
     await renderK8sClusterDetail();
 
-    // Auto-refresh
+    // Auto-refresh — only update the active tab content, not the entire page
     if (k8sRefreshTimer) clearInterval(k8sRefreshTimer);
     k8sRefreshTimer = setInterval(() => {
-        if (currentPage === 'kubernetes' && k8sCurrentCluster) renderK8sClusterDetail();
-        else clearInterval(k8sRefreshTimer);
+        if (currentPage === 'kubernetes' && k8sCurrentCluster) {
+            // Only refresh data tabs, not settings/wolfnet/detail views
+            const autoRefreshTabs = ['overview', 'nodes', 'namespaces', 'deployments', 'pods', 'services'];
+            if (autoRefreshTabs.includes(k8sCurrentView)) {
+                switchK8sTab(k8sCurrentView, true);
+            }
+        } else {
+            clearInterval(k8sRefreshTimer);
+        }
     }, 15000);
 }
 
@@ -21633,7 +21640,7 @@ async function renderK8sClusterDetail() {
 
     tabs.forEach(t => {
         const active = t.key === k8sCurrentView ? 'background:rgba(50,108,229,0.15); color:#326ce5; font-weight:600;' : '';
-        html += `<button class="btn btn-sm" onclick="switchK8sTab('${t.key}')" style="font-size:12px; border:none; padding:6px 14px; border-radius:6px; ${active}">${t.label}</button>`;
+        html += `<button class="btn btn-sm" data-k8s-tab="${t.key}" onclick="switchK8sTab('${t.key}')" style="font-size:12px; border:none; padding:6px 14px; border-radius:6px; ${active}">${t.label}</button>`;
     });
 
     html += `</div><div id="k8s-tab-content">Loading...</div></div></div>`;
@@ -21662,11 +21669,19 @@ async function loadK8sNamespaceFilter() {
     } catch (e) { /* ignore */ }
 }
 
-async function switchK8sTab(tab) {
+async function switchK8sTab(tab, silent) {
     k8sCurrentView = tab;
     const content = document.getElementById('k8s-tab-content');
     if (!content) return;
-    content.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">Loading...</div>';
+    if (!silent) {
+        content.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">Loading...</div>';
+        // Update tab button active states
+        document.querySelectorAll('[data-k8s-tab]').forEach(btn => {
+            btn.style.background = btn.dataset.k8sTab === tab ? 'rgba(50,108,229,0.15)' : '';
+            btn.style.color = btn.dataset.k8sTab === tab ? '#326ce5' : '';
+            btn.style.fontWeight = btn.dataset.k8sTab === tab ? '600' : '';
+        });
+    }
 
     const nsParam = k8sCurrentNamespace ? `?namespace=${encodeURIComponent(k8sCurrentNamespace)}` : '';
 
@@ -21702,11 +21717,15 @@ async function switchK8sTab(tab) {
             const svcs = await resp.json();
             content.innerHTML = renderK8sServices(svcs);
         } else if (tab === 'wolfnet') {
-            const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/wolfnet`);
-            if (!resp.ok) throw new Error('Failed');
-            const status = await resp.json();
+            const [wnResp, depResp] = await Promise.all([
+                fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/wolfnet`),
+                fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/deployments`),
+            ]);
+            if (!wnResp.ok) throw new Error('Failed');
+            const status = await wnResp.json();
+            const deployments = depResp.ok ? await depResp.json() : [];
             const cluster = k8sClusters.find(c => c.id === k8sCurrentCluster);
-            content.innerHTML = renderK8sWolfNet(status, cluster);
+            content.innerHTML = renderK8sWolfNet(status, cluster, deployments);
         } else if (tab === 'settings') {
             const cluster = k8sClusters.find(c => c.id === k8sCurrentCluster);
             content.innerHTML = renderK8sSettings(cluster);
@@ -22909,7 +22928,7 @@ function k8sUninstallDone() {
 
 // ─── WolfNet Integration ───
 
-function renderK8sWolfNet(status, cluster) {
+function renderK8sWolfNet(status, cluster, deployments) {
     const nodes = status.nodes || [];
     const routes = status.routes || [];
     const wolfnetRunning = status.wolfnet_running;
@@ -23039,20 +23058,30 @@ function renderK8sWolfNet(status, cluster) {
 
     // Manual assignment
     if (wolfnetRunning) {
+        const allDeps = deployments || [];
+        const unassigned = allDeps.filter(d => !routes.find(r => r.deployment_name === d.name && r.namespace === (d.namespace || 'default')));
+        let selectOptions = '';
+        if (unassigned.length === 0) {
+            selectOptions = '<option value="" disabled selected>No unassigned deployments</option>';
+        } else {
+            selectOptions = '<option value="" disabled selected>Select a deployment...</option>';
+            unassigned.forEach(d => {
+                const ns = d.namespace || 'default';
+                selectOptions += `<option value="${escapeHtml(d.name)}|${escapeHtml(ns)}">${escapeHtml(d.name)} (${escapeHtml(ns)})</option>`;
+            });
+        }
         html += `
         <div style="margin-top:16px; padding:16px; background:var(--bg-secondary); border-radius:8px;">
             <div style="font-size:13px; font-weight:600; margin-bottom:10px;">Assign WolfNet IP to a Deployment</div>
-            <div style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">Select a deployment that has a NodePort service. A WolfNet IP will be allocated and traffic will be routed to it automatically.</div>
+            <div style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">Select a deployment to allocate a WolfNet IP. Traffic will be routed to its NodePort service automatically.</div>
             <div style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
-                <div class="form-group" style="margin:0; flex:1; min-width:200px;">
-                    <label style="font-size:12px; margin-bottom:4px; display:block;">Deployment Name</label>
-                    <input type="text" id="k8s-wolfnet-assign-deployment" class="form-control" placeholder="e.g. my-app" style="font-size:13px;">
+                <div class="form-group" style="margin:0; flex:1; min-width:250px;">
+                    <label style="font-size:12px; margin-bottom:4px; display:block;">Deployment</label>
+                    <select id="k8s-wolfnet-assign-deployment" class="form-control" style="font-size:13px;">
+                        ${selectOptions}
+                    </select>
                 </div>
-                <div class="form-group" style="margin:0; min-width:140px;">
-                    <label style="font-size:12px; margin-bottom:4px; display:block;">Namespace</label>
-                    <input type="text" id="k8s-wolfnet-assign-namespace" class="form-control" placeholder="default" value="default" style="font-size:13px;">
-                </div>
-                <button class="btn btn-primary" onclick="k8sAssignWolfNetRoute()" style="font-size:13px; white-space:nowrap;">Assign IP</button>
+                <button class="btn btn-primary" onclick="k8sAssignWolfNetRoute()" style="font-size:13px; white-space:nowrap;" ${unassigned.length === 0 ? 'disabled' : ''}>Assign IP</button>
             </div>
         </div>`;
     }
@@ -23091,9 +23120,9 @@ function renderK8sWolfNet(status, cluster) {
 }
 
 async function k8sAssignWolfNetRoute() {
-    const deployment = document.getElementById('k8s-wolfnet-assign-deployment')?.value.trim();
-    const namespace = document.getElementById('k8s-wolfnet-assign-namespace')?.value.trim() || 'default';
-    if (!deployment) { showToast('Enter a deployment name', 'error'); return; }
+    const sel = document.getElementById('k8s-wolfnet-assign-deployment')?.value;
+    if (!sel) { showToast('Select a deployment', 'error'); return; }
+    const [deployment, namespace] = sel.split('|');
 
     showToast('Allocating WolfNet IP...', 'info', 5000);
     try {
