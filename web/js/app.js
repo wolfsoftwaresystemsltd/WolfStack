@@ -21435,6 +21435,38 @@ let k8sRefreshTimer = null;
 let k8sDetailOpen = false;       // true when viewing pod/deployment detail — suppresses auto-refresh
 let k8sWolfStackCluster = '';    // WolfStack cluster name context
 
+// Route K8s cluster API calls through node proxy for remote clusters
+function k8sClusterUrl(clusterId, subpath) {
+    const cluster = k8sClusters.find(c => c.id === clusterId);
+    if (cluster && cluster.owner_node_id) {
+        const node = allNodes.find(n => n.id === cluster.owner_node_id);
+        if (node && !node.is_self) {
+            return `/api/nodes/${cluster.owner_node_id}/proxy/kubernetes/clusters/${encodeURIComponent(clusterId)}${subpath || ''}`;
+        }
+    }
+    return `/api/kubernetes/clusters/${encodeURIComponent(clusterId)}${subpath || ''}`;
+}
+
+// Transparent fetch interceptor: rewrite K8s cluster URLs to proxy through owner node
+const _origFetch = window.fetch;
+window.fetch = function(url, options) {
+    if (typeof url === 'string') {
+        const m = url.match(/^\/api\/kubernetes\/clusters\/([^\/\?]+)(.*)/);
+        if (m) {
+            const rawId = m[1];
+            const clusterId = decodeURIComponent(rawId);
+            const cluster = k8sClusters.find(c => c.id === clusterId);
+            if (cluster && cluster.owner_node_id) {
+                const node = allNodes.find(n => n.id === cluster.owner_node_id);
+                if (node && !node.is_self) {
+                    url = `/api/nodes/${cluster.owner_node_id}/proxy/kubernetes/clusters/${rawId}${m[2]}`;
+                }
+            }
+        }
+    }
+    return _origFetch.call(this, url, options);
+};
+
 function updateK8sPodBadges() {
     // Count pods per node from cluster status data
     const counts = {};
@@ -23050,35 +23082,17 @@ async function k8sRegisterAndStartAgents(agentNodeIds) {
     if (statusEl) statusEl.textContent = 'Registering cluster...';
 
     try {
-        let registrationBody;
         const serverSession = meta.sessions[0];
+        const registrationBody = { name: meta.cluster_name, kubeconfig_path: meta.kubeconfig_path, cluster_type: meta.cluster_type };
 
-        if (serverSession.is_remote) {
-            // Fetch kubeconfig from the remote server node
-            try {
-                console.log('Fetching kubeconfig from remote node:', serverSession.node_id);
-                const kcResp = await fetch(`/api/nodes/${serverSession.node_id}/proxy/kubernetes/kubeconfig`);
-                if (kcResp.ok) {
-                    const kcData = await kcResp.json();
-                    let kubeconfig = kcData.kubeconfig || '';
-                    // Fix localhost references to actual server address
-                    kubeconfig = kubeconfig.replace(/127\.0\.0\.1/g, meta.server_address);
-                    kubeconfig = kubeconfig.replace(/localhost/g, meta.server_address);
-                    registrationBody = { name: meta.cluster_name, kubeconfig, cluster_type: meta.cluster_type };
-                } else {
-                    console.warn('Failed to fetch remote kubeconfig:', kcResp.status, await kcResp.text().catch(() => ''));
-                    registrationBody = { name: meta.cluster_name, kubeconfig_path: meta.kubeconfig_path, cluster_type: meta.cluster_type };
-                }
-            } catch (e) {
-                console.warn('Error fetching remote kubeconfig:', e);
-                registrationBody = { name: meta.cluster_name, kubeconfig_path: meta.kubeconfig_path, cluster_type: meta.cluster_type };
-            }
-        } else {
-            registrationBody = { name: meta.cluster_name, kubeconfig_path: meta.kubeconfig_path, cluster_type: meta.cluster_type };
-        }
+        // Register on the SERVER node (not the UI node) so kubernetes.json, WolfNet routes,
+        // and DNAT rules all live on the node that actually runs the K8s cluster.
+        const regUrl = serverSession.is_remote
+            ? `/api/nodes/${serverSession.node_id}/proxy/kubernetes/clusters`
+            : '/api/kubernetes/clusters';
 
-        console.log('Registering cluster:', registrationBody);
-        const regResp = await fetch('/api/kubernetes/clusters', {
+        console.log('Registering cluster on', serverSession.is_remote ? serverSession.node_id : 'local', ':', registrationBody);
+        const regResp = await fetch(regUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(registrationBody),

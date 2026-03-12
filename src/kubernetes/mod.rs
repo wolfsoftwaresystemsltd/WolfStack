@@ -94,6 +94,10 @@ pub struct K8sCluster {
     pub wolfnet_auto_deploy: bool,
     #[serde(default)]
     pub wolfnet_routes: Vec<K8sWolfNetRoute>,
+    /// The WolfStack node ID of the server node that hosts this K8s cluster.
+    /// WolfNet routes and DNAT rules are applied on this node, not the UI node.
+    #[serde(default)]
+    pub owner_node_id: String,
 }
 
 // ─── Runtime Info (returned from kubectl) ───
@@ -256,6 +260,7 @@ pub fn add_cluster(
         wolfnet_network: String::new(),
         wolfnet_auto_deploy: true,
         wolfnet_routes: Vec::new(),
+        owner_node_id: String::new(),
     };
 
     config.clusters.push(cluster.clone());

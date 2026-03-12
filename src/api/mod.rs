@@ -2332,6 +2332,7 @@ pub async fn node_proxy(
             actix_web::http::Method::POST => client.post(url),
             actix_web::http::Method::PUT => client.put(url),
             actix_web::http::Method::DELETE => client.delete(url),
+            actix_web::http::Method::PATCH => client.patch(url),
             _ => client.get(url),
         };
 
@@ -8309,7 +8310,72 @@ pub async fn appstore_uninstall(
 /// GET /api/kubernetes/clusters
 pub async fn k8s_list_clusters(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    HttpResponse::Ok().json(crate::kubernetes::list_clusters())
+
+    let self_id = state.cluster.self_id.clone();
+
+    // Get local clusters and tag with owner_node_id
+    let mut all_clusters: Vec<crate::kubernetes::K8sCluster> = crate::kubernetes::list_clusters()
+        .into_iter()
+        .map(|mut c| {
+            if c.owner_node_id.is_empty() {
+                c.owner_node_id = self_id.clone();
+            }
+            c
+        })
+        .collect();
+
+    // Aggregate clusters from remote WolfStack nodes
+    let nodes = state.cluster.get_all_nodes();
+    let cluster_secret = state.cluster_secret.clone();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_default();
+
+    let mut remote_futures = Vec::new();
+    for node in &nodes {
+        if node.is_self || node.node_type != "wolfstack" {
+            continue;
+        }
+        let node_id = node.id.clone();
+        let urls = build_node_urls(&node.address, node.port, "/api/kubernetes/clusters");
+        let client = client.clone();
+        let secret = cluster_secret.clone();
+        remote_futures.push(async move {
+            for url in &urls {
+                if let Ok(resp) = client.get(url)
+                    .header("X-WolfStack-Secret", &secret)
+                    .send()
+                    .await
+                {
+                    if resp.status().is_success() {
+                        if let Ok(mut clusters) = resp.json::<Vec<crate::kubernetes::K8sCluster>>().await {
+                            for c in &mut clusters {
+                                c.owner_node_id = node_id.clone();
+                            }
+                            return clusters;
+                        }
+                    }
+                    break; // got a response (even if error), don't try other URL schemes
+                }
+            }
+            Vec::new()
+        });
+    }
+
+    let results = futures::future::join_all(remote_futures).await;
+    let local_ids: std::collections::HashSet<String> = all_clusters.iter().map(|c| c.id.clone()).collect();
+    for remote_clusters in results {
+        for c in remote_clusters {
+            if !local_ids.contains(&c.id) {
+                all_clusters.push(c);
+            }
+        }
+    }
+
+    HttpResponse::Ok().json(all_clusters)
 }
 
 /// GET /api/kubernetes/detect — detect existing k8s installations on this node
@@ -9181,35 +9247,6 @@ pub async fn k8s_provision(req: HttpRequest, state: web::Data<AppState>, body: w
         _ => "/root/.kube/config",
     };
 
-    let kubeconfig_path = if is_self {
-        default_kubeconfig_path.to_string()
-    } else {
-        // Fetch kubeconfig from remote node
-        let fetch_result = fetch_from_remote(&server_address, server_port, "/api/kubernetes/kubeconfig", &cluster_secret).await;
-        match fetch_result {
-            Ok(body) => {
-                if let Some(content) = body["kubeconfig"].as_str() {
-                    let content = content.replace("127.0.0.1", &server_address).replace("localhost", &server_address);
-                    let dir = "/etc/wolfstack/kubernetes";
-                    let _ = std::fs::create_dir_all(dir);
-                    let safe_name = cluster_name.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-");
-                    let path = format!("{}/{}-{}.yaml", dir, dist, safe_name);
-                    let _ = std::fs::write(&path, &content);
-                    path
-                } else {
-                    return HttpResponse::InternalServerError().json(serde_json::json!({
-                        "error": format!("{} server installed but kubeconfig response was empty", dist)
-                    }));
-                }
-            }
-            Err(_) => {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("{} server installed but could not fetch kubeconfig from remote node", dist)
-                }));
-            }
-        }
-    };
-
     let api_port: u16 = match dist.as_str() {
         "microk8s" => 16443,
         "rke2" => 9345,
@@ -9217,9 +9254,72 @@ pub async fn k8s_provision(req: HttpRequest, state: web::Data<AppState>, body: w
     };
     let api_url = format!("https://{}:{}", server_address, api_port);
     let cluster_id = format!("k8s-{}", cluster_name.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-"));
-    let cluster = match crate::kubernetes::add_cluster(cluster_id, cluster_name.clone(), kubeconfig_path.clone(), api_url.clone(), cluster_type) {
-        Ok(c) => c,
-        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    let kubeconfig_path = default_kubeconfig_path.to_string();
+
+    // Register the cluster on the SERVER node (not the UI node)
+    // This ensures kubernetes.json, kubeconfig, WolfNet routes, and DNAT all live
+    // on the node that actually runs the K8s cluster.
+    let cluster = if is_self {
+        match crate::kubernetes::add_cluster(cluster_id.clone(), cluster_name.clone(), kubeconfig_path.clone(), api_url.clone(), cluster_type) {
+            Ok(c) => c,
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        }
+    } else {
+        // Register on the remote server node via its /api/kubernetes/clusters endpoint
+        let import_body = serde_json::json!({
+            "name": cluster_name,
+            "kubeconfig_path": kubeconfig_path,
+            "cluster_type": dist,
+        });
+        let urls = build_node_urls(&server_address, server_port, "/api/kubernetes/clusters");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+        let mut registered = false;
+        let mut cluster_resp = None;
+        for url in &urls {
+            match client.post(url)
+                .header("X-WolfStack-Secret", &cluster_secret)
+                .json(&import_body)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    cluster_resp = resp.json::<serde_json::Value>().await.ok();
+                    registered = true;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        if !registered {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("{} installed but failed to register cluster on server node {}", dist, server_address)
+            }));
+        }
+        // Return the cluster object from the remote registration
+        match cluster_resp.and_then(|v| serde_json::from_value::<crate::kubernetes::K8sCluster>(v["cluster"].clone()).ok()) {
+            Some(c) => c,
+            None => {
+                // Construct a minimal cluster object for the response
+                crate::kubernetes::K8sCluster {
+                    id: cluster_id.clone(),
+                    name: cluster_name.clone(),
+                    kubeconfig_path: kubeconfig_path.clone(),
+                    api_url: api_url.clone(),
+                    cluster_type,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    nodes: Vec::new(),
+                    wolfnet_server: String::new(),
+                    wolfnet_network: String::new(),
+                    wolfnet_auto_deploy: true,
+                    wolfnet_routes: Vec::new(),
+                    owner_node_id: String::new(),
+                }
+            }
+        }
     };
 
     // 3. Install agents on worker nodes
@@ -12525,6 +12625,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/nodes/{id}/proxy/{path:.*}", web::post().to(node_proxy))
         .route("/api/nodes/{id}/proxy/{path:.*}", web::put().to(node_proxy))
         .route("/api/nodes/{id}/proxy/{path:.*}", web::delete().to(node_proxy))
+        .route("/api/nodes/{id}/proxy/{path:.*}", web::patch().to(node_proxy))
         // Status Page (admin — auth required)
         .route("/api/statuspage/config", web::get().to(statuspage_config_get))
         .route("/api/statuspage/config", web::post().to(statuspage_config_save))
