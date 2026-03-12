@@ -21350,6 +21350,7 @@ let k8sCurrentCluster = null;  // selected K8sCluster id
 let k8sCurrentView = 'overview'; // overview, pods, deployments, services, namespaces, nodes
 let k8sCurrentNamespace = '';    // '' = all namespaces
 let k8sRefreshTimer = null;
+let k8sDetailOpen = false;       // true when viewing pod/deployment detail — suppresses auto-refresh
 let k8sWolfStackCluster = '';    // WolfStack cluster name context
 
 function updateK8sPodBadges() {
@@ -21592,6 +21593,8 @@ async function openK8sCluster(clusterId) {
     if (k8sRefreshTimer) clearInterval(k8sRefreshTimer);
     k8sRefreshTimer = setInterval(() => {
         if (currentPage === 'kubernetes' && k8sCurrentCluster) {
+            // Don't refresh when user is viewing pod/deployment detail
+            if (k8sDetailOpen) return;
             // Only refresh data tabs, not settings/wolfnet/detail views
             const autoRefreshTabs = ['overview', 'nodes', 'namespaces', 'deployments', 'pods', 'services', 'storage'];
             if (autoRefreshTabs.includes(k8sCurrentView)) {
@@ -21627,7 +21630,7 @@ async function renderK8sClusterDetail() {
     let html = `<div class="card"><div class="card-body" style="padding:16px 24px;">
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
             <div style="display:flex; align-items:center; gap:12px;">
-                <button class="btn btn-sm btn-secondary" onclick="k8sCurrentCluster=null; document.getElementById('k8s-detail-panel').style.display='none'; clearInterval(k8sRefreshTimer);" style="font-size:11px;">&larr; Back</button>
+                <button class="btn btn-sm btn-secondary" onclick="k8sDetailOpen=false; k8sCurrentCluster=null; document.getElementById('k8s-detail-panel').style.display='none'; clearInterval(k8sRefreshTimer);" style="font-size:11px;">&larr; Back</button>
                 <h3 style="margin:0; font-size:18px; font-weight:700;">${escapeHtml(clusterName)}</h3>
             </div>
             <div style="display:flex; gap:8px;">
@@ -21671,6 +21674,7 @@ async function loadK8sNamespaceFilter() {
 }
 
 async function switchK8sTab(tab, silent) {
+    if (!silent) k8sDetailOpen = false;
     k8sCurrentView = tab;
     const content = document.getElementById('k8s-tab-content');
     if (!content) return;
@@ -22066,6 +22070,7 @@ function openK8sPodConsole(podName, namespace, container) {
 }
 
 async function showK8sPodDetail(name, namespace) {
+    k8sDetailOpen = true;
     const content = document.getElementById('k8s-tab-content');
     if (!content) return;
     content.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">Loading pod details...</div>';
@@ -22074,7 +22079,7 @@ async function showK8sPodDetail(name, namespace) {
         if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
         const pod = await resp.json();
 
-        let html = `<div style="margin-bottom:12px;"><button class="btn btn-sm btn-secondary" onclick="switchK8sTab('pods')" style="font-size:11px;">&larr; Back to Pods</button></div>`;
+        let html = `<div style="margin-bottom:12px;"><button class="btn btn-sm btn-secondary" onclick="k8sDetailOpen=false; switchK8sTab('pods')" style="font-size:11px;">&larr; Back to Pods</button></div>`;
 
         // Header
         const statusColors = { Running: '#10b981', Pending: '#eab308', Succeeded: '#6366f1', Failed: '#ef4444', Unknown: '#9ca3af' };
@@ -24181,6 +24186,7 @@ async function k8sAssignWolfNetRouteDirect(deploymentName, namespace) {
 // ─── Deployment Manager ───
 
 async function showK8sDeploymentDetail(name, namespace) {
+    k8sDetailOpen = true;
     const content = document.getElementById('k8s-tab-content');
     if (!content) return;
     content.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">Loading deployment details...</div>';
@@ -24192,7 +24198,7 @@ async function showK8sDeploymentDetail(name, namespace) {
         const cluster = k8sClusters.find(c => c.id === k8sCurrentCluster);
         const wolfnetRoute = (cluster?.wolfnet_routes || []).find(r => r.deployment_name === d.name && r.namespace === d.namespace);
 
-        let html = `<div style="margin-bottom:12px;"><button class="btn btn-sm btn-secondary" onclick="switchK8sTab('deployments')" style="font-size:11px;">&larr; Back to Deployments</button></div>`;
+        let html = `<div style="margin-bottom:12px;"><button class="btn btn-sm btn-secondary" onclick="k8sDetailOpen=false; switchK8sTab('deployments')" style="font-size:11px;">&larr; Back to Deployments</button></div>`;
 
         // Header
         html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
