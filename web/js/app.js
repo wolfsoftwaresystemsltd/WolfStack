@@ -21593,7 +21593,7 @@ async function openK8sCluster(clusterId) {
     k8sRefreshTimer = setInterval(() => {
         if (currentPage === 'kubernetes' && k8sCurrentCluster) {
             // Only refresh data tabs, not settings/wolfnet/detail views
-            const autoRefreshTabs = ['overview', 'nodes', 'namespaces', 'deployments', 'pods', 'services'];
+            const autoRefreshTabs = ['overview', 'nodes', 'namespaces', 'deployments', 'pods', 'services', 'storage'];
             if (autoRefreshTabs.includes(k8sCurrentView)) {
                 switchK8sTab(k8sCurrentView, true);
             }
@@ -21619,6 +21619,7 @@ async function renderK8sClusterDetail() {
         { key: 'deployments', label: 'Deployments' },
         { key: 'pods', label: 'Pods' },
         { key: 'services', label: 'Services' },
+        { key: 'storage', label: 'Storage' },
         { key: 'wolfnet', label: 'WolfNet' },
         { key: 'settings', label: 'Settings' },
     ];
@@ -21716,6 +21717,11 @@ async function switchK8sTab(tab, silent) {
             if (!resp.ok) throw new Error('Failed');
             const svcs = await resp.json();
             content.innerHTML = renderK8sServices(svcs);
+        } else if (tab === 'storage') {
+            const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/storage${nsParam}`);
+            if (!resp.ok) throw new Error('Failed');
+            const storageData = await resp.json();
+            content.innerHTML = renderK8sStorage(storageData);
         } else if (tab === 'wolfnet') {
             const [wnResp, depResp] = await Promise.all([
                 fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/wolfnet`),
@@ -23489,6 +23495,373 @@ function k8sUninstallDone() {
 
 // ─── WolfNet Integration ───
 
+// ─── K8s Storage Management ───
+
+function renderK8sStorage(data) {
+    const classes = data.storage_classes || [];
+    const pvs = data.persistent_volumes || [];
+    const pvcs = data.pvcs || [];
+
+    let html = '';
+
+    // Summary cards
+    html += `<div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:16px; margin-bottom:20px;">
+        <div class="card" style="text-align:center; padding:20px;">
+            <div style="font-size:24px; font-weight:700; color:#326ce5;">${classes.length}</div>
+            <div style="font-size:12px; color:var(--text-muted);">Storage Classes</div>
+        </div>
+        <div class="card" style="text-align:center; padding:20px;">
+            <div style="font-size:24px; font-weight:700; color:#6366f1;">${pvs.length}</div>
+            <div style="font-size:12px; color:var(--text-muted);">Persistent Volumes</div>
+        </div>
+        <div class="card" style="text-align:center; padding:20px;">
+            <div style="font-size:24px; font-weight:700; color:#10b981;">${pvcs.filter(p => p.status === 'Bound').length}</div>
+            <div style="font-size:12px; color:var(--text-muted);">Bound Claims</div>
+        </div>
+        <div class="card" style="text-align:center; padding:20px;">
+            <div style="font-size:24px; font-weight:700; color:#eab308;">${pvcs.filter(p => p.status !== 'Bound').length}</div>
+            <div style="font-size:12px; color:var(--text-muted);">Pending Claims</div>
+        </div>
+    </div>`;
+
+    // ── Storage Classes ──
+    html += `<div class="card" style="margin-bottom:20px;"><div class="card-body" style="padding:20px;">
+        <h4 style="margin:0 0 12px 0; font-size:15px; font-weight:700;">Storage Classes</h4>`;
+    if (classes.length === 0) {
+        html += `<div style="padding:16px; text-align:center; color:var(--text-muted); font-size:13px; background:var(--bg-secondary); border-radius:8px;">
+            No storage classes found. Your cluster may not have a CSI driver or storage provisioner installed.
+        </div>`;
+    } else {
+        html += `<table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Name</th><th>Provisioner</th><th>Reclaim Policy</th><th>Binding Mode</th><th>Expansion</th><th>Default</th></tr></thead><tbody>`;
+        classes.forEach(sc => {
+            html += `<tr>
+                <td><strong>${escapeHtml(sc.name)}</strong></td>
+                <td><code style="font-size:11px;">${escapeHtml(sc.provisioner)}</code></td>
+                <td>${escapeHtml(sc.reclaim_policy)}</td>
+                <td style="font-size:11px;">${escapeHtml(sc.volume_binding_mode)}</td>
+                <td>${sc.allow_volume_expansion ? '<span style="color:#10b981;">Yes</span>' : '<span style="color:var(--text-muted);">No</span>'}</td>
+                <td>${sc.is_default ? '<span style="padding:2px 8px; border-radius:4px; font-size:10px; background:rgba(50,108,229,0.12); color:#326ce5; font-weight:600;">DEFAULT</span>' : ''}</td>
+            </tr>`;
+        });
+        html += `</tbody></table>`;
+    }
+    html += `<div style="margin-top:12px; padding:10px 14px; background:rgba(99,102,241,0.06); border-radius:6px; border-left:3px solid #6366f1; font-size:12px; color:var(--text-secondary);">
+        <strong>What are Storage Classes?</strong> They define how storage is provisioned. The default class is used when you create a volume claim without specifying one. Common provisioners include <code>local-path</code> (k3s default), <code>rancher.io/local-path</code>, and cloud CSI drivers.
+    </div>`;
+    html += `</div></div>`;
+
+    // ── Persistent Volume Claims ──
+    html += `<div class="card" style="margin-bottom:20px;"><div class="card-body" style="padding:20px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+            <h4 style="margin:0; font-size:15px; font-weight:700;">Volume Claims (PVCs)</h4>
+            <button class="btn btn-sm btn-primary" onclick="showK8sCreatePvcModal()" style="font-size:12px; background:#326ce5; border-color:#326ce5;">Create Volume</button>
+        </div>`;
+    if (pvcs.length === 0) {
+        html += `<div style="padding:20px; text-align:center; color:var(--text-muted); font-size:13px; background:var(--bg-secondary); border-radius:8px;">
+            No volume claims yet. Create one to provide persistent storage for your deployments.<br>
+            <span style="font-size:12px;">Volume claims request storage from a storage class and can be mounted into any deployment.</span>
+        </div>`;
+    } else {
+        html += `<table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Name</th><th>Namespace</th><th>Status</th><th>Size</th><th>Access Modes</th><th>Storage Class</th><th>Volume</th><th>Age</th><th style="text-align:right;">Actions</th></tr></thead><tbody>`;
+        pvcs.forEach(pvc => {
+            const statusColor = pvc.status === 'Bound' ? '#10b981' : pvc.status === 'Pending' ? '#eab308' : '#ef4444';
+            const modes = (pvc.access_modes || []).join(', ');
+            html += `<tr>
+                <td><strong>${escapeHtml(pvc.name)}</strong></td>
+                <td><code style="font-size:11px;">${escapeHtml(pvc.namespace)}</code></td>
+                <td><span style="color:${statusColor}; font-weight:600;">${escapeHtml(pvc.status)}</span></td>
+                <td><code>${escapeHtml(pvc.capacity)}</code></td>
+                <td style="font-size:11px;">${escapeHtml(modes)}</td>
+                <td style="font-size:11px;">${escapeHtml(pvc.storage_class)}</td>
+                <td style="font-size:11px;"><code>${escapeHtml(pvc.volume || '-')}</code></td>
+                <td>${escapeHtml(pvc.age)}</td>
+                <td style="text-align:right; white-space:nowrap;">
+                    <button class="btn btn-sm btn-secondary" onclick="showK8sMountPvcModal('${escapeHtml(pvc.name)}', '${escapeHtml(pvc.namespace)}')" style="font-size:11px;" title="Mount to a deployment">Mount</button>
+                    <button class="btn btn-sm btn-danger" onclick="k8sDeletePvc('${escapeHtml(pvc.name)}', '${escapeHtml(pvc.namespace)}')" style="font-size:11px;">Delete</button>
+                </td>
+            </tr>`;
+        });
+        html += `</tbody></table>`;
+    }
+    html += `<div style="margin-top:12px; padding:10px 14px; background:rgba(99,102,241,0.06); border-radius:6px; border-left:3px solid #6366f1; font-size:12px; color:var(--text-secondary);">
+        <strong>What are Volume Claims?</strong> A PVC requests a piece of storage from the cluster. Once created, you can mount it into one or more deployments. Data persists even if pods restart. Use <strong>ReadWriteOnce</strong> for single-pod access or <strong>ReadWriteMany</strong> for shared storage across multiple pods.
+    </div>`;
+    html += `</div></div>`;
+
+    // ── Persistent Volumes ──
+    if (pvs.length > 0) {
+        html += `<div class="card" style="margin-bottom:20px;"><div class="card-body" style="padding:20px;">
+            <h4 style="margin:0 0 12px 0; font-size:15px; font-weight:700;">Persistent Volumes (PVs)</h4>
+            <table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Name</th><th>Capacity</th><th>Access Modes</th><th>Reclaim Policy</th><th>Status</th><th>Claim</th><th>Storage Class</th><th>Age</th></tr></thead><tbody>`;
+        pvs.forEach(pv => {
+            const statusColor = pv.status === 'Bound' ? '#10b981' : pv.status === 'Available' ? '#326ce5' : '#eab308';
+            const modes = (pv.access_modes || []).join(', ');
+            html += `<tr>
+                <td><strong>${escapeHtml(pv.name)}</strong></td>
+                <td><code>${escapeHtml(pv.capacity)}</code></td>
+                <td style="font-size:11px;">${escapeHtml(modes)}</td>
+                <td>${escapeHtml(pv.reclaim_policy)}</td>
+                <td><span style="color:${statusColor}; font-weight:600;">${escapeHtml(pv.status)}</span></td>
+                <td style="font-size:11px;"><code>${escapeHtml(pv.claim || '-')}</code></td>
+                <td style="font-size:11px;">${escapeHtml(pv.storage_class)}</td>
+                <td>${escapeHtml(pv.age)}</td>
+            </tr>`;
+        });
+        html += `</tbody></table>
+        <div style="margin-top:12px; padding:10px 14px; background:rgba(99,102,241,0.06); border-radius:6px; border-left:3px solid #6366f1; font-size:12px; color:var(--text-secondary);">
+            <strong>What are Persistent Volumes?</strong> PVs are the actual storage resources in the cluster (created automatically by storage classes or manually by admins). They are bound to PVCs and represent the physical storage backend.
+        </div>`;
+        html += `</div></div>`;
+    }
+
+    // ── How Kubernetes Storage Works ──
+    html += `
+    <div class="card" style="border-color:rgba(99,102,241,0.15);">
+        <div class="card-body" style="padding:20px;">
+            <h4 style="margin:0 0 12px 0; font-size:15px; font-weight:700; color:var(--text-primary);">Kubernetes Storage &mdash; Quick Guide</h4>
+            <div style="font-size:13px; color:var(--text-secondary); line-height:1.7;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+                    <div style="padding:12px; background:var(--bg-secondary); border-radius:8px;">
+                        <strong style="color:var(--text-primary);">1. Create a Volume</strong>
+                        <p style="margin:4px 0 0 0; font-size:12px;">Click "Create Volume" to request storage. Choose a size, access mode, and storage class. The cluster will automatically provision the underlying storage.</p>
+                    </div>
+                    <div style="padding:12px; background:var(--bg-secondary); border-radius:8px;">
+                        <strong style="color:var(--text-primary);">2. Mount to a Deployment</strong>
+                        <p style="margin:4px 0 0 0; font-size:12px;">Once created, use the "Mount" button to attach the volume to a deployment at a specific path. The volume will be available inside all pods of that deployment.</p>
+                    </div>
+                    <div style="padding:12px; background:var(--bg-secondary); border-radius:8px;">
+                        <strong style="color:var(--text-primary);">Shared Storage</strong>
+                        <p style="margin:4px 0 0 0; font-size:12px;">Use <strong>ReadWriteMany (RWX)</strong> to share a volume between multiple deployments or pods. This is ideal for shared file storage, uploads, or config. Note: not all storage classes support RWX.</p>
+                    </div>
+                    <div style="padding:12px; background:var(--bg-secondary); border-radius:8px;">
+                        <strong style="color:var(--text-primary);">Data Persistence</strong>
+                        <p style="margin:4px 0 0 0; font-size:12px;">Unlike container filesystems (which reset on restart), volume data persists across pod restarts, upgrades, and scaling. Perfect for databases, uploads, and application data.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>`;
+
+    return html;
+}
+
+function showK8sCreatePvcModal() {
+    // Fetch storage classes first for the dropdown
+    fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/storage`)
+        .then(r => r.json())
+        .then(data => {
+            const classes = data.storage_classes || [];
+            let classOptions = '';
+            if (classes.length === 0) {
+                classOptions = '<option value="" disabled selected>No storage classes available</option>';
+            } else {
+                classes.forEach(sc => {
+                    const def = sc.is_default ? ' (default)' : '';
+                    const selected = sc.is_default ? ' selected' : '';
+                    classOptions += `<option value="${escapeHtml(sc.name)}"${selected}>${escapeHtml(sc.name)}${def}</option>`;
+                });
+            }
+
+            // Also fetch namespaces for the dropdown
+            fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/namespaces`)
+                .then(r => r.json())
+                .then(namespaces => {
+                    const nsList = Array.isArray(namespaces) ? namespaces : [];
+                    let nsOptions = nsList.map(ns =>
+                        `<option value="${escapeHtml(ns.name)}" ${ns.name === (k8sCurrentNamespace || 'default') ? 'selected' : ''}>${escapeHtml(ns.name)}</option>`
+                    ).join('');
+
+                    const overlay = document.createElement('div');
+                    overlay.className = 'modal-overlay active';
+                    overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+                    overlay.innerHTML = `
+                        <div class="modal" style="max-width:500px;">
+                            <div class="modal-header">
+                                <h3>Create Persistent Volume Claim</h3>
+                                <button class="modal-close" onclick="closeModal()">&times;</button>
+                            </div>
+                            <div class="modal-body">
+                                <p style="color:var(--text-muted); font-size:12px; margin:0 0 16px 0;">Create a new volume claim to provide persistent storage for your deployments.</p>
+                                <div class="form-group" style="margin-bottom:12px;">
+                                    <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Name</label>
+                                    <input type="text" id="k8s-pvc-name" class="form-control" placeholder="e.g. my-app-data" style="font-size:13px;">
+                                    <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Lowercase, letters, numbers, and hyphens only</div>
+                                </div>
+                                <div class="form-group" style="margin-bottom:12px;">
+                                    <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Namespace</label>
+                                    <select id="k8s-pvc-namespace" class="form-control" style="font-size:13px;">
+                                        ${nsOptions}
+                                    </select>
+                                </div>
+                                <div class="form-group" style="margin-bottom:12px;">
+                                    <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Storage Class</label>
+                                    <select id="k8s-pvc-class" class="form-control" style="font-size:13px;">
+                                        ${classOptions}
+                                    </select>
+                                </div>
+                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                                    <div class="form-group" style="margin-bottom:12px;">
+                                        <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Size</label>
+                                        <div style="display:flex; gap:6px;">
+                                            <input type="number" id="k8s-pvc-size" class="form-control" value="1" min="1" style="font-size:13px; flex:1;">
+                                            <select id="k8s-pvc-size-unit" class="form-control" style="font-size:13px; width:auto;">
+                                                <option value="Gi" selected>GB</option>
+                                                <option value="Mi">MB</option>
+                                                <option value="Ti">TB</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="form-group" style="margin-bottom:12px;">
+                                        <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Access Mode</label>
+                                        <select id="k8s-pvc-access" class="form-control" style="font-size:13px;">
+                                            <option value="ReadWriteOnce" selected>ReadWriteOnce (single pod)</option>
+                                            <option value="ReadWriteMany">ReadWriteMany (shared)</option>
+                                            <option value="ReadOnlyMany">ReadOnlyMany (read-only shared)</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div style="padding:10px 14px; background:rgba(99,102,241,0.06); border-radius:6px; border-left:3px solid #6366f1; font-size:12px; color:var(--text-secondary);">
+                                    <strong>Tip:</strong> Use <strong>ReadWriteOnce</strong> for databases or single-app storage. Use <strong>ReadWriteMany</strong> to share files between multiple deployments (e.g. shared uploads, config).
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                                <button class="btn btn-primary" onclick="k8sCreatePvc()" style="background:#326ce5; border-color:#326ce5;">Create Volume</button>
+                            </div>
+                        </div>`;
+                    document.body.appendChild(overlay);
+                });
+        })
+        .catch(e => showToast('Failed to load storage classes: ' + e.message, 'error'));
+}
+
+async function k8sCreatePvc() {
+    const name = document.getElementById('k8s-pvc-name')?.value.trim();
+    const namespace = document.getElementById('k8s-pvc-namespace')?.value;
+    const storageClass = document.getElementById('k8s-pvc-class')?.value;
+    const size = document.getElementById('k8s-pvc-size')?.value;
+    const sizeUnit = document.getElementById('k8s-pvc-size-unit')?.value;
+    const accessMode = document.getElementById('k8s-pvc-access')?.value;
+
+    if (!name) { showToast('Enter a volume name', 'error'); return; }
+    if (!storageClass) { showToast('Select a storage class', 'error'); return; }
+    if (!size || parseInt(size) < 1) { showToast('Enter a valid size', 'error'); return; }
+
+    closeModal();
+    showToast('Creating volume...', 'info', 5000);
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/storage/pvcs`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name,
+                namespace,
+                storage_class: storageClass,
+                size: `${size}${sizeUnit}`,
+                access_mode: accessMode,
+            }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(`Volume "${name}" created`, 'success');
+        switchK8sTab('storage');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+async function k8sDeletePvc(name, namespace) {
+    if (!(await showConfirm(`Delete volume claim "${name}" in ${namespace}? Any data stored in this volume will be lost if the reclaim policy is Delete.`))) return;
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/storage/pvcs/${encodeURIComponent(name)}?namespace=${encodeURIComponent(namespace)}`, { method: 'DELETE' });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(`Volume "${name}" deleted`, 'success');
+        switchK8sTab('storage');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function showK8sMountPvcModal(pvcName, pvcNamespace) {
+    // Fetch deployments in the same namespace
+    fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/deployments?namespace=${encodeURIComponent(pvcNamespace)}`)
+        .then(r => r.json())
+        .then(deps => {
+            let depOptions = '';
+            if (deps.length === 0) {
+                depOptions = '<option value="" disabled selected>No deployments in this namespace</option>';
+            } else {
+                depOptions = '<option value="" disabled selected>Select a deployment...</option>';
+                deps.forEach(d => {
+                    depOptions += `<option value="${escapeHtml(d.name)}">${escapeHtml(d.name)}</option>`;
+                });
+            }
+
+            const overlay = document.createElement('div');
+            overlay.className = 'modal-overlay active';
+            overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+            overlay.innerHTML = `
+                <div class="modal" style="max-width:480px;">
+                    <div class="modal-header">
+                        <h3>Mount Volume to Deployment</h3>
+                        <button class="modal-close" onclick="closeModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <p style="color:var(--text-muted); font-size:12px; margin:0 0 16px 0;">
+                            Mount <strong>${escapeHtml(pvcName)}</strong> into a deployment. The volume will be available at the specified path inside the container.
+                        </p>
+                        <div class="form-group" style="margin-bottom:12px;">
+                            <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Deployment</label>
+                            <select id="k8s-mount-deployment" class="form-control" style="font-size:13px;">
+                                ${depOptions}
+                            </select>
+                        </div>
+                        <div class="form-group" style="margin-bottom:12px;">
+                            <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Mount Path</label>
+                            <input type="text" id="k8s-mount-path" class="form-control" placeholder="/data" value="/data" style="font-size:13px;">
+                            <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">The directory inside the container where the volume will be accessible</div>
+                        </div>
+                        <input type="hidden" id="k8s-mount-pvc-name" value="${escapeHtml(pvcName)}">
+                        <input type="hidden" id="k8s-mount-pvc-namespace" value="${escapeHtml(pvcNamespace)}">
+                        <div style="padding:10px 14px; background:rgba(16,185,129,0.06); border-radius:6px; border-left:3px solid #10b981; font-size:12px; color:var(--text-secondary);">
+                            <strong>Note:</strong> This will trigger a rolling restart of the deployment. Existing pods will be replaced with new ones that have the volume mounted.
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                        <button class="btn btn-primary" onclick="k8sMountPvc()" style="background:#326ce5; border-color:#326ce5;" ${deps.length === 0 ? 'disabled' : ''}>Mount Volume</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(overlay);
+        })
+        .catch(e => showToast('Failed to load deployments: ' + e.message, 'error'));
+}
+
+async function k8sMountPvc() {
+    const deployment = document.getElementById('k8s-mount-deployment')?.value;
+    const mountPath = document.getElementById('k8s-mount-path')?.value.trim();
+    const pvcName = document.getElementById('k8s-mount-pvc-name')?.value;
+    const namespace = document.getElementById('k8s-mount-pvc-namespace')?.value;
+
+    if (!deployment) { showToast('Select a deployment', 'error'); return; }
+    if (!mountPath || !mountPath.startsWith('/')) { showToast('Enter a valid mount path starting with /', 'error'); return; }
+
+    closeModal();
+    showToast('Mounting volume...', 'info', 5000);
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/deployments/${encodeURIComponent(deployment)}/volumes`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                namespace,
+                pvc_name: pvcName,
+                mount_path: mountPath,
+            }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(`Volume "${pvcName}" mounted to ${deployment} at ${mountPath}`, 'success');
+        switchK8sTab('storage');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
 function renderK8sWolfNet(status, cluster, deployments) {
     const nodes = status.nodes || [];
     const routes = status.routes || [];
@@ -23832,12 +24205,27 @@ async function showK8sDeploymentDetail(name, namespace) {
         // Volumes
         if (d.volumes && d.volumes.length > 0) {
             html += `<div class="card" style="margin-bottom:16px;"><div class="card-body" style="padding:20px;">
-                <h4 style="margin:0 0 12px 0; font-size:14px; font-weight:600;">Volumes</h4>
-                <table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Name</th><th>Type</th></tr></thead><tbody>`;
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+                    <h4 style="margin:0; font-size:14px; font-weight:600;">Volumes</h4>
+                    <button class="btn btn-sm btn-secondary" onclick="showK8sMountPvcToDepModal('${escapeHtml(d.name)}', '${escapeHtml(d.namespace)}')" style="font-size:11px;">Add Volume</button>
+                </div>
+                <table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Name</th><th>Type</th><th style="text-align:right;">Actions</th></tr></thead><tbody>`;
             d.volumes.forEach(v => {
-                html += `<tr><td>${escapeHtml(v.name)}</td><td><code>${escapeHtml(v.type)}</code></td></tr>`;
+                const isPvc = v.type && v.type.startsWith('pvc:');
+                html += `<tr><td>${escapeHtml(v.name)}</td><td><code>${escapeHtml(v.type)}</code></td>
+                    <td style="text-align:right;">${isPvc ? `<button class="btn btn-sm btn-danger" onclick="k8sRemoveVolume('${escapeHtml(d.name)}', '${escapeHtml(d.namespace)}', '${escapeHtml(v.name)}')" style="font-size:10px;">Remove</button>` : ''}</td></tr>`;
             });
             html += `</tbody></table></div></div>`;
+        } else {
+            html += `<div class="card" style="margin-bottom:16px;"><div class="card-body" style="padding:20px;">
+                <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <div>
+                        <h4 style="margin:0 0 4px 0; font-size:14px; font-weight:600;">Volumes</h4>
+                        <div style="font-size:12px; color:var(--text-muted);">No volumes mounted. Add a PVC volume from the <a href="#" onclick="switchK8sTab('storage'); return false;" style="color:#326ce5;">Storage tab</a> or click Add Volume.</div>
+                    </div>
+                    <button class="btn btn-sm btn-secondary" onclick="showK8sMountPvcToDepModal('${escapeHtml(d.name)}', '${escapeHtml(d.namespace)}')" style="font-size:11px;">Add Volume</button>
+                </div>
+            </div></div>`;
         }
 
         // Conditions
@@ -23867,6 +24255,92 @@ async function k8sDeleteDeploymentFull(name, namespace) {
         if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
         showToast(`Deployment "${name}" and service removed`, 'success');
         switchK8sTab('deployments');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+async function k8sRemoveVolume(deploymentName, namespace, volumeName) {
+    if (!(await showConfirm(`Remove volume "${volumeName}" from deployment "${deploymentName}"? This will trigger a rolling restart.`))) return;
+    showToast('Removing volume...', 'info', 5000);
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/deployments/${encodeURIComponent(deploymentName)}/volumes/${encodeURIComponent(volumeName)}?namespace=${encodeURIComponent(namespace)}`, { method: 'DELETE' });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(`Volume "${volumeName}" removed from ${deploymentName}`, 'success');
+        setTimeout(() => showK8sDeploymentDetail(deploymentName, namespace), 1000);
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function showK8sMountPvcToDepModal(deploymentName, namespace) {
+    // Fetch PVCs in the same namespace
+    fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/storage?namespace=${encodeURIComponent(namespace)}`)
+        .then(r => r.json())
+        .then(data => {
+            const pvcs = data.pvcs || [];
+            let pvcOptions = '';
+            if (pvcs.length === 0) {
+                pvcOptions = '<option value="" disabled selected>No PVCs in this namespace</option>';
+            } else {
+                pvcOptions = '<option value="" disabled selected>Select a volume...</option>';
+                pvcs.forEach(p => {
+                    pvcOptions += `<option value="${escapeHtml(p.name)}">${escapeHtml(p.name)} (${escapeHtml(p.capacity)}, ${escapeHtml(p.status)})</option>`;
+                });
+            }
+
+            const overlay = document.createElement('div');
+            overlay.className = 'modal-overlay active';
+            overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+            overlay.innerHTML = `
+                <div class="modal" style="max-width:480px;">
+                    <div class="modal-header">
+                        <h3>Add Volume to ${escapeHtml(deploymentName)}</h3>
+                        <button class="modal-close" onclick="closeModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <p style="color:var(--text-muted); font-size:12px; margin:0 0 16px 0;">Mount a PVC volume into this deployment. Create volumes in the <a href="#" onclick="closeModal(); switchK8sTab('storage'); return false;" style="color:#326ce5;">Storage tab</a> first.</p>
+                        <div class="form-group" style="margin-bottom:12px;">
+                            <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Volume (PVC)</label>
+                            <select id="k8s-dep-mount-pvc" class="form-control" style="font-size:13px;">
+                                ${pvcOptions}
+                            </select>
+                        </div>
+                        <div class="form-group" style="margin-bottom:12px;">
+                            <label style="font-weight:600; font-size:13px; margin-bottom:4px; display:block;">Mount Path</label>
+                            <input type="text" id="k8s-dep-mount-path" class="form-control" placeholder="/data" value="/data" style="font-size:13px;">
+                        </div>
+                        <input type="hidden" id="k8s-dep-mount-dep" value="${escapeHtml(deploymentName)}">
+                        <input type="hidden" id="k8s-dep-mount-ns" value="${escapeHtml(namespace)}">
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                        <button class="btn btn-primary" onclick="k8sDepMountPvc()" style="background:#326ce5; border-color:#326ce5;" ${pvcs.length === 0 ? 'disabled' : ''}>Mount</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(overlay);
+        })
+        .catch(e => showToast('Failed to load volumes: ' + e.message, 'error'));
+}
+
+async function k8sDepMountPvc() {
+    const pvcName = document.getElementById('k8s-dep-mount-pvc')?.value;
+    const mountPath = document.getElementById('k8s-dep-mount-path')?.value.trim();
+    const deployment = document.getElementById('k8s-dep-mount-dep')?.value;
+    const namespace = document.getElementById('k8s-dep-mount-ns')?.value;
+
+    if (!pvcName) { showToast('Select a volume', 'error'); return; }
+    if (!mountPath || !mountPath.startsWith('/')) { showToast('Enter a valid mount path starting with /', 'error'); return; }
+
+    closeModal();
+    showToast('Mounting volume...', 'info', 5000);
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/deployments/${encodeURIComponent(deployment)}/volumes`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ namespace, pvc_name: pvcName, mount_path: mountPath }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(`Volume "${pvcName}" mounted to ${deployment} at ${mountPath}`, 'success');
+        setTimeout(() => showK8sDeploymentDetail(deployment, namespace), 1000);
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 

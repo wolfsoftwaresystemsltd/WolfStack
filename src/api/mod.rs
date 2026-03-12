@@ -8653,6 +8653,101 @@ pub async fn k8s_pod_events(req: HttpRequest, state: web::Data<AppState>, path: 
     }
 }
 
+/// GET /api/kubernetes/clusters/{id}/storage — full storage overview
+pub async fn k8s_storage_overview(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cluster = match crate::kubernetes::get_cluster(&path.into_inner()) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").filter(|s| !s.is_empty()).map(|s| s.as_str());
+    let classes = crate::kubernetes::get_storage_classes(&cluster.kubeconfig_path);
+    let pvs = crate::kubernetes::get_persistent_volumes(&cluster.kubeconfig_path);
+    let pvcs = crate::kubernetes::get_persistent_volume_claims(&cluster.kubeconfig_path, ns);
+    HttpResponse::Ok().json(serde_json::json!({
+        "storage_classes": classes,
+        "persistent_volumes": pvs,
+        "pvcs": pvcs,
+    }))
+}
+
+/// POST /api/kubernetes/clusters/{id}/storage/pvcs — create a PVC
+#[derive(Deserialize)]
+pub struct K8sCreatePvcRequest {
+    pub name: String,
+    pub namespace: String,
+    pub storage_class: String,
+    pub size: String,
+    #[serde(default = "default_access_mode")]
+    pub access_mode: String,
+}
+fn default_access_mode() -> String { "ReadWriteOnce".to_string() }
+
+pub async fn k8s_create_pvc(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<K8sCreatePvcRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cluster = match crate::kubernetes::get_cluster(&path.into_inner()) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    match crate::kubernetes::create_pvc(&cluster.kubeconfig_path, &body.name, &body.namespace, &body.storage_class, &body.size, &body.access_mode) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/kubernetes/clusters/{id}/storage/pvcs/{name}?namespace=
+pub async fn k8s_delete_pvc(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    match crate::kubernetes::delete_pvc(&cluster.kubeconfig_path, &name, ns) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/kubernetes/clusters/{id}/deployments/{name}/volumes — add PVC volume mount
+#[derive(Deserialize)]
+pub struct K8sAddVolumeRequest {
+    pub namespace: String,
+    pub pvc_name: String,
+    pub mount_path: String,
+    #[serde(default)]
+    pub container: Option<String>,
+}
+
+pub async fn k8s_add_volume(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, body: web::Json<K8sAddVolumeRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, dep_name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    match crate::kubernetes::add_volume_to_deployment(&cluster.kubeconfig_path, &dep_name, &body.namespace, &body.pvc_name, &body.mount_path, body.container.as_deref()) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/kubernetes/clusters/{id}/deployments/{name}/volumes/{vol_name}?namespace=
+pub async fn k8s_remove_volume(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String, String)>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, dep_name, vol_name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    match crate::kubernetes::remove_volume_from_deployment(&cluster.kubeconfig_path, &dep_name, ns, &vol_name) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// POST /api/kubernetes/clusters/{id}/apply
 #[derive(Deserialize)]
 pub struct K8sApplyRequest {
@@ -12232,6 +12327,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/kubernetes/clusters/{id}/wolfnet", web::get().to(k8s_wolfnet_status))
         .route("/api/kubernetes/clusters/{id}/wolfnet", web::post().to(k8s_deploy_wolfnet))
         .route("/api/kubernetes/clusters/{id}/wolfnet", web::delete().to(k8s_remove_wolfnet))
+        .route("/api/kubernetes/clusters/{id}/storage", web::get().to(k8s_storage_overview))
+        .route("/api/kubernetes/clusters/{id}/storage/pvcs", web::post().to(k8s_create_pvc))
+        .route("/api/kubernetes/clusters/{id}/storage/pvcs/{name}", web::delete().to(k8s_delete_pvc))
+        .route("/api/kubernetes/clusters/{id}/deployments/{name}/volumes", web::post().to(k8s_add_volume))
+        .route("/api/kubernetes/clusters/{id}/deployments/{name}/volumes/{vol_name}", web::delete().to(k8s_remove_volume))
         // App Store
         .route("/api/appstore/apps", web::get().to(appstore_list))
         .route("/api/appstore/apps/{id}", web::get().to(appstore_get))

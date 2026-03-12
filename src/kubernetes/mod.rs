@@ -2346,6 +2346,269 @@ pub fn get_pod_events(kubeconfig: &str, name: &str, namespace: &str) -> Result<V
     Ok(json["items"].as_array().cloned().unwrap_or_default())
 }
 
+// ═══════════════════════════════════════════════
+// ─── Storage Management ───
+// ═══════════════════════════════════════════════
+
+/// List all StorageClasses in the cluster
+pub fn get_storage_classes(kubeconfig: &str) -> Vec<serde_json::Value> {
+    let output = match kubectl(kubeconfig, &["get", "storageclass", "-o", "json"]) {
+        Ok(o) => o,
+        Err(e) => { error!("Failed to get storage classes: {}", e); return Vec::new(); }
+    };
+    let json: serde_json::Value = match serde_json::from_str(&output) {
+        Ok(j) => j,
+        Err(_) => return Vec::new(),
+    };
+    json["items"].as_array().unwrap_or(&vec![]).iter().map(|sc| {
+        let is_default = sc["metadata"]["annotations"]["storageclass.kubernetes.io/is-default-class"]
+            .as_str().unwrap_or("false") == "true";
+        serde_json::json!({
+            "name": sc["metadata"]["name"].as_str().unwrap_or(""),
+            "provisioner": sc["metadata"]["annotations"]["storageclass.kubernetes.io/provisioner"]
+                .as_str()
+                .or_else(|| sc["provisioner"].as_str())
+                .unwrap_or("unknown"),
+            "reclaim_policy": sc["reclaimPolicy"].as_str().unwrap_or("Delete"),
+            "volume_binding_mode": sc["volumeBindingMode"].as_str().unwrap_or("Immediate"),
+            "is_default": is_default,
+            "allow_volume_expansion": sc["allowVolumeExpansion"].as_bool().unwrap_or(false),
+        })
+    }).collect()
+}
+
+/// List all PersistentVolumes in the cluster
+pub fn get_persistent_volumes(kubeconfig: &str) -> Vec<serde_json::Value> {
+    let output = match kubectl(kubeconfig, &["get", "pv", "-o", "json"]) {
+        Ok(o) => o,
+        Err(e) => { error!("Failed to get PVs: {}", e); return Vec::new(); }
+    };
+    let json: serde_json::Value = match serde_json::from_str(&output) {
+        Ok(j) => j,
+        Err(_) => return Vec::new(),
+    };
+    json["items"].as_array().unwrap_or(&vec![]).iter().map(|pv| {
+        let claim = pv["spec"]["claimRef"]["name"].as_str().unwrap_or("");
+        let claim_ns = pv["spec"]["claimRef"]["namespace"].as_str().unwrap_or("");
+        serde_json::json!({
+            "name": pv["metadata"]["name"].as_str().unwrap_or(""),
+            "capacity": pv["spec"]["capacity"]["storage"].as_str().unwrap_or(""),
+            "access_modes": pv["spec"]["accessModes"].as_array()
+                .map(|a| a.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>())
+                .unwrap_or_default(),
+            "reclaim_policy": pv["spec"]["persistentVolumeReclaimPolicy"].as_str().unwrap_or(""),
+            "status": pv["status"]["phase"].as_str().unwrap_or(""),
+            "storage_class": pv["spec"]["storageClassName"].as_str().unwrap_or(""),
+            "claim": if claim.is_empty() { String::new() } else { format!("{}/{}", claim_ns, claim) },
+            "age": compute_age(pv["metadata"]["creationTimestamp"].as_str().unwrap_or("")),
+        })
+    }).collect()
+}
+
+/// List PersistentVolumeClaims, optionally filtered by namespace
+pub fn get_persistent_volume_claims(kubeconfig: &str, namespace: Option<&str>) -> Vec<serde_json::Value> {
+    let mut args = vec!["get", "pvc", "-o", "json"];
+    if let Some(ns) = namespace {
+        args.extend_from_slice(&["-n", ns]);
+    } else {
+        args.push("--all-namespaces");
+    }
+    let output = match kubectl(kubeconfig, &args) {
+        Ok(o) => o,
+        Err(e) => { error!("Failed to get PVCs: {}", e); return Vec::new(); }
+    };
+    let json: serde_json::Value = match serde_json::from_str(&output) {
+        Ok(j) => j,
+        Err(_) => return Vec::new(),
+    };
+    json["items"].as_array().unwrap_or(&vec![]).iter().map(|pvc| {
+        let access_modes = pvc["spec"]["accessModes"].as_array()
+            .map(|a| a.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>())
+            .unwrap_or_default();
+        serde_json::json!({
+            "name": pvc["metadata"]["name"].as_str().unwrap_or(""),
+            "namespace": pvc["metadata"]["namespace"].as_str().unwrap_or("default"),
+            "status": pvc["status"]["phase"].as_str().unwrap_or(""),
+            "volume": pvc["spec"]["volumeName"].as_str().unwrap_or(""),
+            "capacity": pvc["status"]["capacity"]["storage"].as_str().unwrap_or(
+                pvc["spec"]["resources"]["requests"]["storage"].as_str().unwrap_or("")
+            ),
+            "access_modes": access_modes,
+            "storage_class": pvc["spec"]["storageClassName"].as_str().unwrap_or(""),
+            "age": compute_age(pvc["metadata"]["creationTimestamp"].as_str().unwrap_or("")),
+        })
+    }).collect()
+}
+
+/// Create a PersistentVolumeClaim
+pub fn create_pvc(
+    kubeconfig: &str,
+    name: &str,
+    namespace: &str,
+    storage_class: &str,
+    size: &str,
+    access_mode: &str,
+) -> Result<String, String> {
+    info!("Creating PVC '{}' in namespace '{}' — {}  {} (class: {})", name, namespace, size, access_mode, storage_class);
+    let yaml = format!(
+        r#"apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {}
+  namespace: {}
+spec:
+  accessModes:
+    - {}
+  resources:
+    requests:
+      storage: {}
+  storageClassName: {}"#,
+        name, namespace, access_mode, size, storage_class
+    );
+
+    // Write to temp file and apply
+    let tmp = format!("/tmp/wolfstack-pvc-{}.yaml", uuid::Uuid::new_v4());
+    std::fs::write(&tmp, &yaml).map_err(|e| format!("Failed to write temp YAML: {}", e))?;
+    let result = kubectl(kubeconfig, &["apply", "-f", &tmp]);
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
+/// Delete a PersistentVolumeClaim
+pub fn delete_pvc(kubeconfig: &str, name: &str, namespace: &str) -> Result<String, String> {
+    info!("Deleting PVC '{}' in namespace '{}'", name, namespace);
+    kubectl(kubeconfig, &["delete", "pvc", name, "-n", namespace])
+}
+
+/// Add a PVC volume mount to a deployment via kubectl patch
+pub fn add_volume_to_deployment(
+    kubeconfig: &str,
+    deployment: &str,
+    namespace: &str,
+    pvc_name: &str,
+    mount_path: &str,
+    container_name: Option<&str>,
+) -> Result<String, String> {
+    info!("Adding PVC '{}' to deployment '{}' at '{}'", pvc_name, deployment, mount_path);
+
+    // Get existing deployment to find container name and existing volumes
+    let output = kubectl(kubeconfig, &["get", "deployment", deployment, "-n", namespace, "-o", "json"])?;
+    let dep: serde_json::Value = serde_json::from_str(&output)
+        .map_err(|e| format!("Failed to parse deployment: {}", e))?;
+
+    // Determine target container
+    let containers = dep["spec"]["template"]["spec"]["containers"]
+        .as_array()
+        .ok_or("No containers in deployment")?;
+    let target_container = if let Some(cn) = container_name {
+        cn.to_string()
+    } else {
+        containers.first()
+            .and_then(|c| c["name"].as_str())
+            .ok_or("No containers found")?
+            .to_string()
+    };
+
+    // Generate a volume name from PVC name (sanitise)
+    let vol_name = format!("pvc-{}", pvc_name);
+
+    // Build the JSON patch to add volume and volumeMount
+    // Use strategic merge patch which handles arrays properly
+    let patch = serde_json::json!({
+        "spec": {
+            "template": {
+                "spec": {
+                    "volumes": [{
+                        "name": vol_name,
+                        "persistentVolumeClaim": {
+                            "claimName": pvc_name
+                        }
+                    }],
+                    "containers": [{
+                        "name": target_container,
+                        "volumeMounts": [{
+                            "name": vol_name,
+                            "mountPath": mount_path
+                        }]
+                    }]
+                }
+            }
+        }
+    });
+
+    let patch_str = serde_json::to_string(&patch)
+        .map_err(|e| format!("Failed to serialize patch: {}", e))?;
+
+    kubectl(kubeconfig, &[
+        "patch", "deployment", deployment,
+        "-n", namespace,
+        "--type", "strategic",
+        "-p", &patch_str,
+    ])
+}
+
+/// Remove a volume from a deployment using a JSON patch
+pub fn remove_volume_from_deployment(
+    kubeconfig: &str,
+    deployment: &str,
+    namespace: &str,
+    volume_name: &str,
+) -> Result<String, String> {
+    info!("Removing volume '{}' from deployment '{}'", volume_name, deployment);
+
+    // Get current deployment spec
+    let output = kubectl(kubeconfig, &["get", "deployment", deployment, "-n", namespace, "-o", "json"])?;
+    let dep: serde_json::Value = serde_json::from_str(&output)
+        .map_err(|e| format!("Failed to parse deployment: {}", e))?;
+
+    // Filter out the volume
+    let volumes: Vec<serde_json::Value> = dep["spec"]["template"]["spec"]["volumes"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter(|v| v["name"].as_str().unwrap_or("") != volume_name)
+        .cloned()
+        .collect();
+
+    // Filter out volumeMounts from all containers
+    let mut containers = dep["spec"]["template"]["spec"]["containers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    for container in containers.iter_mut() {
+        if let Some(mounts) = container["volumeMounts"].as_array() {
+            let filtered: Vec<serde_json::Value> = mounts.iter()
+                .filter(|vm| vm["name"].as_str().unwrap_or("") != volume_name)
+                .cloned()
+                .collect();
+            container["volumeMounts"] = serde_json::Value::Array(filtered);
+        }
+    }
+
+    // Build replacement patch
+    let patch = serde_json::json!({
+        "spec": {
+            "template": {
+                "spec": {
+                    "volumes": volumes,
+                    "containers": containers
+                }
+            }
+        }
+    });
+
+    let patch_str = serde_json::to_string(&patch)
+        .map_err(|e| format!("Failed to serialize patch: {}", e))?;
+
+    kubectl(kubeconfig, &[
+        "patch", "deployment", deployment,
+        "-n", namespace,
+        "--type", "strategic",
+        "-p", &patch_str,
+    ])
+}
+
 /// Get detailed info about a single deployment (env vars, labels, strategy, volumes, etc.)
 pub fn get_deployment_detail(kubeconfig: &str, name: &str, namespace: &str) -> Result<serde_json::Value, String> {
     let output = kubectl(kubeconfig, &["get", "deployment", name, "-n", namespace, "-o", "json"])?;
