@@ -8300,6 +8300,391 @@ pub async fn appstore_uninstall(
     }
 }
 
+// ─── Kubernetes ───
+
+/// GET /api/kubernetes/clusters
+pub async fn k8s_list_clusters(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    HttpResponse::Ok().json(crate::kubernetes::list_clusters())
+}
+
+/// POST /api/kubernetes/clusters — import a cluster via kubeconfig
+#[derive(Deserialize)]
+pub struct K8sImportRequest {
+    pub name: String,
+    pub kubeconfig: String,  // raw kubeconfig YAML content
+    #[serde(default)]
+    pub cluster_type: Option<String>,
+}
+
+pub async fn k8s_create_cluster(req: HttpRequest, state: web::Data<AppState>, body: web::Json<K8sImportRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    // Save kubeconfig to /etc/wolfstack/kubernetes/<id>.yaml
+    let id = format!("k8s-{}", body.name.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-"));
+    let dir = "/etc/wolfstack/kubernetes";
+    let _ = std::fs::create_dir_all(dir);
+    let kubeconfig_path = format!("{}/{}.yaml", dir, id);
+    if let Err(e) = std::fs::write(&kubeconfig_path, &body.kubeconfig) {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Failed to save kubeconfig: {}", e) }));
+    }
+    // Try to extract API URL from kubeconfig
+    let api_url = body.kubeconfig.lines()
+        .find(|l| l.trim().starts_with("server:"))
+        .map(|l| l.trim().trim_start_matches("server:").trim().to_string())
+        .unwrap_or_default();
+    let cluster_type = match body.cluster_type.as_deref() {
+        Some("k3s") => crate::kubernetes::K8sClusterType::K3s,
+        Some("eks") => crate::kubernetes::K8sClusterType::Eks,
+        Some("gke") => crate::kubernetes::K8sClusterType::Gke,
+        Some("aks") => crate::kubernetes::K8sClusterType::Aks,
+        _ => crate::kubernetes::K8sClusterType::K8s,
+    };
+    match crate::kubernetes::add_cluster(id, body.name.clone(), kubeconfig_path, api_url, cluster_type) {
+        Ok(cluster) => HttpResponse::Ok().json(serde_json::json!({ "message": format!("Cluster '{}' imported", body.name), "cluster": cluster })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/kubernetes/clusters/{id}
+pub async fn k8s_delete_cluster(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    match crate::kubernetes::remove_cluster(&id) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "message": "Cluster removed" })),
+        Err(e) => HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/kubernetes/clusters/{id}/status
+pub async fn k8s_cluster_status(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    HttpResponse::Ok().json(crate::kubernetes::get_cluster_status(&cluster.kubeconfig_path))
+}
+
+/// GET /api/kubernetes/clusters/{id}/namespaces
+pub async fn k8s_namespaces(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cluster = match crate::kubernetes::get_cluster(&path.into_inner()) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    HttpResponse::Ok().json(crate::kubernetes::get_namespaces(&cluster.kubeconfig_path))
+}
+
+/// POST /api/kubernetes/clusters/{id}/namespaces
+#[derive(Deserialize)]
+pub struct K8sNameRequest { pub name: String }
+
+pub async fn k8s_create_namespace(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<K8sNameRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cluster = match crate::kubernetes::get_cluster(&path.into_inner()) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    match crate::kubernetes::create_namespace(&cluster.kubeconfig_path, &body.name) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/kubernetes/clusters/{id}/namespaces/{name}
+pub async fn k8s_delete_namespace(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    match crate::kubernetes::delete_namespace(&cluster.kubeconfig_path, &name) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/kubernetes/clusters/{id}/pods?namespace=
+pub async fn k8s_pods(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cluster = match crate::kubernetes::get_cluster(&path.into_inner()) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").filter(|s| !s.is_empty()).map(|s| s.as_str());
+    HttpResponse::Ok().json(crate::kubernetes::get_pods(&cluster.kubeconfig_path, ns))
+}
+
+/// DELETE /api/kubernetes/clusters/{id}/pods/{name}?namespace=
+pub async fn k8s_delete_pod(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    match crate::kubernetes::delete_pod(&cluster.kubeconfig_path, &name, ns) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/kubernetes/clusters/{id}/deployments?namespace=
+pub async fn k8s_deployments(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cluster = match crate::kubernetes::get_cluster(&path.into_inner()) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").filter(|s| !s.is_empty()).map(|s| s.as_str());
+    HttpResponse::Ok().json(crate::kubernetes::get_deployments(&cluster.kubeconfig_path, ns))
+}
+
+/// DELETE /api/kubernetes/clusters/{id}/deployments/{name}?namespace=
+pub async fn k8s_delete_deployment(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    match crate::kubernetes::delete_deployment(&cluster.kubeconfig_path, &name, ns) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// PATCH /api/kubernetes/clusters/{id}/deployments/{name}/scale
+#[derive(Deserialize)]
+pub struct K8sScaleRequest { pub namespace: String, pub replicas: u32 }
+
+pub async fn k8s_scale_deployment(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, body: web::Json<K8sScaleRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    match crate::kubernetes::scale_deployment(&cluster.kubeconfig_path, &name, &body.namespace, body.replicas) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/kubernetes/clusters/{id}/deployments/{name}/restart?namespace=
+pub async fn k8s_restart_deployment(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    match crate::kubernetes::restart_deployment(&cluster.kubeconfig_path, &name, ns) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/kubernetes/clusters/{id}/services?namespace=
+pub async fn k8s_services(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cluster = match crate::kubernetes::get_cluster(&path.into_inner()) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").filter(|s| !s.is_empty()).map(|s| s.as_str());
+    HttpResponse::Ok().json(crate::kubernetes::get_services(&cluster.kubeconfig_path, ns))
+}
+
+/// DELETE /api/kubernetes/clusters/{id}/services/{name}?namespace=
+pub async fn k8s_delete_service(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    match crate::kubernetes::delete_service(&cluster.kubeconfig_path, &name, ns) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/kubernetes/clusters/{id}/nodes
+pub async fn k8s_nodes(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cluster = match crate::kubernetes::get_cluster(&path.into_inner()) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    HttpResponse::Ok().json(crate::kubernetes::get_nodes(&cluster.kubeconfig_path))
+}
+
+/// GET /api/kubernetes/clusters/{id}/logs/{pod}?namespace=&container=&tail=
+pub async fn k8s_pod_logs(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, pod) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    let container = query.get("container").map(|s| s.as_str());
+    let tail: u32 = query.get("tail").and_then(|s| s.parse().ok()).unwrap_or(100);
+    match crate::kubernetes::get_pod_logs(&cluster.kubeconfig_path, &pod, ns, container, tail) {
+        Ok(logs) => HttpResponse::Ok().json(serde_json::json!({ "logs": logs })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/kubernetes/clusters/{id}/apply
+#[derive(Deserialize)]
+pub struct K8sApplyRequest {
+    pub yaml: String,
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+pub async fn k8s_apply(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<K8sApplyRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cluster = match crate::kubernetes::get_cluster(&path.into_inner()) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    // If namespace specified, prepend it to the yaml or use -n flag via a wrapper
+    let yaml = if let Some(ref ns) = body.namespace {
+        // Add namespace to yaml if not already present
+        if body.yaml.contains("namespace:") {
+            body.yaml.clone()
+        } else {
+            body.yaml.replace("metadata:", &format!("metadata:\n  namespace: {}", ns))
+        }
+    } else {
+        body.yaml.clone()
+    };
+    match crate::kubernetes::apply_yaml(&cluster.kubeconfig_path, &yaml) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/kubernetes/clusters/{id}/deploy-app — deploy an app store app to k8s
+#[derive(Deserialize)]
+pub struct K8sDeployAppRequest {
+    pub app_id: String,
+    pub container_name: String,
+    #[serde(default = "default_k8s_namespace")]
+    pub namespace: String,
+    #[serde(default = "default_k8s_replicas")]
+    pub replicas: u32,
+    #[serde(default)]
+    pub inputs: std::collections::HashMap<String, String>,
+}
+fn default_k8s_namespace() -> String { "default".to_string() }
+fn default_k8s_replicas() -> u32 { 1 }
+
+pub async fn k8s_deploy_app(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<K8sDeployAppRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cluster = match crate::kubernetes::get_cluster(&path.into_inner()) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let app = match appstore::get_app(&body.app_id) {
+        Some(a) => a,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": format!("App '{}' not found", body.app_id) })),
+    };
+    let docker = match app.docker {
+        Some(ref d) => d,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "App does not support Docker/Kubernetes deployment" })),
+    };
+    // Substitute user inputs in env vars
+    let env: Vec<String> = docker.env.iter().map(|e| {
+        let mut val = e.clone();
+        for (k, v) in &body.inputs {
+            val = val.replace(&format!("${{{}}}", k), v);
+        }
+        val
+    }).collect();
+    match crate::kubernetes::deploy_app_to_k8s(
+        &cluster.kubeconfig_path, &app.name, &body.container_name,
+        &body.namespace, &docker.image, &docker.ports, &env,
+        &docker.volumes, body.replicas,
+    ) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/kubernetes/clusters/provision — provision a k3s cluster
+#[derive(Deserialize)]
+pub struct K8sProvisionRequest {
+    pub name: String,
+    pub server_node_id: String,
+    #[serde(default)]
+    pub agent_node_ids: Vec<String>,
+}
+
+pub async fn k8s_provision(req: HttpRequest, state: web::Data<AppState>, body: web::Json<K8sProvisionRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    // Find the server node
+    let server_node = match state.cluster.get_node(&body.server_node_id) {
+        Some(n) => n,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Server node not found" })),
+    };
+
+    let is_self = server_node.is_self;
+    let server_address = server_node.address.clone();
+    let cluster_name = body.name.clone();
+
+    // Generate and run the k3s server install script
+    let script = match crate::kubernetes::provision_k3s_server(&server_address, &cluster_name) {
+        Ok(s) => s,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    };
+
+    if is_self {
+        // Run locally
+        let script_path = format!("/tmp/wolfstack-k3s-{}.sh", cluster_name);
+        if let Err(e) = std::fs::write(&script_path, &script) {
+            return HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Failed to write script: {}", e) }));
+        }
+        let output = std::process::Command::new("bash").arg(&script_path).output();
+        let _ = std::fs::remove_file(&script_path);
+        match output {
+            Ok(o) if o.status.success() => {},
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                return HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("k3s install failed: {}", stderr) }));
+            },
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Failed to run script: {}", e) })),
+        }
+
+        // k3s installed — register the cluster
+        let kubeconfig_path = "/etc/rancher/k3s/k3s.yaml".to_string();
+        let api_url = format!("https://{}:6443", server_address);
+        let cluster_id = format!("k8s-{}", cluster_name.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-"));
+        match crate::kubernetes::add_cluster(cluster_id, cluster_name.clone(), kubeconfig_path, api_url, crate::kubernetes::K8sClusterType::K3s) {
+            Ok(cluster) => HttpResponse::Ok().json(serde_json::json!({
+                "message": format!("k3s cluster '{}' provisioned successfully", cluster_name),
+                "cluster": cluster,
+            })),
+            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        }
+    } else {
+        // For remote nodes, we'd need to proxy the install — simplified for now
+        HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Remote k3s provisioning is not yet supported. Please install k3s on the remote node manually and import the kubeconfig."
+        }))
+    }
+}
+
 // ─── Security (Fail2ban, iptables, UFW) ───
 
 /// Helper: check if a command exists on the system
@@ -10922,6 +11307,27 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/wolfnet/routes", web::get().to(wolfnet_routes_debug))
         // Geolocation proxy (ip-api.com is HTTP-only, browsers block mixed content on HTTPS pages)
         .route("/api/geolocate", web::get().to(geolocate))
+        // Kubernetes
+        .route("/api/kubernetes/clusters", web::get().to(k8s_list_clusters))
+        .route("/api/kubernetes/clusters", web::post().to(k8s_create_cluster))
+        .route("/api/kubernetes/clusters/provision", web::post().to(k8s_provision))
+        .route("/api/kubernetes/clusters/{id}", web::delete().to(k8s_delete_cluster))
+        .route("/api/kubernetes/clusters/{id}/status", web::get().to(k8s_cluster_status))
+        .route("/api/kubernetes/clusters/{id}/namespaces", web::get().to(k8s_namespaces))
+        .route("/api/kubernetes/clusters/{id}/namespaces", web::post().to(k8s_create_namespace))
+        .route("/api/kubernetes/clusters/{id}/namespaces/{name}", web::delete().to(k8s_delete_namespace))
+        .route("/api/kubernetes/clusters/{id}/pods", web::get().to(k8s_pods))
+        .route("/api/kubernetes/clusters/{id}/pods/{name}", web::delete().to(k8s_delete_pod))
+        .route("/api/kubernetes/clusters/{id}/deployments", web::get().to(k8s_deployments))
+        .route("/api/kubernetes/clusters/{id}/deployments/{name}", web::delete().to(k8s_delete_deployment))
+        .route("/api/kubernetes/clusters/{id}/deployments/{name}/scale", web::patch().to(k8s_scale_deployment))
+        .route("/api/kubernetes/clusters/{id}/deployments/{name}/restart", web::post().to(k8s_restart_deployment))
+        .route("/api/kubernetes/clusters/{id}/services", web::get().to(k8s_services))
+        .route("/api/kubernetes/clusters/{id}/services/{name}", web::delete().to(k8s_delete_service))
+        .route("/api/kubernetes/clusters/{id}/nodes", web::get().to(k8s_nodes))
+        .route("/api/kubernetes/clusters/{id}/logs/{pod}", web::get().to(k8s_pod_logs))
+        .route("/api/kubernetes/clusters/{id}/apply", web::post().to(k8s_apply))
+        .route("/api/kubernetes/clusters/{id}/deploy-app", web::post().to(k8s_deploy_app))
         // App Store
         .route("/api/appstore/apps", web::get().to(appstore_list))
         .route("/api/appstore/apps/{id}", web::get().to(appstore_get))

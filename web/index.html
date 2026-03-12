@@ -112,6 +112,10 @@
                     style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;border-radius:10px;">
                     <span class="icon" style="margin:0;font-size:20px;">🛍️</span>
                 </a>
+                <a class="nav-item" data-page="kubernetes" onclick="selectView('kubernetes')" title="Kubernetes"
+                    style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;border-radius:10px;">
+                    <span class="icon" style="margin:0;font-size:20px;">&#9784;</span>
+                </a>
                 <a class="nav-item" data-page="issues" onclick="selectView('issues')" title="Issues"
                     style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;border-radius:10px;">
                     <span class="icon" style="margin:0;font-size:20px;">⚠️</span>
@@ -634,6 +638,13 @@
         <div id="page-security" class="page-view" style="display:none;">
             <div id="security-node-content">
                 <div style="padding:40px; text-align:center; color:var(--text-muted);">Loading security status...</div>
+            </div>
+        </div>
+
+        <!-- ═══ Kubernetes Page (datacenter-level) ═══ -->
+        <div id="page-kubernetes" class="page-view" style="display:none;">
+            <div id="kubernetes-content">
+                <div style="padding:40px; text-align:center; color:var(--text-muted);">Loading Kubernetes clusters...</div>
             </div>
         </div>
 

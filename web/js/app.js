@@ -528,7 +528,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', 'global-wolfnet': 'Global View' };
+    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', 'global-wolfnet': 'Global View', kubernetes: 'Kubernetes' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -543,6 +543,8 @@ function selectView(page) {
         }
     } else if (page === 'appstore') {
         loadAppStoreApps();
+    } else if (page === 'kubernetes') {
+        loadKubernetesClusters();
     } else if (page === 'issues') {
         checkIssuesAiBadge();
         checkBetaAccess();
@@ -752,6 +754,10 @@ function buildServerTree(nodes) {
                 </a>
                 <a class="nav-item server-child-item cluster-backups-item" data-cluster="${escapedName}" data-view="cluster-backups" onclick="showClusterBackupsPage('${escapedName}')" style="margin-left: 8px; padding: 6px 10px; display:flex; align-items:center; gap:6px;">
                     <span class="icon" style="font-size:15px;">💾</span> <span style="font-weight:600;">Backups</span>
+                </a>
+                <a class="nav-item server-child-item k8s-cluster-item" data-cluster="${escapedName}" data-view="kubernetes" onclick="showK8sClusterPage('${escapedName}')" style="margin-left: 8px; padding: 6px 10px; display:flex; align-items:center; gap:6px;">
+                    <span class="icon" style="font-size:15px;">&#9784;</span> <span style="font-weight:600;">Kubernetes</span>
+                    <span class="k8s-cluster-count" id="k8s-count-${clusterId}" style="margin-left:auto; font-size:10px; padding:1px 6px; background:#326ce5; color:#fff; border-radius:10px; display:none;"></span>
                 </a>`;
 
         // Each node within the cluster
@@ -18017,6 +18023,7 @@ function renderAppStoreTable() {
         if (app.docker) targets.push('<span class="appstore-target-badge">Docker</span>');
         if (app.lxc) targets.push('<span class="appstore-target-badge">LXC</span>');
         if (app.bare_metal) targets.push('<span class="appstore-target-badge">Host</span>');
+        if (app.docker && k8sClusters.length > 0) targets.push('<span class="appstore-target-badge" style="background:rgba(50,108,229,0.12);color:#326ce5;border-color:rgba(50,108,229,0.3);">K8s</span>');
         const docsLink = app.website ? `<a href="${escapeHtml(app.website)}" target="_blank" rel="noopener" title="Docs" style="color:var(--text-muted); font-size:14px; text-decoration:none; margin-right:6px;">🔗</a>` : '';
 
         return `<tr>
@@ -18081,12 +18088,42 @@ function openAppStoreInstallModal(appId) {
     if (app.docker) targets.push({ key: 'docker', label: '🐳 Docker' });
     if (app.lxc) targets.push({ key: 'lxc', label: '📦 LXC' });
     if (app.bare_metal) targets.push({ key: 'bare_metal', label: '🖥️ Host' });
+    if (app.docker && k8sClusters.length > 0) targets.push({ key: 'kubernetes', label: '&#9784; Kubernetes' });
 
     appStoreInstallTarget = targets[0]?.key || 'docker';
     targetHtml = targets.map(t =>
         `<button class="appstore-target-pill ${t.key === appStoreInstallTarget ? 'active' : ''}" onclick="selectInstallTarget('${t.key}')">${t.label}</button>`
     ).join('');
     targetsEl.innerHTML = targetHtml;
+
+    // Build k8s options (cluster + namespace selector)
+    let k8sOptsEl = document.getElementById('appstore-k8s-options');
+    if (!k8sOptsEl) {
+        k8sOptsEl = document.createElement('div');
+        k8sOptsEl.id = 'appstore-k8s-options';
+        targetsEl.parentElement.insertBefore(k8sOptsEl, targetsEl.nextSibling);
+    }
+    if (k8sClusters.length > 0) {
+        const clusterOpts = k8sClusters.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join('');
+        k8sOptsEl.innerHTML = `
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px;">
+                <div class="form-group" style="margin:0;">
+                    <label style="font-size:13px; font-weight:500;">K8s Cluster</label>
+                    <select id="appstore-k8s-cluster" class="form-control">${clusterOpts}</select>
+                </div>
+                <div class="form-group" style="margin:0;">
+                    <label style="font-size:13px; font-weight:500;">Namespace</label>
+                    <input type="text" id="appstore-k8s-namespace" class="form-control" value="default" placeholder="default">
+                </div>
+            </div>
+            <div class="form-group" style="margin-top:8px; margin-bottom:0;">
+                <label style="font-size:13px; font-weight:500;">Replicas</label>
+                <input type="number" id="appstore-k8s-replicas" class="form-control" value="1" min="1" max="100" style="width:100px;">
+            </div>`;
+    } else {
+        k8sOptsEl.innerHTML = '<div style="margin-top:8px; font-size:12px; color:var(--text-muted);">No Kubernetes clusters configured. Go to Kubernetes page to add one.</div>';
+    }
+    k8sOptsEl.style.display = appStoreInstallTarget === 'kubernetes' ? '' : 'none';
 
     // Build user input fields
     const inputsEl = document.getElementById('appstore-install-inputs');
@@ -18112,6 +18149,15 @@ function selectInstallTarget(target) {
     appStoreInstallTarget = target;
     document.querySelectorAll('#appstore-install-targets .appstore-target-pill').forEach(b => b.classList.remove('active'));
     event.target.classList.add('active');
+
+    // Show/hide k8s options
+    const k8sOpts = document.getElementById('appstore-k8s-options');
+    if (k8sOpts) k8sOpts.style.display = target === 'kubernetes' ? '' : 'none';
+    // Show/hide host/storage (not needed for k8s)
+    const hostRow = document.getElementById('appstore-install-host')?.closest('.form-group');
+    const storageRow = document.getElementById('appstore-install-storage')?.closest('.form-group');
+    if (hostRow) hostRow.style.display = target === 'kubernetes' ? 'none' : '';
+    if (storageRow) storageRow.style.display = target === 'kubernetes' ? 'none' : '';
 }
 
 async function populateAppStoreStorage() {
@@ -18190,6 +18236,32 @@ async function executeAppStoreInstall() {
     const selectedNodeId = document.getElementById('appstore-install-host').value;
     const selectedNode = allNodes.find(n => n.id === selectedNodeId);
     const appName = (appStoreApps.find(a => a.id === appStoreInstallAppId) || {}).name || appStoreInstallAppId;
+
+    // Handle Kubernetes deploy separately
+    if (appStoreInstallTarget === 'kubernetes') {
+        const k8sClusterId = document.getElementById('appstore-k8s-cluster')?.value;
+        const k8sNamespace = document.getElementById('appstore-k8s-namespace')?.value || 'default';
+        const k8sReplicas = parseInt(document.getElementById('appstore-k8s-replicas')?.value) || 1;
+        if (!k8sClusterId) { showToast('Please select a Kubernetes cluster', 'error'); return; }
+        closeAppStoreInstallModal();
+        try {
+            const resp = await fetch(`/api/kubernetes/clusters/${k8sClusterId}/deploy-app`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    app_id: appStoreInstallAppId,
+                    container_name: name,
+                    namespace: k8sNamespace,
+                    replicas: k8sReplicas,
+                    inputs: userInputs,
+                }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data.error || 'Deploy failed');
+            showToast(data.message || `${appName} deployed to Kubernetes!`, 'success');
+        } catch (e) { showToast('K8s deploy failed: ' + e.message, 'error'); }
+        return;
+    }
 
     closeAppStoreInstallModal();
 
@@ -21205,4 +21277,630 @@ function renderWolfrunServicePicker(existingCheck) {
             </div>
         </div>
     </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── Kubernetes Management ───
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let k8sClusters = [];
+let k8sCurrentCluster = null;  // selected K8sCluster id
+let k8sCurrentView = 'overview'; // overview, pods, deployments, services, namespaces, nodes
+let k8sCurrentNamespace = '';    // '' = all namespaces
+let k8sRefreshTimer = null;
+let k8sWolfStackCluster = '';    // WolfStack cluster name context
+
+function showK8sClusterPage(clusterName) {
+    k8sWolfStackCluster = clusterName;
+    selectView('kubernetes');
+}
+
+async function loadKubernetesClusters() {
+    const el = document.getElementById('kubernetes-content');
+    if (!el) return;
+
+    try {
+        const resp = await fetch('/api/kubernetes/clusters');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        k8sClusters = await resp.json();
+    } catch (e) {
+        k8sClusters = [];
+    }
+
+    renderKubernetesPage();
+}
+
+function renderKubernetesPage() {
+    const el = document.getElementById('kubernetes-content');
+    if (!el) return;
+
+    let html = `
+    <div class="card" style="margin-bottom:20px; background:linear-gradient(135deg, rgba(50,108,229,0.12), rgba(50,108,229,0.04)); border-color:rgba(50,108,229,0.25);">
+        <div class="card-body" style="display:flex; align-items:center; justify-content:space-between; padding:28px 32px;">
+            <div style="display:flex; align-items:center; gap:20px;">
+                <div style="width:64px; height:64px; background:linear-gradient(135deg,#326ce5,#54a3ff); border-radius:16px; display:flex; align-items:center; justify-content:center; font-size:32px; box-shadow:0 4px 20px rgba(50,108,229,0.3);">&#9784;</div>
+                <div>
+                    <h2 style="font-size:24px; margin-bottom:4px; color:var(--text-primary); font-weight:700;">Kubernetes</h2>
+                    <p style="color:var(--text-secondary); font-size:13px; margin:0;">Manage Kubernetes clusters, deploy workloads, and provision k3s across your nodes.</p>
+                </div>
+            </div>
+            <div style="display:flex; gap:8px;">
+                <button class="btn btn-primary" onclick="showK8sProvisionModal()" style="background:#326ce5; border-color:#326ce5;">+ Provision k3s</button>
+                <button class="btn btn-secondary" onclick="showK8sImportModal()">Import Cluster</button>
+            </div>
+        </div>
+    </div>`;
+
+    if (k8sClusters.length === 0) {
+        html += `<div class="card"><div class="card-body" style="padding:60px; text-align:center;">
+            <div style="font-size:48px; margin-bottom:16px;">&#9784;</div>
+            <h3 style="margin-bottom:8px; color:var(--text-primary);">No Kubernetes Clusters</h3>
+            <p style="color:var(--text-muted); margin-bottom:20px;">Provision a new k3s cluster on your servers or import an existing kubeconfig.</p>
+            <button class="btn btn-primary" onclick="showK8sProvisionModal()" style="background:#326ce5; border-color:#326ce5;">Provision k3s Cluster</button>
+        </div></div>`;
+    } else {
+        // Cluster list
+        html += `<div class="card"><div class="card-body" style="padding:0;">
+        <table class="data-table" style="width:100%;"><thead><tr>
+            <th>Cluster</th><th>Type</th><th>Nodes</th><th>Status</th><th>API Server</th><th style="text-align:right;">Actions</th>
+        </tr></thead><tbody>`;
+
+        k8sClusters.forEach(c => {
+            const typeBadge = `<span style="padding:2px 8px;border-radius:6px;font-size:11px;background:rgba(50,108,229,0.12);color:#326ce5;border:1px solid rgba(50,108,229,0.3);">${escapeHtml(c.cluster_type || 'k8s')}</span>`;
+            const nodeCount = (c.nodes || []).length;
+            html += `<tr style="cursor:pointer;" onclick="openK8sCluster('${escapeHtml(c.id)}')">
+                <td><strong>${escapeHtml(c.name)}</strong></td>
+                <td>${typeBadge}</td>
+                <td>${nodeCount} node${nodeCount !== 1 ? 's' : ''}</td>
+                <td><span id="k8s-status-${c.id}" style="color:var(--text-muted);">checking...</span></td>
+                <td><code style="font-size:11px;">${escapeHtml(c.api_url || '')}</code></td>
+                <td style="text-align:right;">
+                    <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); openK8sCluster('${escapeHtml(c.id)}')" style="font-size:11px;">Manage</button>
+                    <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteK8sCluster('${escapeHtml(c.id)}', '${escapeHtml(c.name)}')" style="font-size:11px;">Remove</button>
+                </td>
+            </tr>`;
+        });
+
+        html += `</tbody></table></div></div>`;
+
+        // Check cluster statuses async
+        k8sClusters.forEach(c => checkK8sClusterStatus(c.id));
+    }
+
+    // Detail panel (shown when a cluster is selected)
+    html += `<div id="k8s-detail-panel" style="display:none; margin-top:20px;"></div>`;
+
+    el.innerHTML = html;
+}
+
+async function checkK8sClusterStatus(clusterId) {
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${clusterId}/status`);
+        const el = document.getElementById(`k8s-status-${clusterId}`);
+        if (!el) return;
+        if (!resp.ok) {
+            el.innerHTML = '<span style="color:#ef4444;">Unreachable</span>';
+            return;
+        }
+        const status = await resp.json();
+        if (status.healthy) {
+            el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:4px;"><span style="width:6px;height:6px;border-radius:50%;background:#10b981;display:inline-block;"></span> Healthy (${status.nodes_ready}/${status.nodes_total} nodes)</span>`;
+        } else {
+            el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:4px;"><span style="width:6px;height:6px;border-radius:50%;background:#ef4444;display:inline-block;"></span> Unhealthy</span>`;
+        }
+    } catch (e) {
+        const el = document.getElementById(`k8s-status-${clusterId}`);
+        if (el) el.innerHTML = '<span style="color:var(--text-muted);">Unknown</span>';
+    }
+}
+
+async function openK8sCluster(clusterId) {
+    k8sCurrentCluster = clusterId;
+    k8sCurrentView = 'overview';
+    k8sCurrentNamespace = '';
+    await renderK8sClusterDetail();
+
+    // Auto-refresh
+    if (k8sRefreshTimer) clearInterval(k8sRefreshTimer);
+    k8sRefreshTimer = setInterval(() => {
+        if (currentPage === 'kubernetes' && k8sCurrentCluster) renderK8sClusterDetail();
+        else clearInterval(k8sRefreshTimer);
+    }, 15000);
+}
+
+async function renderK8sClusterDetail() {
+    const panel = document.getElementById('k8s-detail-panel');
+    if (!panel || !k8sCurrentCluster) return;
+    panel.style.display = '';
+
+    const cluster = k8sClusters.find(c => c.id === k8sCurrentCluster);
+    const clusterName = cluster ? cluster.name : k8sCurrentCluster;
+
+    // Tab bar
+    const tabs = [
+        { key: 'overview', label: 'Overview' },
+        { key: 'nodes', label: 'Nodes' },
+        { key: 'namespaces', label: 'Namespaces' },
+        { key: 'deployments', label: 'Deployments' },
+        { key: 'pods', label: 'Pods' },
+        { key: 'services', label: 'Services' },
+    ];
+
+    let html = `<div class="card"><div class="card-body" style="padding:16px 24px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+            <div style="display:flex; align-items:center; gap:12px;">
+                <button class="btn btn-sm btn-secondary" onclick="k8sCurrentCluster=null; document.getElementById('k8s-detail-panel').style.display='none'; clearInterval(k8sRefreshTimer);" style="font-size:11px;">&larr; Back</button>
+                <h3 style="margin:0; font-size:18px; font-weight:700;">${escapeHtml(clusterName)}</h3>
+            </div>
+            <div style="display:flex; gap:8px;">
+                <select id="k8s-ns-filter" class="form-control" style="width:200px; font-size:12px;" onchange="k8sCurrentNamespace=this.value; switchK8sTab(k8sCurrentView);">
+                    <option value="">All Namespaces</option>
+                </select>
+                <button class="btn btn-sm btn-primary" onclick="showK8sApplyYamlModal()" style="background:#326ce5; border-color:#326ce5; font-size:11px;">Apply YAML</button>
+            </div>
+        </div>
+        <div style="display:flex; gap:4px; margin-bottom:16px; border-bottom:1px solid var(--border); padding-bottom:8px;">`;
+
+    tabs.forEach(t => {
+        const active = t.key === k8sCurrentView ? 'background:rgba(50,108,229,0.15); color:#326ce5; font-weight:600;' : '';
+        html += `<button class="btn btn-sm" onclick="switchK8sTab('${t.key}')" style="font-size:12px; border:none; padding:6px 14px; border-radius:6px; ${active}">${t.label}</button>`;
+    });
+
+    html += `</div><div id="k8s-tab-content">Loading...</div></div></div>`;
+    panel.innerHTML = html;
+
+    // Load namespaces for filter
+    loadK8sNamespaceFilter();
+
+    // Load current tab
+    switchK8sTab(k8sCurrentView);
+}
+
+async function loadK8sNamespaceFilter() {
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/namespaces`);
+        if (!resp.ok) return;
+        const namespaces = await resp.json();
+        const sel = document.getElementById('k8s-ns-filter');
+        if (!sel) return;
+        let opts = '<option value="">All Namespaces</option>';
+        namespaces.forEach(ns => {
+            const selected = ns.name === k8sCurrentNamespace ? ' selected' : '';
+            opts += `<option value="${escapeHtml(ns.name)}"${selected}>${escapeHtml(ns.name)}</option>`;
+        });
+        sel.innerHTML = opts;
+    } catch (e) { /* ignore */ }
+}
+
+async function switchK8sTab(tab) {
+    k8sCurrentView = tab;
+    const content = document.getElementById('k8s-tab-content');
+    if (!content) return;
+    content.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">Loading...</div>';
+
+    const nsParam = k8sCurrentNamespace ? `?namespace=${encodeURIComponent(k8sCurrentNamespace)}` : '';
+
+    try {
+        if (tab === 'overview') {
+            const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/status`);
+            if (!resp.ok) throw new Error('Failed to get status');
+            const status = await resp.json();
+            content.innerHTML = renderK8sOverview(status);
+        } else if (tab === 'nodes') {
+            const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/nodes`);
+            if (!resp.ok) throw new Error('Failed');
+            const nodes = await resp.json();
+            content.innerHTML = renderK8sNodes(nodes);
+        } else if (tab === 'namespaces') {
+            const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/namespaces`);
+            if (!resp.ok) throw new Error('Failed');
+            const namespaces = await resp.json();
+            content.innerHTML = renderK8sNamespaces(namespaces);
+        } else if (tab === 'deployments') {
+            const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/deployments${nsParam}`);
+            if (!resp.ok) throw new Error('Failed');
+            const deps = await resp.json();
+            content.innerHTML = renderK8sDeployments(deps);
+        } else if (tab === 'pods') {
+            const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/pods${nsParam}`);
+            if (!resp.ok) throw new Error('Failed');
+            const pods = await resp.json();
+            content.innerHTML = renderK8sPods(pods);
+        } else if (tab === 'services') {
+            const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/services${nsParam}`);
+            if (!resp.ok) throw new Error('Failed');
+            const svcs = await resp.json();
+            content.innerHTML = renderK8sServices(svcs);
+        }
+    } catch (e) {
+        content.innerHTML = `<div style="padding:20px; text-align:center; color:#ef4444;">Failed to load ${tab}: ${e.message}</div>`;
+    }
+}
+
+function renderK8sOverview(status) {
+    const healthColor = status.healthy ? '#10b981' : '#ef4444';
+    const healthLabel = status.healthy ? 'Healthy' : 'Unhealthy';
+    return `
+    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:16px; margin-bottom:20px;">
+        <div class="card" style="text-align:center; padding:20px;">
+            <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px;">Status</div>
+            <div style="font-size:20px; font-weight:700; color:${healthColor}; margin-top:4px; display:flex; align-items:center; justify-content:center; gap:6px;">
+                <span style="width:8px;height:8px;border-radius:50%;background:${healthColor};display:inline-block;"></span> ${healthLabel}
+            </div>
+        </div>
+        <div class="card" style="text-align:center; padding:20px;">
+            <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px;">Nodes</div>
+            <div style="font-size:24px; font-weight:700; color:var(--text-primary); margin-top:4px;">${status.nodes_ready}/${status.nodes_total}</div>
+        </div>
+        <div class="card" style="text-align:center; padding:20px;">
+            <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px;">Pods</div>
+            <div style="font-size:24px; font-weight:700; color:var(--text-primary); margin-top:4px;">${status.pods_running}/${status.pods_total}</div>
+        </div>
+        <div class="card" style="text-align:center; padding:20px;">
+            <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px;">Namespaces</div>
+            <div style="font-size:24px; font-weight:700; color:var(--text-primary); margin-top:4px;">${status.namespaces}</div>
+        </div>
+        <div class="card" style="text-align:center; padding:20px;">
+            <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px;">API Version</div>
+            <div style="font-size:14px; font-weight:600; color:var(--text-primary); margin-top:8px;">${escapeHtml(status.api_version || 'N/A')}</div>
+        </div>
+    </div>`;
+}
+
+function renderK8sNodes(nodes) {
+    if (nodes.length === 0) return '<div style="padding:20px; text-align:center; color:var(--text-muted);">No nodes found.</div>';
+    let html = '<table class="data-table" style="width:100%;"><thead><tr><th>Name</th><th>Status</th><th>Roles</th><th>Version</th><th>CPU</th><th>Memory</th><th>Age</th></tr></thead><tbody>';
+    nodes.forEach(n => {
+        const statusColor = n.status === 'Ready' ? '#10b981' : '#ef4444';
+        html += `<tr>
+            <td><strong>${escapeHtml(n.name)}</strong></td>
+            <td><span style="color:${statusColor}; font-weight:600;">${escapeHtml(n.status)}</span></td>
+            <td>${escapeHtml(n.roles || '')}</td>
+            <td><code style="font-size:11px;">${escapeHtml(n.version || '')}</code></td>
+            <td>${escapeHtml(n.cpu_capacity || '')}</td>
+            <td>${escapeHtml(n.memory_capacity || '')}</td>
+            <td>${escapeHtml(n.age || '')}</td>
+        </tr>`;
+    });
+    return html + '</tbody></table>';
+}
+
+function renderK8sNamespaces(namespaces) {
+    let html = `<div style="margin-bottom:12px;"><button class="btn btn-sm btn-primary" onclick="showK8sCreateNamespaceModal()" style="background:#326ce5; border-color:#326ce5; font-size:11px;">+ Create Namespace</button></div>`;
+    html += '<table class="data-table" style="width:100%;"><thead><tr><th>Name</th><th>Status</th><th>Age</th><th style="text-align:right;">Actions</th></tr></thead><tbody>';
+    namespaces.forEach(ns => {
+        const isSystem = ['kube-system', 'kube-public', 'kube-node-lease', 'default'].includes(ns.name);
+        html += `<tr>
+            <td><strong>${escapeHtml(ns.name)}</strong>${isSystem ? ' <span style="font-size:10px;color:var(--text-muted);">(system)</span>' : ''}</td>
+            <td>${escapeHtml(ns.status || '')}</td>
+            <td>${escapeHtml(ns.age || '')}</td>
+            <td style="text-align:right;">${isSystem ? '' : `<button class="btn btn-sm btn-danger" onclick="deleteK8sNamespace('${escapeHtml(ns.name)}')" style="font-size:11px;">Delete</button>`}</td>
+        </tr>`;
+    });
+    return html + '</tbody></table>';
+}
+
+function renderK8sDeployments(deps) {
+    if (deps.length === 0) return '<div style="padding:20px; text-align:center; color:var(--text-muted);">No deployments found.</div>';
+    let html = '<table class="data-table" style="width:100%;"><thead><tr><th>Name</th><th>Namespace</th><th>Ready</th><th>Image</th><th>Age</th><th style="text-align:right;">Actions</th></tr></thead><tbody>';
+    deps.forEach(d => {
+        const ready = `${d.ready_replicas || 0}/${d.desired_replicas || 0}`;
+        const allReady = (d.ready_replicas || 0) >= (d.desired_replicas || 0) && (d.desired_replicas || 0) > 0;
+        const readyColor = allReady ? '#10b981' : '#eab308';
+        html += `<tr>
+            <td><strong>${escapeHtml(d.name)}</strong></td>
+            <td><code style="font-size:11px;">${escapeHtml(d.namespace || '')}</code></td>
+            <td><span style="color:${readyColor}; font-weight:600;">${ready}</span></td>
+            <td><code style="font-size:11px; max-width:250px; overflow:hidden; text-overflow:ellipsis; display:inline-block;">${escapeHtml(d.image || '')}</code></td>
+            <td>${escapeHtml(d.age || '')}</td>
+            <td style="text-align:right; white-space:nowrap;">
+                <button class="btn btn-sm btn-secondary" onclick="showK8sScaleModal('${escapeHtml(d.name)}', '${escapeHtml(d.namespace || 'default')}', ${d.desired_replicas || 1})" style="font-size:11px;">Scale</button>
+                <button class="btn btn-sm btn-secondary" onclick="k8sRestartDeployment('${escapeHtml(d.name)}', '${escapeHtml(d.namespace || 'default')}')" style="font-size:11px;">Restart</button>
+                <button class="btn btn-sm btn-danger" onclick="k8sDeleteDeployment('${escapeHtml(d.name)}', '${escapeHtml(d.namespace || 'default')}')" style="font-size:11px;">Delete</button>
+            </td>
+        </tr>`;
+    });
+    return html + '</tbody></table>';
+}
+
+function renderK8sPods(pods) {
+    if (pods.length === 0) return '<div style="padding:20px; text-align:center; color:var(--text-muted);">No pods found.</div>';
+    let html = '<table class="data-table" style="width:100%;"><thead><tr><th>Name</th><th>Namespace</th><th>Status</th><th>Ready</th><th>Restarts</th><th>Node</th><th>IP</th><th>Age</th><th style="text-align:right;">Actions</th></tr></thead><tbody>';
+    pods.forEach(p => {
+        const statusColors = { Running: '#10b981', Pending: '#eab308', Succeeded: '#6366f1', Failed: '#ef4444', Unknown: '#9ca3af' };
+        const color = statusColors[p.status] || '#9ca3af';
+        html += `<tr>
+            <td><strong style="font-size:12px;">${escapeHtml(p.name)}</strong></td>
+            <td><code style="font-size:11px;">${escapeHtml(p.namespace || '')}</code></td>
+            <td><span style="color:${color}; font-weight:600; font-size:12px;">${escapeHtml(p.status || '')}</span></td>
+            <td>${escapeHtml(p.ready || '')}</td>
+            <td>${p.restarts || 0}</td>
+            <td style="font-size:11px;">${escapeHtml(p.node || '')}</td>
+            <td><code style="font-size:11px;">${escapeHtml(p.ip || '')}</code></td>
+            <td>${escapeHtml(p.age || '')}</td>
+            <td style="text-align:right; white-space:nowrap;">
+                <button class="btn btn-sm btn-secondary" onclick="showK8sPodLogs('${escapeHtml(p.name)}', '${escapeHtml(p.namespace || 'default')}')" style="font-size:11px;">Logs</button>
+                <button class="btn btn-sm btn-danger" onclick="k8sDeletePod('${escapeHtml(p.name)}', '${escapeHtml(p.namespace || 'default')}')" style="font-size:11px;">Delete</button>
+            </td>
+        </tr>`;
+    });
+    return html + '</tbody></table>';
+}
+
+function renderK8sServices(svcs) {
+    if (svcs.length === 0) return '<div style="padding:20px; text-align:center; color:var(--text-muted);">No services found.</div>';
+    let html = '<table class="data-table" style="width:100%;"><thead><tr><th>Name</th><th>Namespace</th><th>Type</th><th>Cluster IP</th><th>External IP</th><th>Ports</th><th>Age</th><th style="text-align:right;">Actions</th></tr></thead><tbody>';
+    svcs.forEach(s => {
+        html += `<tr>
+            <td><strong>${escapeHtml(s.name)}</strong></td>
+            <td><code style="font-size:11px;">${escapeHtml(s.namespace || '')}</code></td>
+            <td><span style="padding:2px 8px;border-radius:6px;font-size:11px;background:rgba(50,108,229,0.12);color:#326ce5;">${escapeHtml(s.service_type || '')}</span></td>
+            <td><code style="font-size:11px;">${escapeHtml(s.cluster_ip || '')}</code></td>
+            <td><code style="font-size:11px;">${escapeHtml(s.external_ip || 'None')}</code></td>
+            <td style="font-size:11px;">${escapeHtml(s.ports || '')}</td>
+            <td>${escapeHtml(s.age || '')}</td>
+            <td style="text-align:right;">
+                <button class="btn btn-sm btn-danger" onclick="k8sDeleteService('${escapeHtml(s.name)}', '${escapeHtml(s.namespace || 'default')}')" style="font-size:11px;">Delete</button>
+            </td>
+        </tr>`;
+    });
+    return html + '</tbody></table>';
+}
+
+// ─── K8s Actions ───
+
+async function deleteK8sCluster(id, name) {
+    if (!(await showConfirm(`Remove Kubernetes cluster "${name}" from WolfStack? This only removes tracking, not the actual cluster.`))) return;
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${id}`, { method: 'DELETE' });
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || `HTTP ${resp.status}`);
+        showToast(`Cluster "${name}" removed`, 'success');
+        loadKubernetesClusters();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+async function deleteK8sNamespace(name) {
+    if (!(await showConfirm(`Delete namespace "${name}"? All resources in it will be destroyed.`))) return;
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/namespaces/${name}`, { method: 'DELETE' });
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
+        showToast(`Namespace "${name}" deleted`, 'success');
+        switchK8sTab('namespaces');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+async function k8sDeletePod(name, namespace) {
+    if (!(await showConfirm(`Delete pod "${name}" in ${namespace}?`))) return;
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/pods/${name}?namespace=${encodeURIComponent(namespace)}`, { method: 'DELETE' });
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
+        showToast(`Pod "${name}" deleted`, 'success');
+        switchK8sTab('pods');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+async function k8sDeleteDeployment(name, namespace) {
+    if (!(await showConfirm(`Delete deployment "${name}" in ${namespace}?`))) return;
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/deployments/${name}?namespace=${encodeURIComponent(namespace)}`, { method: 'DELETE' });
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
+        showToast(`Deployment "${name}" deleted`, 'success');
+        switchK8sTab('deployments');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+async function k8sRestartDeployment(name, namespace) {
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/deployments/${name}/restart?namespace=${encodeURIComponent(namespace)}`, { method: 'POST' });
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
+        showToast(`Deployment "${name}" restarting`, 'success');
+        setTimeout(() => switchK8sTab('deployments'), 2000);
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+async function k8sDeleteService(name, namespace) {
+    if (!(await showConfirm(`Delete service "${name}" in ${namespace}?`))) return;
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/services/${name}?namespace=${encodeURIComponent(namespace)}`, { method: 'DELETE' });
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
+        showToast(`Service "${name}" deleted`, 'success');
+        switchK8sTab('services');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+// ─── K8s Modals ───
+
+function showK8sScaleModal(name, namespace, currentReplicas) {
+    showModal(`
+        <h3 style="margin-bottom:16px;">Scale Deployment: ${escapeHtml(name)}</h3>
+        <div class="form-group">
+            <label>Replicas</label>
+            <input type="number" id="k8s-scale-replicas" class="form-control" value="${currentReplicas}" min="0" max="100">
+        </div>
+        <button class="btn btn-primary" onclick="k8sScaleDeployment('${escapeHtml(name)}', '${escapeHtml(namespace)}')" style="background:#326ce5; border-color:#326ce5;">Scale</button>
+    `);
+}
+
+async function k8sScaleDeployment(name, namespace) {
+    const replicas = parseInt(document.getElementById('k8s-scale-replicas').value);
+    closeModal();
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/deployments/${name}/scale`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ namespace, replicas }),
+        });
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
+        showToast(`Scaled "${name}" to ${replicas} replicas`, 'success');
+        setTimeout(() => switchK8sTab('deployments'), 1000);
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function showK8sCreateNamespaceModal() {
+    showModal(`
+        <h3 style="margin-bottom:16px;">Create Namespace</h3>
+        <div class="form-group">
+            <label>Name</label>
+            <input type="text" id="k8s-ns-name" class="form-control" placeholder="my-namespace">
+        </div>
+        <button class="btn btn-primary" onclick="k8sCreateNamespace()" style="background:#326ce5; border-color:#326ce5;">Create</button>
+    `);
+}
+
+async function k8sCreateNamespace() {
+    const name = document.getElementById('k8s-ns-name').value.trim();
+    if (!name) return;
+    closeModal();
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/namespaces`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+        });
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
+        showToast(`Namespace "${name}" created`, 'success');
+        switchK8sTab('namespaces');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+async function showK8sPodLogs(pod, namespace) {
+    showModal(`<h3 style="margin-bottom:8px;">Logs: ${escapeHtml(pod)}</h3><pre id="k8s-log-content" style="max-height:500px; overflow:auto; background:var(--bg-secondary); padding:12px; border-radius:8px; font-size:12px; white-space:pre-wrap;">Loading...</pre>`);
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/logs/${pod}?namespace=${encodeURIComponent(namespace)}&tail=200`);
+        const el = document.getElementById('k8s-log-content');
+        if (!resp.ok) { el.textContent = 'Failed to load logs'; return; }
+        const data = await resp.json();
+        el.textContent = data.logs || '(no logs)';
+        el.scrollTop = el.scrollHeight;
+    } catch (e) {
+        document.getElementById('k8s-log-content').textContent = 'Error: ' + e.message;
+    }
+}
+
+function showK8sApplyYamlModal() {
+    showModal(`
+        <h3 style="margin-bottom:16px;">Apply YAML Manifest</h3>
+        <div class="form-group">
+            <label>Namespace (optional)</label>
+            <input type="text" id="k8s-apply-ns" class="form-control" placeholder="default" value="${escapeHtml(k8sCurrentNamespace || '')}">
+        </div>
+        <div class="form-group">
+            <label>YAML</label>
+            <textarea id="k8s-apply-yaml" class="form-control" rows="15" style="font-family:monospace; font-size:12px;" placeholder="apiVersion: apps/v1\nkind: Deployment\n..."></textarea>
+        </div>
+        <button class="btn btn-primary" onclick="k8sApplyYaml()" style="background:#326ce5; border-color:#326ce5;">Apply</button>
+    `);
+}
+
+async function k8sApplyYaml() {
+    const yaml = document.getElementById('k8s-apply-yaml').value.trim();
+    const namespace = document.getElementById('k8s-apply-ns').value.trim() || null;
+    if (!yaml) return;
+    closeModal();
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/apply`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ yaml, namespace }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(data.message || 'Applied successfully', 'success');
+        setTimeout(() => switchK8sTab(k8sCurrentView), 1000);
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+// ─── Provision k3s Modal ───
+
+function showK8sProvisionModal() {
+    const sortedNodes = [...allNodes].sort((a, b) => a.hostname.localeCompare(b.hostname));
+    const nodeOpts = sortedNodes.map(n => {
+        const self = n.is_self ? ' (this server)' : '';
+        return `<option value="${n.id}">${escapeHtml(n.hostname)} (${n.address})${self}</option>`;
+    }).join('');
+
+    showModal(`
+        <h3 style="margin-bottom:16px;">Provision k3s Cluster</h3>
+        <div class="form-group">
+            <label>Cluster Name</label>
+            <input type="text" id="k8s-provision-name" class="form-control" placeholder="my-cluster" value="k3s-cluster">
+        </div>
+        <div class="form-group">
+            <label>Server Node (control plane)</label>
+            <select id="k8s-provision-server" class="form-control">${nodeOpts}</select>
+            <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">k3s server will be installed on this node.</div>
+        </div>
+        <div class="form-group">
+            <label>Agent Nodes (workers, optional)</label>
+            <select id="k8s-provision-agents" class="form-control" multiple style="height:120px;">${nodeOpts}</select>
+            <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Hold Ctrl/Cmd to select multiple. These will join as worker nodes.</div>
+        </div>
+        <button class="btn btn-primary" onclick="k8sProvision()" style="background:#326ce5; border-color:#326ce5;">Provision</button>
+    `);
+}
+
+async function k8sProvision() {
+    const name = document.getElementById('k8s-provision-name').value.trim();
+    const serverNodeId = document.getElementById('k8s-provision-server').value;
+    const agentSelect = document.getElementById('k8s-provision-agents');
+    const agentNodeIds = [...agentSelect.selectedOptions].map(o => o.value).filter(id => id !== serverNodeId);
+
+    if (!name) { showToast('Please enter a cluster name', 'error'); return; }
+    if (!serverNodeId) { showToast('Please select a server node', 'error'); return; }
+
+    closeModal();
+    showToast('Provisioning k3s cluster... This may take a few minutes.', 'info', 10000);
+
+    try {
+        const resp = await fetch('/api/kubernetes/clusters/provision', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name,
+                server_node_id: serverNodeId,
+                agent_node_ids: agentNodeIds,
+            }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || 'Provisioning failed');
+        showToast(data.message || 'k3s cluster provisioned!', 'success');
+        loadKubernetesClusters();
+    } catch (e) {
+        showToast('Provisioning failed: ' + e.message, 'error');
+    }
+}
+
+// ─── Import Cluster Modal ───
+
+function showK8sImportModal() {
+    showModal(`
+        <h3 style="margin-bottom:16px;">Import Kubernetes Cluster</h3>
+        <div class="form-group">
+            <label>Cluster Name</label>
+            <input type="text" id="k8s-import-name" class="form-control" placeholder="production-cluster">
+        </div>
+        <div class="form-group">
+            <label>Kubeconfig Contents</label>
+            <textarea id="k8s-import-kubeconfig" class="form-control" rows="12" style="font-family:monospace; font-size:11px;" placeholder="Paste your kubeconfig YAML here..."></textarea>
+        </div>
+        <button class="btn btn-primary" onclick="k8sImportCluster()" style="background:#326ce5; border-color:#326ce5;">Import</button>
+    `);
+}
+
+async function k8sImportCluster() {
+    const name = document.getElementById('k8s-import-name').value.trim();
+    const kubeconfig = document.getElementById('k8s-import-kubeconfig').value.trim();
+    if (!name || !kubeconfig) { showToast('Please fill in all fields', 'error'); return; }
+    closeModal();
+    try {
+        const resp = await fetch('/api/kubernetes/clusters', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, kubeconfig }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || 'Import failed');
+        showToast(data.message || 'Cluster imported!', 'success');
+        loadKubernetesClusters();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
