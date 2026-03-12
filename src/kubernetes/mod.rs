@@ -413,8 +413,14 @@ if ! command -v curl &>/dev/null; then
     fi
 fi
 
-# Install k3s server (--tls-san allows remote kubectl access via hostname/IP)
-curl -sfL https://get.k3s.io | sh -s - server --tls-san {node_address}
+# Build TLS SAN list — include the configured address, hostname, and all IPs
+TLS_SANS="--tls-san {node_address}"
+TLS_SANS="$TLS_SANS --tls-san $(hostname)"
+TLS_SANS="$TLS_SANS --tls-san $(hostname -f 2>/dev/null || hostname)"
+for IP in $(hostname -I 2>/dev/null); do TLS_SANS="$TLS_SANS --tls-san $IP"; done
+
+# Install k3s server
+curl -sfL https://get.k3s.io | sh -s - server $TLS_SANS
 
 # Wait for k3s to be ready
 echo "Waiting for k3s to be ready..."
@@ -951,13 +957,19 @@ fi
 # Install k0s
 curl -sSLf https://get.k0s.sh | sh
 
-# Create config with TLS SAN for remote access
+# Create minimal config with TLS SANs for remote access
 mkdir -p /etc/k0s
-k0s config create > /etc/k0s/k0s.yaml 2>/dev/null || true
-# Add SAN to config so remote kubectl works
-if command -v sed &>/dev/null; then
-    sed -i '/spec:/a\  api:\n    sans:\n      - {node_address}' /etc/k0s/k0s.yaml 2>/dev/null || true
-fi
+{{
+echo "apiVersion: k0s.k0sproject.io/v1beta1"
+echo "kind: ClusterConfig"
+echo "spec:"
+echo "  api:"
+echo "    sans:"
+echo "      - {node_address}"
+echo "      - $(hostname)"
+echo "      - $(hostname -f 2>/dev/null || hostname)"
+for IP in $(hostname -I 2>/dev/null); do echo "      - $IP"; done
+}} > /etc/k0s/k0s.yaml
 
 # Install and start as controller with worker capabilities
 k0s install controller --single --config /etc/k0s/k0s.yaml
@@ -1094,12 +1106,15 @@ fi
 # Install RKE2 server
 curl -sfL https://get.rke2.io | sh -
 
-# Configure TLS SAN for remote access
+# Configure TLS SAN for remote access — include address, hostname, and all IPs
 mkdir -p /etc/rancher/rke2
-cat > /etc/rancher/rke2/config.yaml << EOF
-tls-san:
-  - {node_address}
-EOF
+{{
+echo "tls-san:"
+echo "  - {node_address}"
+echo "  - $(hostname)"
+echo "  - $(hostname -f 2>/dev/null || hostname)"
+for IP in $(hostname -I 2>/dev/null); do echo "  - $IP"; done
+}} > /etc/rancher/rke2/config.yaml
 
 # Enable and start RKE2
 systemctl enable rke2-server.service
