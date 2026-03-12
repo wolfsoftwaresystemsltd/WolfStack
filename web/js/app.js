@@ -21613,6 +21613,7 @@ async function renderK8sClusterDetail() {
         { key: 'pods', label: 'Pods' },
         { key: 'services', label: 'Services' },
         { key: 'wolfnet', label: 'WolfNet' },
+        { key: 'settings', label: 'Settings' },
     ];
 
     let html = `<div class="card"><div class="card-body" style="padding:16px 24px;">
@@ -21704,7 +21705,11 @@ async function switchK8sTab(tab) {
             const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/wolfnet`);
             if (!resp.ok) throw new Error('Failed');
             const status = await resp.json();
-            content.innerHTML = renderK8sWolfNet(status);
+            const cluster = k8sClusters.find(c => c.id === k8sCurrentCluster);
+            content.innerHTML = renderK8sWolfNet(status, cluster);
+        } else if (tab === 'settings') {
+            const cluster = k8sClusters.find(c => c.id === k8sCurrentCluster);
+            content.innerHTML = renderK8sSettings(cluster);
         }
     } catch (e) {
         content.innerHTML = `<div style="padding:20px; text-align:center; color:#ef4444;">Failed to load ${tab}: ${e.message}</div>`;
@@ -21782,15 +21787,15 @@ function renderK8sDeployments(deps) {
         const allReady = (d.ready_replicas || 0) >= (d.desired_replicas || 0) && (d.desired_replicas || 0) > 0;
         const readyColor = allReady ? '#10b981' : '#eab308';
         html += `<tr>
-            <td><strong>${escapeHtml(d.name)}</strong></td>
+            <td><strong><a href="#" onclick="event.preventDefault(); showK8sDeploymentDetail('${escapeHtml(d.name)}', '${escapeHtml(d.namespace || 'default')}')" style="color:var(--text-primary); text-decoration:none;">${escapeHtml(d.name)}</a></strong></td>
             <td><code style="font-size:11px;">${escapeHtml(d.namespace || '')}</code></td>
             <td><span style="color:${readyColor}; font-weight:600;">${ready}</span></td>
             <td><code style="font-size:11px; max-width:250px; overflow:hidden; text-overflow:ellipsis; display:inline-block;">${escapeHtml(d.image || '')}</code></td>
             <td>${escapeHtml(d.age || '')}</td>
             <td style="text-align:right; white-space:nowrap;">
+                <button class="btn btn-sm btn-secondary" onclick="showK8sDeploymentDetail('${escapeHtml(d.name)}', '${escapeHtml(d.namespace || 'default')}')" style="font-size:11px;">Manage</button>
                 <button class="btn btn-sm btn-secondary" onclick="showK8sScaleModal('${escapeHtml(d.name)}', '${escapeHtml(d.namespace || 'default')}', ${d.desired_replicas || 1})" style="font-size:11px;">Scale</button>
-                <button class="btn btn-sm btn-secondary" onclick="k8sRestartDeployment('${escapeHtml(d.name)}', '${escapeHtml(d.namespace || 'default')}')" style="font-size:11px;">Restart</button>
-                <button class="btn btn-sm btn-danger" onclick="k8sDeleteDeployment('${escapeHtml(d.name)}', '${escapeHtml(d.namespace || 'default')}')" style="font-size:11px;">Delete</button>
+                <button class="btn btn-sm btn-danger" onclick="k8sDeleteDeploymentFull('${escapeHtml(d.name)}', '${escapeHtml(d.namespace || 'default')}')" style="font-size:11px;">Remove</button>
             </td>
         </tr>`;
     });
@@ -22896,7 +22901,7 @@ function k8sUninstallDone() {
 
 // ─── WolfNet Integration ───
 
-function renderK8sWolfNet(status) {
+function renderK8sWolfNet(status, cluster) {
     const deployed = status.deployed;
     if (deployed) {
         return `
@@ -22943,12 +22948,12 @@ function renderK8sWolfNet(status) {
                 </div>
                 <div class="form-group" style="margin-bottom:16px;">
                     <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">WolfNet Server Address</label>
-                    <input type="text" id="k8s-wolfnet-server" class="form-control" placeholder="10.0.0.1" style="font-size:14px; padding:10px 12px;">
+                    <input type="text" id="k8s-wolfnet-server" class="form-control" value="${escapeHtml(cluster?.wolfnet_server || '')}" placeholder="10.0.0.1" style="font-size:14px; padding:10px 12px;">
                     <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">IP address of your WolfNet coordination server.</div>
                 </div>
                 <div class="form-group" style="margin-bottom:20px;">
                     <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">WolfNet Network CIDR</label>
-                    <input type="text" id="k8s-wolfnet-network" class="form-control" value="10.10.0.0/24" placeholder="10.10.0.0/24" style="font-size:14px; padding:10px 12px;">
+                    <input type="text" id="k8s-wolfnet-network" class="form-control" value="${escapeHtml(cluster?.wolfnet_network || '10.10.0.0/24')}" placeholder="10.10.0.0/24" style="font-size:14px; padding:10px 12px;">
                     <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">The overlay network CIDR for WolfNet.</div>
                 </div>
                 <button class="btn btn-primary" onclick="k8sDeployWolfNet()" style="background:linear-gradient(135deg,#6366f1,#818cf8); border:none; padding:10px 24px; font-size:14px;">Deploy WolfNet</button>
@@ -22984,5 +22989,304 @@ async function k8sRemoveWolfNet() {
         if (!resp.ok) throw new Error(data.error || 'Removal failed');
         showToast('WolfNet removed from cluster', 'success');
         setTimeout(() => switchK8sTab('wolfnet'), 1000);
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+// ─── Deployment Manager ───
+
+async function showK8sDeploymentDetail(name, namespace) {
+    const content = document.getElementById('k8s-tab-content');
+    if (!content) return;
+    content.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">Loading deployment details...</div>';
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/deployments/${encodeURIComponent(name)}/detail?namespace=${encodeURIComponent(namespace)}`);
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
+        const d = await resp.json();
+        let html = `<div style="margin-bottom:12px;"><button class="btn btn-sm btn-secondary" onclick="switchK8sTab('deployments')" style="font-size:11px;">&larr; Back to Deployments</button></div>`;
+
+        // Header
+        html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:20px;">
+            <div>
+                <h3 style="margin:0; font-size:18px; font-weight:700;">${escapeHtml(d.name)}</h3>
+                <span style="font-size:12px; color:var(--text-muted);">Namespace: <code>${escapeHtml(d.namespace)}</code> &bull; Strategy: ${escapeHtml(d.strategy)} &bull; Age: ${escapeHtml(d.age)}</span>
+            </div>
+            <div style="display:flex; gap:8px;">
+                <button class="btn btn-sm btn-secondary" onclick="showK8sScaleModal('${escapeHtml(d.name)}', '${escapeHtml(d.namespace)}', ${d.replicas})" style="font-size:11px;">Scale (${d.ready_replicas}/${d.replicas})</button>
+                <button class="btn btn-sm btn-secondary" onclick="k8sRestartDeployment('${escapeHtml(d.name)}', '${escapeHtml(d.namespace)}')" style="font-size:11px;">Restart</button>
+                <button class="btn btn-sm btn-danger" onclick="k8sDeleteDeploymentFull('${escapeHtml(d.name)}', '${escapeHtml(d.namespace)}')" style="font-size:11px;">Remove</button>
+            </div>
+        </div>`;
+
+        // Containers
+        (d.containers || []).forEach((c, ci) => {
+            html += `<div class="card" style="margin-bottom:16px;"><div class="card-body" style="padding:20px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+                    <h4 style="margin:0; font-size:14px; font-weight:600;">Container: ${escapeHtml(c.name)}</h4>
+                    <button class="btn btn-sm btn-secondary" onclick="showK8sEditImageModal('${escapeHtml(d.name)}', '${escapeHtml(d.namespace)}', '${escapeHtml(c.name)}', '${escapeHtml(c.image)}')" style="font-size:11px;">Change Image</button>
+                </div>
+                <div style="background:var(--bg-secondary); border-radius:8px; padding:12px; margin-bottom:12px;">
+                    <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Image</div>
+                    <code style="font-size:13px; word-break:break-all;">${escapeHtml(c.image)}</code>
+                </div>`;
+
+            // Ports
+            if (c.ports && c.ports.length > 0) {
+                html += `<div style="margin-bottom:12px;">
+                    <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Ports</div>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">`;
+                c.ports.forEach(p => {
+                    html += `<span style="padding:3px 10px; border-radius:6px; font-size:12px; background:rgba(50,108,229,0.1); color:#326ce5; border:1px solid rgba(50,108,229,0.2);">${p.container_port}/${p.protocol}</span>`;
+                });
+                html += `</div></div>`;
+            }
+
+            // Env vars
+            html += `<div style="margin-bottom:12px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
+                    <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px;">Environment Variables</div>
+                    <button class="btn btn-sm btn-secondary" onclick="showK8sEditEnvModal('${escapeHtml(d.name)}', '${escapeHtml(d.namespace)}', ${ci})" style="font-size:10px;">Edit</button>
+                </div>`;
+            if (c.env && c.env.length > 0) {
+                html += `<table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody>`;
+                c.env.forEach(e => {
+                    html += `<tr><td><code>${escapeHtml(e.name)}</code></td><td><code style="word-break:break-all;">${escapeHtml(e.value || '(from ref)')}</code></td></tr>`;
+                });
+                html += `</tbody></table>`;
+            } else {
+                html += `<div style="color:var(--text-muted); font-size:12px;">No environment variables set.</div>`;
+            }
+            html += `</div>`;
+
+            // Volume mounts
+            if (c.volume_mounts && c.volume_mounts.length > 0) {
+                html += `<div>
+                    <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Volume Mounts</div>
+                    <table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Name</th><th>Mount Path</th><th>Read Only</th></tr></thead><tbody>`;
+                c.volume_mounts.forEach(vm => {
+                    html += `<tr><td>${escapeHtml(vm.name)}</td><td><code>${escapeHtml(vm.mount_path)}</code></td><td>${vm.read_only ? 'Yes' : 'No'}</td></tr>`;
+                });
+                html += `</tbody></table></div>`;
+            }
+
+            html += `</div></div>`;
+        });
+
+        // Volumes
+        if (d.volumes && d.volumes.length > 0) {
+            html += `<div class="card" style="margin-bottom:16px;"><div class="card-body" style="padding:20px;">
+                <h4 style="margin:0 0 12px 0; font-size:14px; font-weight:600;">Volumes</h4>
+                <table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Name</th><th>Type</th></tr></thead><tbody>`;
+            d.volumes.forEach(v => {
+                html += `<tr><td>${escapeHtml(v.name)}</td><td><code>${escapeHtml(v.type)}</code></td></tr>`;
+            });
+            html += `</tbody></table></div></div>`;
+        }
+
+        // Conditions
+        if (d.conditions && d.conditions.length > 0) {
+            html += `<div class="card"><div class="card-body" style="padding:20px;">
+                <h4 style="margin:0 0 12px 0; font-size:14px; font-weight:600;">Conditions</h4>
+                <table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Type</th><th>Status</th><th>Reason</th><th>Message</th></tr></thead><tbody>`;
+            d.conditions.forEach(c => {
+                const color = c.status === 'True' ? '#10b981' : '#ef4444';
+                html += `<tr><td>${escapeHtml(c.type)}</td><td><span style="color:${color}; font-weight:600;">${escapeHtml(c.status)}</span></td><td>${escapeHtml(c.reason)}</td><td style="font-size:11px; max-width:300px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(c.message)}</td></tr>`;
+            });
+            html += `</tbody></table></div></div>`;
+        }
+
+        // Store deployment data for env editing
+        window._k8sDeploymentDetail = d;
+        content.innerHTML = html;
+    } catch (e) {
+        content.innerHTML = `<div style="padding:20px; text-align:center; color:#ef4444;">Failed to load deployment: ${e.message}</div>`;
+    }
+}
+
+async function k8sDeleteDeploymentFull(name, namespace) {
+    if (!(await showConfirm(`Remove deployment "${name}" and its service from ${namespace}?`))) return;
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/deployments/${encodeURIComponent(name)}/full?namespace=${encodeURIComponent(namespace)}`, { method: 'DELETE' });
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
+        showToast(`Deployment "${name}" and service removed`, 'success');
+        switchK8sTab('deployments');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function showK8sEditImageModal(depName, namespace, containerName, currentImage) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+    overlay.innerHTML = `
+        <div class="modal" style="max-width:500px;">
+            <div class="modal-header">
+                <h3>Change Image</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="color:var(--text-muted); font-size:12px; margin:0 0 16px 0;">Update the image for container <strong>${escapeHtml(containerName)}</strong> in deployment <strong>${escapeHtml(depName)}</strong>.</p>
+                <div class="form-group">
+                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Image</label>
+                    <input type="text" id="k8s-new-image" class="form-control" value="${escapeHtml(currentImage)}" style="font-size:14px; padding:10px 12px; font-family:monospace;">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="k8sSetImage('${escapeHtml(depName)}', '${escapeHtml(namespace)}', '${escapeHtml(containerName)}')" style="background:#326ce5; border-color:#326ce5;">Update Image</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+}
+
+async function k8sSetImage(depName, namespace, containerName) {
+    const image = document.getElementById('k8s-new-image').value.trim();
+    if (!image) return;
+    closeModal();
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/deployments/${encodeURIComponent(depName)}/image`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ namespace, container: containerName, image }),
+        });
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
+        showToast(`Image updated to ${image}`, 'success');
+        setTimeout(() => showK8sDeploymentDetail(depName, namespace), 1000);
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function showK8sEditEnvModal(depName, namespace, containerIdx) {
+    const d = window._k8sDeploymentDetail;
+    if (!d || !d.containers[containerIdx]) return;
+    const container = d.containers[containerIdx];
+    const envList = (container.env || []).map(e => ({ name: e.name, value: e.value || '' }));
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+
+    let envRows = envList.map((e, i) => `
+        <div class="k8s-env-row" style="display:flex; gap:8px; margin-bottom:8px;">
+            <input type="text" class="form-control k8s-env-name" value="${escapeHtml(e.name)}" placeholder="KEY" style="flex:1; font-size:12px; font-family:monospace;">
+            <input type="text" class="form-control k8s-env-val" value="${escapeHtml(e.value)}" placeholder="value" style="flex:2; font-size:12px; font-family:monospace;">
+            <button class="btn btn-sm btn-danger" onclick="this.parentElement.remove()" style="font-size:10px; padding:4px 8px;">×</button>
+        </div>
+    `).join('');
+
+    overlay.innerHTML = `
+        <div class="modal" style="max-width:600px;">
+            <div class="modal-header">
+                <h3>Edit Environment Variables</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="color:var(--text-muted); font-size:12px; margin:0 0 16px 0;">Container <strong>${escapeHtml(container.name)}</strong> in <strong>${escapeHtml(depName)}</strong></p>
+                <div id="k8s-env-list">${envRows}</div>
+                <button class="btn btn-sm btn-secondary" onclick="document.getElementById('k8s-env-list').insertAdjacentHTML('beforeend', '<div class=\\'k8s-env-row\\' style=\\'display:flex; gap:8px; margin-bottom:8px;\\'><input type=\\'text\\' class=\\'form-control k8s-env-name\\' placeholder=\\'KEY\\' style=\\'flex:1; font-size:12px; font-family:monospace;\\'><input type=\\'text\\' class=\\'form-control k8s-env-val\\' placeholder=\\'value\\' style=\\'flex:2; font-size:12px; font-family:monospace;\\'><button class=\\'btn btn-sm btn-danger\\' onclick=\\'this.parentElement.remove()\\' style=\\'font-size:10px; padding:4px 8px;\\'>×</button></div>')" style="font-size:11px; margin-top:8px;">+ Add Variable</button>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="k8sSaveEnv('${escapeHtml(depName)}', '${escapeHtml(namespace)}')" style="background:#326ce5; border-color:#326ce5;">Save</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+}
+
+async function k8sSaveEnv(depName, namespace) {
+    const rows = document.querySelectorAll('#k8s-env-list .k8s-env-row');
+    const env = [];
+    rows.forEach(row => {
+        const name = row.querySelector('.k8s-env-name')?.value.trim();
+        const value = row.querySelector('.k8s-env-val')?.value || '';
+        if (name) env.push({ name, value });
+    });
+    closeModal();
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/deployments/${encodeURIComponent(depName)}/env`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ namespace, env }),
+        });
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
+        showToast('Environment variables updated', 'success');
+        setTimeout(() => showK8sDeploymentDetail(depName, namespace), 1000);
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+// ─── K8s Cluster Settings ───
+
+function renderK8sSettings(cluster) {
+    if (!cluster) return '<div style="padding:20px; text-align:center; color:var(--text-muted);">Cluster not found.</div>';
+    return `
+    <div class="card" style="margin-bottom:20px;">
+        <div class="card-body" style="padding:24px;">
+            <h4 style="margin:0 0 16px 0; font-size:16px; font-weight:700;">Cluster Information</h4>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; font-size:13px;">
+                <div><strong>Cluster ID:</strong> <code>${escapeHtml(cluster.id)}</code></div>
+                <div><strong>Type:</strong> ${escapeHtml(cluster.cluster_type || 'k8s')}</div>
+                <div><strong>API Server:</strong> <code>${escapeHtml(cluster.api_url || '')}</code></div>
+                <div><strong>Kubeconfig:</strong> <code style="font-size:11px;">${escapeHtml(cluster.kubeconfig_path || '')}</code></div>
+                <div><strong>Created:</strong> ${escapeHtml(cluster.created_at ? new Date(cluster.created_at).toLocaleDateString() : '')}</div>
+            </div>
+        </div>
+    </div>
+    <div class="card" style="margin-bottom:20px;">
+        <div class="card-body" style="padding:24px;">
+            <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+                <div style="width:36px; height:36px; background:linear-gradient(135deg,#6366f1,#818cf8); border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:18px; color:#fff;">&#127760;</div>
+                <div>
+                    <h4 style="margin:0; font-size:16px; font-weight:700;">WolfNet Integration</h4>
+                    <p style="margin:2px 0 0 0; font-size:12px; color:var(--text-muted);">Configure WolfNet overlay networking for this cluster. When auto-deploy is enabled, WolfNet will be automatically set up when deploying apps.</p>
+                </div>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+                <div class="form-group" style="margin:0;">
+                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">WolfNet Server Address</label>
+                    <input type="text" id="k8s-settings-wolfnet-server" class="form-control" value="${escapeHtml(cluster.wolfnet_server || '')}" placeholder="e.g. 10.0.0.1" style="font-size:13px;">
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">IP of your WolfNet coordination server</div>
+                </div>
+                <div class="form-group" style="margin:0;">
+                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">WolfNet Network CIDR</label>
+                    <input type="text" id="k8s-settings-wolfnet-network" class="form-control" value="${escapeHtml(cluster.wolfnet_network || '10.10.0.0/24')}" placeholder="10.10.0.0/24" style="font-size:13px;">
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Overlay network CIDR — use a range that doesn't overlap with existing WolfNet peers</div>
+                </div>
+            </div>
+            <div style="margin-bottom:20px;">
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:13px;">
+                    <input type="checkbox" id="k8s-settings-wolfnet-auto" ${cluster.wolfnet_auto_deploy ? 'checked' : ''}>
+                    <span><strong>Auto-deploy WolfNet</strong> — automatically deploy WolfNet when provisioning new apps to this cluster</span>
+                </label>
+            </div>
+            <button class="btn btn-primary" onclick="k8sSaveSettings()" style="background:#326ce5; border-color:#326ce5; font-size:13px;">Save Settings</button>
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-body" style="padding:24px;">
+            <h4 style="margin:0 0 12px 0; font-size:16px; font-weight:700; color:#ef4444;">Danger Zone</h4>
+            <div style="display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border:1px solid rgba(239,68,68,0.3); border-radius:8px;">
+                <div>
+                    <strong style="font-size:13px;">Remove Cluster</strong>
+                    <p style="font-size:12px; color:var(--text-muted); margin:2px 0 0 0;">Remove this cluster from WolfKube tracking. The actual cluster is not affected.</p>
+                </div>
+                <button class="btn btn-sm btn-danger" onclick="deleteK8sCluster('${escapeHtml(cluster.id)}', '${escapeHtml(cluster.name)}')" style="font-size:12px;">Remove Cluster</button>
+            </div>
+        </div>
+    </div>`;
+}
+
+async function k8sSaveSettings() {
+    const wolfnetServer = document.getElementById('k8s-settings-wolfnet-server')?.value.trim() || '';
+    const wolfnetNetwork = document.getElementById('k8s-settings-wolfnet-network')?.value.trim() || '10.10.0.0/24';
+    const wolfnetAutoDeploy = document.getElementById('k8s-settings-wolfnet-auto')?.checked || false;
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/settings`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ wolfnet_server: wolfnetServer, wolfnet_network: wolfnetNetwork, wolfnet_auto_deploy: wolfnetAutoDeploy }),
+        });
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
+        const data = await resp.json();
+        // Update local cluster data
+        const idx = k8sClusters.findIndex(c => c.id === k8sCurrentCluster);
+        if (idx >= 0 && data.cluster) k8sClusters[idx] = data.cluster;
+        showToast('Settings saved', 'success');
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }

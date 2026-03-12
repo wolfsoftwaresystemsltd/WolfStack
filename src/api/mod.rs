@@ -8608,6 +8608,98 @@ pub async fn k8s_apply(req: HttpRequest, state: web::Data<AppState>, path: web::
     }
 }
 
+/// GET /api/kubernetes/clusters/{id}/deployments/{name}/detail?namespace=
+pub async fn k8s_deployment_detail(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    match crate::kubernetes::get_deployment_detail(&cluster.kubeconfig_path, &name, ns) {
+        Ok(detail) => HttpResponse::Ok().json(detail),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// PATCH /api/kubernetes/clusters/{id}/deployments/{name}/image
+#[derive(Deserialize)]
+pub struct K8sSetImageRequest { pub namespace: String, pub container: String, pub image: String }
+
+pub async fn k8s_set_image(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, body: web::Json<K8sSetImageRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    match crate::kubernetes::set_deployment_image(&cluster.kubeconfig_path, &name, &body.namespace, &body.container, &body.image) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// PATCH /api/kubernetes/clusters/{id}/deployments/{name}/env
+#[derive(Deserialize)]
+pub struct K8sSetEnvRequest { pub namespace: String, pub env: Vec<K8sEnvVar> }
+#[derive(Deserialize)]
+pub struct K8sEnvVar { pub name: String, pub value: String }
+
+pub async fn k8s_set_env(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, body: web::Json<K8sSetEnvRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let env_pairs: Vec<(String, String)> = body.env.iter().map(|e| (e.name.clone(), e.value.clone())).collect();
+    match crate::kubernetes::set_deployment_env(&cluster.kubeconfig_path, &name, &body.namespace, &env_pairs) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/kubernetes/clusters/{id}/deployments/{name}/full?namespace= — delete deployment + service
+pub async fn k8s_delete_deployment_full(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    match crate::kubernetes::delete_deployment_and_service(&cluster.kubeconfig_path, &name, ns) {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// PATCH /api/kubernetes/clusters/{id}/settings — update cluster WolfNet settings
+#[derive(Deserialize)]
+pub struct K8sClusterSettingsRequest {
+    #[serde(default)]
+    pub wolfnet_server: Option<String>,
+    #[serde(default)]
+    pub wolfnet_network: Option<String>,
+    #[serde(default)]
+    pub wolfnet_auto_deploy: Option<bool>,
+}
+
+pub async fn k8s_cluster_settings(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<K8sClusterSettingsRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    match crate::kubernetes::update_cluster_settings(
+        &id,
+        body.wolfnet_server.as_deref(),
+        body.wolfnet_network.as_deref(),
+        body.wolfnet_auto_deploy,
+    ) {
+        Ok(cluster) => HttpResponse::Ok().json(serde_json::json!({ "message": "Settings updated", "cluster": cluster })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// POST /api/kubernetes/clusters/{id}/deploy-app — deploy an app store app to k8s
 #[derive(Deserialize)]
 pub struct K8sDeployAppRequest {
@@ -8645,6 +8737,16 @@ pub async fn k8s_deploy_app(req: HttpRequest, state: web::Data<AppState>, path: 
         }
         val
     }).collect();
+    // Auto-deploy WolfNet if configured and not already deployed
+    if cluster.wolfnet_auto_deploy && !cluster.wolfnet_server.is_empty() {
+        if !crate::kubernetes::is_wolfnet_deployed(&cluster.kubeconfig_path) {
+            let net = if cluster.wolfnet_network.is_empty() { "10.10.0.0/24" } else { &cluster.wolfnet_network };
+            if let Err(e) = crate::kubernetes::deploy_wolfnet_to_cluster(&cluster.kubeconfig_path, &cluster.wolfnet_server, net) {
+                tracing::warn!("Auto WolfNet deploy failed: {}", e);
+            }
+        }
+    }
+
     match crate::kubernetes::deploy_app_to_k8s(
         &cluster.kubeconfig_path, &app.name, &body.container_name,
         &body.namespace, &docker.image, &docker.ports, &env,
@@ -12021,8 +12123,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/kubernetes/clusters/{id}/pods/{name}", web::delete().to(k8s_delete_pod))
         .route("/api/kubernetes/clusters/{id}/deployments", web::get().to(k8s_deployments))
         .route("/api/kubernetes/clusters/{id}/deployments/{name}", web::delete().to(k8s_delete_deployment))
+        .route("/api/kubernetes/clusters/{id}/deployments/{name}/detail", web::get().to(k8s_deployment_detail))
         .route("/api/kubernetes/clusters/{id}/deployments/{name}/scale", web::patch().to(k8s_scale_deployment))
         .route("/api/kubernetes/clusters/{id}/deployments/{name}/restart", web::post().to(k8s_restart_deployment))
+        .route("/api/kubernetes/clusters/{id}/deployments/{name}/image", web::patch().to(k8s_set_image))
+        .route("/api/kubernetes/clusters/{id}/deployments/{name}/env", web::patch().to(k8s_set_env))
+        .route("/api/kubernetes/clusters/{id}/deployments/{name}/full", web::delete().to(k8s_delete_deployment_full))
+        .route("/api/kubernetes/clusters/{id}/settings", web::patch().to(k8s_cluster_settings))
         .route("/api/kubernetes/clusters/{id}/services", web::get().to(k8s_services))
         .route("/api/kubernetes/clusters/{id}/services/{name}", web::delete().to(k8s_delete_service))
         .route("/api/kubernetes/clusters/{id}/nodes", web::get().to(k8s_nodes))

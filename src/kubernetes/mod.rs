@@ -84,6 +84,12 @@ pub struct K8sCluster {
     pub created_at: String,
     #[serde(default)]
     pub nodes: Vec<K8sClusterNode>,
+    #[serde(default)]
+    pub wolfnet_server: String,
+    #[serde(default)]
+    pub wolfnet_network: String,
+    #[serde(default)]
+    pub wolfnet_auto_deploy: bool,
 }
 
 // ─── Runtime Info (returned from kubectl) ───
@@ -222,6 +228,9 @@ pub fn add_cluster(
         cluster_type,
         created_at: chrono::Utc::now().to_rfc3339(),
         nodes: Vec::new(),
+        wolfnet_server: String::new(),
+        wolfnet_network: String::new(),
+        wolfnet_auto_deploy: false,
     };
 
     config.clusters.push(cluster.clone());
@@ -2035,6 +2044,164 @@ pub fn get_pod_logs(
         args.extend_from_slice(&["-c", c]);
     }
     kubectl(kubeconfig, &args)
+}
+
+/// Get detailed info about a single deployment (env vars, labels, strategy, volumes, etc.)
+pub fn get_deployment_detail(kubeconfig: &str, name: &str, namespace: &str) -> Result<serde_json::Value, String> {
+    let output = kubectl(kubeconfig, &["get", "deployment", name, "-n", namespace, "-o", "json"])?;
+    let json: serde_json::Value = serde_json::from_str(&output)
+        .map_err(|e| format!("Failed to parse deployment JSON: {}", e))?;
+
+    let containers = json["spec"]["template"]["spec"]["containers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    let strategy = json["spec"]["strategy"]["type"]
+        .as_str()
+        .unwrap_or("RollingUpdate")
+        .to_string();
+
+    let labels = json["metadata"]["labels"].clone();
+    let selector = json["spec"]["selector"]["matchLabels"].clone();
+    let replicas = json["spec"]["replicas"].as_u64().unwrap_or(1);
+    let ready_replicas = json["status"]["readyReplicas"].as_u64().unwrap_or(0);
+    let available = json["status"]["availableReplicas"].as_u64().unwrap_or(0);
+    let creation = json["metadata"]["creationTimestamp"].as_str().unwrap_or("");
+    let age = compute_age(creation);
+
+    // Extract container details
+    let container_details: Vec<serde_json::Value> = containers.iter().map(|c| {
+        let env_vars: Vec<serde_json::Value> = c["env"].as_array()
+            .map(|envs| envs.iter().map(|e| {
+                serde_json::json!({
+                    "name": e["name"].as_str().unwrap_or(""),
+                    "value": e["value"].as_str().unwrap_or(""),
+                })
+            }).collect())
+            .unwrap_or_default();
+
+        let volume_mounts: Vec<serde_json::Value> = c["volumeMounts"].as_array()
+            .map(|vms| vms.iter().map(|vm| {
+                serde_json::json!({
+                    "name": vm["name"].as_str().unwrap_or(""),
+                    "mount_path": vm["mountPath"].as_str().unwrap_or(""),
+                    "read_only": vm["readOnly"].as_bool().unwrap_or(false),
+                })
+            }).collect())
+            .unwrap_or_default();
+
+        let ports: Vec<serde_json::Value> = c["ports"].as_array()
+            .map(|ps| ps.iter().map(|p| {
+                serde_json::json!({
+                    "container_port": p["containerPort"].as_u64().unwrap_or(0),
+                    "protocol": p["protocol"].as_str().unwrap_or("TCP"),
+                    "name": p["name"].as_str().unwrap_or(""),
+                })
+            }).collect())
+            .unwrap_or_default();
+
+        serde_json::json!({
+            "name": c["name"].as_str().unwrap_or(""),
+            "image": c["image"].as_str().unwrap_or(""),
+            "env": env_vars,
+            "volume_mounts": volume_mounts,
+            "ports": ports,
+        })
+    }).collect();
+
+    // Volumes
+    let volumes: Vec<serde_json::Value> = json["spec"]["template"]["spec"]["volumes"]
+        .as_array()
+        .map(|vols| vols.iter().map(|v| {
+            let vol_type = if v["hostPath"].is_object() {
+                format!("hostPath: {}", v["hostPath"]["path"].as_str().unwrap_or(""))
+            } else if v["emptyDir"].is_object() || v["emptyDir"].is_null() && v.get("emptyDir").is_some() {
+                "emptyDir".to_string()
+            } else if v["persistentVolumeClaim"].is_object() {
+                format!("pvc: {}", v["persistentVolumeClaim"]["claimName"].as_str().unwrap_or(""))
+            } else if v["configMap"].is_object() {
+                format!("configMap: {}", v["configMap"]["name"].as_str().unwrap_or(""))
+            } else if v["secret"].is_object() {
+                format!("secret: {}", v["secret"]["secretName"].as_str().unwrap_or(""))
+            } else {
+                "unknown".to_string()
+            };
+            serde_json::json!({
+                "name": v["name"].as_str().unwrap_or(""),
+                "type": vol_type,
+            })
+        }).collect())
+        .unwrap_or_default();
+
+    // Conditions
+    let conditions: Vec<serde_json::Value> = json["status"]["conditions"]
+        .as_array()
+        .map(|conds| conds.iter().map(|c| {
+            serde_json::json!({
+                "type": c["type"].as_str().unwrap_or(""),
+                "status": c["status"].as_str().unwrap_or(""),
+                "reason": c["reason"].as_str().unwrap_or(""),
+                "message": c["message"].as_str().unwrap_or(""),
+            })
+        }).collect())
+        .unwrap_or_default();
+
+    Ok(serde_json::json!({
+        "name": name,
+        "namespace": namespace,
+        "replicas": replicas,
+        "ready_replicas": ready_replicas,
+        "available": available,
+        "age": age,
+        "strategy": strategy,
+        "labels": labels,
+        "selector": selector,
+        "containers": container_details,
+        "volumes": volumes,
+        "conditions": conditions,
+    }))
+}
+
+/// Update the image of a deployment's container
+pub fn set_deployment_image(kubeconfig: &str, name: &str, namespace: &str, container: &str, image: &str) -> Result<String, String> {
+    info!("Setting image for deployment '{}' container '{}' to '{}'", name, container, image);
+    let set_arg = format!("{}={}", container, image);
+    kubectl(kubeconfig, &["set", "image", &format!("deployment/{}", name), &set_arg, "-n", namespace])
+}
+
+/// Update environment variables on a deployment
+pub fn set_deployment_env(kubeconfig: &str, name: &str, namespace: &str, env_vars: &[(String, String)]) -> Result<String, String> {
+    info!("Setting {} env vars on deployment '{}' in '{}'", env_vars.len(), name, namespace);
+    let dep_ref = format!("deployment/{}", name);
+    let env_strs: Vec<String> = env_vars.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+    let mut args: Vec<&str> = vec!["set", "env", &dep_ref, "-n", namespace];
+    for s in &env_strs {
+        args.push(s);
+    }
+    kubectl(kubeconfig, &args)
+}
+
+/// Delete a deployment and its matching service (if any)
+pub fn delete_deployment_and_service(kubeconfig: &str, name: &str, namespace: &str) -> Result<String, String> {
+    info!("Deleting deployment '{}' and associated service in '{}'", name, namespace);
+    let dep_result = kubectl(kubeconfig, &["delete", "deployment", name, "-n", namespace]);
+    // Also delete the service with the same name, ignoring if it doesn't exist
+    let _ = kubectl(kubeconfig, &["delete", "service", name, "-n", namespace, "--ignore-not-found"]);
+    dep_result
+}
+
+/// Update cluster WolfNet settings
+pub fn update_cluster_settings(id: &str, wolfnet_server: Option<&str>, wolfnet_network: Option<&str>, wolfnet_auto_deploy: Option<bool>) -> Result<K8sCluster, String> {
+    let mut config = load_config();
+    let cluster = config.clusters.iter_mut().find(|c| c.id == id)
+        .ok_or_else(|| format!("Cluster '{}' not found", id))?;
+    if let Some(s) = wolfnet_server { cluster.wolfnet_server = s.to_string(); }
+    if let Some(n) = wolfnet_network { cluster.wolfnet_network = n.to_string(); }
+    if let Some(a) = wolfnet_auto_deploy { cluster.wolfnet_auto_deploy = a; }
+    let updated = cluster.clone();
+    save_config(&config)?;
+    Ok(updated)
 }
 
 pub fn apply_yaml(kubeconfig: &str, yaml_content: &str) -> Result<String, String> {
