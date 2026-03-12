@@ -136,7 +136,7 @@ pub fn replace_wolfnet_routes(complete_routes: std::collections::HashMap<String,
 }
 
 /// Write the route map to /var/run/wolfnet/routes.json and signal WolfNet to reload.
-fn flush_routes_to_disk(routes: &std::collections::HashMap<String, String>) {
+pub fn flush_routes_to_disk(routes: &std::collections::HashMap<String, String>) {
     let routes_path = "/var/run/wolfnet/routes.json";
     if let Err(e) = std::fs::create_dir_all("/var/run/wolfnet") {
         warn!("Failed to create /var/run/wolfnet: {}", e);
@@ -656,6 +656,25 @@ pub fn wolfnet_used_ips() -> Vec<String> {
                 if let Some(vip) = svc.get("service_ip").and_then(|v| v.as_str()) {
                     if !vip.is_empty() && !ips.contains(&vip.to_string()) {
                         ips.push(vip.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Kubernetes WolfNet route IPs (k8s deployments with allocated WolfNet addresses)
+    if let Ok(data) = std::fs::read_to_string("/etc/wolfstack/kubernetes.json") {
+        if let Ok(config) = serde_json::from_str::<serde_json::Value>(&data) {
+            if let Some(clusters) = config.get("clusters").and_then(|c| c.as_array()) {
+                for cluster in clusters {
+                    if let Some(routes) = cluster.get("wolfnet_routes").and_then(|r| r.as_array()) {
+                        for route in routes {
+                            if let Some(ip) = route.get("wolfnet_ip").and_then(|v| v.as_str()) {
+                                if !ip.is_empty() && !ips.contains(&ip.to_string()) {
+                                    ips.push(ip.to_string());
+                                }
+                            }
+                        }
                     }
                 }
             }

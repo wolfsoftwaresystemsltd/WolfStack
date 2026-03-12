@@ -1499,6 +1499,15 @@ pub fn allocate_wolfnet_route(cluster_id: &str, deployment_name: &str, namespace
             .output();
     }
 
+    // Register route in WolfNet so other peers can reach this IP
+    let wn_status = crate::networking::get_wolfnet_status();
+    if let Some(ref local_wn_ip) = wn_status.ip {
+        let local_ip = local_wn_ip.split('/').next().unwrap_or(local_wn_ip).to_string();
+        let mut routes = std::collections::HashMap::new();
+        routes.insert(wolfnet_ip.clone(), local_ip);
+        crate::containers::update_wolfnet_routes(&routes);
+    }
+
     let route = K8sWolfNetRoute {
         deployment_name: deployment_name.to_string(),
         namespace: namespace.to_string(),
@@ -1546,6 +1555,13 @@ pub fn remove_wolfnet_route(cluster_id: &str, deployment_name: &str, namespace: 
         .args(["addr", "del", &format!("{}/32", route.wolfnet_ip), "dev", "wolfnet0"])
         .output();
 
+    // Remove from WolfNet routes so other peers stop routing to this IP
+    {
+        let mut cache = crate::containers::WOLFNET_ROUTES.lock().unwrap();
+        cache.remove(&route.wolfnet_ip);
+        crate::containers::flush_routes_to_disk(&cache);
+    }
+
     cluster.wolfnet_routes.retain(|r| !(r.deployment_name == deployment_name && r.namespace == namespace));
     save_config(&config)?;
 
@@ -1557,6 +1573,13 @@ pub fn remove_wolfnet_route(cluster_id: &str, deployment_name: &str, namespace: 
 /// Called from main.rs background tasks after WolfNet is running.
 pub fn apply_all_wolfnet_routes() {
     let config = load_config();
+
+    // Collect all k8s route IPs to register with WolfNet
+    let wn_status = crate::networking::get_wolfnet_status();
+    let local_wn_ip = wn_status.ip.as_deref()
+        .map(|ip| ip.split('/').next().unwrap_or(ip).to_string());
+    let mut wn_routes = std::collections::HashMap::new();
+
     for cluster in &config.clusters {
         for route in &cluster.wolfnet_routes {
             // Add secondary IP to wolfnet0 (ignore errors if already exists)
@@ -1588,8 +1611,18 @@ pub fn apply_all_wolfnet_routes() {
                 }
             }
 
+            // Register route so other WolfNet peers can reach this IP
+            if let Some(ref lip) = local_wn_ip {
+                wn_routes.insert(route.wolfnet_ip.clone(), lip.clone());
+            }
+
             info!("Re-applied WolfNet route {} for k8s deployment '{}'", route.wolfnet_ip, route.deployment_name);
         }
+    }
+
+    // Write all k8s routes to routes.json so WolfNet peers can route to them
+    if !wn_routes.is_empty() {
+        crate::containers::update_wolfnet_routes(&wn_routes);
     }
 }
 
