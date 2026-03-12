@@ -21835,9 +21835,11 @@ function renderK8sPods(pods) {
     pods.forEach(p => {
         const statusColors = { Running: '#10b981', Pending: '#eab308', Succeeded: '#6366f1', Failed: '#ef4444', Unknown: '#9ca3af' };
         const color = statusColors[p.status] || '#9ca3af';
+        const ns = p.namespace || 'default';
+        const isRunning = p.status === 'Running';
         html += `<tr>
-            <td><strong style="font-size:12px;">${escapeHtml(p.name)}</strong></td>
-            <td><code style="font-size:11px;">${escapeHtml(p.namespace || '')}</code></td>
+            <td><strong><a href="#" onclick="event.preventDefault(); showK8sPodDetail('${escapeHtml(p.name)}', '${escapeHtml(ns)}')" style="color:var(--text-primary); text-decoration:none; font-size:12px;">${escapeHtml(p.name)}</a></strong></td>
+            <td><code style="font-size:11px;">${escapeHtml(ns)}</code></td>
             <td><span style="color:${color}; font-weight:600; font-size:12px;">${escapeHtml(p.status || '')}</span></td>
             <td>${escapeHtml(p.ready || '')}</td>
             <td>${p.restarts || 0}</td>
@@ -21845,8 +21847,9 @@ function renderK8sPods(pods) {
             <td><code style="font-size:11px;">${escapeHtml(p.ip || '')}</code></td>
             <td>${escapeHtml(p.age || '')}</td>
             <td style="text-align:right; white-space:nowrap;">
-                <button class="btn btn-sm btn-secondary" onclick="showK8sPodLogs('${escapeHtml(p.name)}', '${escapeHtml(p.namespace || 'default')}')" style="font-size:11px;">Logs</button>
-                <button class="btn btn-sm btn-danger" onclick="k8sDeletePod('${escapeHtml(p.name)}', '${escapeHtml(p.namespace || 'default')}')" style="font-size:11px;">Delete</button>
+                ${isRunning ? `<button class="btn btn-sm btn-secondary" onclick="openK8sPodConsole('${escapeHtml(p.name)}', '${escapeHtml(ns)}')" style="font-size:11px;" title="Terminal">Console</button>` : ''}
+                <button class="btn btn-sm btn-secondary" onclick="showK8sPodDetail('${escapeHtml(p.name)}', '${escapeHtml(ns)}')" style="font-size:11px;">Manage</button>
+                <button class="btn btn-sm btn-danger" onclick="k8sDeletePod('${escapeHtml(p.name)}', '${escapeHtml(ns)}')" style="font-size:11px;">Delete</button>
             </td>
         </tr>`;
     });
@@ -22044,6 +22047,564 @@ async function showK8sPodLogs(pod, namespace) {
         el.scrollTop = el.scrollHeight;
     } catch (e) {
         document.getElementById('k8s-log-content').textContent = 'Error: ' + e.message;
+    }
+}
+
+// ─── K8s Pod Detail View ───
+
+let k8sPodDetailTab = 'overview';
+
+function openK8sPodConsole(podName, namespace, container) {
+    const target = `${k8sCurrentCluster}/${podName}/${namespace}${container ? '/' + container : ''}`;
+    openConsole('k8s', target);
+}
+
+async function showK8sPodDetail(name, namespace) {
+    const content = document.getElementById('k8s-tab-content');
+    if (!content) return;
+    content.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">Loading pod details...</div>';
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/pods/${encodeURIComponent(name)}/detail?namespace=${encodeURIComponent(namespace)}`);
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
+        const pod = await resp.json();
+
+        let html = `<div style="margin-bottom:12px;"><button class="btn btn-sm btn-secondary" onclick="switchK8sTab('pods')" style="font-size:11px;">&larr; Back to Pods</button></div>`;
+
+        // Header
+        const statusColors = { Running: '#10b981', Pending: '#eab308', Succeeded: '#6366f1', Failed: '#ef4444', Unknown: '#9ca3af' };
+        const sColor = statusColors[pod.status] || '#9ca3af';
+        const isRunning = pod.status === 'Running';
+        html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+            <div>
+                <h3 style="margin:0; font-size:18px; font-weight:700;">${escapeHtml(pod.name)}</h3>
+                <span style="font-size:12px; color:var(--text-muted);">Namespace: <code>${escapeHtml(pod.namespace)}</code> &bull;
+                Node: <code>${escapeHtml(pod.node_name || 'N/A')}</code> &bull;
+                IP: <code>${escapeHtml(pod.pod_ip || 'N/A')}</code> &bull;
+                Status: <span style="color:${sColor}; font-weight:600;">${escapeHtml(pod.status || 'Unknown')}</span></span>
+            </div>
+            <div style="display:flex; gap:8px;">
+                ${isRunning ? `<button class="btn btn-sm btn-secondary" onclick="openK8sPodConsole('${escapeHtml(name)}', '${escapeHtml(namespace)}')" style="font-size:11px;">Console</button>` : ''}
+                <button class="btn btn-sm btn-danger" onclick="k8sDeletePod('${escapeHtml(name)}', '${escapeHtml(namespace)}')" style="font-size:11px;">Delete</button>
+            </div>
+        </div>`;
+
+        // Tabs
+        const podTabs = [
+            { key: 'overview', label: 'Overview' },
+            { key: 'logs', label: 'Logs' },
+        ];
+        if (isRunning) {
+            podTabs.push({ key: 'terminal', label: 'Terminal' });
+            podTabs.push({ key: 'processes', label: 'Processes' });
+            podTabs.push({ key: 'disk', label: 'Disk Space' });
+            podTabs.push({ key: 'resources', label: 'Resources' });
+        }
+        podTabs.push({ key: 'events', label: 'Events' });
+
+        html += `<div style="display:flex; gap:4px; margin-bottom:16px; border-bottom:1px solid var(--border-color); padding-bottom:0;">`;
+        podTabs.forEach(t => {
+            const active = t.key === 'overview' ? 'border-bottom:2px solid #326ce5; color:#326ce5; font-weight:600;' : 'color:var(--text-muted);';
+            html += `<button class="btn btn-sm" data-pod-tab="${t.key}" onclick="switchK8sPodTab('${t.key}', '${escapeHtml(name)}', '${escapeHtml(namespace)}')" style="font-size:12px; border:none; border-radius:0; padding:8px 14px; background:transparent; ${active}">${t.label}</button>`;
+        });
+        html += `</div>`;
+
+        html += `<div id="k8s-pod-tab-content"></div>`;
+
+        content.innerHTML = html;
+        window._k8sPodDetail = pod;
+        renderK8sPodOverview(pod);
+    } catch (e) {
+        content.innerHTML = `<div style="padding:20px; text-align:center; color:#ef4444;">Failed to load pod: ${e.message}</div>`;
+    }
+}
+
+function switchK8sPodTab(tab, podName, namespace) {
+    k8sPodDetailTab = tab;
+    // Update tab button styles
+    document.querySelectorAll('[data-pod-tab]').forEach(btn => {
+        if (btn.dataset.podTab === tab) {
+            btn.style.borderBottom = '2px solid #326ce5';
+            btn.style.color = '#326ce5';
+            btn.style.fontWeight = '600';
+        } else {
+            btn.style.borderBottom = 'none';
+            btn.style.color = 'var(--text-muted)';
+            btn.style.fontWeight = '400';
+        }
+    });
+
+    const container = document.getElementById('k8s-pod-tab-content');
+    if (!container) return;
+    const pod = window._k8sPodDetail;
+
+    if (tab === 'overview') {
+        renderK8sPodOverview(pod);
+    } else if (tab === 'logs') {
+        renderK8sPodLogsTab(podName, namespace, pod);
+    } else if (tab === 'terminal') {
+        renderK8sPodTerminalTab(podName, namespace, pod);
+    } else if (tab === 'processes') {
+        loadK8sPodProcesses(podName, namespace);
+    } else if (tab === 'disk') {
+        loadK8sPodDiskSpace(podName, namespace);
+    } else if (tab === 'resources') {
+        loadK8sPodResources(podName, namespace, pod);
+    } else if (tab === 'events') {
+        loadK8sPodEvents(podName, namespace);
+    }
+}
+
+function renderK8sPodOverview(pod) {
+    const container = document.getElementById('k8s-pod-tab-content');
+    if (!container) return;
+
+    let html = '';
+
+    // Basic info card
+    html += `<div class="card" style="margin-bottom:16px;"><div class="card-body" style="padding:20px;">
+        <h4 style="margin:0 0 12px 0; font-size:14px; font-weight:600;">Pod Information</h4>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px 24px; font-size:13px;">
+            <div><span style="color:var(--text-muted);">QoS Class:</span> <strong>${escapeHtml(pod.qos_class || 'N/A')}</strong></div>
+            <div><span style="color:var(--text-muted);">Restart Policy:</span> <strong>${escapeHtml(pod.restart_policy || 'N/A')}</strong></div>
+            <div><span style="color:var(--text-muted);">Service Account:</span> <code>${escapeHtml(pod.service_account || 'default')}</code></div>
+            <div><span style="color:var(--text-muted);">DNS Policy:</span> <strong>${escapeHtml(pod.dns_policy || 'N/A')}</strong></div>
+            <div><span style="color:var(--text-muted);">Host IP:</span> <code>${escapeHtml(pod.host_ip || 'N/A')}</code></div>
+            <div><span style="color:var(--text-muted);">Pod IP:</span> <code>${escapeHtml(pod.pod_ip || 'N/A')}</code></div>
+            <div><span style="color:var(--text-muted);">Created:</span> ${escapeHtml(pod.creation_timestamp || 'N/A')}</div>
+            <div><span style="color:var(--text-muted);">Node:</span> <code>${escapeHtml(pod.node_name || 'N/A')}</code></div>
+        </div>
+    </div></div>`;
+
+    // Labels
+    if (pod.labels && Object.keys(pod.labels).length > 0) {
+        html += `<div class="card" style="margin-bottom:16px;"><div class="card-body" style="padding:20px;">
+            <h4 style="margin:0 0 12px 0; font-size:14px; font-weight:600;">Labels</h4>
+            <div style="display:flex; flex-wrap:wrap; gap:6px;">`;
+        Object.entries(pod.labels).forEach(([k, v]) => {
+            html += `<span style="padding:3px 10px; border-radius:6px; font-size:11px; background:rgba(50,108,229,0.1); color:#326ce5; border:1px solid rgba(50,108,229,0.2);"><code>${escapeHtml(k)}</code>=<code>${escapeHtml(v)}</code></span>`;
+        });
+        html += `</div></div></div>`;
+    }
+
+    // Container statuses
+    const statuses = pod.container_statuses || [];
+    if (statuses.length > 0) {
+        html += `<div class="card" style="margin-bottom:16px;"><div class="card-body" style="padding:20px;">
+            <h4 style="margin:0 0 12px 0; font-size:14px; font-weight:600;">Container Status</h4>
+            <table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Name</th><th>Ready</th><th>State</th><th>Restarts</th><th>Image</th></tr></thead><tbody>`;
+        statuses.forEach(cs => {
+            const ready = cs.ready ? '<span style="color:#10b981; font-weight:600;">Yes</span>' : '<span style="color:#ef4444; font-weight:600;">No</span>';
+            let state = 'unknown';
+            if (cs.state) {
+                if (cs.state.running) state = 'Running';
+                else if (cs.state.waiting) state = 'Waiting: ' + (cs.state.waiting.reason || '');
+                else if (cs.state.terminated) state = 'Terminated: ' + (cs.state.terminated.reason || '');
+            }
+            html += `<tr>
+                <td><strong>${escapeHtml(cs.name)}</strong></td>
+                <td>${ready}</td>
+                <td>${escapeHtml(state)}</td>
+                <td>${cs.restartCount || 0}</td>
+                <td><code style="font-size:11px; max-width:250px; overflow:hidden; text-overflow:ellipsis; display:inline-block;">${escapeHtml(cs.image || '')}</code></td>
+            </tr>`;
+        });
+        html += `</tbody></table></div></div>`;
+    }
+
+    // Containers spec
+    (pod.containers || []).forEach(c => {
+        html += `<div class="card" style="margin-bottom:16px;"><div class="card-body" style="padding:20px;">
+            <h4 style="margin:0 0 12px 0; font-size:14px; font-weight:600;">Container: ${escapeHtml(c.name)}</h4>
+            <div style="background:var(--bg-secondary); border-radius:8px; padding:12px; margin-bottom:12px;">
+                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Image</div>
+                <code style="font-size:13px; word-break:break-all;">${escapeHtml(c.image)}</code>
+            </div>`;
+
+        // Resources (requests/limits)
+        if (c.resources && (c.resources.requests || c.resources.limits)) {
+            html += `<div style="margin-bottom:12px;">
+                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Resource Limits</div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">`;
+            if (c.resources.requests) {
+                html += `<div style="padding:8px 12px; background:var(--bg-secondary); border-radius:6px; font-size:12px;"><strong>Requests:</strong> CPU: <code>${escapeHtml(c.resources.requests.cpu || 'none')}</code>, Memory: <code>${escapeHtml(c.resources.requests.memory || 'none')}</code></div>`;
+            }
+            if (c.resources.limits) {
+                html += `<div style="padding:8px 12px; background:var(--bg-secondary); border-radius:6px; font-size:12px;"><strong>Limits:</strong> CPU: <code>${escapeHtml(c.resources.limits.cpu || 'none')}</code>, Memory: <code>${escapeHtml(c.resources.limits.memory || 'none')}</code></div>`;
+            }
+            html += `</div></div>`;
+        }
+
+        // Ports
+        if (c.ports && c.ports.length > 0) {
+            html += `<div style="margin-bottom:12px;">
+                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Ports</div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">`;
+            c.ports.forEach(p => {
+                html += `<span style="padding:3px 10px; border-radius:6px; font-size:12px; background:rgba(50,108,229,0.1); color:#326ce5; border:1px solid rgba(50,108,229,0.2);">${escapeHtml(String(p.containerPort || p.container_port || ''))}/${escapeHtml(p.protocol || 'TCP')}</span>`;
+            });
+            html += `</div></div>`;
+        }
+
+        // Env vars
+        if (c.env && c.env.length > 0) {
+            html += `<div style="margin-bottom:12px;">
+                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Environment Variables</div>
+                <table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody>`;
+            c.env.forEach(e => {
+                const val = e.value || (e.valueFrom ? '(from ref)' : '');
+                html += `<tr><td><code>${escapeHtml(e.name)}</code></td><td><code style="word-break:break-all;">${escapeHtml(val)}</code></td></tr>`;
+            });
+            html += `</tbody></table></div>`;
+        }
+
+        // Volume mounts
+        if (c.volume_mounts && c.volume_mounts.length > 0) {
+            html += `<div>
+                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Volume Mounts</div>
+                <table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Name</th><th>Mount Path</th><th>Read Only</th></tr></thead><tbody>`;
+            c.volume_mounts.forEach(vm => {
+                html += `<tr><td>${escapeHtml(vm.name)}</td><td><code>${escapeHtml(vm.mountPath || vm.mount_path || '')}</code></td><td>${vm.readOnly || vm.read_only ? 'Yes' : 'No'}</td></tr>`;
+            });
+            html += `</tbody></table></div>`;
+        }
+
+        html += `</div></div>`;
+    });
+
+    // Conditions
+    if (pod.conditions && pod.conditions.length > 0) {
+        html += `<div class="card"><div class="card-body" style="padding:20px;">
+            <h4 style="margin:0 0 12px 0; font-size:14px; font-weight:600;">Conditions</h4>
+            <table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Type</th><th>Status</th><th>Reason</th><th>Last Transition</th></tr></thead><tbody>`;
+        pod.conditions.forEach(c => {
+            const color = c.status === 'True' ? '#10b981' : '#ef4444';
+            html += `<tr><td>${escapeHtml(c.type)}</td><td><span style="color:${color}; font-weight:600;">${escapeHtml(c.status)}</span></td><td>${escapeHtml(c.reason || '')}</td><td style="font-size:11px;">${escapeHtml(c.lastTransitionTime || '')}</td></tr>`;
+        });
+        html += `</tbody></table></div></div>`;
+    }
+
+    container.innerHTML = html;
+}
+
+async function renderK8sPodLogsTab(podName, namespace, pod) {
+    const container = document.getElementById('k8s-pod-tab-content');
+    if (!container) return;
+
+    // If multi-container pod, show container selector
+    const containers = pod.containers || [];
+    let selectorHtml = '';
+    if (containers.length > 1) {
+        selectorHtml = `<div style="margin-bottom:12px; display:flex; gap:8px; align-items:center;">
+            <label style="font-size:12px; color:var(--text-muted);">Container:</label>
+            <select id="k8s-pod-log-container" class="form-control" style="font-size:12px; width:auto;" onchange="k8sPodRefreshLogs('${escapeHtml(podName)}', '${escapeHtml(namespace)}')">
+                ${containers.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}
+            </select>
+        </div>`;
+    }
+
+    container.innerHTML = `
+        <div class="card"><div class="card-body" style="padding:20px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+                <h4 style="margin:0; font-size:14px; font-weight:600;">Pod Logs</h4>
+                <div style="display:flex; gap:8px;">
+                    <select id="k8s-pod-log-lines" class="form-control" style="font-size:11px; width:auto; padding:4px 8px;" onchange="k8sPodRefreshLogs('${escapeHtml(podName)}', '${escapeHtml(namespace)}')">
+                        <option value="100">Last 100 lines</option>
+                        <option value="200">Last 200 lines</option>
+                        <option value="500" selected>Last 500 lines</option>
+                        <option value="1000">Last 1000 lines</option>
+                        <option value="5000">Last 5000 lines</option>
+                    </select>
+                    <button class="btn btn-sm btn-secondary" onclick="k8sPodRefreshLogs('${escapeHtml(podName)}', '${escapeHtml(namespace)}')" style="font-size:11px;">Refresh</button>
+                </div>
+            </div>
+            ${selectorHtml}
+            <pre id="k8s-pod-log-content" style="max-height:600px; overflow:auto; background:var(--bg-secondary); padding:12px; border-radius:8px; font-size:11px; line-height:1.5; white-space:pre-wrap; margin:0;">Loading...</pre>
+        </div></div>`;
+    k8sPodRefreshLogs(podName, namespace);
+}
+
+async function k8sPodRefreshLogs(podName, namespace) {
+    const el = document.getElementById('k8s-pod-log-content');
+    if (!el) return;
+    const tail = document.getElementById('k8s-pod-log-lines')?.value || '500';
+    const containerSel = document.getElementById('k8s-pod-log-container')?.value || '';
+    const containerParam = containerSel ? `&container=${encodeURIComponent(containerSel)}` : '';
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/logs/${encodeURIComponent(podName)}?namespace=${encodeURIComponent(namespace)}&tail=${tail}${containerParam}`);
+        if (!resp.ok) { el.textContent = 'Failed to load logs'; return; }
+        const data = await resp.json();
+        el.textContent = data.logs || '(no logs)';
+        el.scrollTop = el.scrollHeight;
+    } catch (e) {
+        el.textContent = 'Error: ' + e.message;
+    }
+}
+
+function renderK8sPodTerminalTab(podName, namespace, pod) {
+    const container = document.getElementById('k8s-pod-tab-content');
+    if (!container) return;
+
+    const containers = pod.containers || [];
+    let containerButtons = '';
+    if (containers.length > 1) {
+        containerButtons = `<div style="margin-bottom:16px;">
+            <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">This pod has multiple containers. Select one to open a terminal:</div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                ${containers.map(c => `<button class="btn btn-sm btn-primary" onclick="openK8sPodConsole('${escapeHtml(podName)}', '${escapeHtml(namespace)}', '${escapeHtml(c.name)}')" style="font-size:12px; background:#326ce5; border-color:#326ce5;">Terminal: ${escapeHtml(c.name)}</button>`).join('')}
+            </div>
+        </div>`;
+    }
+
+    container.innerHTML = `
+        <div class="card"><div class="card-body" style="padding:20px; text-align:center;">
+            <div style="font-size:48px; margin-bottom:16px;">&#128187;</div>
+            <h4 style="margin:0 0 8px 0; font-size:16px; font-weight:600;">Pod Terminal</h4>
+            <p style="color:var(--text-muted); font-size:13px; margin-bottom:20px;">Open an interactive shell session inside this pod. This uses <code>kubectl exec</code> to connect to a bash or sh shell.</p>
+            ${containerButtons}
+            ${containers.length <= 1 ? `<button class="btn btn-primary" onclick="openK8sPodConsole('${escapeHtml(podName)}', '${escapeHtml(namespace)}')" style="font-size:14px; padding:10px 28px; background:#326ce5; border-color:#326ce5;">Open Terminal</button>` : ''}
+            <div style="margin-top:16px; padding:12px; background:var(--bg-secondary); border-radius:8px; font-size:12px; color:var(--text-muted); text-align:left;">
+                <strong>Tip:</strong> The terminal opens in a new window. You can run any command inside the pod, just like SSH. Type <code>exit</code> to close the session.
+            </div>
+        </div></div>`;
+}
+
+async function loadK8sPodProcesses(podName, namespace) {
+    const container = document.getElementById('k8s-pod-tab-content');
+    if (!container) return;
+    container.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">Loading processes...</div>';
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/pods/${encodeURIComponent(podName)}/exec`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ namespace, command: ['ps', 'aux'] }),
+        });
+        const data = await resp.json();
+        let output = data.output || data.error || 'No output';
+        // If ps aux failed, try ps -ef
+        if (data.error && data.error.includes('not found')) {
+            const resp2 = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/pods/${encodeURIComponent(podName)}/exec`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ namespace, command: ['ps', '-ef'] }),
+            });
+            const data2 = await resp2.json();
+            output = data2.output || data2.error || 'No output';
+        }
+
+        container.innerHTML = `
+            <div class="card"><div class="card-body" style="padding:20px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+                    <h4 style="margin:0; font-size:14px; font-weight:600;">Running Processes</h4>
+                    <button class="btn btn-sm btn-secondary" onclick="loadK8sPodProcesses('${escapeHtml(podName)}', '${escapeHtml(namespace)}')" style="font-size:11px;">Refresh</button>
+                </div>
+                <pre style="max-height:500px; overflow:auto; background:var(--bg-secondary); padding:12px; border-radius:8px; font-size:11px; line-height:1.5; white-space:pre-wrap; margin:0;">${escapeHtml(output)}</pre>
+            </div></div>`;
+    } catch (e) {
+        container.innerHTML = `<div class="card"><div class="card-body" style="padding:20px;">
+            <h4 style="margin:0 0 12px 0; font-size:14px; font-weight:600;">Running Processes</h4>
+            <div style="padding:16px; background:var(--bg-secondary); border-radius:8px; color:var(--text-muted); font-size:13px;">
+                Could not retrieve processes: ${escapeHtml(e.message)}<br>
+                <span style="font-size:12px;">The <code>ps</code> command may not be available in this container image. Use the Terminal tab for interactive access.</span>
+            </div>
+        </div></div>`;
+    }
+}
+
+async function loadK8sPodDiskSpace(podName, namespace) {
+    const container = document.getElementById('k8s-pod-tab-content');
+    if (!container) return;
+    container.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">Loading disk usage...</div>';
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/pods/${encodeURIComponent(podName)}/exec`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ namespace, command: ['df', '-h'] }),
+        });
+        const data = await resp.json();
+        const dfOutput = data.output || data.error || 'No output';
+
+        // Parse df -h output into a table
+        const lines = dfOutput.trim().split('\n');
+        let tableHtml = '';
+        if (lines.length > 1) {
+            tableHtml = `<table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Filesystem</th><th>Size</th><th>Used</th><th>Available</th><th>Use%</th><th>Mounted On</th></tr></thead><tbody>`;
+            for (let i = 1; i < lines.length; i++) {
+                const parts = lines[i].split(/\s+/);
+                if (parts.length >= 6) {
+                    const usePct = parseInt(parts[4]) || 0;
+                    const barColor = usePct > 90 ? '#ef4444' : usePct > 70 ? '#eab308' : '#10b981';
+                    tableHtml += `<tr>
+                        <td><code style="font-size:11px;">${escapeHtml(parts[0])}</code></td>
+                        <td>${escapeHtml(parts[1])}</td>
+                        <td>${escapeHtml(parts[2])}</td>
+                        <td>${escapeHtml(parts[3])}</td>
+                        <td>
+                            <div style="display:flex; align-items:center; gap:6px;">
+                                <div style="flex:1; height:6px; background:var(--bg-secondary); border-radius:3px; min-width:50px;">
+                                    <div style="width:${usePct}%; height:100%; background:${barColor}; border-radius:3px;"></div>
+                                </div>
+                                <span style="font-size:11px; min-width:30px;">${escapeHtml(parts[4])}</span>
+                            </div>
+                        </td>
+                        <td><code style="font-size:11px;">${escapeHtml(parts.slice(5).join(' '))}</code></td>
+                    </tr>`;
+                }
+            }
+            tableHtml += `</tbody></table>`;
+        } else {
+            tableHtml = `<pre style="background:var(--bg-secondary); padding:12px; border-radius:8px; font-size:11px; margin:0; white-space:pre-wrap;">${escapeHtml(dfOutput)}</pre>`;
+        }
+
+        container.innerHTML = `
+            <div class="card"><div class="card-body" style="padding:20px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+                    <h4 style="margin:0; font-size:14px; font-weight:600;">Disk Space</h4>
+                    <button class="btn btn-sm btn-secondary" onclick="loadK8sPodDiskSpace('${escapeHtml(podName)}', '${escapeHtml(namespace)}')" style="font-size:11px;">Refresh</button>
+                </div>
+                ${tableHtml}
+            </div></div>`;
+    } catch (e) {
+        container.innerHTML = `<div class="card"><div class="card-body" style="padding:20px;">
+            <h4 style="margin:0 0 12px 0; font-size:14px; font-weight:600;">Disk Space</h4>
+            <div style="padding:16px; background:var(--bg-secondary); border-radius:8px; color:var(--text-muted); font-size:13px;">
+                Could not retrieve disk usage: ${escapeHtml(e.message)}<br>
+                <span style="font-size:12px;">The <code>df</code> command may not be available in this container image.</span>
+            </div>
+        </div></div>`;
+    }
+}
+
+async function loadK8sPodResources(podName, namespace, pod) {
+    const container = document.getElementById('k8s-pod-tab-content');
+    if (!container) return;
+    container.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">Loading resource usage...</div>';
+
+    // Fetch kubectl top and memory info in parallel
+    let topData = { cpu: 'N/A', memory: 'N/A' };
+    let memInfo = '';
+    try {
+        const [topResp, memResp] = await Promise.all([
+            fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/pods/${encodeURIComponent(podName)}/top?namespace=${encodeURIComponent(namespace)}`),
+            fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/pods/${encodeURIComponent(podName)}/exec`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ namespace, command: ['cat', '/proc/meminfo'] }),
+            }),
+        ]);
+        if (topResp.ok) topData = await topResp.json();
+        if (memResp.ok) {
+            const memData = await memResp.json();
+            memInfo = memData.output || '';
+        }
+    } catch (e) { /* ignore partial failures */ }
+
+    // Parse meminfo
+    let memTotal = '', memFree = '', memAvail = '', memUsed = '';
+    if (memInfo) {
+        const getVal = key => { const m = memInfo.match(new RegExp(key + ':\\s+([\\d]+)')); return m ? m[1] : ''; };
+        const totalKb = parseInt(getVal('MemTotal')) || 0;
+        const freeKb = parseInt(getVal('MemFree')) || 0;
+        const availKb = parseInt(getVal('MemAvailable')) || 0;
+        const usedKb = totalKb - availKb;
+        const fmt = kb => kb >= 1048576 ? (kb / 1048576).toFixed(1) + ' GB' : kb >= 1024 ? (kb / 1024).toFixed(0) + ' MB' : kb + ' KB';
+        memTotal = fmt(totalKb);
+        memFree = fmt(freeKb);
+        memAvail = fmt(availKb);
+        memUsed = fmt(usedKb);
+    }
+
+    // Resource spec from pod detail
+    const specs = (pod.containers || []).map(c => {
+        const req = c.resources?.requests || {};
+        const lim = c.resources?.limits || {};
+        return { name: c.name, reqCpu: req.cpu || '-', reqMem: req.memory || '-', limCpu: lim.cpu || '-', limMem: lim.memory || '-' };
+    });
+
+    let html = `<div class="card" style="margin-bottom:16px;"><div class="card-body" style="padding:20px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+            <h4 style="margin:0; font-size:14px; font-weight:600;">Current Resource Usage</h4>
+            <button class="btn btn-sm btn-secondary" onclick="loadK8sPodResources('${escapeHtml(podName)}', '${escapeHtml(namespace)}', window._k8sPodDetail)" style="font-size:11px;">Refresh</button>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+            <div style="padding:16px; background:var(--bg-secondary); border-radius:8px; text-align:center;">
+                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">CPU Usage</div>
+                <div style="font-size:24px; font-weight:700; color:#326ce5;">${escapeHtml(topData.cpu || 'N/A')}</div>
+            </div>
+            <div style="padding:16px; background:var(--bg-secondary); border-radius:8px; text-align:center;">
+                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Memory Usage</div>
+                <div style="font-size:24px; font-weight:700; color:#6366f1;">${escapeHtml(topData.memory || 'N/A')}</div>
+            </div>
+        </div>`;
+
+    if (topData.error) {
+        html += `<div style="padding:10px 14px; background:rgba(234,179,8,0.08); border-radius:6px; border-left:3px solid #eab308; font-size:12px; color:var(--text-secondary); margin-bottom:16px;">
+            <strong>Note:</strong> ${escapeHtml(topData.error)}
+        </div>`;
+    }
+
+    if (memInfo) {
+        html += `<div style="margin-bottom:16px;">
+            <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">Memory Details (from /proc/meminfo)</div>
+            <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:8px;">
+                <div style="padding:10px; background:var(--bg-secondary); border-radius:6px; text-align:center; font-size:12px;"><div style="color:var(--text-muted); font-size:10px;">Total</div><strong>${escapeHtml(memTotal)}</strong></div>
+                <div style="padding:10px; background:var(--bg-secondary); border-radius:6px; text-align:center; font-size:12px;"><div style="color:var(--text-muted); font-size:10px;">Used</div><strong>${escapeHtml(memUsed)}</strong></div>
+                <div style="padding:10px; background:var(--bg-secondary); border-radius:6px; text-align:center; font-size:12px;"><div style="color:var(--text-muted); font-size:10px;">Available</div><strong>${escapeHtml(memAvail)}</strong></div>
+                <div style="padding:10px; background:var(--bg-secondary); border-radius:6px; text-align:center; font-size:12px;"><div style="color:var(--text-muted); font-size:10px;">Free</div><strong>${escapeHtml(memFree)}</strong></div>
+            </div>
+        </div>`;
+    }
+    html += `</div></div>`;
+
+    // Resource spec table
+    if (specs.length > 0) {
+        html += `<div class="card"><div class="card-body" style="padding:20px;">
+            <h4 style="margin:0 0 12px 0; font-size:14px; font-weight:600;">Resource Requests &amp; Limits</h4>
+            <table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Container</th><th>CPU Request</th><th>CPU Limit</th><th>Memory Request</th><th>Memory Limit</th></tr></thead><tbody>`;
+        specs.forEach(s => {
+            html += `<tr><td><strong>${escapeHtml(s.name)}</strong></td><td><code>${escapeHtml(s.reqCpu)}</code></td><td><code>${escapeHtml(s.limCpu)}</code></td><td><code>${escapeHtml(s.reqMem)}</code></td><td><code>${escapeHtml(s.limMem)}</code></td></tr>`;
+        });
+        html += `</tbody></table></div></div>`;
+    }
+
+    container.innerHTML = html;
+}
+
+async function loadK8sPodEvents(podName, namespace) {
+    const container = document.getElementById('k8s-pod-tab-content');
+    if (!container) return;
+    container.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-muted);">Loading events...</div>';
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/pods/${encodeURIComponent(podName)}/events?namespace=${encodeURIComponent(namespace)}`);
+        if (!resp.ok) throw new Error('Failed to load events');
+        const data = await resp.json();
+        const events = data.events || [];
+
+        let html = `<div class="card"><div class="card-body" style="padding:20px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+                <h4 style="margin:0; font-size:14px; font-weight:600;">Pod Events</h4>
+                <button class="btn btn-sm btn-secondary" onclick="loadK8sPodEvents('${escapeHtml(podName)}', '${escapeHtml(namespace)}')" style="font-size:11px;">Refresh</button>
+            </div>`;
+
+        if (events.length === 0) {
+            html += `<div style="padding:16px; text-align:center; color:var(--text-muted); font-size:13px; background:var(--bg-secondary); border-radius:8px;">No events found for this pod.</div>`;
+        } else {
+            html += `<table class="data-table" style="width:100%; font-size:12px;"><thead><tr><th>Type</th><th>Reason</th><th>Message</th><th>Count</th><th>Last Seen</th></tr></thead><tbody>`;
+            events.forEach(ev => {
+                const typeColor = ev.type === 'Normal' ? '#10b981' : '#eab308';
+                html += `<tr>
+                    <td><span style="color:${typeColor}; font-weight:600;">${escapeHtml(ev.type || '')}</span></td>
+                    <td><strong>${escapeHtml(ev.reason || '')}</strong></td>
+                    <td style="font-size:11px; max-width:400px; word-break:break-word;">${escapeHtml(ev.message || '')}</td>
+                    <td>${ev.count || 1}</td>
+                    <td style="font-size:11px;">${escapeHtml(ev.lastTimestamp || ev.eventTime || '')}</td>
+                </tr>`;
+            });
+            html += `</tbody></table>`;
+        }
+        html += `</div></div>`;
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = `<div style="padding:20px; text-align:center; color:#ef4444;">Failed to load events: ${e.message}</div>`;
     }
 }
 

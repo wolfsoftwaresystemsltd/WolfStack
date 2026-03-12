@@ -29,7 +29,16 @@ pub async fn console_ws(
     let (container_type, container_name) = path.into_inner();
 
     // Validate container name to prevent command injection (except for compound install names)
-    if container_type != "install" && container_type != "appstore-install" && container_type != "k8s-provision"
+    // k8s names use "cluster_id/pod/namespace[/container]" format — validate each part
+    if container_type == "k8s" {
+        for part in container_name.split('/') {
+            if !part.is_empty() && !crate::auth::is_safe_name(part) {
+                return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Invalid pod name"
+                })));
+            }
+        }
+    } else if container_type != "install" && container_type != "appstore-install" && container_type != "k8s-provision"
         && !crate::auth::is_safe_name(&container_name)
     {
         return Ok(HttpResponse::BadRequest().json(serde_json::json!({
@@ -119,6 +128,46 @@ async fn console_session(
         "host" => {
             // Host shell — open an interactive login bash/sh session on this machine
             cmd.arg("if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi");
+        }
+        "k8s" => {
+            // Kubernetes pod exec — name format: "cluster_id/pod_name/namespace[/container]"
+            let parts: Vec<&str> = name.splitn(4, '/').collect();
+            if parts.len() < 3 {
+                let _ = session.text("\r\n\x1b[31mInvalid k8s console target (expected cluster/pod/namespace)\x1b[0m\r\n").await;
+                let _ = session.close(None).await;
+                return;
+            }
+            let cluster_id = parts[0];
+            let pod_name = parts[1];
+            let namespace = parts[2];
+            let container_arg = if parts.len() >= 4 && !parts[3].is_empty() {
+                format!("-c {} ", parts[3])
+            } else {
+                String::new()
+            };
+            let kubeconfig = match crate::kubernetes::get_cluster(cluster_id) {
+                Some(c) => c.kubeconfig_path.clone(),
+                None => {
+                    let _ = session.text("\r\n\x1b[31mCluster not found\x1b[0m\r\n").await;
+                    let _ = session.close(None).await;
+                    return;
+                }
+            };
+            let (binary, prefix_args) = crate::kubernetes::find_kubectl_pub();
+            let kubectl_cmd = if prefix_args.is_empty() {
+                binary.to_string()
+            } else {
+                format!("{} {}", binary, prefix_args.join(" "))
+            };
+            cmd.arg(format!(
+                "{} --kubeconfig {} exec -it {} -n {} {}-e TERM=xterm-256color -- \
+                 /bin/bash --login 2>/dev/null || \
+                 {} --kubeconfig {} exec -it {} -n {} {}-e TERM=xterm-256color -- \
+                 /bin/sh -l 2>/dev/null || \
+                 echo 'No shell available in this pod'",
+                kubectl_cmd, kubeconfig, pod_name, namespace, container_arg,
+                kubectl_cmd, kubeconfig, pod_name, namespace, container_arg,
+            ));
         }
         "upgrade" => {
             // WolfStack upgrade — use custom update script if configured, otherwise default

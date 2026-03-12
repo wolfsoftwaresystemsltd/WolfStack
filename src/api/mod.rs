@@ -8577,6 +8577,82 @@ pub async fn k8s_pod_logs(req: HttpRequest, state: web::Data<AppState>, path: we
     }
 }
 
+/// GET /api/kubernetes/clusters/{id}/pods/{name}/detail?namespace=
+pub async fn k8s_pod_detail(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    match crate::kubernetes::get_pod_detail(&cluster.kubeconfig_path, &name, ns) {
+        Ok(detail) => HttpResponse::Ok().json(detail),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/kubernetes/clusters/{id}/pods/{name}/top?namespace=
+pub async fn k8s_pod_top(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    match crate::kubernetes::get_pod_top(&cluster.kubeconfig_path, &name, ns) {
+        Ok(usage) => HttpResponse::Ok().json(usage),
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({ "cpu": "N/A", "memory": "N/A", "error": e })),
+    }
+}
+
+/// POST /api/kubernetes/clusters/{id}/pods/{name}/exec
+#[derive(Deserialize)]
+pub struct K8sPodExecRequest {
+    pub namespace: String,
+    #[serde(default)]
+    pub container: Option<String>,
+    pub command: Vec<String>,
+}
+
+pub async fn k8s_pod_exec(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, body: web::Json<K8sPodExecRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    // Security: only allow safe read-only commands
+    let allowed_commands = ["ps", "df", "top", "cat", "ls", "whoami", "hostname", "uname", "env", "printenv", "id", "uptime", "free", "du", "mount", "lsblk", "ip", "ss", "netstat", "date"];
+    let base_cmd = body.command.first().map(|s| s.as_str()).unwrap_or("");
+    // Extract just the command name (strip path like /bin/ps -> ps)
+    let cmd_name = base_cmd.rsplit('/').next().unwrap_or(base_cmd);
+    if !allowed_commands.contains(&cmd_name) {
+        return HttpResponse::Forbidden().json(serde_json::json!({ "error": format!("Command '{}' is not allowed. Use the terminal for interactive access.", cmd_name) }));
+    }
+    let cmd_refs: Vec<&str> = body.command.iter().map(|s| s.as_str()).collect();
+    match crate::kubernetes::exec_in_pod(&cluster.kubeconfig_path, &name, &body.namespace, body.container.as_deref(), &cmd_refs) {
+        Ok(output) => HttpResponse::Ok().json(serde_json::json!({ "output": output })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/kubernetes/clusters/{id}/pods/{name}/events?namespace=
+pub async fn k8s_pod_events(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, name) = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    };
+    let ns = query.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    match crate::kubernetes::get_pod_events(&cluster.kubeconfig_path, &name, ns) {
+        Ok(events) => HttpResponse::Ok().json(serde_json::json!({ "events": events })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// POST /api/kubernetes/clusters/{id}/apply
 #[derive(Deserialize)]
 pub struct K8sApplyRequest {
@@ -12134,6 +12210,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/kubernetes/clusters/{id}/namespaces/{name}", web::delete().to(k8s_delete_namespace))
         .route("/api/kubernetes/clusters/{id}/pods", web::get().to(k8s_pods))
         .route("/api/kubernetes/clusters/{id}/pods/{name}", web::delete().to(k8s_delete_pod))
+        .route("/api/kubernetes/clusters/{id}/pods/{name}/detail", web::get().to(k8s_pod_detail))
+        .route("/api/kubernetes/clusters/{id}/pods/{name}/top", web::get().to(k8s_pod_top))
+        .route("/api/kubernetes/clusters/{id}/pods/{name}/exec", web::post().to(k8s_pod_exec))
+        .route("/api/kubernetes/clusters/{id}/pods/{name}/events", web::get().to(k8s_pod_events))
         .route("/api/kubernetes/clusters/{id}/deployments", web::get().to(k8s_deployments))
         .route("/api/kubernetes/clusters/{id}/deployments/{name}", web::delete().to(k8s_delete_deployment))
         .route("/api/kubernetes/clusters/{id}/deployments/{name}/detail", web::get().to(k8s_deployment_detail))

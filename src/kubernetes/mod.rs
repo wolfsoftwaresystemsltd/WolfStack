@@ -286,6 +286,11 @@ pub fn list_clusters() -> Vec<K8sCluster> {
 
 /// Find the best kubectl binary on the system.
 /// Tries: kubectl, k3s kubectl, microk8s kubectl, /usr/local/bin/kubectl
+/// Public wrapper for console.rs to build kubectl commands
+pub fn find_kubectl_pub() -> (&'static str, &'static [&'static str]) {
+    find_kubectl()
+}
+
 fn find_kubectl() -> (&'static str, &'static [&'static str]) {
     // Check standalone kubectl first
     if Command::new("kubectl").arg("version").arg("--client")
@@ -2233,6 +2238,112 @@ pub fn get_pod_logs(
         args.extend_from_slice(&["-c", c]);
     }
     kubectl(kubeconfig, &args)
+}
+
+/// Get detailed pod information (describe-like) as JSON
+pub fn get_pod_detail(kubeconfig: &str, name: &str, namespace: &str) -> Result<serde_json::Value, String> {
+    let output = kubectl(kubeconfig, &["get", "pod", name, "-n", namespace, "-o", "json"])?;
+    let json: serde_json::Value = serde_json::from_str(&output)
+        .map_err(|e| format!("Failed to parse pod JSON: {}", e))?;
+
+    // Extract container info
+    let containers: Vec<serde_json::Value> = json["spec"]["containers"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c["name"],
+                "image": c["image"],
+                "ports": c["ports"],
+                "env": c["env"],
+                "volume_mounts": c["volumeMounts"],
+                "resources": c["resources"],
+                "command": c["command"],
+                "args": c["args"],
+            })
+        })
+        .collect();
+
+    // Extract container statuses
+    let container_statuses = json["status"]["containerStatuses"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    let conditions = json["status"]["conditions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    let volumes = json["spec"]["volumes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(serde_json::json!({
+        "name": json["metadata"]["name"],
+        "namespace": json["metadata"]["namespace"],
+        "labels": json["metadata"]["labels"],
+        "annotations": json["metadata"]["annotations"],
+        "creation_timestamp": json["metadata"]["creationTimestamp"],
+        "owner_references": json["metadata"]["ownerReferences"],
+        "status": json["status"]["phase"],
+        "pod_ip": json["status"]["podIP"],
+        "host_ip": json["status"]["hostIP"],
+        "node_name": json["spec"]["nodeName"],
+        "service_account": json["spec"]["serviceAccountName"],
+        "restart_policy": json["spec"]["restartPolicy"],
+        "dns_policy": json["spec"]["dnsPolicy"],
+        "containers": containers,
+        "container_statuses": container_statuses,
+        "conditions": conditions,
+        "volumes": volumes,
+        "qos_class": json["status"]["qosClass"],
+    }))
+}
+
+/// Get resource usage for a specific pod via `kubectl top pod`
+pub fn get_pod_top(kubeconfig: &str, name: &str, namespace: &str) -> Result<serde_json::Value, String> {
+    let output = kubectl(kubeconfig, &["top", "pod", name, "-n", namespace, "--no-headers"]);
+    match output {
+        Ok(text) => {
+            // Output format: "pod-name   CPU(cores)   MEMORY(bytes)"
+            let parts: Vec<&str> = text.split_whitespace().collect();
+            if parts.len() >= 3 {
+                Ok(serde_json::json!({
+                    "cpu": parts[1],
+                    "memory": parts[2],
+                }))
+            } else {
+                Ok(serde_json::json!({ "cpu": "N/A", "memory": "N/A" }))
+            }
+        }
+        Err(e) => {
+            // Metrics server may not be installed
+            Err(format!("Metrics not available (metrics-server may not be installed): {}", e))
+        }
+    }
+}
+
+/// Execute a command inside a pod and return stdout
+pub fn exec_in_pod(kubeconfig: &str, name: &str, namespace: &str, container: Option<&str>, command: &[&str]) -> Result<String, String> {
+    let mut args = vec!["exec", name, "-n", namespace];
+    if let Some(c) = container {
+        args.extend_from_slice(&["-c", c]);
+    }
+    args.push("--");
+    args.extend_from_slice(command);
+    kubectl(kubeconfig, &args)
+}
+
+/// Get events related to a specific pod
+pub fn get_pod_events(kubeconfig: &str, name: &str, namespace: &str) -> Result<Vec<serde_json::Value>, String> {
+    let field_selector = format!("involvedObject.name={}", name);
+    let output = kubectl(kubeconfig, &["get", "events", "-n", namespace, "--field-selector", &field_selector, "-o", "json"])?;
+    let json: serde_json::Value = serde_json::from_str(&output)
+        .map_err(|e| format!("Failed to parse events JSON: {}", e))?;
+    Ok(json["items"].as_array().cloned().unwrap_or_default())
 }
 
 /// Get detailed info about a single deployment (env vars, labels, strategy, volumes, etc.)
