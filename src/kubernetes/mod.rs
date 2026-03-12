@@ -27,6 +27,8 @@ pub enum K8sClusterType {
     K3s,
     K8s,
     MicroK8s,
+    K0s,
+    Rke2,
     Eks,
     Gke,
     Aks,
@@ -39,6 +41,8 @@ impl std::fmt::Display for K8sClusterType {
             Self::K3s => write!(f, "k3s"),
             Self::K8s => write!(f, "k8s"),
             Self::MicroK8s => write!(f, "microk8s"),
+            Self::K0s => write!(f, "k0s"),
+            Self::Rke2 => write!(f, "rke2"),
             Self::Eks => write!(f, "eks"),
             Self::Gke => write!(f, "gke"),
             Self::Aks => write!(f, "aks"),
@@ -331,6 +335,36 @@ pub fn detect_existing_clusters() -> Vec<(String, String, K8sClusterType)> {
         ));
     }
 
+    // k0s: kubeconfig generated via k0s kubeconfig admin
+    if Path::new("/var/lib/k0s").exists() {
+        // k0s stores data in /var/lib/k0s, kubeconfig via command
+        if let Ok(output) = Command::new("k0s")
+            .args(["kubeconfig", "admin"])
+            .output()
+        {
+            if output.status.success() {
+                // Write kubeconfig to a known location
+                let kc_path = "/etc/k0s/kubeconfig";
+                let _ = fs::create_dir_all("/etc/k0s");
+                let _ = fs::write(kc_path, &output.stdout);
+                found.push((
+                    "k0s (local)".to_string(),
+                    kc_path.to_string(),
+                    K8sClusterType::K0s,
+                ));
+            }
+        }
+    }
+
+    // RKE2: kubeconfig at /etc/rancher/rke2/rke2.yaml
+    if Path::new("/etc/rancher/rke2/rke2.yaml").exists() {
+        found.push((
+            "rke2 (local)".to_string(),
+            "/etc/rancher/rke2/rke2.yaml".to_string(),
+            K8sClusterType::Rke2,
+        ));
+    }
+
     // User kubeconfig at /root/.kube/config (WolfStack runs as root)
     let home_kubeconfig = "/root/.kube/config";
     if Path::new(home_kubeconfig).exists() {
@@ -361,6 +395,23 @@ pub fn provision_k3s_server(node_address: &str, cluster_name: &str) -> Result<St
 set -euo pipefail
 
 echo "=== Installing k3s server on {node_address} for cluster '{cluster_name}' ==="
+
+# Install dependencies
+if ! command -v curl &>/dev/null; then
+    echo "Installing curl..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y -qq curl
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q curl
+    elif command -v yum &>/dev/null; then
+        yum install -y -q curl
+    elif command -v zypper &>/dev/null; then
+        zypper install -y curl
+    else
+        echo "ERROR: curl is not installed and no supported package manager found"
+        exit 1
+    fi
+fi
 
 # Install k3s server
 curl -sfL https://get.k3s.io | sh -s - server
@@ -412,6 +463,23 @@ pub fn provision_k3s_agent(
 set -euo pipefail
 
 echo "=== Joining {node_address} as k3s agent to {server_url} ==="
+
+# Install dependencies
+if ! command -v curl &>/dev/null; then
+    echo "Installing curl..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y -qq curl
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q curl
+    elif command -v yum &>/dev/null; then
+        yum install -y -q curl
+    elif command -v zypper &>/dev/null; then
+        zypper install -y curl
+    else
+        echo "ERROR: curl is not installed and no supported package manager found"
+        exit 1
+    fi
+fi
 
 # Install k3s agent
 curl -sfL https://get.k3s.io | K3S_URL={server_url} K3S_TOKEN={token} sh -s - agent
@@ -485,6 +553,35 @@ set -euo pipefail
 
 echo "=== Installing MicroK8s on {node_address} for cluster '{cluster_name}' ==="
 
+# Install snapd if not present
+if ! command -v snap &>/dev/null; then
+    echo "Installing snapd..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y -qq snapd
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q snapd
+        systemctl enable --now snapd.socket
+        # snapd needs a symlink on some distros
+        ln -sf /var/lib/snapd/snap /snap 2>/dev/null || true
+    elif command -v yum &>/dev/null; then
+        yum install -y -q epel-release
+        yum install -y -q snapd
+        systemctl enable --now snapd.socket
+        ln -sf /var/lib/snapd/snap /snap 2>/dev/null || true
+    elif command -v zypper &>/dev/null; then
+        zypper install -y snapd
+        systemctl enable --now snapd.socket
+        ln -sf /var/lib/snapd/snap /snap 2>/dev/null || true
+    else
+        echo "ERROR: snapd is not installed and no supported package manager found"
+        exit 1
+    fi
+    # Wait for snapd to be ready
+    echo "Waiting for snapd to initialize..."
+    sleep 5
+    snap wait system seed.loaded 2>/dev/null || sleep 10
+fi
+
 # Install MicroK8s
 snap install microk8s --classic
 
@@ -516,6 +613,33 @@ pub fn provision_microk8s_agent(join_url: &str) -> Result<String, String> {
 set -euo pipefail
 
 echo "=== Joining MicroK8s cluster ==="
+
+# Install snapd if not present
+if ! command -v snap &>/dev/null; then
+    echo "Installing snapd..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y -qq snapd
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q snapd
+        systemctl enable --now snapd.socket
+        ln -sf /var/lib/snapd/snap /snap 2>/dev/null || true
+    elif command -v yum &>/dev/null; then
+        yum install -y -q epel-release
+        yum install -y -q snapd
+        systemctl enable --now snapd.socket
+        ln -sf /var/lib/snapd/snap /snap 2>/dev/null || true
+    elif command -v zypper &>/dev/null; then
+        zypper install -y snapd
+        systemctl enable --now snapd.socket
+        ln -sf /var/lib/snapd/snap /snap 2>/dev/null || true
+    else
+        echo "ERROR: snapd is not installed and no supported package manager found"
+        exit 1
+    fi
+    echo "Waiting for snapd to initialize..."
+    sleep 5
+    snap wait system seed.loaded 2>/dev/null || sleep 10
+fi
 
 # Install MicroK8s if not present
 if ! command -v microk8s &>/dev/null; then
@@ -589,23 +713,70 @@ net.ipv4.ip_forward = 1
 SYSCTL
 sysctl --system
 
-# Install containerd
-apt-get update -qq
-apt-get install -y -qq containerd
-mkdir -p /etc/containerd
-containerd config default > /etc/containerd/config.toml
-sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-systemctl restart containerd
-systemctl enable containerd
+# Detect package manager and install dependencies
+if command -v apt-get &>/dev/null; then
+    export PKG_MGR=apt
+    apt-get update -qq
+    apt-get install -y -qq containerd apt-transport-https ca-certificates curl gpg
 
-# Install kubeadm, kubelet, kubectl
-apt-get install -y -qq apt-transport-https ca-certificates curl gpg
-mkdir -p /etc/apt/keyrings
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
-apt-get update -qq
-apt-get install -y -qq kubelet kubeadm kubectl
-apt-mark hold kubelet kubeadm kubectl
+    # Set up containerd
+    mkdir -p /etc/containerd
+    containerd config default > /etc/containerd/config.toml
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+    systemctl restart containerd
+    systemctl enable containerd
+
+    # Add Kubernetes apt repo
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
+    apt-get update -qq
+    apt-get install -y -qq kubelet kubeadm kubectl
+    apt-mark hold kubelet kubeadm kubectl
+
+elif command -v dnf &>/dev/null || command -v yum &>/dev/null; then
+    export PKG_MGR=rpm
+    PKG_CMD=$(command -v dnf &>/dev/null && echo "dnf" || echo "yum")
+
+    $PKG_CMD install -y -q containerd curl
+
+    # Set up containerd
+    mkdir -p /etc/containerd
+    containerd config default > /etc/containerd/config.toml
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+    systemctl restart containerd
+    systemctl enable containerd
+
+    # Add Kubernetes yum repo
+    cat > /etc/yum.repos.d/kubernetes.repo <<REPO
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/repodata/repomd.xml.key
+REPO
+    $PKG_CMD install -y -q kubelet kubeadm kubectl
+
+elif command -v zypper &>/dev/null; then
+    export PKG_MGR=zypper
+
+    zypper install -y containerd curl
+
+    mkdir -p /etc/containerd
+    containerd config default > /etc/containerd/config.toml
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+    systemctl restart containerd
+    systemctl enable containerd
+
+    zypper addrepo -G https://pkgs.k8s.io/core:/stable:/v1.31/rpm/ kubernetes
+    zypper install -y kubelet kubeadm kubectl
+else
+    echo "ERROR: No supported package manager found (apt, dnf, yum, zypper)"
+    exit 1
+fi
+
+systemctl enable kubelet
 
 # Initialize cluster
 kubeadm init --apiserver-advertise-address={node_address} --pod-network-cidr=10.244.0.0/16
@@ -662,23 +833,61 @@ net.ipv4.ip_forward = 1
 SYSCTL
 sysctl --system
 
-# Install containerd
-apt-get update -qq
-apt-get install -y -qq containerd
-mkdir -p /etc/containerd
-containerd config default > /etc/containerd/config.toml
-sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-systemctl restart containerd
-systemctl enable containerd
+# Detect package manager and install dependencies
+if command -v apt-get &>/dev/null; then
+    apt-get update -qq
+    apt-get install -y -qq containerd apt-transport-https ca-certificates curl gpg
 
-# Install kubeadm and kubelet
-apt-get install -y -qq apt-transport-https ca-certificates curl gpg
-mkdir -p /etc/apt/keyrings
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
-apt-get update -qq
-apt-get install -y -qq kubelet kubeadm
-apt-mark hold kubelet kubeadm
+    mkdir -p /etc/containerd
+    containerd config default > /etc/containerd/config.toml
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+    systemctl restart containerd
+    systemctl enable containerd
+
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
+    apt-get update -qq
+    apt-get install -y -qq kubelet kubeadm
+    apt-mark hold kubelet kubeadm
+
+elif command -v dnf &>/dev/null || command -v yum &>/dev/null; then
+    PKG_CMD=$(command -v dnf &>/dev/null && echo "dnf" || echo "yum")
+    $PKG_CMD install -y -q containerd curl
+
+    mkdir -p /etc/containerd
+    containerd config default > /etc/containerd/config.toml
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+    systemctl restart containerd
+    systemctl enable containerd
+
+    cat > /etc/yum.repos.d/kubernetes.repo <<REPO
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/repodata/repomd.xml.key
+REPO
+    $PKG_CMD install -y -q kubelet kubeadm
+
+elif command -v zypper &>/dev/null; then
+    zypper install -y containerd curl
+
+    mkdir -p /etc/containerd
+    containerd config default > /etc/containerd/config.toml
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+    systemctl restart containerd
+    systemctl enable containerd
+
+    zypper addrepo -G https://pkgs.k8s.io/core:/stable:/v1.31/rpm/ kubernetes
+    zypper install -y kubelet kubeadm
+else
+    echo "ERROR: No supported package manager found (apt, dnf, yum, zypper)"
+    exit 1
+fi
+
+systemctl enable kubelet
 
 # Join the cluster
 {join_command}
@@ -702,6 +911,288 @@ pub fn get_kubeadm_join_command() -> Result<String, String> {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+// ═══════════════════════════════════════════════
+// ─── k0s Provisioning ───
+// ═══════════════════════════════════════════════
+
+/// Generate a bash script that installs k0s controller on a node.
+pub fn provision_k0s_server(node_address: &str, cluster_name: &str) -> Result<String, String> {
+    info!(
+        "Generating k0s controller provisioning script for {} (cluster: {})",
+        node_address, cluster_name
+    );
+
+    let script = format!(
+        r#"#!/bin/bash
+set -euo pipefail
+
+echo "=== Installing k0s controller on {node_address} for cluster '{cluster_name}' ==="
+
+# Install dependencies
+if ! command -v curl &>/dev/null; then
+    echo "Installing curl..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y -qq curl
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q curl
+    elif command -v yum &>/dev/null; then
+        yum install -y -q curl
+    elif command -v zypper &>/dev/null; then
+        zypper install -y curl
+    else
+        echo "ERROR: curl is not installed and no supported package manager found"
+        exit 1
+    fi
+fi
+
+# Install k0s
+curl -sSLf https://get.k0s.sh | sh
+
+# Create default config
+k0s config create > /etc/k0s/k0s.yaml 2>/dev/null || true
+mkdir -p /etc/k0s
+
+# Install and start as controller with worker capabilities
+k0s install controller --single
+
+# Start the service
+k0s start
+
+# Wait for k0s to be ready
+echo "Waiting for k0s to be ready..."
+for i in $(seq 1 90); do
+    if k0s kubectl get nodes &>/dev/null; then
+        echo "k0s is ready!"
+        break
+    fi
+    if [ "$i" -eq 90 ]; then
+        echo "ERROR: k0s failed to start within 90 seconds"
+        exit 1
+    fi
+    sleep 1
+done
+
+# Generate kubeconfig
+mkdir -p /root/.kube
+k0s kubeconfig admin > /root/.kube/config 2>/dev/null || true
+
+echo ""
+echo "=== k0s Controller Installed Successfully ==="
+echo "Kubeconfig: k0s kubeconfig admin"
+echo "To add workers, generate a join token: k0s token create --role=worker"
+"#,
+        node_address = node_address,
+        cluster_name = cluster_name,
+    );
+
+    Ok(script)
+}
+
+/// Generate a bash script that joins a node to a k0s cluster as a worker.
+pub fn provision_k0s_agent(token: &str) -> Result<String, String> {
+    info!("Generating k0s worker join script");
+
+    let script = format!(
+        r#"#!/bin/bash
+set -euo pipefail
+
+echo "=== Joining k0s cluster as worker node ==="
+
+# Install dependencies
+if ! command -v curl &>/dev/null; then
+    echo "Installing curl..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y -qq curl
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q curl
+    elif command -v yum &>/dev/null; then
+        yum install -y -q curl
+    elif command -v zypper &>/dev/null; then
+        zypper install -y curl
+    else
+        echo "ERROR: curl is not installed and no supported package manager found"
+        exit 1
+    fi
+fi
+
+# Install k0s
+curl -sSLf https://get.k0s.sh | sh
+
+# Write join token
+mkdir -p /etc/k0s
+cat > /etc/k0s/worker-token <<'TOKEN'
+{token}
+TOKEN
+
+# Install and start as worker
+k0s install worker --token-file /etc/k0s/worker-token
+k0s start
+
+echo "=== k0s worker joined successfully ==="
+"#,
+        token = token,
+    );
+
+    Ok(script)
+}
+
+/// Get the k0s worker join token from a controller node.
+pub fn get_k0s_join_token() -> Result<String, String> {
+    let output = Command::new("k0s")
+        .args(["token", "create", "--role=worker"])
+        .output()
+        .map_err(|e| format!("Failed to run k0s token create: {}", e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+// ═══════════════════════════════════════════════
+// ─── RKE2 Provisioning ───
+// ═══════════════════════════════════════════════
+
+/// Generate a bash script that installs RKE2 server on a node.
+pub fn provision_rke2_server(node_address: &str, cluster_name: &str) -> Result<String, String> {
+    info!(
+        "Generating RKE2 server provisioning script for {} (cluster: {})",
+        node_address, cluster_name
+    );
+
+    let script = format!(
+        r#"#!/bin/bash
+set -euo pipefail
+
+echo "=== Installing RKE2 server on {node_address} for cluster '{cluster_name}' ==="
+
+# Install dependencies
+if ! command -v curl &>/dev/null; then
+    echo "Installing curl..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y -qq curl
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q curl
+    elif command -v yum &>/dev/null; then
+        yum install -y -q curl
+    elif command -v zypper &>/dev/null; then
+        zypper install -y curl
+    else
+        echo "ERROR: curl is not installed and no supported package manager found"
+        exit 1
+    fi
+fi
+
+# Install RKE2 server
+curl -sfL https://get.rke2.io | sh -
+
+# Enable and start RKE2
+systemctl enable rke2-server.service
+systemctl start rke2-server.service
+
+# Wait for RKE2 to be ready
+echo "Waiting for RKE2 to be ready..."
+for i in $(seq 1 120); do
+    if /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get nodes &>/dev/null; then
+        echo "RKE2 is ready!"
+        break
+    fi
+    if [ "$i" -eq 120 ]; then
+        echo "ERROR: RKE2 failed to start within 120 seconds"
+        exit 1
+    fi
+    sleep 1
+done
+
+# Set up kubectl access
+mkdir -p /root/.kube
+cp /etc/rancher/rke2/rke2.yaml /root/.kube/config
+chmod 600 /root/.kube/config
+
+# Add RKE2 bins to PATH
+echo 'export PATH=$PATH:/var/lib/rancher/rke2/bin' >> /root/.bashrc
+export PATH=$PATH:/var/lib/rancher/rke2/bin
+
+echo ""
+echo "=== RKE2 Server Installed Successfully ==="
+echo "Kubeconfig: /etc/rancher/rke2/rke2.yaml"
+echo "Join token: $(cat /var/lib/rancher/rke2/server/node-token)"
+echo "API URL: https://{node_address}:9345"
+"#,
+        node_address = node_address,
+        cluster_name = cluster_name,
+    );
+
+    Ok(script)
+}
+
+/// Generate a bash script that joins a node to an RKE2 cluster as an agent.
+pub fn provision_rke2_agent(server_url: &str, token: &str) -> Result<String, String> {
+    info!("Generating RKE2 agent join script");
+
+    let script = format!(
+        r#"#!/bin/bash
+set -euo pipefail
+
+echo "=== Joining RKE2 cluster as agent node ==="
+
+# Install dependencies
+if ! command -v curl &>/dev/null; then
+    echo "Installing curl..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y -qq curl
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q curl
+    elif command -v yum &>/dev/null; then
+        yum install -y -q curl
+    elif command -v zypper &>/dev/null; then
+        zypper install -y curl
+    else
+        echo "ERROR: curl is not installed and no supported package manager found"
+        exit 1
+    fi
+fi
+
+# Install RKE2 agent
+curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="agent" sh -
+
+# Configure RKE2 agent
+mkdir -p /etc/rancher/rke2
+cat > /etc/rancher/rke2/config.yaml <<CONFIG
+server: {server_url}
+token: {token}
+CONFIG
+
+# Enable and start RKE2 agent
+systemctl enable rke2-agent.service
+systemctl start rke2-agent.service
+
+echo "=== RKE2 agent joined successfully ==="
+"#,
+        server_url = server_url,
+        token = token,
+    );
+
+    Ok(script)
+}
+
+/// Get the RKE2 join token from a server node.
+pub fn get_rke2_join_token() -> Result<String, String> {
+    let token_path = "/var/lib/rancher/rke2/server/node-token";
+    match fs::read_to_string(token_path) {
+        Ok(token) => {
+            let token = token.trim().to_string();
+            if token.is_empty() {
+                Err("RKE2 token file is empty".to_string())
+            } else {
+                Ok(token)
+            }
+        }
+        Err(e) => Err(format!("Failed to read RKE2 token: {}", e)),
     }
 }
 

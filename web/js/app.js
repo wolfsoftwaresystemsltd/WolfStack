@@ -21953,32 +21953,46 @@ function showK8sProvisionModal() {
             <div class="modal-body">
                 <div class="form-group" style="margin-bottom:16px;">
                     <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">Cluster Name</label>
-                    <input type="text" id="k8s-provision-name" class="form-control" placeholder="my-cluster" value="k8s-cluster" style="font-size:14px; padding:10px 12px;">
+                    <input type="text" id="k8s-provision-name" class="form-control" placeholder="my-cluster" value="wolfkube" style="font-size:14px; padding:10px 12px;">
                 </div>
                 <div class="form-group" style="margin-bottom:16px;">
                     <label style="font-weight:600; font-size:13px; margin-bottom:8px; display:block;">Distribution</label>
                     <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;" id="k8s-dist-selector">
-                        <label style="display:flex; align-items:center; gap:8px; padding:12px; border:2px solid #326ce5; border-radius:10px; cursor:pointer; background:rgba(50,108,229,0.08); transition:all 0.15s;" onclick="k8sSelectDist('k3s')">
-                            <input type="radio" name="k8s-dist" value="k3s" checked style="accent-color:#326ce5;">
+                        <div class="k8s-dist-card" data-dist="k3s" style="display:flex; align-items:center; gap:8px; padding:10px 12px; border:2px solid #326ce5; border-radius:10px; cursor:pointer; background:rgba(50,108,229,0.08); transition:all 0.15s;" onclick="k8sSelectDist('k3s')">
+                            <input type="radio" name="k8s-dist" value="k3s" checked style="accent-color:#326ce5; pointer-events:none;">
                             <div>
                                 <div style="font-weight:700; font-size:13px;">k3s</div>
-                                <div style="font-size:10px; color:var(--text-muted);">Lightweight, ideal for edge/IoT</div>
+                                <div style="font-size:10px; color:var(--text-muted);">Lightweight, edge/IoT</div>
                             </div>
-                        </label>
-                        <label style="display:flex; align-items:center; gap:8px; padding:12px; border:2px solid var(--border); border-radius:10px; cursor:pointer; transition:all 0.15s;" onclick="k8sSelectDist('microk8s')">
-                            <input type="radio" name="k8s-dist" value="microk8s" style="accent-color:#326ce5;">
+                        </div>
+                        <div class="k8s-dist-card" data-dist="microk8s" style="display:flex; align-items:center; gap:8px; padding:10px 12px; border:2px solid var(--border); border-radius:10px; cursor:pointer; transition:all 0.15s;" onclick="k8sSelectDist('microk8s')">
+                            <input type="radio" name="k8s-dist" value="microk8s" style="accent-color:#326ce5; pointer-events:none;">
                             <div>
                                 <div style="font-weight:700; font-size:13px;">MicroK8s</div>
                                 <div style="font-size:10px; color:var(--text-muted);">Snap-based, batteries included</div>
                             </div>
-                        </label>
-                        <label style="display:flex; align-items:center; gap:8px; padding:12px; border:2px solid var(--border); border-radius:10px; cursor:pointer; transition:all 0.15s;" onclick="k8sSelectDist('kubeadm')">
-                            <input type="radio" name="k8s-dist" value="kubeadm" style="accent-color:#326ce5;">
+                        </div>
+                        <div class="k8s-dist-card" data-dist="kubeadm" style="display:flex; align-items:center; gap:8px; padding:10px 12px; border:2px solid var(--border); border-radius:10px; cursor:pointer; transition:all 0.15s;" onclick="k8sSelectDist('kubeadm')">
+                            <input type="radio" name="k8s-dist" value="kubeadm" style="accent-color:#326ce5; pointer-events:none;">
                             <div>
                                 <div style="font-weight:700; font-size:13px;">kubeadm</div>
-                                <div style="font-size:10px; color:var(--text-muted);">Full Kubernetes, production-grade</div>
+                                <div style="font-size:10px; color:var(--text-muted);">Full Kubernetes, production</div>
                             </div>
-                        </label>
+                        </div>
+                        <div class="k8s-dist-card" data-dist="k0s" style="display:flex; align-items:center; gap:8px; padding:10px 12px; border:2px solid var(--border); border-radius:10px; cursor:pointer; transition:all 0.15s;" onclick="k8sSelectDist('k0s')">
+                            <input type="radio" name="k8s-dist" value="k0s" style="accent-color:#326ce5; pointer-events:none;">
+                            <div>
+                                <div style="font-weight:700; font-size:13px;">k0s</div>
+                                <div style="font-size:10px; color:var(--text-muted);">Zero-friction, zero deps</div>
+                            </div>
+                        </div>
+                        <div class="k8s-dist-card" data-dist="rke2" style="display:flex; align-items:center; gap:8px; padding:10px 12px; border:2px solid var(--border); border-radius:10px; cursor:pointer; transition:all 0.15s;" onclick="k8sSelectDist('rke2')">
+                            <input type="radio" name="k8s-dist" value="rke2" style="accent-color:#326ce5; pointer-events:none;">
+                            <div>
+                                <div style="font-weight:700; font-size:13px;">RKE2</div>
+                                <div style="font-size:10px; color:var(--text-muted);">Rancher, FIPS/CIS compliant</div>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div class="form-group" style="margin-bottom:16px;">
@@ -22001,15 +22015,18 @@ function showK8sProvisionModal() {
 }
 
 function k8sSelectDist(dist) {
-    document.querySelectorAll('#k8s-dist-selector label').forEach(el => {
+    document.querySelectorAll('#k8s-dist-selector .k8s-dist-card').forEach(el => {
         el.style.borderColor = 'var(--border)';
         el.style.background = 'transparent';
+        const r = el.querySelector('input[type="radio"]');
+        if (r) r.checked = false;
     });
-    const radio = document.querySelector(`input[name="k8s-dist"][value="${dist}"]`);
-    if (radio) {
-        radio.checked = true;
-        radio.closest('label').style.borderColor = '#326ce5';
-        radio.closest('label').style.background = 'rgba(50,108,229,0.08)';
+    const card = document.querySelector(`#k8s-dist-selector .k8s-dist-card[data-dist="${dist}"]`);
+    if (card) {
+        card.style.borderColor = '#326ce5';
+        card.style.background = 'rgba(50,108,229,0.08)';
+        const r = card.querySelector('input[type="radio"]');
+        if (r) r.checked = true;
     }
 }
 

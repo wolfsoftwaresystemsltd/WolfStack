@@ -8366,6 +8366,8 @@ pub async fn k8s_create_cluster(req: HttpRequest, state: web::Data<AppState>, bo
     let cluster_type = match body.cluster_type.as_deref() {
         Some("k3s") => crate::kubernetes::K8sClusterType::K3s,
         Some("micro_k8s" | "microk8s") => crate::kubernetes::K8sClusterType::MicroK8s,
+        Some("k0s") => crate::kubernetes::K8sClusterType::K0s,
+        Some("rke2") => crate::kubernetes::K8sClusterType::Rke2,
         Some("eks") => crate::kubernetes::K8sClusterType::Eks,
         Some("gke") => crate::kubernetes::K8sClusterType::Gke,
         Some("aks") => crate::kubernetes::K8sClusterType::Aks,
@@ -8661,7 +8663,7 @@ pub struct K8sProvisionRequest {
     #[serde(default)]
     pub agent_node_ids: Vec<String>,
     #[serde(default = "default_distribution")]
-    pub distribution: String,  // "k3s", "microk8s", "kubeadm"
+    pub distribution: String,  // "k3s", "microk8s", "kubeadm", "k0s", "rke2"
 }
 
 fn default_distribution() -> String { "k3s".to_string() }
@@ -8737,7 +8739,9 @@ pub async fn k8s_provision(req: HttpRequest, state: web::Data<AppState>, body: w
         "k3s" => crate::kubernetes::K8sClusterType::K3s,
         "microk8s" => crate::kubernetes::K8sClusterType::MicroK8s,
         "kubeadm" | "k8s" => crate::kubernetes::K8sClusterType::K8s,
-        _ => return HttpResponse::BadRequest().json(serde_json::json!({ "error": format!("Unsupported distribution: {}. Use k3s, microk8s, or kubeadm.", dist) })),
+        "k0s" => crate::kubernetes::K8sClusterType::K0s,
+        "rke2" => crate::kubernetes::K8sClusterType::Rke2,
+        _ => return HttpResponse::BadRequest().json(serde_json::json!({ "error": format!("Unsupported distribution: {}. Use k3s, microk8s, kubeadm, k0s, or rke2.", dist) })),
     };
 
     // Find the server node
@@ -8757,6 +8761,8 @@ pub async fn k8s_provision(req: HttpRequest, state: web::Data<AppState>, body: w
         "k3s" => crate::kubernetes::provision_k3s_server(&server_address, &cluster_name),
         "microk8s" => crate::kubernetes::provision_microk8s_server(&server_address, &cluster_name),
         "kubeadm" | "k8s" => crate::kubernetes::provision_kubeadm_server(&server_address, &cluster_name),
+        "k0s" => crate::kubernetes::provision_k0s_server(&server_address, &cluster_name),
+        "rke2" => crate::kubernetes::provision_rke2_server(&server_address, &cluster_name),
         _ => unreachable!(),
     };
     let script = match script {
@@ -8781,6 +8787,8 @@ pub async fn k8s_provision(req: HttpRequest, state: web::Data<AppState>, body: w
         "k3s" => "/etc/rancher/k3s/k3s.yaml",
         "microk8s" => "/var/snap/microk8s/current/credentials/client.config",
         "kubeadm" | "k8s" => "/etc/kubernetes/admin.conf",
+        "k0s" => "/etc/k0s/kubeconfig",
+        "rke2" => "/etc/rancher/rke2/rke2.yaml",
         _ => "/root/.kube/config",
     };
 
@@ -8813,8 +8821,9 @@ pub async fn k8s_provision(req: HttpRequest, state: web::Data<AppState>, body: w
         }
     };
 
-    let api_port = match dist.as_str() {
+    let api_port: u16 = match dist.as_str() {
         "microk8s" => 16443,
+        "rke2" => 9345,
         _ => 6443,
     };
     let api_url = format!("https://{}:{}", server_address, api_port);
@@ -8833,6 +8842,8 @@ pub async fn k8s_provision(req: HttpRequest, state: web::Data<AppState>, body: w
                 "k3s" => crate::kubernetes::get_k3s_token(&kubeconfig_path),
                 "microk8s" => crate::kubernetes::get_microk8s_join_command(),
                 "kubeadm" | "k8s" => crate::kubernetes::get_kubeadm_join_command(),
+                "k0s" => crate::kubernetes::get_k0s_join_token(),
+                "rke2" => crate::kubernetes::get_rke2_join_token(),
                 _ => Err("Unsupported distribution".to_string()),
             }
         } else {
@@ -8861,6 +8872,8 @@ pub async fn k8s_provision(req: HttpRequest, state: web::Data<AppState>, body: w
                 "k3s" => crate::kubernetes::provision_k3s_agent(&agent_node.address, &api_url, &join_info),
                 "microk8s" => crate::kubernetes::provision_microk8s_agent(&join_info),
                 "kubeadm" | "k8s" => crate::kubernetes::provision_kubeadm_agent(&join_info),
+                "k0s" => crate::kubernetes::provision_k0s_agent(&join_info),
+                "rke2" => crate::kubernetes::provision_rke2_agent(&api_url, &join_info),
                 _ => Err("Unsupported distribution".to_string()),
             };
             let agent_script = match agent_script {
@@ -8891,9 +8904,9 @@ pub async fn k8s_prepare_provision(req: HttpRequest, state: web::Data<AppState>,
     if let Err(resp) = require_auth(&req, &state) { return resp; }
 
     let dist = body.distribution.to_lowercase();
-    if !["k3s", "microk8s", "kubeadm", "k8s"].contains(&dist.as_str()) {
+    if !["k3s", "microk8s", "kubeadm", "k8s", "k0s", "rke2"].contains(&dist.as_str()) {
         return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": format!("Unsupported distribution: {}. Use k3s, microk8s, or kubeadm.", dist)
+            "error": format!("Unsupported distribution: {}. Use k3s, microk8s, kubeadm, k0s, or rke2.", dist)
         }));
     }
 
@@ -8912,6 +8925,8 @@ pub async fn k8s_prepare_provision(req: HttpRequest, state: web::Data<AppState>,
     let cluster_type = match dist.as_str() {
         "k3s" => crate::kubernetes::K8sClusterType::K3s,
         "microk8s" => crate::kubernetes::K8sClusterType::MicroK8s,
+        "k0s" => crate::kubernetes::K8sClusterType::K0s,
+        "rke2" => crate::kubernetes::K8sClusterType::Rke2,
         _ => crate::kubernetes::K8sClusterType::K8s,
     };
 
@@ -8919,6 +8934,8 @@ pub async fn k8s_prepare_provision(req: HttpRequest, state: web::Data<AppState>,
         "k3s" => crate::kubernetes::provision_k3s_server(&server_address, &cluster_name),
         "microk8s" => crate::kubernetes::provision_microk8s_server(&server_address, &cluster_name),
         "kubeadm" | "k8s" => crate::kubernetes::provision_kubeadm_server(&server_address, &cluster_name),
+        "k0s" => crate::kubernetes::provision_k0s_server(&server_address, &cluster_name),
+        "rke2" => crate::kubernetes::provision_rke2_server(&server_address, &cluster_name),
         _ => unreachable!(),
     };
     let server_install = match server_install {
@@ -8931,9 +8948,15 @@ pub async fn k8s_prepare_provision(req: HttpRequest, state: web::Data<AppState>,
     let kubeconfig_path = match dist.as_str() {
         "k3s" => "/etc/rancher/k3s/k3s.yaml",
         "microk8s" => "/var/snap/microk8s/current/credentials/client.config",
+        "k0s" => "/etc/k0s/kubeconfig",
+        "rke2" => "/etc/rancher/rke2/rke2.yaml",
         _ => "/etc/kubernetes/admin.conf",
     };
-    let api_port: u16 = if dist == "microk8s" { 16443 } else { 6443 };
+    let api_port: u16 = match dist.as_str() {
+        "microk8s" => 16443,
+        "rke2" => 9345,
+        _ => 6443,
+    };
 
     let server_script = format!(
         "#!/bin/bash\nset -e\n\n\
@@ -9015,6 +9038,8 @@ pub async fn k8s_prepare_provision_agents(req: HttpRequest, state: web::Data<App
         "k3s" => crate::kubernetes::get_k3s_token(&body.kubeconfig_path),
         "microk8s" => crate::kubernetes::get_microk8s_join_command(),
         "kubeadm" | "k8s" => crate::kubernetes::get_kubeadm_join_command(),
+        "k0s" => crate::kubernetes::get_k0s_join_token(),
+        "rke2" => crate::kubernetes::get_rke2_join_token(),
         _ => Err("Unsupported distribution".to_string()),
     };
     let join_info = match join_info {
@@ -9037,6 +9062,8 @@ pub async fn k8s_prepare_provision_agents(req: HttpRequest, state: web::Data<App
             "k3s" => crate::kubernetes::provision_k3s_agent(&agent_node.address, &body.api_url, &join_info),
             "microk8s" => crate::kubernetes::provision_microk8s_agent(&join_info),
             "kubeadm" | "k8s" => crate::kubernetes::provision_kubeadm_agent(&join_info),
+            "k0s" => crate::kubernetes::provision_k0s_agent(&join_info),
+            "rke2" => crate::kubernetes::provision_rke2_agent(&body.api_url, &join_info),
             _ => Err("Unsupported".to_string()),
         };
         let agent_install = match agent_install {
@@ -9132,6 +9159,8 @@ pub async fn k8s_kubeconfig(req: HttpRequest, state: web::Data<AppState>) -> Htt
         "/etc/rancher/k3s/k3s.yaml",
         "/var/snap/microk8s/current/credentials/client.config",
         "/etc/kubernetes/admin.conf",
+        "/etc/k0s/kubeconfig",
+        "/etc/rancher/rke2/rke2.yaml",
         "/root/.kube/config",
     ];
     for path in &paths {
@@ -9162,6 +9191,14 @@ pub async fn k8s_join_token(req: HttpRequest, state: web::Data<AppState>) -> Htt
     // Try kubeadm join
     if let Ok(join) = crate::kubernetes::get_kubeadm_join_command() {
         return HttpResponse::Ok().json(serde_json::json!({ "token": join, "type": "kubeadm" }));
+    }
+    // Try k0s join
+    if let Ok(token) = crate::kubernetes::get_k0s_join_token() {
+        return HttpResponse::Ok().json(serde_json::json!({ "token": token, "type": "k0s" }));
+    }
+    // Try RKE2 join
+    if let Ok(token) = crate::kubernetes::get_rke2_join_token() {
+        return HttpResponse::Ok().json(serde_json::json!({ "token": token, "type": "rke2" }));
     }
     HttpResponse::NotFound().json(serde_json::json!({ "error": "No join token available on this node" }))
 }
