@@ -1494,6 +1494,12 @@ pub fn allocate_wolfnet_route(cluster_id: &str, deployment_name: &str, namespace
         return Err(format!("Failed to add IP to wolfnet0: {}. Is WolfNet running?", e));
     }
 
+    // Add explicit local route so the kernel knows this IP is ours
+    // (matches how Docker containers get `ip route replace X/32 dev docker0`)
+    let _ = Command::new("ip")
+        .args(["route", "replace", &format!("{}/32", wolfnet_ip), "dev", "wolfnet0"])
+        .output();
+
     // Enable forwarding so DNAT packets can be routed
     let _ = Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]).output();
 
@@ -1620,7 +1626,10 @@ pub fn remove_wolfnet_route(cluster_id: &str, deployment_name: &str, namespace: 
     // Remove iptables DNAT + MASQUERADE rules
     remove_dnat_rules(&route.wolfnet_ip, &route.target_node_ip, &route.port_mappings);
 
-    // Remove secondary IP from wolfnet0
+    // Remove kernel route and secondary IP from wolfnet0
+    let _ = Command::new("ip")
+        .args(["route", "del", &format!("{}/32", route.wolfnet_ip), "dev", "wolfnet0"])
+        .output();
     let _ = Command::new("ip")
         .args(["addr", "del", &format!("{}/32", route.wolfnet_ip), "dev", "wolfnet0"])
         .output();
@@ -1658,6 +1667,11 @@ pub fn apply_all_wolfnet_routes() {
             // Add secondary IP to wolfnet0 (ignore errors if already exists)
             let _ = Command::new("ip")
                 .args(["addr", "add", &format!("{}/32", route.wolfnet_ip), "dev", "wolfnet0"])
+                .output();
+
+            // Add explicit route so the kernel knows this IP is local
+            let _ = Command::new("ip")
+                .args(["route", "replace", &format!("{}/32", route.wolfnet_ip), "dev", "wolfnet0"])
                 .output();
 
             // Apply DNAT rules (check first to avoid duplicates)
@@ -3075,6 +3089,9 @@ pub fn deploy_app_to_k8s(
         app_name, container_name, image, namespace, replicas
     );
 
+    // Strip protocol suffix (e.g. "80/tcp" → "80") from port strings
+    fn strip_proto(s: &str) -> &str { s.split('/').next().unwrap_or(s) }
+
     // Build container ports YAML
     let container_ports_yaml = if ports.is_empty() {
         String::new()
@@ -3084,9 +3101,9 @@ pub fn deploy_app_to_k8s(
             .filter_map(|p| {
                 let parts: Vec<&str> = p.split(':').collect();
                 let container_port = if parts.len() == 2 {
-                    parts[1]
+                    strip_proto(parts[1])
                 } else {
-                    parts[0]
+                    strip_proto(parts[0])
                 };
                 container_port
                     .parse::<u32>()
@@ -3180,8 +3197,8 @@ pub fn deploy_app_to_k8s(
             .filter_map(|(i, p)| {
                 let parts: Vec<&str> = p.split(':').collect();
                 if parts.len() == 2 {
-                    let host_port = parts[0].parse::<u32>().ok()?;
-                    let container_port = parts[1].parse::<u32>().ok()?;
+                    let host_port = strip_proto(parts[0]).parse::<u32>().ok()?;
+                    let container_port = strip_proto(parts[1]).parse::<u32>().ok()?;
                     // NodePort must be in range 30000-32767; map host ports accordingly
                     let node_port = if host_port >= 30000 && host_port <= 32767 {
                         Some(host_port)
@@ -3197,7 +3214,7 @@ pub fn deploy_app_to_k8s(
                     }
                     Some(entry)
                 } else {
-                    let port = parts[0].parse::<u32>().ok()?;
+                    let port = strip_proto(parts[0]).parse::<u32>().ok()?;
                     Some(format!("  - name: port-{}\n    port: {}\n    targetPort: {}", i, port, port))
                 }
             })
