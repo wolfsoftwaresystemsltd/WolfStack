@@ -21781,15 +21781,23 @@ function renderK8sNamespaces(namespaces) {
 
 function renderK8sDeployments(deps) {
     if (deps.length === 0) return '<div style="padding:20px; text-align:center; color:var(--text-muted);">No deployments found.</div>';
-    let html = '<table class="data-table" style="width:100%;"><thead><tr><th>Name</th><th>Namespace</th><th>Ready</th><th>Image</th><th>Age</th><th style="text-align:right;">Actions</th></tr></thead><tbody>';
+    // Look up WolfNet routes from cluster data
+    const cluster = k8sClusters.find(c => c.id === k8sCurrentCluster);
+    const routes = cluster?.wolfnet_routes || [];
+    let html = '<table class="data-table" style="width:100%;"><thead><tr><th>Name</th><th>Namespace</th><th>Ready</th><th>WolfNet IP</th><th>Image</th><th>Age</th><th style="text-align:right;">Actions</th></tr></thead><tbody>';
     deps.forEach(d => {
         const ready = `${d.ready_replicas || 0}/${d.desired_replicas || 0}`;
         const allReady = (d.ready_replicas || 0) >= (d.desired_replicas || 0) && (d.desired_replicas || 0) > 0;
         const readyColor = allReady ? '#10b981' : '#eab308';
+        const route = routes.find(r => r.deployment_name === d.name && r.namespace === (d.namespace || 'default'));
+        const wolfnetCell = route
+            ? `<code style="color:#10b981; font-weight:600; font-size:11px;">${escapeHtml(route.wolfnet_ip)}</code>`
+            : '<span style="color:var(--text-muted); font-size:11px;">-</span>';
         html += `<tr>
             <td><strong><a href="#" onclick="event.preventDefault(); showK8sDeploymentDetail('${escapeHtml(d.name)}', '${escapeHtml(d.namespace || 'default')}')" style="color:var(--text-primary); text-decoration:none;">${escapeHtml(d.name)}</a></strong></td>
             <td><code style="font-size:11px;">${escapeHtml(d.namespace || '')}</code></td>
             <td><span style="color:${readyColor}; font-weight:600;">${ready}</span></td>
+            <td>${wolfnetCell}</td>
             <td><code style="font-size:11px; max-width:250px; overflow:hidden; text-overflow:ellipsis; display:inline-block;">${escapeHtml(d.image || '')}</code></td>
             <td>${escapeHtml(d.age || '')}</td>
             <td style="text-align:right; white-space:nowrap;">
@@ -22902,93 +22910,233 @@ function k8sUninstallDone() {
 // ─── WolfNet Integration ───
 
 function renderK8sWolfNet(status, cluster) {
-    const deployed = status.deployed;
-    if (deployed) {
-        return `
-        <div class="card" style="border-color:rgba(16,185,129,0.3); background:rgba(16,185,129,0.06);">
-            <div class="card-body" style="padding:32px;">
-                <div style="display:flex; align-items:center; gap:16px; margin-bottom:16px;">
-                    <div style="width:48px; height:48px; background:linear-gradient(135deg,#10b981,#34d399); border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:24px; color:#fff;">&#127760;</div>
-                    <div>
-                        <h3 style="margin:0; font-size:18px; font-weight:700; color:var(--text-primary);">WolfNet Active</h3>
-                        <p style="color:var(--text-secondary); font-size:13px; margin:2px 0 0 0;">WolfNet overlay networking is deployed on this cluster.</p>
-                    </div>
+    const nodes = status.nodes || [];
+    const routes = status.routes || [];
+    const wolfnetRunning = status.wolfnet_running;
+    const allNodesHaveWolfnet = status.all_nodes_have_wolfnet;
+
+    let html = '';
+
+    // ── How It Works info card ──
+    html += `
+    <div class="card" style="margin-bottom:20px; border-color:rgba(99,102,241,0.2); background:rgba(99,102,241,0.04);">
+        <div class="card-body" style="padding:24px;">
+            <div style="display:flex; align-items:center; gap:14px; margin-bottom:14px;">
+                <div style="width:42px; height:42px; background:linear-gradient(135deg,#6366f1,#818cf8); border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:20px; color:#fff;">&#127760;</div>
+                <div>
+                    <h4 style="margin:0; font-size:16px; font-weight:700;">WolfNet &mdash; Private Access to Kubernetes</h4>
+                    <p style="margin:2px 0 0 0; font-size:12px; color:var(--text-muted);">WolfNet is your secure, private route into the Kubernetes cluster &mdash; no public internet exposure required.</p>
                 </div>
-                <div style="background:var(--bg-secondary); border-radius:8px; padding:16px; margin-bottom:16px;">
-                    <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px; text-transform:uppercase; letter-spacing:1px;">Details</div>
-                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:13px;">
-                        <div><strong>Namespace:</strong> wolfnet-system</div>
-                        <div><strong>Type:</strong> DaemonSet (all nodes)</div>
-                        <div><strong>Encryption:</strong> WireGuard</div>
-                        <div><strong>Status:</strong> <span style="color:#10b981; font-weight:600;">Running</span></div>
-                    </div>
-                </div>
-                <button class="btn btn-danger" onclick="k8sRemoveWolfNet()" style="font-size:13px;">Remove WolfNet</button>
             </div>
+            <div style="background:var(--bg-secondary); border-radius:8px; padding:16px; font-size:13px; color:var(--text-secondary); line-height:1.7;">
+                <strong style="color:var(--text-primary);">How it works:</strong>
+                <ol style="margin:8px 0 0 0; padding-left:24px;">
+                    <li><strong>WolfNet runs on your servers</strong> &mdash; it creates an encrypted WireGuard tunnel between all your nodes. Your servers already have WolfNet IPs (e.g. <code>10.10.10.x</code>).</li>
+                    <li><strong>Each deployment gets its own WolfNet IP</strong> &mdash; when you deploy an app to Kubernetes, WolfStack allocates a unique private IP from the WolfNet range.</li>
+                    <li><strong>Traffic is routed automatically</strong> &mdash; any machine on your WolfNet can access the deployment using its WolfNet IP on standard ports (e.g. <code>10.10.10.50:80</code>). WolfStack routes that traffic to the correct Kubernetes pods behind the scenes.</li>
+                    <li><strong>Load balanced across pods</strong> &mdash; Kubernetes spreads traffic across all running pods automatically. If you scale to 3 replicas, all 3 share the load.</li>
+                </ol>
+                <div style="margin-top:12px; padding:10px 14px; background:rgba(99,102,241,0.08); border-radius:6px; border-left:3px solid #6366f1;">
+                    <strong>Tip:</strong> Enable "Auto-assign WolfNet IP" in <a href="#" onclick="switchK8sTab('settings'); return false;" style="color:#818cf8;">Settings</a> to automatically assign a WolfNet IP every time you deploy an app. You can also assign IPs manually from this page.
+                </div>
+            </div>
+        </div>
+    </div>`;
+
+    // ── WolfNet Status ──
+    const statusColor = wolfnetRunning ? '#10b981' : '#ef4444';
+    const statusLabel = wolfnetRunning ? 'Running' : 'Not Running';
+    html += `
+    <div class="card" style="margin-bottom:20px;">
+        <div class="card-body" style="padding:20px;">
+            <h4 style="margin:0 0 14px 0; font-size:15px; font-weight:700;">Cluster Node Status</h4>
+            <div style="display:flex; gap:16px; margin-bottom:14px; flex-wrap:wrap;">
+                <div style="padding:8px 16px; background:var(--bg-secondary); border-radius:8px; font-size:13px;">
+                    <span style="color:var(--text-muted);">WolfNet:</span>
+                    <span style="color:${statusColor}; font-weight:600; margin-left:4px;">
+                        <span style="width:7px; height:7px; border-radius:50%; background:${statusColor}; display:inline-block; margin-right:3px;"></span>${statusLabel}
+                    </span>
+                </div>
+                ${status.local_ip ? `<div style="padding:8px 16px; background:var(--bg-secondary); border-radius:8px; font-size:13px;"><span style="color:var(--text-muted);">Local WolfNet IP:</span> <code style="margin-left:4px;">${escapeHtml(status.local_ip)}</code></div>` : ''}
+                <div style="padding:8px 16px; background:var(--bg-secondary); border-radius:8px; font-size:13px;">
+                    <span style="color:var(--text-muted);">All nodes on WolfNet:</span>
+                    <span style="color:${allNodesHaveWolfnet ? '#10b981' : '#f59e0b'}; font-weight:600; margin-left:4px;">${allNodesHaveWolfnet ? 'Yes' : 'No'}</span>
+                </div>
+            </div>`;
+
+    if (nodes.length > 0) {
+        html += `<table class="table" style="font-size:13px;">
+            <thead><tr><th>Node</th><th>Status</th><th>Roles</th><th>WolfNet IP</th><th>Connected</th></tr></thead>
+            <tbody>`;
+        nodes.forEach(n => {
+            const statusBadge = n.status === 'Ready'
+                ? '<span style="color:#10b981; font-weight:600;">Ready</span>'
+                : `<span style="color:#ef4444; font-weight:600;">${escapeHtml(n.status)}</span>`;
+            const connBadge = n.wolfnet_ip
+                ? (n.connected ? '<span style="color:#10b981;">Connected</span>' : '<span style="color:#ef4444;">Disconnected</span>')
+                : '<span style="color:var(--text-muted);">-</span>';
+            html += `<tr>
+                <td><code>${escapeHtml(n.name)}</code></td>
+                <td>${statusBadge}</td>
+                <td>${escapeHtml(n.roles)}</td>
+                <td>${n.wolfnet_ip ? `<code>${escapeHtml(n.wolfnet_ip)}</code>` : '<span style="color:var(--text-muted);">Not on WolfNet</span>'}</td>
+                <td>${connBadge}</td>
+            </tr>`;
+        });
+        html += `</tbody></table>`;
+    }
+
+    if (!wolfnetRunning) {
+        html += `<div style="padding:12px 16px; background:rgba(239,68,68,0.08); border-radius:8px; border-left:3px solid #ef4444; font-size:13px; color:var(--text-secondary); margin-top:12px;">
+            <strong>WolfNet is not running on this server.</strong> Install and start WolfNet on all your Kubernetes nodes to enable private WolfNet access to your deployments. Go to <strong>Networking &rarr; WolfNet</strong> on each node to set it up.
         </div>`;
+    } else if (!allNodesHaveWolfnet) {
+        html += `<div style="padding:12px 16px; background:rgba(245,158,11,0.08); border-radius:8px; border-left:3px solid #f59e0b; font-size:13px; color:var(--text-secondary); margin-top:12px;">
+            <strong>Some nodes are not on WolfNet.</strong> For best results, install WolfNet on all Kubernetes nodes so traffic can be routed to any pod.
+        </div>`;
+    }
+
+    html += `</div></div>`;
+
+    // ── Deployment WolfNet Routes (Load Balancer) ──
+    html += `
+    <div class="card" style="margin-bottom:20px;">
+        <div class="card-body" style="padding:20px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+                <div>
+                    <h4 style="margin:0; font-size:15px; font-weight:700;">Deployment Load Balancer</h4>
+                    <p style="margin:4px 0 0 0; font-size:12px; color:var(--text-muted);">Each deployment can be assigned a WolfNet IP. Traffic to that IP is load-balanced across all running pods.</p>
+                </div>
+            </div>`;
+
+    if (routes.length > 0) {
+        html += `<table class="table" style="font-size:13px;">
+            <thead><tr><th>Deployment</th><th>Namespace</th><th>WolfNet IP</th><th>Port Mappings</th><th>Access</th><th></th></tr></thead>
+            <tbody>`;
+        routes.forEach(r => {
+            const portMaps = (r.port_mappings || []).map(pm =>
+                `<code>${pm.service_port}/${pm.protocol}</code> &rarr; NodePort ${pm.node_port}`
+            ).join(', ') || '-';
+            const accessExamples = (r.port_mappings || []).map(pm =>
+                `<code>${r.wolfnet_ip}:${pm.service_port}</code>`
+            ).join(' &nbsp; ');
+            html += `<tr>
+                <td><strong>${escapeHtml(r.deployment_name)}</strong></td>
+                <td><code>${escapeHtml(r.namespace)}</code></td>
+                <td><code style="color:#10b981; font-weight:600;">${escapeHtml(r.wolfnet_ip)}</code></td>
+                <td style="font-size:12px;">${portMaps}</td>
+                <td style="font-size:12px;">${accessExamples}</td>
+                <td style="text-align:right;"><button class="btn btn-sm btn-danger" onclick="k8sRemoveWolfNetRoute('${escapeHtml(r.deployment_name)}', '${escapeHtml(r.namespace)}')" style="font-size:11px;" title="Remove WolfNet IP">Remove</button></td>
+            </tr>`;
+        });
+        html += `</tbody></table>`;
     } else {
-        return `
-        <div class="card">
-            <div class="card-body" style="padding:32px;">
-                <div style="display:flex; align-items:center; gap:16px; margin-bottom:16px;">
-                    <div style="width:48px; height:48px; background:linear-gradient(135deg,#6366f1,#818cf8); border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:24px; color:#fff;">&#127760;</div>
-                    <div>
-                        <h3 style="margin:0; font-size:18px; font-weight:700; color:var(--text-primary);">WolfNet Overlay Network</h3>
-                        <p style="color:var(--text-secondary); font-size:13px; margin:2px 0 0 0;">Connect this cluster's nodes with encrypted WireGuard tunnels via WolfNet.</p>
-                    </div>
+        html += `<div style="padding:20px; text-align:center; color:var(--text-muted); font-size:13px; background:var(--bg-secondary); border-radius:8px;">
+            No deployments have WolfNet IPs assigned yet.<br>
+            <span style="font-size:12px;">Deploy an app from the App Store with auto-assign enabled, or assign an IP manually below.</span>
+        </div>`;
+    }
+
+    // Manual assignment
+    if (wolfnetRunning) {
+        html += `
+        <div style="margin-top:16px; padding:16px; background:var(--bg-secondary); border-radius:8px;">
+            <div style="font-size:13px; font-weight:600; margin-bottom:10px;">Assign WolfNet IP to a Deployment</div>
+            <div style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">Select a deployment that has a NodePort service. A WolfNet IP will be allocated and traffic will be routed to it automatically.</div>
+            <div style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+                <div class="form-group" style="margin:0; flex:1; min-width:200px;">
+                    <label style="font-size:12px; margin-bottom:4px; display:block;">Deployment Name</label>
+                    <input type="text" id="k8s-wolfnet-assign-deployment" class="form-control" placeholder="e.g. my-app" style="font-size:13px;">
                 </div>
-                <div style="background:var(--bg-secondary); border-radius:8px; padding:16px; margin-bottom:20px;">
-                    <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px; text-transform:uppercase; letter-spacing:1px;">What WolfNet does</div>
-                    <ul style="margin:0; padding-left:20px; font-size:13px; color:var(--text-secondary); line-height:1.8;">
-                        <li>Deploys a WolfNet DaemonSet on every node in the cluster</li>
-                        <li>Creates encrypted WireGuard tunnels between all nodes</li>
-                        <li>Enables secure inter-node communication via the WolfNet mesh</li>
-                        <li>Pods on different nodes can communicate through the overlay</li>
-                    </ul>
+                <div class="form-group" style="margin:0; min-width:140px;">
+                    <label style="font-size:12px; margin-bottom:4px; display:block;">Namespace</label>
+                    <input type="text" id="k8s-wolfnet-assign-namespace" class="form-control" placeholder="default" value="default" style="font-size:13px;">
                 </div>
-                <div class="form-group" style="margin-bottom:16px;">
-                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">WolfNet Server Address</label>
-                    <input type="text" id="k8s-wolfnet-server" class="form-control" value="${escapeHtml(cluster?.wolfnet_server || '')}" placeholder="10.0.0.1" style="font-size:14px; padding:10px 12px;">
-                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">IP address of your WolfNet coordination server.</div>
-                </div>
-                <div class="form-group" style="margin-bottom:20px;">
-                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">WolfNet Network CIDR</label>
-                    <input type="text" id="k8s-wolfnet-network" class="form-control" value="${escapeHtml(cluster?.wolfnet_network || '10.10.0.0/24')}" placeholder="10.10.0.0/24" style="font-size:14px; padding:10px 12px;">
-                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">The overlay network CIDR for WolfNet.</div>
-                </div>
-                <button class="btn btn-primary" onclick="k8sDeployWolfNet()" style="background:linear-gradient(135deg,#6366f1,#818cf8); border:none; padding:10px 24px; font-size:14px;">Deploy WolfNet</button>
+                <button class="btn btn-primary" onclick="k8sAssignWolfNetRoute()" style="font-size:13px; white-space:nowrap;">Assign IP</button>
             </div>
         </div>`;
     }
+
+    html += `</div></div>`;
+
+    // ── Kubernetes Networking Concepts ──
+    html += `
+    <div class="card" style="border-color:rgba(99,102,241,0.15);">
+        <div class="card-body" style="padding:20px;">
+            <h4 style="margin:0 0 12px 0; font-size:15px; font-weight:700; color:var(--text-primary);">Kubernetes Networking &mdash; Quick Reference</h4>
+            <div style="font-size:13px; color:var(--text-secondary); line-height:1.7;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+                    <div style="padding:12px; background:var(--bg-secondary); border-radius:8px;">
+                        <strong style="color:var(--text-primary);">NodePort Service</strong>
+                        <p style="margin:4px 0 0 0; font-size:12px;">Kubernetes exposes your app on a high port (30000-32767) on every node. This is how WolfNet routes reach your pods &mdash; traffic goes to the NodePort, and Kubernetes distributes it to the right pod.</p>
+                    </div>
+                    <div style="padding:12px; background:var(--bg-secondary); border-radius:8px;">
+                        <strong style="color:var(--text-primary);">WolfNet IP (Load Balancer)</strong>
+                        <p style="margin:4px 0 0 0; font-size:12px;">WolfStack assigns a private WolfNet IP to each deployment. You access your app on its normal port (e.g. <code>:80</code>), and WolfStack redirects traffic to the NodePort behind the scenes. Think of it as a private load balancer.</p>
+                    </div>
+                    <div style="padding:12px; background:var(--bg-secondary); border-radius:8px;">
+                        <strong style="color:var(--text-primary);">Pods &amp; Replicas</strong>
+                        <p style="margin:4px 0 0 0; font-size:12px;">Pods are the smallest unit in Kubernetes &mdash; each pod runs one instance of your app. If you set 3 replicas, Kubernetes creates 3 pods. Traffic is automatically load-balanced across them.</p>
+                    </div>
+                    <div style="padding:12px; background:var(--bg-secondary); border-radius:8px;">
+                        <strong style="color:var(--text-primary);">Private vs Public</strong>
+                        <p style="margin:4px 0 0 0; font-size:12px;">WolfNet IPs are only accessible from machines connected to your WolfNet &mdash; they are <strong>not</strong> exposed to the internet. This is ideal for internal services, admin panels, and databases.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>`;
+
+    return html;
 }
 
-async function k8sDeployWolfNet() {
-    const wolfnetServer = document.getElementById('k8s-wolfnet-server')?.value.trim();
-    const wolfnetNetwork = document.getElementById('k8s-wolfnet-network')?.value.trim() || '10.10.0.0/24';
-    if (!wolfnetServer) { showToast('Please enter the WolfNet server address', 'error'); return; }
+async function k8sAssignWolfNetRoute() {
+    const deployment = document.getElementById('k8s-wolfnet-assign-deployment')?.value.trim();
+    const namespace = document.getElementById('k8s-wolfnet-assign-namespace')?.value.trim() || 'default';
+    if (!deployment) { showToast('Enter a deployment name', 'error'); return; }
 
-    showToast('Deploying WolfNet to cluster...', 'info', 10000);
+    showToast('Allocating WolfNet IP...', 'info', 5000);
     try {
         const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/wolfnet`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ wolfnet_server: wolfnetServer, wolfnet_network: wolfnetNetwork }),
+            body: JSON.stringify({ deployment_name: deployment, namespace: namespace }),
         });
         const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) throw new Error(data.error || 'Deployment failed');
-        showToast('WolfNet deployed successfully!', 'success');
-        setTimeout(() => switchK8sTab('wolfnet'), 1000);
+        if (!resp.ok) throw new Error(data.error || 'Allocation failed');
+        showToast(`Assigned WolfNet IP ${data.route?.wolfnet_ip || ''} to ${deployment}`, 'success');
+        setTimeout(() => switchK8sTab('wolfnet'), 500);
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
-async function k8sRemoveWolfNet() {
-    if (!(await showConfirm('Remove WolfNet overlay from this cluster? This will tear down the encrypted tunnels between nodes.'))) return;
+async function k8sRemoveWolfNetRoute(deploymentName, namespace) {
+    if (!(await showConfirm(`Remove WolfNet IP for deployment "${deploymentName}"? The deployment will no longer be accessible via its WolfNet IP.`))) return;
     try {
-        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/wolfnet`, { method: 'DELETE' });
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/wolfnet?deployment=${encodeURIComponent(deploymentName)}&namespace=${encodeURIComponent(namespace)}`, { method: 'DELETE' });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(data.error || 'Removal failed');
-        showToast('WolfNet removed from cluster', 'success');
-        setTimeout(() => switchK8sTab('wolfnet'), 1000);
+        showToast('WolfNet route removed', 'success');
+        setTimeout(() => switchK8sTab('wolfnet'), 500);
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+async function k8sAssignWolfNetRouteDirect(deploymentName, namespace) {
+    showToast('Allocating WolfNet IP...', 'info', 5000);
+    try {
+        const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/wolfnet`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deployment_name: deploymentName, namespace: namespace }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || 'Allocation failed');
+        showToast(`Assigned WolfNet IP ${data.route?.wolfnet_ip || ''} to ${deploymentName}`, 'success');
+        // Refresh cluster data to get updated routes
+        try {
+            const clusterResp = await fetch('/api/kubernetes/clusters');
+            if (clusterResp.ok) k8sClusters = await clusterResp.json();
+        } catch (_) {}
+        showK8sDeploymentDetail(deploymentName, namespace);
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
@@ -23002,10 +23150,14 @@ async function showK8sDeploymentDetail(name, namespace) {
         const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/deployments/${encodeURIComponent(name)}/detail?namespace=${encodeURIComponent(namespace)}`);
         if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
         const d = await resp.json();
+        // Look up WolfNet route
+        const cluster = k8sClusters.find(c => c.id === k8sCurrentCluster);
+        const wolfnetRoute = (cluster?.wolfnet_routes || []).find(r => r.deployment_name === d.name && r.namespace === d.namespace);
+
         let html = `<div style="margin-bottom:12px;"><button class="btn btn-sm btn-secondary" onclick="switchK8sTab('deployments')" style="font-size:11px;">&larr; Back to Deployments</button></div>`;
 
         // Header
-        html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:20px;">
+        html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
             <div>
                 <h3 style="margin:0; font-size:18px; font-weight:700;">${escapeHtml(d.name)}</h3>
                 <span style="font-size:12px; color:var(--text-muted);">Namespace: <code>${escapeHtml(d.namespace)}</code> &bull; Strategy: ${escapeHtml(d.strategy)} &bull; Age: ${escapeHtml(d.age)}</span>
@@ -23016,6 +23168,22 @@ async function showK8sDeploymentDetail(name, namespace) {
                 <button class="btn btn-sm btn-danger" onclick="k8sDeleteDeploymentFull('${escapeHtml(d.name)}', '${escapeHtml(d.namespace)}')" style="font-size:11px;">Remove</button>
             </div>
         </div>`;
+
+        // WolfNet IP info
+        if (wolfnetRoute) {
+            const accessUrls = (wolfnetRoute.port_mappings || []).map(pm =>
+                `<code style="color:#10b981;">${wolfnetRoute.wolfnet_ip}:${pm.service_port}</code>`
+            ).join(' &nbsp; ');
+            html += `<div style="padding:12px 16px; background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.2); border-radius:8px; margin-bottom:16px; display:flex; align-items:center; justify-content:space-between;">
+                <div style="font-size:13px;"><strong style="color:#10b981;">WolfNet IP:</strong> <code style="font-size:14px; font-weight:600; color:#10b981;">${escapeHtml(wolfnetRoute.wolfnet_ip)}</code> &mdash; Access: ${accessUrls}</div>
+                <button class="btn btn-sm btn-danger" onclick="k8sRemoveWolfNetRoute('${escapeHtml(d.name)}', '${escapeHtml(d.namespace)}')" style="font-size:11px;">Remove IP</button>
+            </div>`;
+        } else {
+            html += `<div style="padding:12px 16px; background:var(--bg-secondary); border-radius:8px; margin-bottom:16px; display:flex; align-items:center; justify-content:space-between;">
+                <div style="font-size:13px; color:var(--text-muted);">No WolfNet IP assigned &mdash; this deployment is only accessible within the cluster.</div>
+                <button class="btn btn-sm btn-primary" onclick="k8sAssignWolfNetRouteDirect('${escapeHtml(d.name)}', '${escapeHtml(d.namespace)}')" style="font-size:11px; background:#6366f1; border-color:#6366f1;">Assign IP</button>
+            </div>`;
+        }
 
         // Containers
         (d.containers || []).forEach((c, ci) => {
@@ -23234,25 +23402,16 @@ function renderK8sSettings(cluster) {
                 <div style="width:36px; height:36px; background:linear-gradient(135deg,#6366f1,#818cf8); border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:18px; color:#fff;">&#127760;</div>
                 <div>
                     <h4 style="margin:0; font-size:16px; font-weight:700;">WolfNet Integration</h4>
-                    <p style="margin:2px 0 0 0; font-size:12px; color:var(--text-muted);">Configure WolfNet overlay networking for this cluster. When auto-deploy is enabled, WolfNet will be automatically set up when deploying apps.</p>
+                    <p style="margin:2px 0 0 0; font-size:12px; color:var(--text-muted);">Configure WolfNet private networking for this Kubernetes cluster. WolfNet gives each deployment a private IP accessible only from your WolfNet.</p>
                 </div>
             </div>
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
-                <div class="form-group" style="margin:0;">
-                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">WolfNet Server Address</label>
-                    <input type="text" id="k8s-settings-wolfnet-server" class="form-control" value="${escapeHtml(cluster.wolfnet_server || '')}" placeholder="e.g. 10.0.0.1" style="font-size:13px;">
-                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">IP of your WolfNet coordination server</div>
-                </div>
-                <div class="form-group" style="margin:0;">
-                    <label style="font-weight:600; font-size:13px; margin-bottom:6px; display:block;">WolfNet Network CIDR</label>
-                    <input type="text" id="k8s-settings-wolfnet-network" class="form-control" value="${escapeHtml(cluster.wolfnet_network || '10.10.0.0/24')}" placeholder="10.10.0.0/24" style="font-size:13px;">
-                    <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Overlay network CIDR — use a range that doesn't overlap with existing WolfNet peers</div>
-                </div>
+            <div style="background:var(--bg-secondary); border-radius:8px; padding:14px; margin-bottom:16px; font-size:12px; color:var(--text-secondary); line-height:1.6;">
+                When auto-assign is enabled, every app you deploy from the App Store automatically gets a private WolfNet IP. You can then access the app from any machine on your WolfNet using that IP on its normal ports. You can also assign IPs manually from the <strong>WolfNet</strong> tab.
             </div>
             <div style="margin-bottom:20px;">
                 <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:13px;">
                     <input type="checkbox" id="k8s-settings-wolfnet-auto" ${cluster.wolfnet_auto_deploy ? 'checked' : ''}>
-                    <span><strong>Auto-deploy WolfNet</strong> — automatically deploy WolfNet when provisioning new apps to this cluster</span>
+                    <span><strong>Auto-assign WolfNet IP</strong> — automatically assign a private WolfNet IP to every new deployment that exposes ports</span>
                 </label>
             </div>
             <button class="btn btn-primary" onclick="k8sSaveSettings()" style="background:#326ce5; border-color:#326ce5; font-size:13px;">Save Settings</button>
@@ -23273,14 +23432,12 @@ function renderK8sSettings(cluster) {
 }
 
 async function k8sSaveSettings() {
-    const wolfnetServer = document.getElementById('k8s-settings-wolfnet-server')?.value.trim() || '';
-    const wolfnetNetwork = document.getElementById('k8s-settings-wolfnet-network')?.value.trim() || '10.10.0.0/24';
     const wolfnetAutoDeploy = document.getElementById('k8s-settings-wolfnet-auto')?.checked || false;
     try {
         const resp = await fetch(`/api/kubernetes/clusters/${k8sCurrentCluster}/settings`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ wolfnet_server: wolfnetServer, wolfnet_network: wolfnetNetwork, wolfnet_auto_deploy: wolfnetAutoDeploy }),
+            body: JSON.stringify({ wolfnet_auto_deploy: wolfnetAutoDeploy }),
         });
         if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Failed');
         const data = await resp.json();

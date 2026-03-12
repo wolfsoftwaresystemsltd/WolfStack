@@ -90,6 +90,8 @@ pub struct K8sCluster {
     pub wolfnet_network: String,
     #[serde(default)]
     pub wolfnet_auto_deploy: bool,
+    #[serde(default)]
+    pub wolfnet_routes: Vec<K8sWolfNetRoute>,
 }
 
 // ─── Runtime Info (returned from kubectl) ───
@@ -167,6 +169,23 @@ pub struct K8sClusterStatus {
     pub api_version: String,
 }
 
+// ─── WolfNet Route Types ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct K8sWolfNetRoute {
+    pub deployment_name: String,
+    pub namespace: String,
+    pub wolfnet_ip: String,
+    pub port_mappings: Vec<K8sWolfNetPortMap>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct K8sWolfNetPortMap {
+    pub service_port: u16,
+    pub node_port: u16,
+    pub protocol: String,
+}
+
 // ─── Config ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +250,7 @@ pub fn add_cluster(
         wolfnet_server: String::new(),
         wolfnet_network: String::new(),
         wolfnet_auto_deploy: false,
+        wolfnet_routes: Vec::new(),
     };
 
     config.clusters.push(cluster.clone());
@@ -1235,142 +1255,311 @@ pub fn get_rke2_join_token() -> Result<String, String> {
 // ─── WolfNet Integration ───
 // ═══════════════════════════════════════════════
 
-/// Deploy WolfNet overlay networking to a Kubernetes cluster.
-/// This creates a DaemonSet that runs WolfNet on every k8s node,
-/// connecting them to the WolfNet mesh for encrypted inter-node communication.
-pub fn deploy_wolfnet_to_cluster(
-    kubeconfig: &str,
-    wolfnet_server: &str,
-    wolfnet_network: &str,
-) -> Result<String, String> {
-    info!(
-        "Deploying WolfNet to k8s cluster (server: {}, network: {})",
-        wolfnet_server, wolfnet_network
-    );
+/// Get WolfNet status for all nodes in a k8s cluster.
+/// Matches k8s node hostnames against WolfNet peers and the local server
+/// to find their WolfNet IPs. No DaemonSet needed — WolfNet runs on the
+/// host servers, and k8s services are accessible via NodePort on WolfNet IPs.
+pub fn get_wolfnet_node_status(kubeconfig: &str) -> serde_json::Value {
+    let k8s_nodes = get_nodes(kubeconfig);
+    let wolfnet_status = crate::networking::get_wolfnet_status();
+    let local_hostname = hostname::get().unwrap_or_default().to_string_lossy().to_string();
+    let local_short = local_hostname.split('.').next().unwrap_or(&local_hostname).to_lowercase();
 
-    let yaml = format!(
-        r#"apiVersion: v1
-kind: Namespace
-metadata:
-  name: wolfnet-system
-  labels:
-    app.kubernetes.io/managed-by: wolfstack
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: wolfnet-config
-  namespace: wolfnet-system
-data:
-  WOLFNET_SERVER: "{wolfnet_server}"
-  WOLFNET_NETWORK: "{wolfnet_network}"
----
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: wolfnet
-  namespace: wolfnet-system
-  labels:
-    app: wolfnet
-    app.kubernetes.io/managed-by: wolfstack
-spec:
-  selector:
-    matchLabels:
-      app: wolfnet
-  template:
-    metadata:
-      labels:
-        app: wolfnet
-    spec:
-      hostNetwork: true
-      hostPID: true
-      tolerations:
-      - operator: Exists
-      initContainers:
-      - name: wolfnet-setup
-        image: alpine:latest
-        command:
-        - /bin/sh
-        - -c
-        - |
-          apk add --no-cache wireguard-tools bash curl git build-base linux-headers
-          if [ ! -d /opt/wolfnet-src ]; then
-            git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git /opt/wolfnet-src
-          else
-            cd /opt/wolfnet-src && git pull
-          fi
-          cd /opt/wolfnet-src && bash setup.sh
-        securityContext:
-          privileged: true
-        volumeMounts:
-        - name: host-root
-          mountPath: /opt/wolfnet-src
-          subPath: opt/wolfnet-src
-        - name: host-modules
-          mountPath: /lib/modules
-          readOnly: true
-      containers:
-      - name: wolfnet-agent
-        image: alpine:latest
-        command:
-        - /bin/sh
-        - -c
-        - |
-          echo "WolfNet overlay active on $(hostname)"
-          # Keep the pod running — WolfNet runs as a host service
-          while true; do
-            if wg show wolfnet0 &>/dev/null; then
-              echo "WolfNet interface wolfnet0 is up"
-            else
-              echo "WolfNet interface not found, attempting restart..."
-              systemctl restart wolfnet 2>/dev/null || true
-            fi
-            sleep 60
-          done
-        securityContext:
-          privileged: true
-          capabilities:
-            add: ["NET_ADMIN", "SYS_MODULE"]
-        envFrom:
-        - configMapRef:
-            name: wolfnet-config
-        volumeMounts:
-        - name: host-modules
-          mountPath: /lib/modules
-          readOnly: true
-        - name: host-etc-wolfnet
-          mountPath: /etc/wolfnet
-      volumes:
-      - name: host-root
-        hostPath:
-          path: /
-      - name: host-modules
-        hostPath:
-          path: /lib/modules
-      - name: host-etc-wolfnet
-        hostPath:
-          path: /etc/wolfnet
-          type: DirectoryOrCreate
-"#,
-        wolfnet_server = wolfnet_server,
-        wolfnet_network = wolfnet_network,
-    );
+    let mut node_info = Vec::new();
 
-    apply_yaml(kubeconfig, &yaml)
+    for node in &k8s_nodes {
+        let node_name_lower = node.name.to_lowercase();
+        let node_short = node_name_lower.split('.').next().unwrap_or(&node_name_lower);
+
+        // Check if this node is the local server
+        let mut wolfnet_ip = None;
+        let mut connected = false;
+
+        if node_short == local_short || node_name_lower == local_hostname.to_lowercase() {
+            // This k8s node is the local server
+            if let Some(ref ip) = wolfnet_status.ip {
+                wolfnet_ip = Some(ip.split('/').next().unwrap_or(ip).to_string());
+                connected = wolfnet_status.running;
+            }
+        } else {
+            // Check against WolfNet peers
+            for peer in &wolfnet_status.peers {
+                let peer_name_lower = peer.name.to_lowercase();
+                let peer_short = peer_name_lower.split('.').next().unwrap_or(&peer_name_lower);
+                if peer_short == node_short || peer_name_lower == node_name_lower {
+                    if !peer.ip.is_empty() {
+                        wolfnet_ip = Some(peer.ip.split('/').next().unwrap_or(&peer.ip).to_string());
+                        connected = peer.connected;
+                    }
+                    break;
+                }
+            }
+        }
+
+        node_info.push(serde_json::json!({
+            "name": node.name,
+            "status": node.status,
+            "roles": node.roles,
+            "wolfnet_ip": wolfnet_ip,
+            "connected": connected,
+        }));
+    }
+
+    let all_have_wolfnet = !node_info.is_empty() && node_info.iter().all(|n| !n["wolfnet_ip"].is_null());
+
+    serde_json::json!({
+        "wolfnet_installed": wolfnet_status.installed,
+        "wolfnet_running": wolfnet_status.running,
+        "local_ip": wolfnet_status.ip.as_deref().map(|ip| ip.split('/').next().unwrap_or(ip)),
+        "nodes": node_info,
+        "all_nodes_have_wolfnet": all_have_wolfnet,
+    })
 }
 
-/// Remove WolfNet from a Kubernetes cluster.
-pub fn remove_wolfnet_from_cluster(kubeconfig: &str) -> Result<String, String> {
-    info!("Removing WolfNet from k8s cluster");
-    kubectl(kubeconfig, &["delete", "namespace", "wolfnet-system", "--ignore-not-found"])
+/// Get NodePort assignments for a k8s Service.
+fn get_service_node_ports(kubeconfig: &str, name: &str, namespace: &str) -> Vec<K8sWolfNetPortMap> {
+    let output = match kubectl(kubeconfig, &["get", "service", name, "-n", namespace, "-o", "json"]) {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    let json: serde_json::Value = match serde_json::from_str(&output) {
+        Ok(j) => j,
+        Err(_) => return Vec::new(),
+    };
+    json["spec"]["ports"].as_array()
+        .map(|ports| ports.iter().filter_map(|p| {
+            let service_port = p["port"].as_u64()? as u16;
+            let node_port = p["nodePort"].as_u64()? as u16;
+            let protocol = p["protocol"].as_str().unwrap_or("TCP").to_string();
+            Some(K8sWolfNetPortMap { service_port, node_port, protocol })
+        }).collect())
+        .unwrap_or_default()
 }
 
-/// Check if WolfNet is deployed on a Kubernetes cluster.
-pub fn is_wolfnet_deployed(kubeconfig: &str) -> bool {
-    kubectl(kubeconfig, &["get", "namespace", "wolfnet-system", "-o", "name"])
-        .map(|o| !o.trim().is_empty())
-        .unwrap_or(false)
+/// Find the next available WolfNet IP that doesn't conflict with any existing
+/// allocations (containers, VMs, WolfRun, k8s routes, peers, or live IPs).
+fn find_available_k8s_wolfnet_ip(config: &KubernetesConfig) -> Option<String> {
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // All container/VM/WolfRun used IPs (Docker, LXC, VMs, WolfRun VIPs)
+    for ip in crate::containers::wolfnet_used_ips() {
+        used.insert(ip);
+    }
+
+    // All k8s-allocated WolfNet routes across all clusters
+    for cluster in &config.clusters {
+        for route in &cluster.wolfnet_routes {
+            used.insert(route.wolfnet_ip.clone());
+        }
+    }
+
+    // WolfNet config file: node IPs and peer IPs
+    if let Ok(content) = fs::read_to_string("/etc/wolfnet/config.toml") {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if (trimmed.starts_with("address") || trimmed.starts_with("allowed_ip")) && trimmed.contains('=') {
+                if let Some(val) = trimmed.split('=').nth(1) {
+                    let ip = val.trim().trim_matches('"').trim().to_string();
+                    if !ip.is_empty() { used.insert(ip); }
+                }
+            }
+        }
+    }
+
+    // Live IPs on wolfnet0 interface
+    if let Ok(output) = Command::new("ip").args(["addr", "show", "wolfnet0"]).output() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("inet ") {
+                if let Some(cidr) = trimmed.split_whitespace().nth(1) {
+                    let ip = cidr.split('/').next().unwrap_or("").to_string();
+                    if !ip.is_empty() { used.insert(ip); }
+                }
+            }
+        }
+    }
+
+    // WolfRun service VIPs and route cache
+    if let Ok(content) = fs::read_to_string("/etc/wolfstack/wolfrun/services.json") {
+        if let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+            for svc in &services {
+                if let Some(vip) = svc.get("service_ip").and_then(|v| v.as_str()) {
+                    if !vip.is_empty() { used.insert(vip.to_string()); }
+                }
+                if let Some(instances) = svc.get("instances").and_then(|v| v.as_array()) {
+                    for inst in instances {
+                        if let Some(ip) = inst.get("wolfnet_ip").and_then(|v| v.as_str()) {
+                            if !ip.is_empty() { used.insert(ip.to_string()); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Route cache
+    if let Ok(content) = fs::read_to_string("/var/run/wolfnet/routes.json") {
+        if let Ok(routes) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
+            for ip in routes.keys() {
+                used.insert(ip.clone());
+            }
+        }
+    }
+
+    // Reserve gateway and broadcast
+    used.insert("10.10.10.1".to_string());
+    used.insert("10.10.10.255".to_string());
+
+    // Find next available in 10.10.10.2-254
+    for i in 2..=254u8 {
+        let candidate = format!("10.10.10.{}", i);
+        if !used.contains(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
+
+/// Allocate a WolfNet IP for a k8s deployment and set up iptables routing.
+/// The WolfNet IP is added as a secondary address on wolfnet0 and iptables
+/// REDIRECT rules forward traffic from service_port to the k8s NodePort.
+pub fn allocate_wolfnet_route(cluster_id: &str, deployment_name: &str, namespace: &str) -> Result<K8sWolfNetRoute, String> {
+    let config = load_config();
+    let cluster = config.clusters.iter().find(|c| c.id == cluster_id)
+        .ok_or_else(|| format!("Cluster '{}' not found", cluster_id))?;
+
+    // Return existing route if already allocated
+    if let Some(existing) = cluster.wolfnet_routes.iter().find(|r| r.deployment_name == deployment_name && r.namespace == namespace) {
+        return Ok(existing.clone());
+    }
+
+    // Get NodePort assignments from the k8s Service
+    let kubeconfig = cluster.kubeconfig_path.clone();
+    let port_mappings = get_service_node_ports(&kubeconfig, deployment_name, namespace);
+    if port_mappings.is_empty() {
+        return Err("No NodePort service found for this deployment. Deploy the app first, and ensure it exposes ports.".to_string());
+    }
+
+    // Find next available WolfNet IP
+    let wolfnet_ip = find_available_k8s_wolfnet_ip(&config)
+        .ok_or_else(|| "No available WolfNet IPs in the 10.10.10.0/24 range".to_string())?;
+
+    // Add IP as secondary address on wolfnet0
+    let add_result = Command::new("ip")
+        .args(["addr", "add", &format!("{}/32", wolfnet_ip), "dev", "wolfnet0"])
+        .output();
+    if let Err(e) = add_result {
+        return Err(format!("Failed to add IP to wolfnet0: {}. Is WolfNet running?", e));
+    }
+
+    // Set up iptables REDIRECT rules for each port mapping
+    for pm in &port_mappings {
+        let proto = pm.protocol.to_lowercase();
+        let _ = Command::new("iptables")
+            .args(["-t", "nat", "-A", "PREROUTING",
+                   "-d", &wolfnet_ip,
+                   "-p", &proto,
+                   "--dport", &pm.service_port.to_string(),
+                   "-j", "REDIRECT", "--to-port", &pm.node_port.to_string()])
+            .output();
+    }
+
+    let route = K8sWolfNetRoute {
+        deployment_name: deployment_name.to_string(),
+        namespace: namespace.to_string(),
+        wolfnet_ip: wolfnet_ip.clone(),
+        port_mappings,
+    };
+
+    // Re-load config for mutable update (avoids borrow conflict)
+    let mut config = load_config();
+    if let Some(cluster) = config.clusters.iter_mut().find(|c| c.id == cluster_id) {
+        cluster.wolfnet_routes.push(route.clone());
+    }
+    save_config(&config)?;
+
+    info!("Allocated WolfNet IP {} for k8s deployment '{}' in '{}'", wolfnet_ip, deployment_name, namespace);
+    Ok(route)
+}
+
+/// Remove the WolfNet IP route for a k8s deployment.
+/// Removes iptables rules and the secondary IP from wolfnet0.
+pub fn remove_wolfnet_route(cluster_id: &str, deployment_name: &str, namespace: &str) -> Result<(), String> {
+    let mut config = load_config();
+    let cluster = config.clusters.iter_mut().find(|c| c.id == cluster_id)
+        .ok_or_else(|| format!("Cluster '{}' not found", cluster_id))?;
+
+    let route = cluster.wolfnet_routes.iter()
+        .find(|r| r.deployment_name == deployment_name && r.namespace == namespace)
+        .cloned()
+        .ok_or_else(|| "No WolfNet route found for this deployment".to_string())?;
+
+    // Remove iptables REDIRECT rules
+    for pm in &route.port_mappings {
+        let proto = pm.protocol.to_lowercase();
+        let _ = Command::new("iptables")
+            .args(["-t", "nat", "-D", "PREROUTING",
+                   "-d", &route.wolfnet_ip,
+                   "-p", &proto,
+                   "--dport", &pm.service_port.to_string(),
+                   "-j", "REDIRECT", "--to-port", &pm.node_port.to_string()])
+            .output();
+    }
+
+    // Remove secondary IP from wolfnet0
+    let _ = Command::new("ip")
+        .args(["addr", "del", &format!("{}/32", route.wolfnet_ip), "dev", "wolfnet0"])
+        .output();
+
+    cluster.wolfnet_routes.retain(|r| !(r.deployment_name == deployment_name && r.namespace == namespace));
+    save_config(&config)?;
+
+    info!("Removed WolfNet route {} for k8s deployment '{}'", route.wolfnet_ip, deployment_name);
+    Ok(())
+}
+
+/// Re-apply all WolfNet routes on startup (add secondary IPs and iptables rules).
+/// Called from main.rs background tasks after WolfNet is running.
+pub fn apply_all_wolfnet_routes() {
+    let config = load_config();
+    for cluster in &config.clusters {
+        for route in &cluster.wolfnet_routes {
+            // Add secondary IP to wolfnet0 (ignore errors if already exists)
+            let _ = Command::new("ip")
+                .args(["addr", "add", &format!("{}/32", route.wolfnet_ip), "dev", "wolfnet0"])
+                .output();
+
+            // Add iptables REDIRECT rules (check first to avoid duplicates)
+            for pm in &route.port_mappings {
+                let proto = pm.protocol.to_lowercase();
+                let exists = Command::new("iptables")
+                    .args(["-t", "nat", "-C", "PREROUTING",
+                           "-d", &route.wolfnet_ip,
+                           "-p", &proto,
+                           "--dport", &pm.service_port.to_string(),
+                           "-j", "REDIRECT", "--to-port", &pm.node_port.to_string()])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+
+                if !exists {
+                    let _ = Command::new("iptables")
+                        .args(["-t", "nat", "-A", "PREROUTING",
+                               "-d", &route.wolfnet_ip,
+                               "-p", &proto,
+                               "--dport", &pm.service_port.to_string(),
+                               "-j", "REDIRECT", "--to-port", &pm.node_port.to_string()])
+                        .output();
+                }
+            }
+
+            info!("Re-applied WolfNet route {} for k8s deployment '{}'", route.wolfnet_ip, route.deployment_name);
+        }
+    }
+}
+
 
 // ═══════════════════════════════════════════════
 // ─── Resource Queries ───

@@ -8669,6 +8669,8 @@ pub async fn k8s_delete_deployment_full(req: HttpRequest, state: web::Data<AppSt
         None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
     };
     let ns = query.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    // Clean up WolfNet route if one exists for this deployment
+    let _ = crate::kubernetes::remove_wolfnet_route(&id, &name, ns);
     match crate::kubernetes::delete_deployment_and_service(&cluster.kubeconfig_path, &name, ns) {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
@@ -8737,22 +8739,30 @@ pub async fn k8s_deploy_app(req: HttpRequest, state: web::Data<AppState>, path: 
         }
         val
     }).collect();
-    // Auto-deploy WolfNet if configured and not already deployed
-    if cluster.wolfnet_auto_deploy && !cluster.wolfnet_server.is_empty() {
-        if !crate::kubernetes::is_wolfnet_deployed(&cluster.kubeconfig_path) {
-            let net = if cluster.wolfnet_network.is_empty() { "10.10.0.0/24" } else { &cluster.wolfnet_network };
-            if let Err(e) = crate::kubernetes::deploy_wolfnet_to_cluster(&cluster.kubeconfig_path, &cluster.wolfnet_server, net) {
-                tracing::warn!("Auto WolfNet deploy failed: {}", e);
-            }
-        }
-    }
-
     match crate::kubernetes::deploy_app_to_k8s(
         &cluster.kubeconfig_path, &app.name, &body.container_name,
         &body.namespace, &docker.image, &docker.ports, &env,
         &docker.volumes, body.replicas,
     ) {
-        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(msg) => {
+            // Auto-allocate WolfNet IP if configured and the app exposes ports
+            let mut wolfnet_ip = None;
+            if cluster.wolfnet_auto_deploy && !docker.ports.is_empty() {
+                // Sanitize the container name the same way deploy_app_to_k8s does
+                let svc_name: String = body.container_name
+                    .to_lowercase()
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+                    .collect::<String>()
+                    .trim_matches('-')
+                    .to_string();
+                match crate::kubernetes::allocate_wolfnet_route(&cluster.id, &svc_name, &body.namespace) {
+                    Ok(route) => wolfnet_ip = Some(route.wolfnet_ip),
+                    Err(e) => tracing::warn!("Auto WolfNet route allocation failed: {}", e),
+                }
+            }
+            HttpResponse::Ok().json(serde_json::json!({ "message": msg, "wolfnet_ip": wolfnet_ip }))
+        },
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
 }
@@ -9372,50 +9382,53 @@ pub async fn k8s_uninstall(req: HttpRequest, state: web::Data<AppState>, body: w
     }))
 }
 
-/// POST /api/kubernetes/clusters/{id}/wolfnet — deploy WolfNet to a k8s cluster
+/// POST /api/kubernetes/clusters/{id}/wolfnet — allocate a WolfNet IP route for a deployment
 #[derive(Deserialize)]
-pub struct K8sWolfNetRequest {
-    pub wolfnet_server: String,
-    #[serde(default = "default_wolfnet_network")]
-    pub wolfnet_network: String,
+pub struct K8sWolfNetRouteRequest {
+    pub deployment_name: String,
+    #[serde(default = "default_k8s_namespace")]
+    pub namespace: String,
 }
 
-fn default_wolfnet_network() -> String { "10.10.0.0/24".to_string() }
-
-pub async fn k8s_deploy_wolfnet(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<K8sWolfNetRequest>) -> HttpResponse {
+pub async fn k8s_deploy_wolfnet(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<K8sWolfNetRouteRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let cluster = match crate::kubernetes::get_cluster(&path.into_inner()) {
-        Some(c) => c,
-        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
-    };
-    match crate::kubernetes::deploy_wolfnet_to_cluster(&cluster.kubeconfig_path, &body.wolfnet_server, &body.wolfnet_network) {
-        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+    let id = path.into_inner();
+    match crate::kubernetes::allocate_wolfnet_route(&id, &body.deployment_name, &body.namespace) {
+        Ok(route) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Allocated WolfNet IP {} for {}", route.wolfnet_ip, route.deployment_name),
+            "route": route,
+        })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
 }
 
-/// DELETE /api/kubernetes/clusters/{id}/wolfnet — remove WolfNet from a k8s cluster
-pub async fn k8s_remove_wolfnet(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+/// DELETE /api/kubernetes/clusters/{id}/wolfnet — remove a WolfNet route for a deployment
+pub async fn k8s_remove_wolfnet(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let cluster = match crate::kubernetes::get_cluster(&path.into_inner()) {
-        Some(c) => c,
-        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
+    let id = path.into_inner();
+    let deployment_name = match query.get("deployment") {
+        Some(n) => n.as_str(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'deployment' query parameter" })),
     };
-    match crate::kubernetes::remove_wolfnet_from_cluster(&cluster.kubeconfig_path) {
-        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+    let namespace = query.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    match crate::kubernetes::remove_wolfnet_route(&id, deployment_name, namespace) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "message": format!("WolfNet route removed for {}", deployment_name) })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
 }
 
-/// GET /api/kubernetes/clusters/{id}/wolfnet — check WolfNet status on a k8s cluster
+/// GET /api/kubernetes/clusters/{id}/wolfnet — WolfNet status for k8s cluster nodes + deployment routes
 pub async fn k8s_wolfnet_status(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let cluster = match crate::kubernetes::get_cluster(&path.into_inner()) {
+    let id = path.into_inner();
+    let cluster = match crate::kubernetes::get_cluster(&id) {
         Some(c) => c,
         None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Cluster not found" })),
     };
-    let deployed = crate::kubernetes::is_wolfnet_deployed(&cluster.kubeconfig_path);
-    HttpResponse::Ok().json(serde_json::json!({ "deployed": deployed }))
+    let mut status = crate::kubernetes::get_wolfnet_node_status(&cluster.kubeconfig_path);
+    status["routes"] = serde_json::json!(cluster.wolfnet_routes);
+    status["wolfnet_auto_deploy"] = serde_json::json!(cluster.wolfnet_auto_deploy);
+    HttpResponse::Ok().json(status)
 }
 
 // ─── Security (Fail2ban, iptables, UFW) ───

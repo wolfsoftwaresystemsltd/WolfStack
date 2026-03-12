@@ -245,6 +245,9 @@ async fn main() -> std::io::Result<()> {
     // Re-apply WireGuard bridge interfaces (survives reboot)
     networking::apply_all_wireguard_bridges();
 
+    // Re-apply WolfNet routes for k8s deployments (secondary IPs + iptables rules)
+    kubernetes::apply_all_wolfnet_routes();
+
     // Check if TLS will be available (so the frontend knows the correct protocol for URLs)
     let tls_enabled = if cli.no_tls {
         false
