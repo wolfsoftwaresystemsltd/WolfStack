@@ -160,9 +160,16 @@ pub fn install_app(
     target: &str,
     container_name: &str,
     user_inputs: &HashMap<String, String>,
+    custom_ports: Option<&[String]>,
 ) -> Result<String, String> {
-    let app = get_app(app_id).ok_or_else(|| format!("App '{}' not found", app_id))?;
+    let mut app = get_app(app_id).ok_or_else(|| format!("App '{}' not found", app_id))?;
 
+    // Override manifest ports with custom ports if provided
+    if let Some(ports) = custom_ports {
+        if let Some(ref mut docker) = app.docker {
+            docker.ports = ports.to_vec();
+        }
+    }
 
     let mut sidecar_names: Vec<String> = Vec::new();
 
@@ -543,8 +550,16 @@ pub fn prepare_install(
     container_name: &str,
     user_inputs: &HashMap<String, String>,
     storage_path: Option<&str>,
+    custom_ports: Option<&[String]>,
 ) -> Result<(String, String), String> {
-    let app = get_app(app_id).ok_or_else(|| format!("App '{}' not found", app_id))?;
+    let mut app = get_app(app_id).ok_or_else(|| format!("App '{}' not found", app_id))?;
+
+    // Override manifest ports with custom ports if provided
+    if let Some(ports) = custom_ports {
+        if let Some(ref mut docker) = app.docker {
+            docker.ports = ports.to_vec();
+        }
+    }
 
     let session_id = format!("{}_{}", app_id, chrono_timestamp());
     let script_path = format!("/tmp/wolfstack-appinstall-{}.sh", session_id);
@@ -1326,7 +1341,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 architecture: "amd64".into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl".into(),
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfproxy/install.sh | bash".into(),
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfproxy/setup.sh | bash".into(),
                     "systemctl enable wolfproxy".into(),
                 ],
             }),
@@ -1334,7 +1349,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 packages_debian: vec![],
                 packages_redhat: vec![],
                 post_install: vec![
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfproxy/install.sh | bash".into(),
+                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfproxy/setup.sh | bash".into(),
                 ],
                 service: Some("wolfproxy".into()),
             }),

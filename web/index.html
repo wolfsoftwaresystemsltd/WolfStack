@@ -741,6 +741,11 @@
                                 <!-- Target buttons injected by JS -->
                             </div>
                         </div>
+                        <div id="appstore-install-ports-section" style="margin-bottom:16px; display:none;">
+                            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Port Mappings</label>
+                            <div id="appstore-install-ports-list" style="display:flex; flex-direction:column; gap:6px;"></div>
+                            <button type="button" onclick="addDockerPortRow('appstore-install-ports-list')" class="btn btn-sm" style="margin-top:6px; font-size:11px; padding:4px 12px;">+ Add Port</button>
+                        </div>
                         <div id="appstore-install-inputs">
                             <!-- Dynamic user inputs injected by JS -->
                         </div>

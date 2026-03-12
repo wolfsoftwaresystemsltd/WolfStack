@@ -8228,6 +8228,8 @@ pub struct AppInstallRequest {
     pub inputs: std::collections::HashMap<String, String>,  // user input values
     #[serde(default)]
     pub storage_path: Option<String>,                // optional storage location
+    #[serde(default)]
+    pub ports: Option<Vec<String>>,                  // optional custom port mappings (overrides manifest)
 }
 
 /// POST /api/appstore/apps/{id}/install — install an app
@@ -8243,7 +8245,8 @@ pub async fn appstore_install(
     // Inject CONTAINER_NAME for ${CONTAINER_NAME} substitution in manifests
     inputs.insert("CONTAINER_NAME".to_string(), body.container_name.clone());
 
-    match appstore::install_app(&id, &body.target, &body.container_name, &inputs) {
+    let custom_ports = body.ports.clone();
+    match appstore::install_app(&id, &body.target, &body.container_name, &inputs, custom_ports.as_deref()) {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
@@ -8264,9 +8267,10 @@ pub async fn appstore_prepare_install(
     let target = body.target.clone();
     let container_name = body.container_name.clone();
     let storage_path = body.storage_path.clone();
+    let custom_ports = body.ports.clone();
 
     match web::block(move || {
-        appstore::prepare_install(&id, &target, &container_name, &inputs, storage_path.as_deref())
+        appstore::prepare_install(&id, &target, &container_name, &inputs, storage_path.as_deref(), custom_ports.as_deref())
     }).await {
         Ok(Ok((session_id, _script_path))) => HttpResponse::Ok().json(serde_json::json!({
             "session_id": session_id,

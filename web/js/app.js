@@ -9881,10 +9881,12 @@ async function openDockerSettings(name) {
                 bindings.forEach(b => {
                     const hostPort = b.HostPort || '';
                     const hostIp = b.HostIp || '0.0.0.0';
+                    const proto = containerPort.includes('/') ? containerPort.split('/')[1].toUpperCase() : 'TCP';
                     portRows += `<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;margin-bottom:4px;background:var(--bg-primary);border-radius:6px;border:1px solid var(--border);">
                         <code style="font-size:12px;color:var(--accent);">${hostIp}:${hostPort}</code>
                         <span style="color:var(--text-muted);font-size:12px;">→</span>
                         <code style="font-size:12px;color:var(--text-primary);">${containerPort}</code>
+                        <span style="font-size:10px;padding:2px 6px;border-radius:4px;background:${proto === 'UDP' ? 'rgba(234,179,8,0.15)' : 'rgba(59,130,246,0.15)'};color:${proto === 'UDP' ? '#eab308' : '#3b82f6'};font-weight:600;">${proto}</span>
                     </div>`;
                 });
             }
@@ -11989,9 +11991,9 @@ function selectDockerImage(imageName) {
                 </div>
             </div>
             <div style="margin-bottom:12px;">
-                <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Port Mappings <span style="font-weight:400; color:var(--text-muted);">(comma-separated, e.g. 8080:80, 443:443)</span></label>
-                <input id="docker-create-ports" type="text" placeholder="8080:80"
-                    style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
+                <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Port Mappings</label>
+                <div id="docker-create-ports-list" style="display:flex; flex-direction:column; gap:6px;"></div>
+                <button type="button" onclick="addDockerPortRow('docker-create-ports-list')" class="btn btn-sm" style="margin-top:6px; font-size:11px; padding:4px 12px;">+ Add Port</button>
             </div>
             <div style="margin-bottom:12px;">
                 <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Environment Variables <span style="font-weight:400; color:var(--text-muted);">(comma-separated, e.g. KEY=val)</span></label>
@@ -12081,10 +12083,50 @@ function selectDockerImage(imageName) {
         });
 }
 
+// ─── Port Row Helpers ───
+
+function addDockerPortRow(containerId, hostPort, containerPort, protocol) {
+    const list = document.getElementById(containerId);
+    if (!list) return;
+    const row = document.createElement('div');
+    row.className = 'docker-port-row';
+    row.style.cssText = 'display:flex; gap:6px; align-items:center;';
+    row.innerHTML = `
+        <input type="text" class="port-host form-control" placeholder="Host port" value="${hostPort || ''}" style="width:80px; padding:6px 8px; font-size:12px;">
+        <span style="color:var(--text-muted); font-size:12px;">:</span>
+        <input type="text" class="port-container form-control" placeholder="Container port" value="${containerPort || ''}" style="width:80px; padding:6px 8px; font-size:12px;">
+        <select class="port-protocol form-control" style="width:72px; padding:6px 4px; font-size:12px;">
+            <option value="tcp" ${(!protocol || protocol === 'tcp') ? 'selected' : ''}>TCP</option>
+            <option value="udp" ${protocol === 'udp' ? 'selected' : ''}>UDP</option>
+            <option value="both" ${protocol === 'both' ? 'selected' : ''}>Both</option>
+        </select>
+        <button type="button" onclick="this.parentElement.remove()" class="btn btn-sm" style="padding:4px 8px; font-size:11px; color:var(--danger);" title="Remove">✕</button>
+    `;
+    list.appendChild(row);
+}
+
+function collectPortRows(containerId) {
+    const rows = document.querySelectorAll(`#${containerId} .docker-port-row`);
+    const ports = [];
+    rows.forEach(row => {
+        const host = row.querySelector('.port-host')?.value?.trim();
+        const container = row.querySelector('.port-container')?.value?.trim();
+        const proto = row.querySelector('.port-protocol')?.value || 'tcp';
+        if (host && container) {
+            if (proto === 'both') {
+                ports.push(`${host}:${container}/tcp`);
+                ports.push(`${host}:${container}/udp`);
+            } else {
+                ports.push(`${host}:${container}/${proto}`);
+            }
+        }
+    });
+    return ports;
+}
+
 async function createDockerContainer() {
     const name = document.getElementById('docker-create-name').value.trim();
     const image = document.getElementById('docker-create-image').value.trim();
-    const portsStr = document.getElementById('docker-create-ports').value.trim();
     const envStr = document.getElementById('docker-create-env').value.trim();
     const wolfnet_ip = document.getElementById('docker-wolfnet-ip')?.value?.trim() || '';
     const memory_limit = document.getElementById('docker-create-memory')?.value || '';
@@ -12110,7 +12152,7 @@ async function createDockerContainer() {
         return;
     }
 
-    const ports = portsStr ? portsStr.split(',').map(s => s.trim()) : [];
+    const ports = collectPortRows('docker-create-ports-list');
     const env = envStr ? envStr.split(',').map(s => s.trim()) : [];
 
     closeContainerDetail();
@@ -18123,6 +18165,9 @@ function openAppStoreInstallModal(appId) {
     // Build target buttons (checks if selected host has k8s)
     rebuildAppStoreTargets(app);
 
+    // Populate port mappings from Docker manifest
+    populateAppStorePorts(app);
+
     // Build user input fields
     const inputsEl = document.getElementById('appstore-install-inputs');
     if (app.user_inputs && app.user_inputs.length > 0) {
@@ -18219,6 +18264,38 @@ function selectInstallTarget(target) {
     if (hostRow) hostRow.style.display = target === 'kubernetes' ? 'none' : '';
     if (storageRow) storageRow.style.display = target === 'kubernetes' ? 'none' : '';
     if (inputsEl) inputsEl.style.display = target === 'kubernetes' ? 'none' : '';
+    // Show/hide port config (only for Docker/K8s)
+    const portsSection = document.getElementById('appstore-install-ports-section');
+    if (portsSection) portsSection.style.display = (target === 'docker' || target === 'kubernetes') ? '' : 'none';
+}
+
+function populateAppStorePorts(app) {
+    const section = document.getElementById('appstore-install-ports-section');
+    const list = document.getElementById('appstore-install-ports-list');
+    if (!section || !list) return;
+    list.innerHTML = '';
+
+    const docker = app.docker;
+    if (docker && docker.ports && docker.ports.length > 0) {
+        docker.ports.forEach(p => {
+            // Parse "8080:80", "53:53/tcp", "53:53/udp"
+            const slashIdx = p.indexOf('/');
+            let proto = 'tcp';
+            let mapping = p;
+            if (slashIdx !== -1) {
+                proto = p.substring(slashIdx + 1).toLowerCase();
+                mapping = p.substring(0, slashIdx);
+            }
+            const parts = mapping.split(':');
+            const hostPort = parts[0] || '';
+            const containerPort = parts[1] || parts[0] || '';
+            addDockerPortRow('appstore-install-ports-list', hostPort, containerPort, proto);
+        });
+        section.style.display = (appStoreInstallTarget === 'docker' || appStoreInstallTarget === 'kubernetes') ? '' : 'none';
+    } else {
+        // No default ports — still show section so user can add custom ones
+        section.style.display = (appStoreInstallTarget === 'docker' || appStoreInstallTarget === 'kubernetes') ? '' : 'none';
+    }
 }
 
 async function populateAppStoreStorage() {
@@ -18293,6 +18370,9 @@ async function executeAppStoreInstall() {
     // Get storage selection
     const storagePath = document.getElementById('appstore-install-storage').value || null;
 
+    // Collect custom port mappings
+    const customPorts = collectPortRows('appstore-install-ports-list');
+
     // Determine the install URL based on selected host
     const selectedNodeId = document.getElementById('appstore-install-host').value;
     const selectedNode = allNodes.find(n => n.id === selectedNodeId);
@@ -18315,6 +18395,7 @@ async function executeAppStoreInstall() {
                     namespace: k8sNamespace,
                     replicas: k8sReplicas,
                     inputs: userInputs,
+                    ports: customPorts.length > 0 ? customPorts : undefined,
                 }),
             });
             const data = await resp.json().catch(() => ({}));
@@ -18343,6 +18424,7 @@ async function executeAppStoreInstall() {
                 target: appStoreInstallTarget,
                 inputs: userInputs,
                 storage_path: storagePath,
+                ports: customPorts.length > 0 ? customPorts : undefined,
             }),
         });
         const data = await res.json().catch(() => ({}));
