@@ -1272,11 +1272,29 @@ pub fn get_wolfnet_node_status(kubeconfig: &str) -> serde_json::Value {
     let local_hostname = hostname::get().unwrap_or_default().to_string_lossy().to_string();
     let local_short = local_hostname.split('.').next().unwrap_or(&local_hostname).to_lowercase();
 
+    // Get full node JSON to extract InternalIP addresses for matching
+    let node_ips: std::collections::HashMap<String, String> = kubectl(kubeconfig, &["get", "nodes", "-o", "json"])
+        .ok()
+        .and_then(|o| serde_json::from_str::<serde_json::Value>(&o).ok())
+        .and_then(|v| v["items"].as_array().map(|items| {
+            items.iter().filter_map(|item| {
+                let name = item["metadata"]["name"].as_str()?.to_lowercase();
+                let ip = item["status"]["addresses"].as_array()
+                    .and_then(|addrs| addrs.iter()
+                        .find(|a| a["type"].as_str() == Some("InternalIP"))
+                        .and_then(|a| a["address"].as_str()))
+                    .map(|s| s.to_string())?;
+                Some((name, ip))
+            }).collect()
+        }))
+        .unwrap_or_default();
+
     let mut node_info = Vec::new();
 
     for node in &k8s_nodes {
         let node_name_lower = node.name.to_lowercase();
         let node_short = node_name_lower.split('.').next().unwrap_or(&node_name_lower);
+        let node_internal_ip = node_ips.get(&node_name_lower);
 
         // Check if this node is the local server
         let mut wolfnet_ip = None;
@@ -1289,11 +1307,19 @@ pub fn get_wolfnet_node_status(kubeconfig: &str) -> serde_json::Value {
                 connected = wolfnet_status.running;
             }
         } else {
-            // Check against WolfNet peers
+            // Check against WolfNet peers by hostname AND by IP
             for peer in &wolfnet_status.peers {
                 let peer_name_lower = peer.name.to_lowercase();
                 let peer_short = peer_name_lower.split('.').next().unwrap_or(&peer_name_lower);
-                if peer_short == node_short || peer_name_lower == node_name_lower {
+
+                // Extract the real IP from peer endpoint (format: "host:port")
+                let peer_endpoint_ip = peer.endpoint.split(':').next().unwrap_or("");
+
+                let hostname_match = peer_short == node_short || peer_name_lower == node_name_lower;
+                let ip_match = !peer_endpoint_ip.is_empty()
+                    && node_internal_ip.is_some_and(|nip| nip == peer_endpoint_ip);
+
+                if hostname_match || ip_match {
                     if !peer.ip.is_empty() {
                         wolfnet_ip = Some(peer.ip.split('/').next().unwrap_or(&peer.ip).to_string());
                         connected = peer.connected;
