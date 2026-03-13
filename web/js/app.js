@@ -81,8 +81,8 @@ function applyMapCollapse() {
 // ─── Icon Theme System ───
 // Built-in themes (emoji-based)
 const BUILTIN_ICON_THEMES = {
-    standard: { name: 'Standard', description: 'Default system icons' },
-    candy:    { name: 'Candy',    description: 'Sweet candy-themed icons' },
+    standard:    { name: 'Standard',    description: 'Default system icons' },
+    candy_emoji: { name: 'Candy Emoji', description: 'Candy-themed emoji icons' },
 };
 
 const CANDY_ICON_MAP = {
@@ -123,11 +123,11 @@ let _iconPackCache = {};
 let _activePackAvailable = null;
 
 function isIconPackTheme() {
-    return currentIconTheme !== 'standard' && currentIconTheme !== 'candy';
+    return currentIconTheme !== 'standard' && currentIconTheme !== 'candy_emoji';
 }
 
 function getIconThemeMap() {
-    if (currentIconTheme === 'candy') return CANDY_ICON_MAP;
+    if (currentIconTheme === 'candy_emoji') return CANDY_ICON_MAP;
     return null;
 }
 
@@ -19124,6 +19124,11 @@ function applyIconTheme(themeName) {
 
 async function initIconTheme() {
     currentIconTheme = localStorage.getItem('wolfstack-icon-theme') || 'standard';
+    // Migrate old "candy" key to "candy_emoji"
+    if (currentIconTheme === 'candy') {
+        currentIconTheme = 'candy_emoji';
+        localStorage.setItem('wolfstack-icon-theme', 'candy_emoji');
+    }
     // Update icon theme selector UI
     document.querySelectorAll('.icon-theme-card').forEach(card => {
         card.classList.toggle('active', card.getAttribute('data-icon-theme') === currentIconTheme);
@@ -19137,10 +19142,12 @@ async function initIconTheme() {
         const preview = await loadIconPackPreview(currentIconTheme);
         if (preview && preview.available && preview.available.length > 0) {
             _activePackAvailable = new Set(preview.available);
+            console.log(`[WolfStack] Icon pack "${currentIconTheme}": ${preview.available.length}/${preview.total_semantic} icons available`);
             replaceEmojisWithPackIcons(document.body);
             observeForIconPack();
+        } else {
+            console.warn(`[WolfStack] Icon pack "${currentIconTheme}": no matching icons found`);
         }
-        // If the pack has no matching icons, we just leave default emojis in place
     } else {
         // Built-in emoji theme (candy)
         patchIconConstants();
@@ -19195,31 +19202,42 @@ function translateIconsInDOM() {
     });
 }
 
+let _iconPackReplacing = false; // guard against observer re-entry
+
 /// Replace emoji characters with <img> tags from the active icon pack
 function replaceEmojisWithPackIcons(root) {
-    if (!_activePackAvailable) return;
-    // Collect text nodes first (modifying during walk causes issues)
-    const textNodes = [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-        acceptNode(node) {
-            if (node.parentElement?.closest('[data-no-translate]')) return NodeFilter.FILTER_REJECT;
-            if (node.parentElement?.closest('.ws-icon-pack-img')) return NodeFilter.FILTER_REJECT;
-            if (node.parentElement?.tagName === 'SCRIPT' || node.parentElement?.tagName === 'STYLE') return NodeFilter.FILTER_REJECT;
-            return NodeFilter.FILTER_ACCEPT;
-        }
-    });
-    while (walker.nextNode()) textNodes.push(walker.currentNode);
+    if (!_activePackAvailable || _iconPackReplacing) return;
+    _iconPackReplacing = true;
+    try {
+        // Collect text nodes first (modifying during walk causes issues)
+        const textNodes = [];
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+                if (node.parentElement?.closest('[data-no-translate]')) return NodeFilter.FILTER_REJECT;
+                if (node.parentElement?.classList?.contains('ws-icon-pack-img')) return NodeFilter.FILTER_REJECT;
+                if (node.parentElement?.tagName === 'SCRIPT' || node.parentElement?.tagName === 'STYLE') return NodeFilter.FILTER_REJECT;
+                if (node.parentElement?.tagName === 'INPUT' || node.parentElement?.tagName === 'TEXTAREA') return NodeFilter.FILTER_REJECT;
+                return NodeFilter.FILTER_ACCEPT;
+            }
+        });
+        while (walker.nextNode()) textNodes.push(walker.currentNode);
 
-    for (const textNode of textNodes) {
-        if (!textNode.parentNode) continue;
-        const text = textNode.nodeValue;
-        // Find emojis that have semantic mappings
-        for (const [emoji, semantic] of Object.entries(EMOJI_TO_SEMANTIC)) {
-            if (text.includes(emoji) && _activePackAvailable.has(semantic)) {
-                replaceEmojiWithPackIcon(textNode, emoji, semantic);
-                break; // textNode is now split, move on
+        for (const textNode of textNodes) {
+            if (!textNode.parentNode) continue;
+            // Keep replacing emojis until none left in this node's fragments
+            let current = textNode;
+            for (const [emoji, semantic] of Object.entries(EMOJI_TO_SEMANTIC)) {
+                if (!current.parentNode) break;
+                if (!current.nodeValue?.includes(emoji)) continue;
+                if (!_activePackAvailable.has(semantic)) continue;
+                replaceEmojiWithPackIcon(current, emoji, semantic);
+                // After replacement, current is removed; the "after" text node
+                // will be picked up when we process remaining textNodes
+                break;
             }
         }
+    } finally {
+        _iconPackReplacing = false;
     }
 }
 
@@ -19277,20 +19295,12 @@ function observeForIconPack() {
     if (_iconThemeObserver) return;
     if (!_activePackAvailable) return;
     _iconThemeObserver = new MutationObserver((mutations) => {
+        if (_iconPackReplacing) return; // skip mutations caused by our own replacements
         for (const m of mutations) {
             for (const node of m.addedNodes) {
-                if (node.nodeType === Node.TEXT_NODE) {
-                    if (node.parentElement?.closest('[data-no-translate]')) continue;
-                    if (node.parentElement?.classList?.contains('ws-icon-pack-img')) continue;
-                    const text = node.nodeValue;
-                    for (const [emoji, semantic] of Object.entries(EMOJI_TO_SEMANTIC)) {
-                        if (text.includes(emoji) && _activePackAvailable.has(semantic)) {
-                            replaceEmojiWithPackIcon(node, emoji, semantic);
-                            break;
-                        }
-                    }
-                } else if (node.nodeType === Node.ELEMENT_NODE) {
+                if (node.nodeType === Node.ELEMENT_NODE) {
                     if (node.closest?.('[data-no-translate]')) continue;
+                    if (node.classList?.contains('ws-icon-pack-img')) continue;
                     replaceEmojisWithPackIcons(node);
                 }
             }
