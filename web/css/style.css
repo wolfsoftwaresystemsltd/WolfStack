@@ -1131,7 +1131,7 @@ body.sidebar-collapsed .main-content {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 3px 10px;
+    padding: 1px 10px;
     border-radius: var(--radius-sm);
     cursor: pointer;
     transition: var(--transition);
@@ -1205,7 +1205,7 @@ body.sidebar-collapsed .main-content {
 
 .server-node-children {
     display: none;
-    padding-left: 14px;
+    padding-left: 10px;
     margin-left: 18px;
     border-left: 1px solid var(--border);
 }
@@ -1215,7 +1215,7 @@ body.sidebar-collapsed .main-content {
 }
 
 .server-node-children .nav-item {
-    padding: 4px 10px;
+    padding: 1px 10px;
     font-size: 11px;
     gap: 6px;
     border-radius: 6px;
