@@ -1191,17 +1191,11 @@ function buildServerTree(nodes) {
                 <a class="nav-item server-child-item cluster-backups-item" data-cluster="${escapedName}" data-view="cluster-backups" onclick="showClusterBackupsPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
                     <span class="icon" style="font-size:15px;">💾</span> <span style="font-weight:600;">Backups</span>
                 </a>
-`;
-        // Only show WolfKube if this cluster has k8s clusters on its nodes
-        const clusterNodeIds = new Set(clusterNodes.map(n => n.id));
-        const clusterK8s = k8sClusters.filter(c => c.owner_node_id && clusterNodeIds.has(c.owner_node_id));
-        if (clusterK8s.length > 0 || clusterNodes.some(n => n.k8s_clusters && n.k8s_clusters.length > 0)) {
-            html += `
+
                 <a class="nav-item server-child-item k8s-cluster-item" data-cluster="${escapedName}" data-view="kubernetes" onclick="showK8sClusterPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
                     <span class="icon" style="font-size:15px;">&#9784;</span> <span style="font-weight:600;">WolfKube</span>
                     <span class="k8s-cluster-count" id="k8s-count-${clusterId}" style="margin-left:auto; font-size:10px; padding:1px 6px; background:#326ce5; color:#fff; border-radius:10px; display:none;"></span>
                 </a>`;
-        }
 
         // Each node within the cluster
         clusterNodes.forEach(node => {
@@ -22232,13 +22226,24 @@ function renderKubernetesPage() {
     const el = document.getElementById('kubernetes-content');
     if (!el) return;
 
+    // Filter k8s clusters to only those belonging to the active WolfStack cluster
+    let visibleK8s = k8sClusters;
+    if (k8sWolfStackCluster) {
+        const wsClusterNodes = new Set(
+            allNodes.filter(n => (n.cluster_name || 'WolfStack') === k8sWolfStackCluster).map(n => n.id)
+        );
+        visibleK8s = k8sClusters.filter(c => !c.owner_node_id || wsClusterNodes.has(c.owner_node_id));
+    }
+
+    const clusterLabel = k8sWolfStackCluster ? ` — ${escapeHtml(k8sWolfStackCluster)}` : '';
+
     let html = `
     <div class="card" style="margin-bottom:20px; background:linear-gradient(135deg, rgba(50,108,229,0.12), rgba(50,108,229,0.04)); border-color:rgba(50,108,229,0.25);">
         <div class="card-body" style="display:flex; align-items:center; justify-content:space-between; padding:28px 32px;">
             <div style="display:flex; align-items:center; gap:20px;">
                 <div style="width:64px; height:64px; background:linear-gradient(135deg,#326ce5,#54a3ff); border-radius:16px; display:flex; align-items:center; justify-content:center; font-size:32px; box-shadow:0 4px 20px rgba(50,108,229,0.3);">&#9784;</div>
                 <div>
-                    <h2 style="font-size:24px; margin-bottom:4px; color:var(--text-primary); font-weight:700;">WolfKube</h2>
+                    <h2 style="font-size:24px; margin-bottom:4px; color:var(--text-primary); font-weight:700;">WolfKube${clusterLabel}</h2>
                     <p style="color:var(--text-secondary); font-size:13px; margin:0;">Provision and manage Kubernetes clusters across your nodes with WolfNet overlay networking.</p>
                 </div>
             </div>
@@ -22252,7 +22257,7 @@ function renderKubernetesPage() {
     // Auto-detect banner
     html += `<div id="k8s-detect-banner"></div>`;
 
-    if (k8sClusters.length === 0) {
+    if (visibleK8s.length === 0) {
         html += `<div class="card"><div class="card-body" style="padding:60px; text-align:center;">
             <div style="font-size:48px; margin-bottom:16px;">&#9784;</div>
             <h3 style="margin-bottom:8px; color:var(--text-primary);">No Clusters Configured</h3>
@@ -22269,7 +22274,7 @@ function renderKubernetesPage() {
             <th>Cluster</th><th>Type</th><th>Nodes</th><th>Status</th><th>API Server</th><th style="text-align:right;">Actions</th>
         </tr></thead><tbody>`;
 
-        k8sClusters.forEach(c => {
+        visibleK8s.forEach(c => {
             const typeBadge = `<span style="padding:2px 8px;border-radius:6px;font-size:11px;background:rgba(50,108,229,0.12);color:#326ce5;border:1px solid rgba(50,108,229,0.3);">${escapeHtml(c.cluster_type || 'k8s')}</span>`;
             const nodeCount = (c.nodes || []).length;
             html += `<tr style="cursor:pointer;" onclick="openK8sCluster('${escapeHtml(c.id)}')">
@@ -22288,7 +22293,7 @@ function renderKubernetesPage() {
         html += `</tbody></table></div></div>`;
 
         // Check cluster statuses async
-        k8sClusters.forEach(c => checkK8sClusterStatus(c.id));
+        visibleK8s.forEach(c => checkK8sClusterStatus(c.id));
     }
 
     // Detail panel (shown when a cluster is selected)
