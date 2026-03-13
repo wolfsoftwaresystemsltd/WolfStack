@@ -1181,17 +1181,17 @@ function buildServerTree(nodes) {
                 <span class="remove-server-btn" onclick="event.stopPropagation(); openWsClusterSettings('${escapedName}')" title="Cluster settings" style="margin-left:4px;">⚙️</span>
             </div>
             <div class="server-node-children ${shouldExpandCluster ? 'expanded' : ''}" id="children-${clusterId}">
-                <a class="nav-item server-child-item statuspage-cluster-item" data-cluster="${escapedName}" data-view="statuspage" onclick="showStatusPagesForCluster('${escapedName}')" style="margin-left: 8px; padding: 1px 10px; display:flex; align-items:center; gap:6px;">
+                <a class="nav-item server-child-item statuspage-cluster-item" data-cluster="${escapedName}" data-view="statuspage" onclick="showStatusPagesForCluster('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
                     <span class="icon" style="font-size:15px;">🛡️</span> <span style="font-weight:600;">Status Pages</span>
                 </a>
-                <a class="nav-item server-child-item wolfrun-cluster-item" data-cluster="${escapedName}" data-view="wolfrun" onclick="showWolfRunPage('${escapedName}')" style="margin-left: 8px; padding: 1px 10px; display:flex; align-items:center; gap:6px;">
+                <a class="nav-item server-child-item wolfrun-cluster-item" data-cluster="${escapedName}" data-view="wolfrun" onclick="showWolfRunPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
                     <span class="icon" style="font-size:15px;">🏃</span> <span style="font-weight:600;">WolfRun</span>
                     <span class="wolfrun-svc-count" id="wolfrun-count-${clusterId}" style="margin-left:auto; font-size:10px; padding:1px 6px; background:var(--primary-color,#6366f1); color:#fff; border-radius:10px; display:none;"></span>
                 </a>
-                <a class="nav-item server-child-item cluster-backups-item" data-cluster="${escapedName}" data-view="cluster-backups" onclick="showClusterBackupsPage('${escapedName}')" style="margin-left: 8px; padding: 1px 10px; display:flex; align-items:center; gap:6px;">
+                <a class="nav-item server-child-item cluster-backups-item" data-cluster="${escapedName}" data-view="cluster-backups" onclick="showClusterBackupsPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
                     <span class="icon" style="font-size:15px;">💾</span> <span style="font-weight:600;">Backups</span>
                 </a>
-                <a class="nav-item server-child-item k8s-cluster-item" data-cluster="${escapedName}" data-view="kubernetes" onclick="showK8sClusterPage('${escapedName}')" style="margin-left: 8px; padding: 1px 10px; display:flex; align-items:center; gap:6px;">
+                <a class="nav-item server-child-item k8s-cluster-item" data-cluster="${escapedName}" data-view="kubernetes" onclick="showK8sClusterPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
                     <span class="icon" style="font-size:15px;">&#9784;</span> <span style="font-weight:600;">WolfKube</span>
                     <span class="k8s-cluster-count" id="k8s-count-${clusterId}" style="margin-left:auto; font-size:10px; padding:1px 6px; background:#326ce5; color:#fff; border-radius:10px; display:none;"></span>
                 </a>`;
