@@ -413,6 +413,82 @@ async function installIconPack() {
     }
 }
 
+/// Install all curated icon packs sequentially with a progress modal
+async function installAllIconPacks() {
+    // Get list of already-installed packs to skip
+    let installedIds = new Set();
+    try {
+        const resp = await fetch('/api/icon-packs');
+        if (resp.ok) {
+            const data = await resp.json();
+            installedIds = new Set((data.packs || []).map(p => p.id));
+        }
+    } catch {}
+
+    const toInstall = CURATED_PACKS.filter(p => !installedIds.has(p.id));
+    if (toInstall.length === 0) {
+        showToast('All icon packs are already installed', 'success');
+        return;
+    }
+
+    // Show progress modal
+    const overlay = document.createElement('div');
+    overlay.id = 'install-all-modal';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);';
+    overlay.innerHTML = `
+        <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:16px;padding:32px 40px;min-width:420px;max-width:520px;text-align:center;">
+            <div style="font-size:18px;font-weight:700;margin-bottom:16px;">Installing Icon Packs</div>
+            <div id="install-all-name" style="font-size:14px;font-weight:600;margin-bottom:8px;"></div>
+            <div style="background:var(--bg-primary);border-radius:8px;height:12px;overflow:hidden;margin-bottom:12px;">
+                <div id="install-all-bar" style="height:100%;width:0%;background:var(--accent);border-radius:8px;transition:width 0.3s;"></div>
+            </div>
+            <div id="install-all-status" style="font-size:13px;color:var(--text-muted);"></div>
+            <div id="install-all-log" style="margin-top:12px;max-height:150px;overflow-y:auto;text-align:left;font-size:11px;color:var(--text-muted);"></div>
+            <button id="install-all-close" class="btn btn-primary" style="margin-top:16px;display:none;padding:6px 24px;" onclick="document.getElementById('install-all-modal').remove();loadIconPacks();">Done</button>
+        </div>`;
+    document.body.appendChild(overlay);
+
+    const nameEl = document.getElementById('install-all-name');
+    const barEl = document.getElementById('install-all-bar');
+    const statusEl = document.getElementById('install-all-status');
+    const logEl = document.getElementById('install-all-log');
+    const closeBtn = document.getElementById('install-all-close');
+
+    let installed = 0, failed = 0;
+    for (let i = 0; i < toInstall.length; i++) {
+        const pack = toInstall[i];
+        const pct = Math.round(((i) / toInstall.length) * 100);
+        barEl.style.width = pct + '%';
+        nameEl.textContent = pack.name;
+        statusEl.textContent = `${i + 1} of ${toInstall.length} — ${installed} installed, ${failed} failed`;
+
+        try {
+            const resp = await fetch('/api/icon-packs/install', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: pack.url }),
+            });
+            const data = await resp.json();
+            if (data.ok) {
+                installed++;
+                logEl.innerHTML += `<div style="color:var(--success);">&#10003; ${pack.name}</div>`;
+            } else {
+                failed++;
+                logEl.innerHTML += `<div style="color:var(--danger);">&#10007; ${pack.name}: ${data.error || 'failed'}</div>`;
+            }
+        } catch (e) {
+            failed++;
+            logEl.innerHTML += `<div style="color:var(--danger);">&#10007; ${pack.name}: ${e.message}</div>`;
+        }
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    barEl.style.width = '100%';
+    nameEl.textContent = 'Complete';
+    statusEl.textContent = `${installed} installed, ${failed} failed`;
+    closeBtn.style.display = '';
+}
+
 /// Remove a custom-installed icon pack
 async function removeIconPack(packId) {
     if (!confirm(`Remove icon pack "${packId}"?`)) return;

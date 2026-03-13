@@ -3229,12 +3229,14 @@
                             </div>
                         </div>
 
-                        <!-- Install Icon Pack -->
+                        <!-- Install Icon Packs -->
                         <div style="margin-top:24px; padding:16px; background:var(--bg-primary); border:1px solid var(--border); border-radius:12px;">
-                            <div style="font-weight:600; font-size:14px; margin-bottom:8px;">Install Icon Pack</div>
+                            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                                <div style="font-weight:600; font-size:14px;">Install Icon Pack</div>
+                                <button id="icon-pack-install-all-btn" class="btn btn-sm btn-primary" onclick="installAllIconPacks()" style="font-size:12px; padding:4px 12px;">Install All Packs</button>
+                            </div>
                             <p style="font-size:12px; color:var(--text-muted); margin:0 0 12px 0;">
-                                Install any freedesktop.org-compatible Linux icon theme from GitHub. System icon themes
-                                already installed on the server (e.g. in <code>/usr/share/icons</code>) are detected automatically.
+                                Install any freedesktop.org-compatible Linux icon theme from GitHub, or install all 20 curated packs at once.
                             </p>
                             <div style="display:flex; gap:8px;">
                                 <input type="text" id="icon-pack-url" placeholder="https://github.com/EliverLara/candy-icons" style="flex:1; padding:8px 12px; background:var(--bg-card); border:1px solid var(--border); border-radius:8px; color:var(--text-primary); font-size:13px; outline:none;">
