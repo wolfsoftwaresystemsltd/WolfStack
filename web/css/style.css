@@ -775,6 +775,152 @@
     color: #1e4a6e;
 }
 
+/* ─── Trek Theme — LCARS-inspired Star Trek aesthetic ─── */
+[data-theme="trek"] {
+    --bg-primary: #000000;
+    --bg-secondary: #0a0a14;
+    --bg-card: #12121e;
+    --bg-card-hover: #1a1a2a;
+    --bg-input: #06060e;
+    --border: #cc6699;
+    --border-light: #9999cc;
+    --text-primary: #ccddff;
+    --text-secondary: #9999cc;
+    --text-muted: #666699;
+    --accent: #ff9900;
+    --accent-light: #ffbb44;
+    --accent-glow: rgba(255, 153, 0, 0.15);
+    --success: #99ccff;
+    --success-bg: rgba(153, 204, 255, 0.1);
+    --warning: #ff9900;
+    --warning-bg: rgba(255, 153, 0, 0.1);
+    --danger: #cc6666;
+    --danger-bg: rgba(204, 102, 102, 0.1);
+    --info: #9999ff;
+    --info-bg: rgba(153, 153, 255, 0.1);
+    --gradient-main: linear-gradient(135deg, #cc6699 0%, #ff9900 50%, #ffbb44 100%);
+    --gradient-success: linear-gradient(135deg, #9999cc 0%, #99ccff 100%);
+    --gradient-danger: linear-gradient(135deg, #cc6666 0%, #ff8888 100%);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.6);
+    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.7);
+    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.8);
+    --shadow-glow: 0 0 30px rgba(204, 102, 153, 0.12);
+    --radius: 16px;
+    --radius-sm: 12px;
+    --radius-lg: 24px;
+}
+
+[data-theme="trek"] body {
+    font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+    background: #000000;
+    background-attachment: fixed;
+}
+
+[data-theme="trek"] .sidebar {
+    background: #0a0a14;
+    border-right: 3px solid #cc6699;
+}
+
+[data-theme="trek"] .top-bar {
+    background: #0a0a14;
+    border-bottom: 3px solid #cc6699;
+}
+
+[data-theme="trek"] .card,
+[data-theme="trek"] .stat-card {
+    border: 1px solid #3a3a5c;
+    border-left: 4px solid #cc6699;
+    border-radius: var(--radius);
+}
+
+[data-theme="trek"] .card:hover,
+[data-theme="trek"] .stat-card:hover {
+    border-left-color: #ff9900;
+}
+
+[data-theme="trek"] .btn-primary {
+    background: linear-gradient(135deg, #cc6699, #dd7799);
+    border: none;
+    border-radius: 20px;
+    color: #000;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+[data-theme="trek"] .btn-primary:hover {
+    background: linear-gradient(135deg, #ff9900, #ffbb44);
+    color: #000;
+}
+
+[data-theme="trek"] .btn {
+    border-radius: 20px;
+}
+
+[data-theme="trek"] .nav-item.active {
+    background: rgba(204, 102, 153, 0.2);
+    box-shadow: inset 3px 0 0 #ff9900;
+}
+
+[data-theme="trek"] .modal-content {
+    border: 2px solid #cc6699;
+    border-radius: 20px;
+    box-shadow: 0 0 40px rgba(204, 102, 153, 0.2), 0 20px 60px rgba(0, 0, 0, 0.8);
+}
+
+[data-theme="trek"] input,
+[data-theme="trek"] select,
+[data-theme="trek"] textarea {
+    border-radius: 10px;
+    border-color: #3a3a5c;
+}
+
+[data-theme="trek"] input:focus,
+[data-theme="trek"] select:focus,
+[data-theme="trek"] textarea:focus {
+    border-color: #cc6699;
+    box-shadow: 0 0 0 3px rgba(204, 102, 153, 0.2);
+}
+
+[data-theme="trek"] .data-table thead {
+    background: #12121e;
+    border-bottom: 2px solid #cc6699;
+}
+
+[data-theme="trek"] .data-table tbody tr:hover {
+    background: rgba(153, 153, 204, 0.08);
+}
+
+[data-theme="trek"] .log-viewer {
+    background: #000000;
+    color: #99ccff;
+    border: 1px solid #3a3a5c;
+}
+
+[data-theme="trek"] .progress-bar {
+    background: #12121e;
+    border-radius: 10px;
+}
+
+[data-theme="trek"] .stat-icon {
+    border-radius: 50%;
+    box-shadow: 0 0 10px rgba(255, 153, 0, 0.2);
+}
+
+[data-theme="trek"] ::selection {
+    background: #cc6699;
+    color: #000;
+}
+
+[data-theme="trek"] ::-webkit-scrollbar-thumb {
+    background: #cc6699;
+    border-radius: 10px;
+}
+
+[data-theme="trek"] ::-webkit-scrollbar-track {
+    background: #0a0a14;
+}
+
 /* ─── No Icons Mode ─── */
 [data-no-icons] .icon {
     display: none !important;
