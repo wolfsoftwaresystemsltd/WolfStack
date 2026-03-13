@@ -148,13 +148,17 @@ function getIconPackUrl(semanticName) {
 
 /// Create an <img> element for an icon pack icon
 function createIconImg(semanticName, size) {
-    size = size || 18;
     const url = getIconPackUrl(semanticName);
     if (!url) return null;
     const img = document.createElement('img');
     img.src = url;
     img.alt = semanticName;
-    img.style.cssText = `width:${size}px;height:${size}px;vertical-align:middle;display:inline-block;`;
+    if (size) {
+        img.style.cssText = `width:${size}px;height:${size}px;vertical-align:middle;display:inline-block;`;
+    } else {
+        // Use 1em so the icon matches the surrounding text/emoji size
+        img.style.cssText = 'width:1em;height:1em;vertical-align:-0.125em;display:inline-block;';
+    }
     img.className = 'ws-icon-pack-img';
     img.onerror = function() { this.style.display = 'none'; };
     return img;
@@ -166,17 +170,20 @@ function replaceEmojiWithPackIcon(textNode, emojiChar, semanticName) {
     const idx = text.indexOf(emojiChar);
     if (idx === -1) return false;
 
-    const img = createIconImg(semanticName, 18);
-    if (!img) return false;
-
     // Check if this semantic icon is available in the pack
     if (_activePackAvailable && !_activePackAvailable.has(semanticName)) return false;
 
-    const before = text.substring(0, idx);
-    const after = text.substring(idx + emojiChar.length);
-
     const parent = textNode.parentNode;
     if (!parent) return false;
+
+    // Derive size from the parent element's font-size so icons match emojis
+    const computed = window.getComputedStyle(parent);
+    const fontSize = parseFloat(computed.fontSize) || 16;
+    const img = createIconImg(semanticName, Math.round(fontSize));
+    if (!img) return false;
+
+    const before = text.substring(0, idx);
+    const after = text.substring(idx + emojiChar.length);
 
     if (before) parent.insertBefore(document.createTextNode(before), textNode);
     parent.insertBefore(img, textNode);
