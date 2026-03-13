@@ -113,6 +113,7 @@ const EMOJI_TO_SEMANTIC = {
     '🐳': 'docker', '🐧': 'docker', '🔍': 'search', '🎮': 'gamepad',
     '🎵': 'music', '📷': 'camera', '🛒': 'cart', '💰': 'money', '📚': 'book',
     '🔬': 'lab', '🧪': 'lab', '⭐': 'star', '🌟': 'star',
+    '🏃': 'runner',
 };
 
 let currentIconTheme = localStorage.getItem('wolfstack-icon-theme') || 'standard';
@@ -240,21 +241,13 @@ function renderIconPacksUI(packs) {
             ? `<button class="btn btn-sm" style="margin-top:8px;font-size:11px;padding:2px 8px;color:var(--danger);" onclick="event.stopPropagation();removeIconPack('${pack.id}')">Remove</button>`
             : '';
 
-        // Preview: show icon images if this is the active pack, otherwise show folder icon
-        const previewIcons = (pack.sample_icons || []).slice(0, 5);
-        let previewHtml;
-        if (previewIcons.length > 0) {
-            previewHtml = previewIcons.map(name =>
-                `<img src="/api/icon-packs/${encodeURIComponent(pack.id)}/icon/${encodeURIComponent(name)}" style="width:28px;height:28px;margin:0 3px;" onerror="this.style.display='none'">`
-            ).join('');
-        } else {
-            previewHtml = `<span style="font-size:13px;color:var(--text-muted);">No preview</span>`;
-        }
-
+        const packIdEsc = pack.id.replace(/'/g, "\\'");
         html += `
-            <div class="icon-theme-card theme-card${active}" data-icon-theme="${pack.id}" onclick="applyIconTheme('${pack.id}')">
+            <div class="icon-theme-card theme-card${active}" data-icon-theme="${pack.id}" onclick="applyIconTheme('${packIdEsc}')">
                 <div style="padding:16px;text-align:center;">
-                    <div style="height:38px;display:flex;align-items:center;justify-content:center;margin-bottom:10px;">${previewHtml}</div>
+                    <div id="icon-pack-preview-${pack.id}" style="min-height:38px;display:flex;align-items:center;justify-content:center;margin-bottom:10px;">
+                        <button class="btn btn-sm" onclick="event.stopPropagation();previewIconPack('${packIdEsc}')" style="font-size:11px;padding:3px 10px;">Preview</button>
+                    </div>
                     <div class="theme-card-info">
                         <div class="theme-card-name">${pack.name}</div>
                         <div class="theme-card-desc">${pack.comment || source}${iconCount}${scalable}</div>
@@ -265,6 +258,22 @@ function renderIconPacksUI(packs) {
     }
 
     container.innerHTML = html;
+}
+
+/// Load and show preview icons for a specific pack
+async function previewIconPack(packId) {
+    const container = document.getElementById(`icon-pack-preview-${packId}`);
+    if (!container) return;
+    container.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">Loading...</span>';
+    const preview = await loadIconPackPreview(packId);
+    if (!preview || !preview.available || preview.available.length === 0) {
+        container.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">No matching icons</span>';
+        return;
+    }
+    const icons = preview.available.slice(0, 5);
+    container.innerHTML = icons.map(name =>
+        `<img src="/api/icon-packs/${encodeURIComponent(packId)}/icon/${encodeURIComponent(name)}" style="width:28px;height:28px;margin:0 3px;" onerror="this.style.display='none'">`
+    ).join('');
 }
 
 /// Install an icon pack from a GitHub URL
@@ -19090,11 +19099,12 @@ async function initIconTheme() {
     if (isIconPackTheme()) {
         // Load available icons for the active pack
         const preview = await loadIconPackPreview(currentIconTheme);
-        if (preview && preview.available) {
+        if (preview && preview.available && preview.available.length > 0) {
             _activePackAvailable = new Set(preview.available);
             replaceEmojisWithPackIcons(document.body);
             observeForIconPack();
         }
+        // If the pack has no matching icons, we just leave default emojis in place
     } else {
         // Built-in emoji theme (candy)
         patchIconConstants();

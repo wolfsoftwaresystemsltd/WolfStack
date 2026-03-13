@@ -106,6 +106,7 @@ pub fn semantic_to_freedesktop() -> HashMap<&'static str, &'static [&'static str
     m.insert("book",           &["accessories-dictionary", "help-contents", "applications-office"]);
     m.insert("lab",            &["applications-science", "utilities-system-monitor"]);
     m.insert("star",           &["emblem-favorite", "starred", "bookmark-new"]);
+    m.insert("runner",         &["system-run", "media-playback-start", "go-next"]);
     m
 }
 
@@ -248,16 +249,6 @@ fn scan_icon_dir(base: &Path, source: &str) -> Vec<IconPack> {
         let has_scalable = path.join("scalable").exists()
             || path.join("apps").join("scalable").exists();
 
-        // Count sample icons by looking in common dirs
-        let mut sample_icons = Vec::new();
-        let semantic_map = semantic_to_freedesktop();
-        for (semantic, _candidates) in &semantic_map {
-            if sample_icons.len() >= 6 { break; }
-            if resolve_icon(&path, semantic).is_some() {
-                sample_icons.push(semantic.to_string());
-            }
-        }
-
         let icon_count = count_icons_rough(&path);
 
         packs.push(IconPack {
@@ -268,7 +259,7 @@ fn scan_icon_dir(base: &Path, source: &str) -> Vec<IconPack> {
             source: source.to_string(),
             has_scalable,
             icon_count,
-            sample_icons,
+            sample_icons: Vec::new(),
         });
     }
     packs
