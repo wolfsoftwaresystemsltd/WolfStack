@@ -222,24 +222,49 @@ async function loadIconPacks() {
     }
 }
 
-// Suggested icon packs — shown as installable cards if not already present
-const SUGGESTED_PACKS = [
-    { id: 'BeautyLine',           name: 'BeautyLine',    desc: 'Sleek outlined icons with gradient fills', url: 'https://github.com/gvolpe/BeautyLine' },
-    { id: 'breeze-icons',         name: 'Breeze (KDE)',  desc: 'KDE Visual Design Group — clean, modern icons', url: 'https://github.com/KDE/breeze-icons' },
-    { id: 'candy-icons',          name: 'Candy Icons',   desc: 'Sweet, colorful SVG icons with candy-inspired gradients', url: 'https://github.com/EliverLara/candy-icons' },
-    { id: 'papirus-icon-theme',   name: 'Papirus',      desc: 'Material Design-inspired SVG icon theme', url: 'https://github.com/PapirusDevelopmentTeam/papirus-icon-theme' },
-    { id: 'Tela-icon-theme',      name: 'Tela',         desc: 'Flat, colourful design with multiple colour variants', url: 'https://github.com/vinceliuice/Tela-icon-theme' },
+// Curated icon packs — the primary list shown to users (servers have no desktop themes)
+const CURATED_PACKS = [
+    { id: 'BeautyLine',              name: 'BeautyLine',       desc: 'Sleek outlined icons with gradient fills',              url: 'https://github.com/gvolpe/BeautyLine' },
+    { id: 'breeze-icons',            name: 'Breeze (KDE)',     desc: 'KDE Visual Design Group — clean, modern icons',         url: 'https://github.com/KDE/breeze-icons' },
+    { id: 'candy-icons',             name: 'Candy Icons',      desc: 'Sweet, colourful SVG icons with candy-inspired gradients', url: 'https://github.com/EliverLara/candy-icons' },
+    { id: 'Colloid-icon-theme',      name: 'Colloid',          desc: 'Rounded icons with Nord, Dracula and Catppuccin palettes', url: 'https://github.com/vinceliuice/Colloid-icon-theme' },
+    { id: 'flat-remix',              name: 'Flat Remix',       desc: 'Material Design-inspired flat icons with vivid colours',  url: 'https://github.com/daniruiz/flat-remix' },
+    { id: 'Fluent-icon-theme',       name: 'Fluent',           desc: 'Microsoft Fluent Design-inspired icons for Linux',       url: 'https://github.com/vinceliuice/Fluent-icon-theme' },
+    { id: 'gruvbox-plus-icon-pack',  name: 'Gruvbox Plus',     desc: 'Warm retro groove based on the Gruvbox colour scheme',   url: 'https://github.com/SylEleuth/gruvbox-plus-icon-pack' },
+    { id: 'kora',                    name: 'Kora',             desc: 'Crisp SVG icons with vibrant blue and grey variants',     url: 'https://github.com/bikass/kora' },
+    { id: 'luv-icon-theme',          name: 'Luv',              desc: 'Flat yet detailed icons — spiritual successor to Flattr', url: 'https://github.com/Nitrux/luv-icon-theme' },
+    { id: 'McMojave-circle',         name: 'McMojave Circle',  desc: 'macOS Mojave-inspired circular icons',                   url: 'https://github.com/vinceliuice/McMojave-circle' },
+    { id: 'Nordzy-icon',             name: 'Nordzy',           desc: 'Arctic palette icons using the Nord colour scheme',       url: 'https://github.com/alvatip/Nordzy-icon' },
+    { id: 'numix-icon-theme-circle', name: 'Numix Circle',     desc: 'Distinctive circular app icons from the Numix project',  url: 'https://github.com/numixproject/numix-icon-theme-circle' },
+    { id: 'iconpack-obsidian',       name: 'Obsidian',         desc: 'Faenza-based icon pack optimised for dark themes',        url: 'https://github.com/madmaxms/iconpack-obsidian' },
+    { id: 'papirus-icon-theme',      name: 'Papirus',          desc: 'Material Design-inspired SVG icon theme',                url: 'https://github.com/PapirusDevelopmentTeam/papirus-icon-theme' },
+    { id: 'Qogir-icon-theme',        name: 'Qogir',            desc: 'Flat colourful design with rounded folder icons',         url: 'https://github.com/vinceliuice/Qogir-icon-theme' },
+    { id: 'Reversal-icon-theme',     name: 'Reversal',         desc: 'Bold colourful icons with many colour variants',          url: 'https://github.com/yeyushengfan258/Reversal-icon-theme' },
+    { id: 'Tela-icon-theme',         name: 'Tela',             desc: 'Flat, colourful design with multiple colour variants',    url: 'https://github.com/vinceliuice/Tela-icon-theme' },
+    { id: 'We10X-icon-theme',        name: 'We10X',            desc: 'Windows 10-inspired colourful icons for Linux',           url: 'https://github.com/yeyushengfan258/We10X-icon-theme' },
+    { id: 'WhiteSur-icon-theme',     name: 'WhiteSur',         desc: 'macOS Big Sur-style icons for Linux desktops',            url: 'https://github.com/vinceliuice/WhiteSur-icon-theme' },
+    { id: 'Zafiro-icons',            name: 'Zafiro',           desc: 'Minimalist flat icons with soft light colours',           url: 'https://github.com/zayronxio/Zafiro-icons' },
 ];
 
-/// Render the icon packs management UI — auto-loads previews, hides packs with no matching icons
+/// Render the icon packs management UI — curated list first, auto-loads previews for installed packs
 async function renderIconPacksUI(packs) {
     const container = document.getElementById('icon-packs-grid');
     if (!container) return;
 
+    // Build lookup of installed packs by ID and normalised name
+    const installedById = {};
+    const installedByName = {};
+    for (const p of packs) {
+        installedById[p.id] = p;
+        installedByName[p.name.toLowerCase().replace(/[^a-z]/g, '')] = p;
+    }
+    function findInstalled(curatedId, curatedName) {
+        if (installedById[curatedId]) return installedById[curatedId];
+        const norm = curatedName.toLowerCase().replace(/[^a-z]/g, '');
+        return installedByName[norm] || null;
+    }
+
     let html = '';
-    const installedIds = new Set(packs.map(p => p.id));
-    // Also index by lowercase name for fuzzy matching suggested packs
-    const installedNames = new Set(packs.map(p => p.name.toLowerCase().replace(/[^a-z]/g, '')));
 
     // Built-in themes first
     for (const [id, theme] of Object.entries(BUILTIN_ICON_THEMES)) {
@@ -249,8 +274,8 @@ async function renderIconPacksUI(packs) {
             : '🍬 🧁 🍩 🍪 🍭';
         html += `
             <div class="icon-theme-card theme-card${active}" data-icon-theme="${id}" onclick="applyIconTheme('${id}')">
-                <div style="padding:16px;text-align:center;">
-                    <div data-no-translate style="font-size:28px;letter-spacing:6px;margin-bottom:10px;">${preview}</div>
+                <div style="padding:12px;text-align:center;">
+                    <div data-no-translate style="font-size:28px;letter-spacing:6px;margin-bottom:8px;">${preview}</div>
                     <div class="theme-card-info">
                         <div class="theme-card-name">${theme.name}</div>
                         <div class="theme-card-desc">${theme.description}</div>
@@ -259,60 +284,84 @@ async function renderIconPacksUI(packs) {
             </div>`;
     }
 
-    // Helper to build a pack card
-    function packCardHtml(id, name, desc, extra) {
-        const active = currentIconTheme === id ? ' active' : '';
-        const idEsc = id.replace(/'/g, "\\'");
-        return `
-            <div class="icon-theme-card theme-card${active}" data-icon-theme="${id}" data-icon-card="${id}" onclick="applyIconTheme('${idEsc}')">
-                <div style="padding:16px;text-align:center;">
-                    <div id="icon-pack-preview-${id}" style="min-height:38px;display:flex;align-items:center;justify-content:center;margin-bottom:10px;">
-                        <span style="font-size:11px;color:var(--text-muted);">Loading...</span>
-                    </div>
+    // Curated packs — always shown, with install/preview state
+    const shownIds = new Set();
+    const previewIds = [];
+    for (const cp of CURATED_PACKS) {
+        const installed = findInstalled(cp.id, cp.name);
+        const packId = installed ? installed.id : cp.id;
+        shownIds.add(packId);
+        if (installed) shownIds.add(installed.id);
+
+        const active = currentIconTheme === packId ? ' active' : '';
+        const idEsc = packId.replace(/'/g, "\\'");
+        const urlEsc = cp.url.replace(/'/g, "\\'");
+
+        let previewArea, actionBtn;
+        if (installed) {
+            // Installed — show preview area (will auto-load) and optional Remove
+            previewArea = `<div id="icon-pack-preview-${packId}" style="min-height:34px;display:flex;align-items:center;justify-content:center;margin-bottom:8px;">
+                <span style="font-size:11px;color:var(--text-muted);">Loading...</span></div>`;
+            actionBtn = installed.source === 'custom'
+                ? `<button class="btn btn-sm" style="margin-top:6px;font-size:11px;padding:2px 8px;color:var(--danger);" onclick="event.stopPropagation();removeIconPack('${idEsc}')">Remove</button>`
+                : '';
+            previewIds.push(packId);
+        } else {
+            // Not installed — show Install button in preview area
+            previewArea = `<div style="min-height:34px;display:flex;align-items:center;justify-content:center;margin-bottom:8px;">
+                <button class="btn btn-sm btn-primary" onclick="event.stopPropagation();document.getElementById('icon-pack-url').value='${urlEsc}';installIconPack()" style="font-size:11px;padding:3px 10px;">Install</button></div>`;
+            actionBtn = '';
+        }
+
+        const desc = installed
+            ? (installed.comment || cp.desc) + (installed.icon_count > 0 ? ` \u00b7 ${installed.icon_count}+ icons` : '') + (installed.has_scalable ? ' \u00b7 SVG' : '')
+            : cp.desc;
+
+        html += `
+            <div class="icon-theme-card theme-card${active}" data-icon-theme="${packId}" data-icon-card="${packId}" onclick="${installed ? `applyIconTheme('${idEsc}')` : ''}">
+                <div style="padding:12px;text-align:center;">
+                    ${previewArea}
                     <div class="theme-card-info">
-                        <div class="theme-card-name">${name}</div>
+                        <div class="theme-card-name">${cp.name}</div>
                         <div class="theme-card-desc">${desc}</div>
                     </div>
-                    ${extra || ''}
+                    ${actionBtn}
                 </div>
             </div>`;
     }
 
-    // Installed icon packs
-    const allPackIds = [];
+    // Any extra installed packs not in the curated list (manually installed or system themes)
     for (const pack of packs) {
+        if (shownIds.has(pack.id)) continue;
+        const active = currentIconTheme === pack.id ? ' active' : '';
+        const idEsc = pack.id.replace(/'/g, "\\'");
         const source = pack.source === 'custom' ? 'Installed' : 'System';
         const iconCount = pack.icon_count > 0 ? ` \u00b7 ${pack.icon_count}+ icons` : '';
         const scalable = pack.has_scalable ? ' \u00b7 SVG' : '';
         const canRemove = pack.source === 'custom'
-            ? `<button class="btn btn-sm" style="margin-top:8px;font-size:11px;padding:2px 8px;color:var(--danger);" onclick="event.stopPropagation();removeIconPack('${pack.id.replace(/'/g, "\\'")}')">Remove</button>`
+            ? `<button class="btn btn-sm" style="margin-top:6px;font-size:11px;padding:2px 8px;color:var(--danger);" onclick="event.stopPropagation();removeIconPack('${idEsc}')">Remove</button>`
             : '';
-        html += packCardHtml(pack.id, pack.name, (pack.comment || source) + iconCount + scalable, canRemove);
-        allPackIds.push(pack.id);
-    }
-
-    // Suggested packs not yet installed — same card style, with Install button
-    const suggestedShown = [];
-    for (const sp of SUGGESTED_PACKS) {
-        if (installedIds.has(sp.id)) continue;
-        // Skip if already installed under a different dir name (e.g. system "Papirus" vs suggested "papirus-icon-theme")
-        const normName = sp.name.toLowerCase().replace(/[^a-z]/g, '');
-        if (installedNames.has(normName)) continue;
-        const urlEsc = sp.url.replace(/'/g, "\\'");
-        const installBtn = `<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();document.getElementById('icon-pack-url').value='${urlEsc}';installIconPack()" style="margin-top:8px;font-size:11px;padding:3px 10px;">Install</button>`;
-        html += packCardHtml(sp.id, sp.name, sp.desc, installBtn);
-        suggestedShown.push(sp.id);
+        html += `
+            <div class="icon-theme-card theme-card${active}" data-icon-theme="${pack.id}" data-icon-card="${pack.id}" onclick="applyIconTheme('${idEsc}')">
+                <div style="padding:12px;text-align:center;">
+                    <div id="icon-pack-preview-${pack.id}" style="min-height:34px;display:flex;align-items:center;justify-content:center;margin-bottom:8px;">
+                        <span style="font-size:11px;color:var(--text-muted);">Loading...</span>
+                    </div>
+                    <div class="theme-card-info">
+                        <div class="theme-card-name">${pack.name}</div>
+                        <div class="theme-card-desc">${(pack.comment || source) + iconCount + scalable}</div>
+                    </div>
+                    ${canRemove}
+                </div>
+            </div>`;
+        previewIds.push(pack.id);
     }
 
     container.innerHTML = html;
 
-    // Auto-load previews for all installed packs; hide cards with no matching icons
-    for (const pack of packs) {
-        autoLoadPreview(pack.id);
-    }
-    // Also try suggested packs — they'll be hidden if preview fails (not installed)
-    for (const spId of suggestedShown) {
-        autoLoadPreview(spId);
+    // Auto-load previews for installed packs; hide if no matching icons
+    for (const pid of previewIds) {
+        autoLoadPreview(pid);
     }
 }
 
