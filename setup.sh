@@ -160,7 +160,7 @@ if [ "$PKG_MANAGER" = "apt" ]; then
             done
         }
         # Install optional runtime deps one-by-one — skip if already provided by PVE
-        for pkg in dnsmasq-base bridge-utils socat s3fs nfs-common fuse3; do
+        for pkg in dnsmasq-base bridge-utils socat nfs-common fuse3; do
             if dpkg -s "$pkg" &>/dev/null; then
                 echo "  ✓ $pkg already installed"
             else
@@ -169,6 +169,12 @@ if [ "$PKG_MANAGER" = "apt" ]; then
                     echo "  ⚠ Could not install $pkg (may conflict with PVE) — skipping"
             fi
         done
+        # s3fs — try both package names (s3fs-fuse on Kali/some Debian, s3fs on Ubuntu/Proxmox)
+        if ! dpkg -s s3fs-fuse &>/dev/null && ! dpkg -s s3fs &>/dev/null; then
+            apt install -y --no-install-recommends s3fs-fuse 2>/dev/null || \
+                apt install -y --no-install-recommends s3fs 2>/dev/null || \
+                echo "  ⚠ s3fs not available — S3 mounts will use built-in sync"
+        fi
     else
         # Select architecture-appropriate QEMU package
         ARCH=$(uname -m)
@@ -179,7 +185,8 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         else
             QEMU_PKG="qemu-system-x86 qemu-utils"
         fi
-        apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils $QEMU_PKG socat s3fs nfs-common fuse3
+        apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils $QEMU_PKG socat nfs-common fuse3
+        apt install -y s3fs-fuse 2>/dev/null || apt install -y s3fs 2>/dev/null || echo "  ⚠ s3fs not available — S3 mounts will use built-in sync"
     fi
 elif [ "$PKG_MANAGER" = "dnf" ]; then
     ARCH=$(uname -m)
