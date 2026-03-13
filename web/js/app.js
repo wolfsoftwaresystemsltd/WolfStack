@@ -238,6 +238,8 @@ async function renderIconPacksUI(packs) {
 
     let html = '';
     const installedIds = new Set(packs.map(p => p.id));
+    // Also index by lowercase name for fuzzy matching suggested packs
+    const installedNames = new Set(packs.map(p => p.name.toLowerCase().replace(/[^a-z]/g, '')));
 
     // Built-in themes first
     for (const [id, theme] of Object.entries(BUILTIN_ICON_THEMES)) {
@@ -290,18 +292,27 @@ async function renderIconPacksUI(packs) {
     }
 
     // Suggested packs not yet installed — same card style, with Install button
+    const suggestedShown = [];
     for (const sp of SUGGESTED_PACKS) {
         if (installedIds.has(sp.id)) continue;
+        // Skip if already installed under a different dir name (e.g. system "Papirus" vs suggested "papirus-icon-theme")
+        const normName = sp.name.toLowerCase().replace(/[^a-z]/g, '');
+        if (installedNames.has(normName)) continue;
         const urlEsc = sp.url.replace(/'/g, "\\'");
         const installBtn = `<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();document.getElementById('icon-pack-url').value='${urlEsc}';installIconPack()" style="margin-top:8px;font-size:11px;padding:3px 10px;">Install</button>`;
         html += packCardHtml(sp.id, sp.name, sp.desc, installBtn);
+        suggestedShown.push(sp.id);
     }
 
     container.innerHTML = html;
 
-    // Auto-load previews for all packs; hide cards with no matching icons
+    // Auto-load previews for all installed packs; hide cards with no matching icons
     for (const pack of packs) {
         autoLoadPreview(pack.id);
+    }
+    // Also try suggested packs — they'll be hidden if preview fails (not installed)
+    for (const spId of suggestedShown) {
+        autoLoadPreview(spId);
     }
 }
 
