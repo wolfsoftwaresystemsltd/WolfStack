@@ -313,7 +313,7 @@ async fn main() -> std::io::Result<()> {
                 let (metrics, components) = {
                     let mut monitor = state_clone.monitor.lock().unwrap();
                     let m = monitor.collect();
-                    let c = installer::get_all_status();
+                    let c = installer::get_all_status_cached();
                     (m, c)
                 };
                 // Record historical snapshot
@@ -321,12 +321,16 @@ async fn main() -> std::io::Result<()> {
                     let mut history = state_clone.metrics_history.lock().unwrap();
                     history.push(&metrics);
                 }
-                let docker_count = containers::docker_list_all().len() as u32;
-                let lxc_count = containers::lxc_list_all().len() as u32;
+                // Use lightweight counts (1 subprocess each) instead of full listing
+                // (which spawns 3+ subprocesses per container for docker inspect)
+                let docker_count = containers::docker_count();
+                let lxc_count = containers::lxc_count();
                 let vm_count = state_clone.vms.lock().unwrap().list_vms().len() as u32;
-                let has_docker = containers::docker_status().installed;
-                let has_lxc = containers::lxc_status().installed;
-                let has_kvm = containers::kvm_installed();
+                // Use cached runtime detection (TTL 120s) instead of spawning
+                // 'which', 'docker info', etc. on every 2-second cycle
+                let has_docker = containers::has_docker_cached();
+                let has_lxc = containers::has_lxc_cached();
+                let has_kvm = containers::has_kvm_cached();
 
                 // Cache the agent status report for instant polling responses
                 let self_id = cluster_clone.self_id.clone();
@@ -344,7 +348,7 @@ async fn main() -> std::io::Result<()> {
                     public_ip: public_ip.clone(),
                     known_nodes,
                     deleted_ids,
-                    wolfnet_ips: containers::wolfnet_used_ips(),
+                    wolfnet_ips: containers::wolfnet_used_ips_cached(),
                     has_docker,
                     has_lxc,
                     has_kvm,
@@ -367,7 +371,13 @@ async fn main() -> std::io::Result<()> {
             loop {
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 agent::poll_remote_nodes(cluster_poll.clone(), secret_poll.clone(), Some(ai_agent_poll.clone())).await;
-                // Clean up stale kernel routes that override wolfnet0
+            }
+        });
+
+        // Background: clean up stale WolfNet kernel routes (every 30s, was every 10s)
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
                 containers::cleanup_stale_wolfnet_routes();
             }
         });
@@ -1012,8 +1022,8 @@ a{color:#eab308;text-decoration:none;}a:hover{text-decoration:underline;}
                          docker_count, lxc_count, vm_count, uptime_secs) = {
                         let mut monitor = ai_state.monitor.lock().unwrap();
                         let m = monitor.collect();
-                        let docker_count = containers::docker_list_all().len() as u32;
-                        let lxc_count = containers::lxc_list_all().len() as u32;
+                        let docker_count = containers::docker_count();
+                        let lxc_count = containers::lxc_count();
                         let vm_count = ai_state.vms.lock().unwrap().list_vms().len() as u32;
 
                         let mem_used = m.memory_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);

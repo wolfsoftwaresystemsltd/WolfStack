@@ -900,7 +900,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
     // This cleans up stale routes without losing routes during temporary outages.
 
     // 1. Add LOCAL container/VM/VIP IPs → this node's wolfnet IP
-    let local_ips = crate::containers::wolfnet_used_ips();
+    let local_ips = crate::containers::wolfnet_used_ips_cached();
     let local_wn_ip = local_ips.first().cloned().unwrap_or_default();
     if local_ips.len() > 1 {
         let host_wn_ip = &local_ips[0];

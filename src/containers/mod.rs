@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::Mutex;
+use std::time::Instant;
 use tracing::{error, warn};
 
 /// One-time WolfNet networking initialization — called at WolfStack startup.
@@ -165,6 +166,128 @@ pub fn flush_routes_to_disk(routes: &std::collections::HashMap<String, String>) 
     }
 }
 
+// ─── Lightweight container counting (for monitoring loops) ───
+// These avoid the expensive per-container docker inspect calls that docker_list_all() performs.
+
+/// Count all Docker containers with a single subprocess call (no per-container inspect).
+pub fn docker_count() -> u32 {
+    Command::new("docker")
+        .args(["ps", "-aq"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .count() as u32
+        })
+        .unwrap_or(0)
+}
+
+/// Count all LXC containers with a single subprocess call.
+pub fn lxc_count() -> u32 {
+    // Check for pct (Proxmox) first
+    let is_proxmox = Command::new("which").arg("pct").output()
+        .map(|o| o.status.success()).unwrap_or(false);
+    if is_proxmox {
+        return Command::new("pct")
+            .args(["list"])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .skip(1) // header
+                    .filter(|l| !l.is_empty())
+                    .count() as u32
+            })
+            .unwrap_or(0);
+    }
+    // Native LXC — count across all storage paths
+    let mut count = 0u32;
+    let mut seen = std::collections::HashSet::new();
+    for base_path in lxc_storage_paths() {
+        if let Ok(output) = Command::new("lxc-ls").args(["-P", &base_path]).output() {
+            for name in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+                if !name.is_empty() && seen.insert(name.to_string()) {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
+// ─── Cached runtime detection ───
+// has_docker/has_lxc/has_kvm rarely change during runtime. Caching avoids
+// spawning 'which' and 'docker info' every 2 seconds in the monitoring loop.
+
+static HAS_DOCKER_CACHE: Mutex<Option<(bool, Instant)>> = Mutex::new(None);
+static HAS_LXC_CACHE: Mutex<Option<(bool, Instant)>> = Mutex::new(None);
+static HAS_KVM_CACHE: Mutex<Option<(bool, Instant)>> = Mutex::new(None);
+
+const RUNTIME_CACHE_TTL_SECS: u64 = 120;
+
+/// Check if Docker is installed (cached for 120s).
+pub fn has_docker_cached() -> bool {
+    let mut cache = HAS_DOCKER_CACHE.lock().unwrap();
+    if let Some((val, ts)) = &*cache {
+        if ts.elapsed().as_secs() < RUNTIME_CACHE_TTL_SECS {
+            return *val;
+        }
+    }
+    let val = Command::new("which").arg("docker").output()
+        .map(|o| o.status.success()).unwrap_or(false);
+    *cache = Some((val, Instant::now()));
+    val
+}
+
+/// Check if LXC is installed (cached for 120s).
+pub fn has_lxc_cached() -> bool {
+    let mut cache = HAS_LXC_CACHE.lock().unwrap();
+    if let Some((val, ts)) = &*cache {
+        if ts.elapsed().as_secs() < RUNTIME_CACHE_TTL_SECS {
+            return *val;
+        }
+    }
+    let val = Command::new("which").arg("lxc-ls").output()
+        .map(|o| o.status.success()).unwrap_or(false);
+    *cache = Some((val, Instant::now()));
+    val
+}
+
+/// Check if KVM/QEMU is installed (cached for 120s).
+pub fn has_kvm_cached() -> bool {
+    let mut cache = HAS_KVM_CACHE.lock().unwrap();
+    if let Some((val, ts)) = &*cache {
+        if ts.elapsed().as_secs() < RUNTIME_CACHE_TTL_SECS {
+            return *val;
+        }
+    }
+    let val = kvm_installed();
+    *cache = Some((val, Instant::now()));
+    val
+}
+
+// ─── Cached WolfNet IP lookup ───
+// wolfnet_used_ips() spawns multiple subprocesses. Cache for 5 seconds
+// since it's called every 2s in monitoring and 10s in route cleanup.
+
+static WOLFNET_IPS_CACHE: Mutex<Option<(Vec<String>, Instant)>> = Mutex::new(None);
+
+const WOLFNET_IPS_CACHE_TTL_SECS: u64 = 5;
+
+/// Get WolfNet IPs with caching (TTL 5s).
+pub fn wolfnet_used_ips_cached() -> Vec<String> {
+    let mut cache = WOLFNET_IPS_CACHE.lock().unwrap();
+    if let Some((ref val, ts)) = *cache {
+        if ts.elapsed().as_secs() < WOLFNET_IPS_CACHE_TTL_SECS {
+            return val.clone();
+        }
+    }
+    let val = wolfnet_used_ips();
+    *cache = Some((val.clone(), Instant::now()));
+    val
+}
+
 // ─── LXC Storage Paths Registry ───
 // Tracks all known directories that may contain LXC containers.
 // Always includes /var/lib/lxc as the default.
@@ -224,7 +347,7 @@ pub fn lxc_base_dir(container: &str) -> String {
 /// Stale routes (from deleted/moved containers) override the wolfnet0 /24 route and
 /// prevent cross-node container routing through the WolfNet tunnel.
 pub fn cleanup_stale_wolfnet_routes() {
-    let local_ips: std::collections::HashSet<String> = wolfnet_used_ips().into_iter().collect();
+    let local_ips: std::collections::HashSet<String> = wolfnet_used_ips_cached().into_iter().collect();
 
     // Get all kernel routes in the 10.10.10.0/24 range
     let output = match Command::new("ip").args(["route", "show"]).output() {
@@ -1887,8 +2010,9 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                     let name = parts.get(1).unwrap_or(&"").to_string();
                     let state = parts.get(4).unwrap_or(&"").to_string();
 
-                    // Get network IPs, gateway, and MAC in one inspect call
-                    let inspect_fmt = "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}|{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}|{{range .NetworkSettings.Networks}}{{.MacAddress}} {{end}}";
+                    // Get network IPs, gateway, MAC, restart policy, and rootfs in ONE inspect call
+                    // (previously 3 separate docker inspect calls per container)
+                    let inspect_fmt = "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}|{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}|{{range .NetworkSettings.Networks}}{{.MacAddress}} {{end}}|{{.HostConfig.RestartPolicy.Name}}|{{.GraphDriver.Data.MergedDir}}";
                     let inspect_out = Command::new("docker")
                         .args(["inspect", "-f", inspect_fmt, &name])
                         .output()
@@ -1896,10 +2020,12 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                         .unwrap_or_default();
 
-                    let inspect_parts: Vec<&str> = inspect_out.splitn(3, '|').collect();
+                    let inspect_parts: Vec<&str> = inspect_out.splitn(5, '|').collect();
                     let raw_net_ips = inspect_parts.first().unwrap_or(&"").trim();
                     let raw_gateways = inspect_parts.get(1).unwrap_or(&"").trim();
                     let raw_macs = inspect_parts.get(2).unwrap_or(&"").trim();
+                    let restart_policy = inspect_parts.get(3).unwrap_or(&"").trim().to_string();
+                    let rootfs_raw = inspect_parts.get(4).unwrap_or(&"").trim().to_string();
 
                     // Parse WolfNet IP — override file takes priority, then Docker label
                     let wolfnet_ip = docker_effective_wolfnet_ip(&name);
@@ -1933,24 +2059,15 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                     } else {
                         bridge_ip
                     };
-                    // Parse autostart (RestartPolicy)
-                    let restart_policy = Command::new("docker")
-                        .args(["inspect", "--format", "{{.HostConfig.RestartPolicy.Name}}", &name])
-                        .output()
-                        .ok()
-                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                        .unwrap_or_default();
+                    // Parse autostart from combined inspect
                     let autostart = !restart_policy.is_empty() && restart_policy != "no";
 
-                    // Get Docker storage info
-                    let docker_rootfs = Command::new("docker")
-                        .args(["inspect", "--format", "{{.GraphDriver.Data.MergedDir}}", &name])
-                        .output()
-                        .ok()
-                        .and_then(|o| {
-                            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                            if s.is_empty() || s.contains("no value") { None } else { Some(s) }
-                        });
+                    // Parse rootfs from combined inspect
+                    let docker_rootfs = if rootfs_raw.is_empty() || rootfs_raw.contains("no value") {
+                        None
+                    } else {
+                        Some(rootfs_raw)
+                    };
                     let (du, dt, ft) = docker_rootfs.as_ref()
                         .map(|p| get_path_disk_usage(p))
                         .unwrap_or((None, None, None));

@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
+use std::sync::Mutex;
+use std::time::Instant;
 
 
 /// All available Wolf suite components
@@ -215,6 +217,24 @@ pub fn get_all_status() -> Vec<ComponentStatus> {
             version: get_version(*comp),
         }
     }).collect()
+}
+
+// Cache for get_all_status — avoids spawning ~35 subprocesses every 2 seconds.
+// Component install/run status changes rarely; 10s TTL is plenty responsive.
+static STATUS_CACHE: Mutex<Option<(Vec<ComponentStatus>, Instant)>> = Mutex::new(None);
+const STATUS_CACHE_TTL_SECS: u64 = 10;
+
+/// Get status of all components (cached for 10s to reduce subprocess overhead).
+pub fn get_all_status_cached() -> Vec<ComponentStatus> {
+    let mut cache = STATUS_CACHE.lock().unwrap();
+    if let Some((ref val, ts)) = *cache {
+        if ts.elapsed().as_secs() < STATUS_CACHE_TTL_SECS {
+            return val.clone();
+        }
+    }
+    let val = get_all_status();
+    *cache = Some((val.clone(), Instant::now()));
+    val
 }
 
 /// Install a component
