@@ -1062,13 +1062,13 @@ body.sidebar-collapsed .main-content {
 }
 
 .sidebar-nav {
-    padding: 4px 8px;
+    padding: 2px 8px;
     flex: 1;
     overflow-y: auto;
 }
 
 .nav-section {
-    margin-bottom: 3px;
+    margin-bottom: 1px;
 }
 
 .nav-section-title {
@@ -1078,14 +1078,14 @@ body.sidebar-collapsed .main-content {
     letter-spacing: 1.2px;
     color: var(--text-muted);
     padding: 0 10px;
-    margin-bottom: 2px;
+    margin-bottom: 1px;
 }
 
 .nav-item {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 2px 10px;
+    gap: 8px;
+    padding: 1px 10px;
     border-radius: var(--radius-sm);
     color: var(--text-secondary);
     cursor: pointer;
