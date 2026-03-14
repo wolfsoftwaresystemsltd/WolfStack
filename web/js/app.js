@@ -23950,7 +23950,14 @@ async function loadNodeWolfKube() {
             fetch('/api/kubernetes/clusters'),
         ]);
         if (detectResp.ok) detected = await detectResp.json();
-        if (clustersResp.ok) clusters = await clustersResp.json();
+        if (clustersResp.ok) {
+            const allClusters = await clustersResp.json();
+            // Filter to clusters owned by or containing this node
+            clusters = allClusters.filter(c =>
+                c.owner_node_id === currentNodeId ||
+                (c.nodes && c.nodes.some(n => n.node_id === currentNodeId))
+            );
+        }
     } catch (e) {}
 
     let html = `
