@@ -769,6 +769,11 @@ if [ -f "$CARGO_BIN" ]; then
 elif command -v cargo &> /dev/null; then
     CARGO_BIN="$(command -v cargo)"
     echo "✓ Rust already installed (system-wide)"
+elif command -v rustup &> /dev/null; then
+    # rustup installed (e.g. via pacman on Arch) but no toolchain set yet
+    echo "  Setting default Rust toolchain via rustup..."
+    rustup default stable
+    echo "✓ Rust installed via rustup"
 else
     echo ""
     if [ -n "$CUSTOM_INSTALL_DIR" ]; then
@@ -786,12 +791,6 @@ fi
 
 # Ensure cargo is found
 export PATH="${CARGO_HOME:-$REAL_HOME/.cargo}/bin:/usr/local/bin:/usr/bin:$PATH"
-
-# On Arch, rustup may be installed via pacman without a default toolchain
-if command -v rustup &> /dev/null && ! rustup show active-toolchain &> /dev/null; then
-    echo "  Setting default Rust toolchain..."
-    rustup default stable
-fi
 
 if ! command -v cargo &> /dev/null; then
     echo "✗ cargo not found after installation. Check Rust install."
