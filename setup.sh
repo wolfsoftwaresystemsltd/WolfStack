@@ -224,7 +224,7 @@ elif [ "$PKG_MANAGER" = "pacman" ]; then
     else
         QEMU_PAC="qemu-full"
     fi
-    pacman -Sy --noconfirm --needed git curl base-devel openssl pkg-config lxc dnsmasq bridge-utils $QEMU_PAC socat s3fs-fuse nfs-utils fuse3
+    pacman -Sy --noconfirm --needed git curl base-devel openssl pkg-config lxc dnsmasq $QEMU_PAC socat s3fs-fuse nfs-utils fuse3 rustup
 fi
 
 echo "✓ System dependencies installed"
@@ -786,6 +786,12 @@ fi
 
 # Ensure cargo is found
 export PATH="${CARGO_HOME:-$REAL_HOME/.cargo}/bin:/usr/local/bin:/usr/bin:$PATH"
+
+# On Arch, rustup may be installed via pacman without a default toolchain
+if command -v rustup &> /dev/null && ! rustup show active-toolchain &> /dev/null; then
+    echo "  Setting default Rust toolchain..."
+    rustup default stable
+fi
 
 if ! command -v cargo &> /dev/null; then
     echo "✗ cargo not found after installation. Check Rust install."

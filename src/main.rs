@@ -120,7 +120,7 @@ async fn main() -> std::io::Result<()> {
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("wolfstack=info".parse().unwrap())
                 .add_directive("actix_web=info".parse().unwrap())
-                .add_directive("actix_http=error".parse().unwrap()),
+                .add_directive("actix_http=off".parse().unwrap()),
         )
         .init();
 
