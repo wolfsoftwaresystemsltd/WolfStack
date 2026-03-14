@@ -872,6 +872,30 @@
                 </div>
             </div>
 
+            <!-- Failover Events Log -->
+            <div class="card" id="wolfrun-failover-card" style="margin-bottom:20px; display:none;">
+                <div class="card-header">
+                    <h3>🛡️ Failover Events</h3>
+                </div>
+                <div class="card-body" style="overflow-x:auto;">
+                    <table class="data-table" id="wolfrun-failover-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Service</th>
+                                <th>From</th>
+                                <th>To</th>
+                                <th>Detail</th>
+                            </tr>
+                        </thead>
+                        <tbody id="wolfrun-failover-tbody"></tbody>
+                    </table>
+                    <div id="wolfrun-failover-empty" style="padding:24px; text-align:center; color:var(--text-muted); font-size:13px;">
+                        No failover events recorded.
+                    </div>
+                </div>
+            </div>
+
             <!-- What is WolfRun? -->
             <div class="card"
                 style="margin-bottom:20px; background:linear-gradient(135deg, rgba(99,102,241,0.06), rgba(16,185,129,0.04)); border-color:rgba(99,102,241,0.15);">
@@ -914,6 +938,26 @@
                                         style="width:24px; height:24px; border-radius:6px; background:rgba(59,130,246,0.15); display:flex; align-items:center; justify-content:center; font-size:12px; flex-shrink:0;">🐳</span>
                                     <span><strong>Docker & LXC</strong> — orchestrate both runtimes</span>
                                 </div>
+                                <div
+                                    style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text-secondary);">
+                                    <span
+                                        style="width:24px; height:24px; border-radius:6px; background:rgba(139,92,246,0.15); display:flex; align-items:center; justify-content:center; font-size:12px; flex-shrink:0;">🛡️</span>
+                                    <span><strong>Container failover</strong> — standby containers auto-promote on node failure</span>
+                                </div>
+                            </div>
+                            <!-- Failover how-it-works -->
+                            <div style="margin-top:20px; padding:16px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm);">
+                                <h4 style="margin:0 0 10px; font-size:14px; font-weight:700; color:var(--accent-light);">🛡️ How Container Failover Works</h4>
+                                <ol style="margin:0; padding-left:20px; font-size:12px; color:var(--text-secondary); line-height:1.8;">
+                                    <li><strong>Enable failover</strong> on any WolfRun service (deploy modal or settings).</li>
+                                    <li>WolfRun automatically <strong>pre-creates standby containers</strong> on other cluster nodes — stopped but fully configured with the same WolfNet IP allocation.</li>
+                                    <li>Every 15 seconds, the cluster leader checks if any node has gone offline.</li>
+                                    <li>If a node with active containers goes down, <strong>standby containers on surviving nodes are instantly started</strong> — no re-imaging, no IP reassignment.</li>
+                                    <li>A <strong>failover event</strong> is logged so you can see exactly what happened and when.</li>
+                                </ol>
+                                <p style="margin:10px 0 0; font-size:11px; color:var(--text-muted);">
+                                    No shared storage needed — use app-level clustering (Galera, GlusterFS, WolfScale replication) for data persistence across nodes.
+                                </p>
                             </div>
                         </div>
                     </div>
@@ -1014,7 +1058,7 @@
                             </div>
                         </div>
                         <!-- Common fields -->
-                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
                             <div>
                                 <label
                                     style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Replicas</label>
@@ -1031,6 +1075,16 @@
                                     <option value="never">Never</option>
                                 </select>
                             </div>
+                        </div>
+                        <!-- Failover -->
+                        <div style="padding:12px 14px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius-sm);">
+                            <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-size:13px; font-weight:600;">
+                                <input type="checkbox" id="wolfrun-deploy-failover">
+                                Container Failover (HA)
+                            </label>
+                            <p style="font-size:11px; color:var(--text-muted); margin:6px 0 0 26px;">
+                                Pre-stage standby containers on other nodes. If a node goes down, standby containers are automatically promoted — zero-downtime failover.
+                            </p>
                         </div>
                     </div>
                     <div class="modal-footer">
@@ -1182,6 +1236,16 @@
                         </div>
                         <small style="color:var(--text-muted); font-size:11px;">Uncheck all = run on any node. Check
                             specific nodes to restrict placement.</small>
+                    </div>
+                    <!-- Failover -->
+                    <div style="margin-top:12px; padding:12px 14px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius-sm);">
+                        <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-size:13px; font-weight:600;">
+                            <input type="checkbox" id="wolfrun-settings-failover">
+                            Container Failover (HA)
+                        </label>
+                        <p style="font-size:11px; color:var(--text-muted); margin:6px 0 0 26px;">
+                            Pre-stage standby containers on other nodes. If a node goes down, standby containers are automatically promoted.
+                        </p>
                     </div>
                     <p style="font-size:12px; color:var(--text-muted); margin:8px 0 0;">
                         ➖/➕ buttons will be disabled at min/max bounds. IP Hash keeps clients on the same backend for

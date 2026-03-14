@@ -1416,6 +1416,10 @@ a{color:#eab308;text-decoration:none;}a:hover{text-decoration:underline;}
                 // duplicate container creation and IP address conflicts
                 if wolfrun::is_leader(&wolfrun_cluster) {
                     wolfrun::reconcile(&wolfrun_bg, &wolfrun_cluster, &wolfrun_secret).await;
+                    // Check failover — promote standby containers for offline nodes
+                    wolfrun::check_failover(&wolfrun_bg, &wolfrun_cluster, &wolfrun_secret).await;
+                    // Create standby containers for failover-enabled services
+                    wolfrun::manage_standby(&wolfrun_bg, &wolfrun_cluster, &wolfrun_secret).await;
                     // Broadcast updated instance status to cluster peers
                     wolfrun::broadcast_to_cluster(&wolfrun_bg, &wolfrun_cluster, &wolfrun_secret).await;
                 }

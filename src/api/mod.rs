@@ -10906,6 +10906,8 @@ pub struct WolfRunCreateRequest {
     pub lxc_release: Option<String>,
     #[serde(default)]
     pub lxc_architecture: Option<String>,
+    #[serde(default)]
+    pub failover: Option<bool>,
 }
 
 /// POST /api/wolfrun/services — create a new service
@@ -10956,6 +10958,7 @@ pub async fn wolfrun_create(req: HttpRequest, state: web::Data<AppState>, body: 
         restart_policy,
         runtime,
         lxc_config,
+        body.failover.unwrap_or(false),
     );
 
     // Broadcast to cluster peers
@@ -10991,8 +10994,8 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
             .ok();
 
         for inst in &svc.instances {
-            // Only destroy clones (contain "wolfrun" in name), leave original template
-            if !inst.container_name.contains("wolfrun") {
+            // Destroy clones (contain "wolfrun" in name) and standby instances, leave original template
+            if !inst.container_name.contains("wolfrun") && !inst.standby {
                 kept.push(inst.container_name.clone());
                 continue;
             }
@@ -11115,6 +11118,8 @@ pub async fn wolfrun_service_action(req: HttpRequest, state: web::Data<AppState>
     let mut errors: Vec<String> = Vec::new();
 
     for inst in &svc.instances {
+        // Skip standby instances — they're managed by the failover system
+        if inst.standby { continue; }
         if let Some(node) = state.cluster.get_node(&inst.node_id) {
             if node.is_self {
                 // Local container — call functions directly (avoids HTTP self-call issues)
@@ -11321,13 +11326,14 @@ pub struct WolfRunSettingsRequest {
     pub desired: Option<u32>,
     pub lb_policy: Option<String>,
     pub allowed_nodes: Option<Vec<String>>,
+    pub failover: Option<bool>,
 }
 
 /// POST /api/wolfrun/services/{id}/settings — update service settings
 pub async fn wolfrun_settings(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<WolfRunSettingsRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
-    if state.wolfrun.update_settings(&id, body.min_replicas, body.max_replicas, body.desired, body.lb_policy.clone(), body.allowed_nodes.clone()) {
+    if state.wolfrun.update_settings(&id, body.min_replicas, body.max_replicas, body.desired, body.lb_policy.clone(), body.allowed_nodes.clone(), body.failover) {
         let wolfrun = Arc::clone(&state.wolfrun);
         let cluster = Arc::clone(&state.cluster);
         let secret = state.cluster_secret.clone();
@@ -11349,6 +11355,7 @@ pub async fn wolfrun_settings(req: HttpRequest, state: web::Data<AppState>, path
                 "max_replicas": svc.max_replicas,
                 "lb_policy": svc.lb_policy,
                 "allowed_nodes": svc.allowed_nodes,
+                "failover": svc.failover,
             }))
         } else {
             HttpResponse::Ok().json(serde_json::json!({ "updated": true }))
@@ -11404,6 +11411,14 @@ pub async fn wolfrun_adopt(req: HttpRequest, state: web::Data<AppState>, body: w
     });
 
     HttpResponse::Ok().json(svc)
+}
+
+/// GET /api/wolfrun/failover-events — list failover events
+pub async fn wolfrun_failover_events(req: HttpRequest, state: web::Data<AppState>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let service_id = query.get("service_id").map(|s| s.as_str());
+    let events = state.wolfrun.get_failover_events(service_id);
+    HttpResponse::Ok().json(events)
 }
 
 /// POST /api/wolfrun/sync — receive WolfRun services from a cluster peer
@@ -12742,6 +12757,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/wolfrun/services", web::post().to(wolfrun_create))
         .route("/api/wolfrun/services/adopt", web::post().to(wolfrun_adopt))
         .route("/api/wolfrun/sync", web::post().to(wolfrun_sync))
+        .route("/api/wolfrun/failover-events", web::get().to(wolfrun_failover_events))
         .route("/api/wolfrun/reconcile", web::post().to(wolfrun_reconcile))
         .route("/api/wolfrun/services/{id}", web::get().to(wolfrun_get))
         .route("/api/wolfrun/services/{id}", web::delete().to(wolfrun_delete))

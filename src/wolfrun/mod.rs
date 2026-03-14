@@ -65,8 +65,23 @@ pub struct ServiceInstance {
     pub node_id: String,
     pub container_name: String,
     pub wolfnet_ip: Option<String>,
-    pub status: String,        // "running", "stopped", "pending", "lost"
+    pub status: String,        // "running", "stopped", "pending", "lost", "standby"
     pub last_seen: u64,        // unix timestamp
+    /// Standby instance — pre-created but stopped, ready for failover
+    #[serde(default)]
+    pub standby: bool,
+}
+
+/// A failover event — records when a standby was promoted
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailoverEvent {
+    pub timestamp: u64,
+    pub service_id: String,
+    pub service_name: String,
+    pub from_node: String,
+    pub to_node: String,
+    pub container_name: String,
+    pub detail: String,
 }
 
 /// LXC-specific configuration for a service
@@ -123,6 +138,9 @@ pub struct WolfRunService {
     /// Allowed node IDs — empty means all nodes are eligible
     #[serde(default)]
     pub allowed_nodes: Vec<String>,
+    /// Failover enabled — pre-stage standby containers on other nodes
+    #[serde(default)]
+    pub failover: bool,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -134,18 +152,22 @@ fn default_lb_policy() -> String { "round_robin".to_string() }
 
 const SERVICES_DIR: &str = "/etc/wolfstack/wolfrun";
 const SERVICES_FILE: &str = "/etc/wolfstack/wolfrun/services.json";
+const FAILOVER_EVENTS_FILE: &str = "/etc/wolfstack/wolfrun/failover-events.json";
 
 /// Shared WolfRun state
 pub struct WolfRunState {
     services: RwLock<Vec<WolfRunService>>,
+    failover_events: RwLock<Vec<FailoverEvent>>,
 }
 
 impl WolfRunState {
     pub fn new() -> Self {
         let state = Self {
             services: RwLock::new(Vec::new()),
+            failover_events: RwLock::new(Vec::new()),
         };
         state.load();
+        state.load_failover_events();
         state
     }
 
@@ -168,6 +190,49 @@ impl WolfRunState {
             if let Err(e) = std::fs::write(SERVICES_FILE, json) {
                 warn!("WolfRun: failed to save services: {}", e);
             }
+        }
+    }
+
+    /// Load failover events from disk
+    fn load_failover_events(&self) {
+        if let Ok(data) = std::fs::read_to_string(FAILOVER_EVENTS_FILE) {
+            if let Ok(events) = serde_json::from_str::<Vec<FailoverEvent>>(&data) {
+                let mut evts = self.failover_events.write().unwrap();
+                *evts = events;
+            }
+        }
+    }
+
+    /// Save failover events to disk
+    fn save_failover_events(&self) {
+        let evts = self.failover_events.read().unwrap();
+        if let Ok(json) = serde_json::to_string_pretty(&*evts) {
+            let _ = std::fs::create_dir_all(SERVICES_DIR);
+            if let Err(e) = std::fs::write(FAILOVER_EVENTS_FILE, json) {
+                warn!("WolfRun: failed to save failover events: {}", e);
+            }
+        }
+    }
+
+    /// Record a failover event
+    pub fn add_failover_event(&self, event: FailoverEvent) {
+        let mut evts = self.failover_events.write().unwrap();
+        evts.push(event);
+        // Keep last 100 events
+        if evts.len() > 100 {
+            let drain = evts.len() - 100;
+            evts.drain(..drain);
+        }
+        drop(evts);
+        self.save_failover_events();
+    }
+
+    /// Get failover events, optionally filtered by service ID
+    pub fn get_failover_events(&self, service_id: Option<&str>) -> Vec<FailoverEvent> {
+        let evts = self.failover_events.read().unwrap();
+        match service_id {
+            Some(id) => evts.iter().filter(|e| e.service_id == id).cloned().collect(),
+            None => evts.clone(),
         }
     }
 
@@ -208,7 +273,8 @@ impl WolfRunState {
     pub fn create(&self, name: String, image: String, replicas: u32, cluster_name: String,
                   env: Vec<String>, ports: Vec<String>, volumes: Vec<String>,
                   placement: Placement, restart_policy: RestartPolicy,
-                  runtime: Runtime, lxc_config: Option<LxcConfig>) -> WolfRunService {
+                  runtime: Runtime, lxc_config: Option<LxcConfig>,
+                  failover: bool) -> WolfRunService {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let id = format!("svc-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         // Allocate a Service VIP on WolfNet for load balancing
@@ -233,6 +299,7 @@ impl WolfRunState {
             service_ip,
             lb_policy: "round_robin".to_string(),
             allowed_nodes: Vec::new(),
+            failover,
             created_at: now,
             updated_at: now,
         };
@@ -279,7 +346,7 @@ impl WolfRunState {
     }
 
     /// Update service settings (min, max, desired replicas)
-    pub fn update_settings(&self, id: &str, min: Option<u32>, max: Option<u32>, desired: Option<u32>, lb_policy: Option<String>, allowed_nodes: Option<Vec<String>>) -> bool {
+    pub fn update_settings(&self, id: &str, min: Option<u32>, max: Option<u32>, desired: Option<u32>, lb_policy: Option<String>, allowed_nodes: Option<Vec<String>>, failover: Option<bool>) -> bool {
         let mut svcs = self.services.write().unwrap();
         if let Some(svc) = svcs.iter_mut().find(|s| s.id == id) {
             if let Some(mn) = min { svc.min_replicas = mn; }
@@ -291,6 +358,7 @@ impl WolfRunState {
             if let Some(nodes) = allowed_nodes {
                 svc.allowed_nodes = nodes;
             }
+            if let Some(f) = failover { svc.failover = f; }
             // Enforce: min <= desired <= max
             if svc.min_replicas > svc.max_replicas { svc.min_replicas = svc.max_replicas; }
             svc.replicas = svc.replicas.max(svc.min_replicas).min(svc.max_replicas);
@@ -352,6 +420,7 @@ impl WolfRunState {
             status: "running".to_string(),
             wolfnet_ip: None,
             last_seen: now,
+            standby: false,
         };
 
         // Allocate a Service VIP on WolfNet for load balancing
@@ -387,6 +456,7 @@ impl WolfRunState {
             service_ip,
             lb_policy: "round_robin".to_string(),
             allowed_nodes: Vec::new(),
+            failover: false,
             created_at: now,
             updated_at: now,
         };
@@ -772,6 +842,7 @@ pub async fn reconcile(
                             wolfnet_ip: ip,
                             status: c.state.to_lowercase(),
                             last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                            standby: inst.standby,
                         });
                     } else if inst.status == "pending" {
                         // Pending (clone in progress) — preserve
@@ -783,6 +854,7 @@ pub async fn reconcile(
                             wolfnet_ip: None,
                             status: "lost".to_string(),
                             last_seen: inst.last_seen,
+                            standby: inst.standby,
                         });
                     }
                 }
@@ -828,6 +900,7 @@ pub async fn reconcile(
                                                 wolfnet_ip,
                                                 status: state.to_lowercase(),
                                                 last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                                                standby: inst.standby,
                                             });
                                             found = true;
                                             break;
@@ -851,6 +924,7 @@ pub async fn reconcile(
                                 wolfnet_ip: None,
                                 status: "lost".to_string(),
                                 last_seen: inst.last_seen,
+                                standby: inst.standby,
                             });
                         } else {
                             // Couldn't reach the node or got HTTP/auth error — container
@@ -862,6 +936,7 @@ pub async fn reconcile(
                                 wolfnet_ip: inst.wolfnet_ip.clone(),
                                 status: "offline".to_string(),
                                 last_seen: inst.last_seen,
+                                standby: inst.standby,
                             });
                         }
                     }
@@ -888,7 +963,7 @@ pub async fn reconcile(
         // Rebuild load balancer rules for this service's VIP (only if backends changed)
         if let Some(ref vip) = service.service_ip {
             let backend_ips: Vec<String> = live_instances.iter()
-                .filter(|i| i.status == "running")
+                .filter(|i| i.status == "running" && !i.standby)
                 .filter_map(|i| i.wolfnet_ip.clone())
                 .collect();
 
@@ -915,13 +990,15 @@ pub async fn reconcile(
         }
 
         // 2. Count instances for scaling decisions
-        // Count ALL existing instances (running + stopped + offline) — they should NOT
-        // trigger creating yet another clone. Only truly "lost" instances (container
-        // vanished from an ONLINE node) should be replaced.
+        // Exclude standby instances — they don't count toward active replicas.
+        // Count ALL existing non-standby instances (running + stopped + offline) — they
+        // should NOT trigger creating yet another clone. Only truly "lost" instances
+        // (container vanished from an ONLINE node) should be replaced.
         let existing = live_instances.iter()
+            .filter(|i| !i.standby)
             .filter(|i| i.status == "running" || i.status == "stopped" || i.status == "pending" || i.status == "offline" || i.status == "created" || i.status == "exited")
             .count() as u32;
-        let running = live_instances.iter().filter(|i| i.status == "running").count() as u32;
+        let running = live_instances.iter().filter(|i| i.status == "running" && !i.standby).count() as u32;
         let desired = service.replicas;
 
         // 3. Scale up if under-provisioned (based on EXISTING count, not running)
@@ -1064,6 +1141,7 @@ pub async fn reconcile(
                                 wolfnet_ip: pre_alloc_ip.clone(),
                                 status: "pending".to_string(),
                                 last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                                standby: false,
                             });
 
                             let mut clone_payload = serde_json::json!({
@@ -1130,6 +1208,7 @@ pub async fn reconcile(
                                 wolfnet_ip: None,
                                 status: "running".to_string(),
                                 last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                                standby: false,
                             });
                         } else {
                             warn!("WolfRun: failed to clone '{}' for service {}", template_name, service.name);
@@ -1146,13 +1225,13 @@ pub async fn reconcile(
 
             let mut instance_counts: HashMap<String, usize> = HashMap::new();
             for inst in &live_instances {
-                if inst.status == "running" {
+                if inst.status == "running" && !inst.standby {
                     *instance_counts.entry(inst.node_id.clone()).or_insert(0) += 1;
                 }
             }
 
             let mut running_instances: Vec<_> = live_instances.iter()
-                .filter(|i| i.status == "running")
+                .filter(|i| i.status == "running" && !i.standby)
                 .collect();
             running_instances.sort_by(|a, b| {
                 let a_count = instance_counts.get(&a.node_id).unwrap_or(&0);
@@ -1168,8 +1247,10 @@ pub async fn reconcile(
         }
 
         // 5. Handle stopped containers that should be running (restart policy)
+        // Skip standby instances — they are intentionally stopped
         if matches!(service.restart_policy, RestartPolicy::Always) {
             for inst in &live_instances {
+                if inst.standby { continue; }
                 if inst.status == "exited" || inst.status == "dead" || inst.status == "stopped" || inst.status == "created" {
                     let node = match cluster.get_node(&inst.node_id) {
                         Some(n) => n,
@@ -1216,6 +1297,58 @@ pub async fn reconcile(
             wolfrun.remove_instance(&service.id, &inst.container_name);
             // The next reconciliation cycle will detect under-provisioning and schedule a replacement
         }
+
+        // 7. Clean up orphaned standby instances when failover is disabled
+        if !service.failover {
+            let orphaned_standby: Vec<_> = live_instances.iter()
+                .filter(|i| i.standby)
+                .cloned()
+                .collect();
+            for inst in &orphaned_standby {
+                // Stop and destroy the standby container
+                let node = all_nodes.iter().find(|n| n.id == inst.node_id);
+                if let Some(n) = node {
+                    if n.is_self {
+                        match service.runtime {
+                            Runtime::Docker => {
+                                let _ = crate::containers::docker_stop(&inst.container_name);
+                                let _ = crate::containers::docker_remove(&inst.container_name);
+                            }
+                            Runtime::Lxc => {
+                                let _ = crate::containers::lxc_stop(&inst.container_name);
+                                let _ = crate::containers::lxc_destroy(&inst.container_name);
+                            }
+                        }
+                    } else if n.online {
+                        let action_path = container_action_path(&service.runtime, &inst.container_name);
+                        let urls = crate::api::build_node_urls(&n.address, n.port, &action_path);
+                        let stop_payload = serde_json::json!({ "action": "stop" });
+                        for url in &urls {
+                            if client.post(url)
+                                .header("X-WolfStack-Secret", cluster_secret)
+                                .json(&stop_payload)
+                                .send().await
+                                .is_ok()
+                            { break; }
+                        }
+                        let rm_action = match service.runtime {
+                            Runtime::Docker => "remove",
+                            Runtime::Lxc => "destroy",
+                        };
+                        let rm_payload = serde_json::json!({ "action": rm_action });
+                        for url in &urls {
+                            if client.post(url)
+                                .header("X-WolfStack-Secret", cluster_secret)
+                                .json(&rm_payload)
+                                .send().await
+                                .is_ok()
+                            { break; }
+                        }
+                    }
+                }
+                wolfrun.remove_instance(&service.id, &inst.container_name);
+            }
+        }
     }
 }
 
@@ -1255,6 +1388,7 @@ async fn deploy_docker(
                     wolfnet_ip,
                     status: "running".to_string(),
                     last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                    standby: false,
                 });
             }
             Err(e) => warn!("WolfRun: failed to deploy {} locally: {}", container_name, e),
@@ -1321,6 +1455,7 @@ async fn deploy_docker(
             wolfnet_ip: None,
             status: "running".to_string(),
             last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            standby: false,
         });
     }
 }
@@ -1351,6 +1486,7 @@ async fn deploy_lxc(
                     wolfnet_ip: None,
                     status: "running".to_string(),
                     last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                    standby: false,
                 });
             }
             Err(e) => warn!("WolfRun: failed to deploy LXC {} locally: {}", container_name, e),
@@ -1404,6 +1540,7 @@ async fn deploy_lxc(
             wolfnet_ip: None,
             status: "running".to_string(),
             last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            standby: false,
         });
     }
 }
@@ -1472,6 +1609,341 @@ pub async fn stop_and_remove_pub(
     runtime: &Runtime,
 ) {
     stop_and_remove(client, cluster_secret, node, container_name, runtime).await;
+}
+
+// ─── Failover ───
+
+/// Manage standby containers for services with failover enabled.
+/// Creates stopped clones on nodes that don't already have a running or standby instance.
+pub async fn manage_standby(
+    wolfrun: &WolfRunState,
+    cluster: &ClusterState,
+    cluster_secret: &str,
+) {
+    let self_cluster = {
+        let nodes = cluster.get_all_nodes();
+        nodes.iter().find(|n| n.is_self)
+            .and_then(|n| n.cluster_name.clone())
+            .unwrap_or_else(|| "WolfStack".to_string())
+    };
+
+    let services = wolfrun.list(Some(&self_cluster));
+    let all_nodes = cluster.get_all_nodes();
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .danger_accept_invalid_certs(true)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    for service in &services {
+        if !service.failover { continue; }
+
+        // Find nodes that already have an instance (running or standby)
+        let occupied_nodes: std::collections::HashSet<String> = service.instances.iter()
+            .filter(|i| i.status != "lost")
+            .map(|i| i.node_id.clone())
+            .collect();
+
+        // Find eligible nodes that DON'T have an instance yet
+        let eligible_nodes: Vec<_> = all_nodes.iter().filter(|n| {
+            if !n.online { return false; }
+            let nc = n.cluster_name.as_deref().unwrap_or("WolfStack");
+            if nc != service.cluster_name { return false; }
+            if !service.allowed_nodes.is_empty() && !service.allowed_nodes.contains(&n.id) { return false; }
+            // Must have the required runtime
+            let has_runtime = match service.runtime {
+                Runtime::Docker => n.has_docker || (n.is_self && std::path::Path::new("/usr/bin/docker").exists()),
+                Runtime::Lxc => n.has_lxc || (n.is_self && std::path::Path::new("/usr/bin/lxc-ls").exists()),
+            };
+            if !has_runtime { return false; }
+            // Skip nodes that already have an instance
+            !occupied_nodes.contains(&n.id)
+        }).collect();
+
+        if eligible_nodes.is_empty() { continue; }
+
+        // Find a running instance to use as clone source
+        let source = service.instances.iter()
+            .find(|i| i.status == "running" && !i.standby)
+            .or_else(|| service.instances.iter().find(|i| i.status == "running"));
+
+        let source = match source {
+            Some(s) => s,
+            None => continue, // No running instance to clone from
+        };
+
+        for target_node in &eligible_nodes {
+            let short_id = &uuid::Uuid::new_v4().to_string()[..8];
+            let standby_name = format!("{}-standby-{}", source.container_name
+                .split("-wolfrun-").next().unwrap_or(&service.name.to_lowercase().replace(' ', "-")), short_id);
+
+            // Pre-allocate wolfnet IP for the standby (same subnet, unique)
+            let standby_ip = crate::containers::next_available_wolfnet_ip();
+
+            tracing::info!("WolfRun failover: creating standby '{}' on {} for service {}",
+                standby_name, target_node.hostname, service.name);
+
+            // Register as standby immediately to prevent duplicates
+            wolfrun.add_instance(&service.id, ServiceInstance {
+                node_id: target_node.id.clone(),
+                container_name: standby_name.clone(),
+                wolfnet_ip: standby_ip.clone(),
+                status: "standby".to_string(),
+                last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                standby: true,
+            });
+
+            match service.runtime {
+                Runtime::Docker => {
+                    // For Docker: pull the image and create the container stopped
+                    let created = if target_node.is_self {
+                        match crate::containers::docker_create(
+                            &standby_name, &service.image, &service.ports, &service.env,
+                            standby_ip.as_deref(), None, None, None, &service.volumes,
+                        ) {
+                            Ok(_) => true,
+                            Err(e) => {
+                                warn!("WolfRun failover: failed to create standby Docker '{}': {}", standby_name, e);
+                                false
+                            }
+                        }
+                    } else {
+                        // Pull + create on remote node (don't start)
+                        let pull_urls = crate::api::build_node_urls(&target_node.address, target_node.port, "/api/containers/docker/pull");
+                        let pull_payload = serde_json::json!({ "image": service.image });
+                        let mut pulled = false;
+                        for url in &pull_urls {
+                            if let Ok(resp) = client.post(url).header("X-WolfStack-Secret", cluster_secret).json(&pull_payload).send().await {
+                                if resp.status().is_success() { pulled = true; break; }
+                            }
+                        }
+                        if pulled {
+                            let create_urls = crate::api::build_node_urls(&target_node.address, target_node.port, "/api/containers/docker/create");
+                            let payload = serde_json::json!({
+                                "name": standby_name,
+                                "image": service.image,
+                                "ports": service.ports,
+                                "env": service.env,
+                                "volumes": service.volumes,
+                            });
+                            let mut ok = false;
+                            for url in &create_urls {
+                                if let Ok(resp) = client.post(url).header("X-WolfStack-Secret", cluster_secret).json(&payload).send().await {
+                                    if resp.status().is_success() { ok = true; break; }
+                                    break;
+                                }
+                            }
+                            ok
+                        } else { false }
+                    };
+                    if !created {
+                        wolfrun.remove_instance(&service.id, &standby_name);
+                    }
+                }
+                Runtime::Lxc => {
+                    // For LXC: clone from source (stopped) — cross-node or same-node
+                    let source_node = all_nodes.iter().find(|n| n.id == source.node_id);
+                    let source_node = match source_node {
+                        Some(n) => n,
+                        None => {
+                            wolfrun.remove_instance(&service.id, &standby_name);
+                            continue;
+                        }
+                    };
+
+                    let mut clone_payload = serde_json::json!({
+                        "new_name": standby_name,
+                    });
+                    if source_node.id != target_node.id {
+                        clone_payload["target_node"] = serde_json::json!(target_node.id);
+                    }
+                    if let Some(ref ip) = standby_ip {
+                        clone_payload["wolfnet_ip"] = serde_json::json!(ip);
+                    }
+
+                    let clone_path = format!("/api/containers/lxc/{}/clone", source.container_name);
+                    let urls = if source_node.is_self {
+                        vec![format!("https://127.0.0.1:{}{}", source_node.port, clone_path)]
+                    } else {
+                        crate::api::build_node_urls(&source_node.address, source_node.port, &clone_path)
+                    };
+
+                    let clone_client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(600))
+                        .danger_accept_invalid_certs(true)
+                        .build().unwrap_or_default();
+
+                    let mut ok = false;
+                    for url in &urls {
+                        match clone_client.post(url)
+                            .header("X-WolfStack-Secret", cluster_secret)
+                            .json(&clone_payload)
+                            .send().await
+                        {
+                            Ok(resp) if resp.status().is_success() => { ok = true; break; }
+                            Ok(_) => break,
+                            Err(_) => continue,
+                        }
+                    }
+
+                    if !ok {
+                        warn!("WolfRun failover: failed to clone standby '{}' for service {}", standby_name, service.name);
+                        wolfrun.remove_instance(&service.id, &standby_name);
+                    }
+                    // Note: standby LXC stays stopped — don't start it
+                }
+            }
+        }
+    }
+}
+
+/// Check for failover — detect offline nodes with running instances and promote standby containers.
+/// Called by the leader during reconciliation.
+pub async fn check_failover(
+    wolfrun: &WolfRunState,
+    cluster: &ClusterState,
+    cluster_secret: &str,
+) {
+    let self_cluster = {
+        let nodes = cluster.get_all_nodes();
+        nodes.iter().find(|n| n.is_self)
+            .and_then(|n| n.cluster_name.clone())
+            .unwrap_or_else(|| "WolfStack".to_string())
+    };
+
+    let services = wolfrun.list(Some(&self_cluster));
+    let all_nodes = cluster.get_all_nodes();
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .danger_accept_invalid_certs(true)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    for service in &services {
+        if !service.failover { continue; }
+
+        // Find instances on offline nodes (not standby — those are expected to be stopped)
+        let failed_instances: Vec<_> = service.instances.iter()
+            .filter(|i| !i.standby && (i.status == "offline" || i.status == "lost"))
+            .filter(|i| {
+                // Verify the node is actually offline
+                all_nodes.iter().find(|n| n.id == i.node_id)
+                    .map(|n| !n.online)
+                    .unwrap_or(true) // Unknown node = offline
+            })
+            .collect();
+
+        if failed_instances.is_empty() { continue; }
+
+        // Find standby instances to promote (mutable — consumed as used)
+        let mut standby_instances: Vec<_> = service.instances.iter()
+            .filter(|i| i.standby && i.status != "lost")
+            .cloned()
+            .collect();
+
+        for failed in &failed_instances {
+            // Pick a standby to promote (prefer one on an online node), removing it from candidates
+            let standby_idx = standby_instances.iter().position(|s| {
+                all_nodes.iter().find(|n| n.id == s.node_id)
+                    .map(|n| n.online)
+                    .unwrap_or(false)
+            });
+
+            let standby = match standby_idx {
+                Some(idx) => standby_instances.remove(idx),
+                None => {
+                    warn!("WolfRun failover: no standby available for failed instance '{}' on offline node",
+                        failed.container_name);
+                    continue;
+                }
+            };
+
+            let standby_node = match all_nodes.iter().find(|n| n.id == standby.node_id) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            tracing::info!("WolfRun failover: promoting standby '{}' on {} (replacing '{}' on offline node)",
+                standby.container_name, standby_node.hostname, failed.container_name);
+
+            // Start the standby container
+            let started = if standby_node.is_self {
+                match service.runtime {
+                    Runtime::Docker => crate::containers::docker_start(&standby.container_name).is_ok(),
+                    Runtime::Lxc => {
+                        // Attach wolfnet with the pre-allocated IP before starting
+                        if let Some(ref ip) = standby.wolfnet_ip {
+                            let _ = crate::containers::lxc_attach_wolfnet(&standby.container_name, ip);
+                        }
+                        crate::containers::lxc_start(&standby.container_name).is_ok()
+                    }
+                }
+            } else {
+                let action_path = container_action_path(&service.runtime, &standby.container_name);
+                let urls = crate::api::build_node_urls(&standby_node.address, standby_node.port, &action_path);
+                let payload = serde_json::json!({ "action": "start" });
+                let mut ok = false;
+                for url in &urls {
+                    if let Ok(resp) = client.post(url)
+                        .header("X-WolfStack-Secret", cluster_secret)
+                        .json(&payload)
+                        .send().await
+                    {
+                        if resp.status().is_success() { ok = true; break; }
+                        break;
+                    }
+                }
+                ok
+            };
+
+            if started {
+                // Update the standby instance — mark as active (not standby)
+                let mut svcs = wolfrun.services.write().unwrap();
+                if let Some(svc) = svcs.iter_mut().find(|s| s.id == service.id) {
+                    if let Some(inst) = svc.instances.iter_mut().find(|i| i.container_name == standby.container_name) {
+                        inst.standby = false;
+                        inst.status = "running".to_string();
+                        inst.last_seen = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                    }
+                    // Remove the failed instance
+                    svc.instances.retain(|i| i.container_name != failed.container_name);
+                }
+                drop(svcs);
+                wolfrun.save();
+
+                // Record failover event
+                let failed_hostname = all_nodes.iter()
+                    .find(|n| n.id == failed.node_id)
+                    .map(|n| n.hostname.clone())
+                    .unwrap_or_else(|| failed.node_id.clone());
+
+                wolfrun.add_failover_event(FailoverEvent {
+                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                    service_id: service.id.clone(),
+                    service_name: service.name.clone(),
+                    from_node: failed_hostname,
+                    to_node: standby_node.hostname.clone(),
+                    container_name: standby.container_name.clone(),
+                    detail: format!("Standby '{}' promoted — replacing failed '{}'",
+                        standby.container_name, failed.container_name),
+                });
+
+                tracing::info!("WolfRun failover: successfully promoted '{}' on {}",
+                    standby.container_name, standby_node.hostname);
+            } else {
+                warn!("WolfRun failover: failed to start standby '{}' on {}",
+                    standby.container_name, standby_node.hostname);
+            }
+        }
+    }
 }
 
 // ─── Load Balancer (iptables round-robin DNAT) ───

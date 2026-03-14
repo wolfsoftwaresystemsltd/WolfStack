@@ -20016,6 +20016,10 @@ async function loadWolfRunServices() {
         if (!resp.ok) throw new Error('Failed to load services');
         const services = await resp.json();
         renderWolfRunServices(services);
+        // Load failover events if any service has failover enabled
+        if (services.some(s => s.failover)) {
+            loadWolfRunFailoverEvents();
+        }
     } catch (e) {
         console.error('WolfRun load error:', e);
     }
@@ -20039,12 +20043,13 @@ function renderWolfRunServices(services) {
     table.style.display = '';
     empty.style.display = 'none';
 
-    // Calculate stats
-    let totalRunning = 0, totalPending = 0;
+    // Calculate stats (exclude standby from running/pending counts)
+    let totalRunning = 0, totalPending = 0, totalStandby = 0;
     const allNodes = new Set();
     services.forEach(s => {
         s.instances.forEach(i => {
-            if (i.status === 'running') totalRunning++;
+            if (i.standby) { totalStandby++; }
+            else if (i.status === 'running') totalRunning++;
             else if (i.status === 'pending' || i.status === 'lost') totalPending++;
             allNodes.add(i.node_id);
         });
@@ -20057,12 +20062,14 @@ function renderWolfRunServices(services) {
 
     // Render table rows
     tbody.innerHTML = services.map(svc => {
-        const running = svc.instances.filter(i => i.status === 'running').length;
-        const total = svc.instances.length;
+        const activeInstances = svc.instances.filter(i => !i.standby);
+        const standbyInstances = svc.instances.filter(i => i.standby);
+        const running = activeInstances.filter(i => i.status === 'running').length;
+        const total = activeInstances.length;
         const desired = svc.replicas;
 
         // Status badge
-        const offline = svc.instances.filter(i => i.status === 'offline' || i.status === 'lost').length;
+        const offline = activeInstances.filter(i => i.status === 'offline' || i.status === 'lost').length;
         let statusBadge;
         if (running === desired && desired > 0) {
             statusBadge = `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);">
@@ -20125,7 +20132,9 @@ function renderWolfRunServices(services) {
         const instanceRows = svc.instances.map(inst => {
             const instNode = (window.allNodes || []).find(n => n.id === inst.node_id);
             const instHostname = instNode ? instNode.hostname : inst.node_id.substring(0, 12);
-            const statusColor = inst.status === 'running' ? '#10b981' : (inst.status === 'pending' ? '#eab308' : '#ef4444');
+            const isStandby = inst.standby;
+            const statusColor = isStandby ? '#6366f1' : (inst.status === 'running' ? '#10b981' : (inst.status === 'pending' ? '#eab308' : '#ef4444'));
+            const statusLabel = isStandby ? 'standby' : inst.status;
             const ipHtml = inst.wolfnet_ip
                 ? `<code style="font-size:11px;padding:2px 6px;background:rgba(59,130,246,0.12);border-radius:4px;color:#60a5fa;">${inst.wolfnet_ip}</code>`
                 : '<span style="color:var(--text-muted);font-size:11px;">—</span>';
@@ -20133,10 +20142,12 @@ function renderWolfRunServices(services) {
             const isPve = instNode && instNode.is_proxmox;
             const instIcon = svc.runtime === 'Docker' ? '🐳' : (isPve ? '🖥️' : '📦');
             const instType = svc.runtime === 'Docker' ? 'Docker' : (isPve ? 'Proxmox LXC' : 'LXC');
-            return `<tr class="wolfrun-inst-row wolfrun-inst-${svc.id}" style="background:var(--bg-input);">
+            const rowOpacity = isStandby ? 'opacity:0.6;' : '';
+            return `<tr class="wolfrun-inst-row wolfrun-inst-${svc.id}" style="background:var(--bg-input);${rowOpacity}">
                 <td style="padding-left:32px;font-size:12px;color:var(--text-secondary);">
                     <span style="color:var(--text-muted);">└</span> ${instIcon} <code style="font-size:11px;">${inst.container_name}</code>
                     <span style="font-size:10px;color:var(--text-muted);margin-left:4px;">${instType}</span>
+                    ${isStandby ? '<span style="font-size:9px;padding:1px 6px;border-radius:8px;background:rgba(99,102,241,0.15);color:#818cf8;border:1px solid rgba(99,102,241,0.3);margin-left:6px;">STANDBY</span>' : ''}
                 </td>
                 <td colspan="2" style="font-size:12px;">
                     <span style="padding:2px 8px;border-radius:6px;font-size:11px;background:var(--bg-secondary);border:1px solid var(--border);">${instHostname}</span>
@@ -20145,7 +20156,7 @@ function renderWolfRunServices(services) {
                 <td>
                     <span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:${statusColor};">
                         <span style="width:6px;height:6px;border-radius:50%;background:${statusColor};display:inline-block;"></span>
-                        ${inst.status}
+                        ${statusLabel}
                     </span>
                 </td>
                 <td colspan="3"></td>
@@ -20157,8 +20168,13 @@ function renderWolfRunServices(services) {
             ? `<span class="wolfrun-toggle" data-svc="${svc.id}" onclick="toggleWolfRunInstances('${svc.id}')" style="cursor:pointer;margin-right:6px;font-size:10px;color:var(--text-muted);transition:transform 0.2s;">▼</span>`
             : '<span style="display:inline-block;width:16px;"></span>';
 
+        // Failover badge
+        const failoverBadge = svc.failover
+            ? `<span style="font-size:9px;padding:1px 6px;border-radius:8px;background:rgba(99,102,241,0.15);color:#818cf8;border:1px solid rgba(99,102,241,0.3);margin-left:6px;" title="Failover enabled — ${standbyInstances.length} standby">HA</span>`
+            : '';
+
         return `<tr style="cursor:pointer;" onclick="toggleWolfRunInstances('${svc.id}')">
-            <td style="font-weight:600;">${toggleBtn}${svc.name}</td>
+            <td style="font-weight:600;">${toggleBtn}${svc.name}${failoverBadge}</td>
             <td>${runtimeIcon} ${runtimeLabel}</td>
             <td><code style="font-size:12px;">${svc.image || '—'}</code></td>
             <td>${replicaHtml}</td>
@@ -20171,7 +20187,7 @@ function renderWolfRunServices(services) {
                 <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'restart')" title="Restart All" style="padding:4px 8px; font-size:12px; color:#3b82f6;">🔄</button>
                 <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired - 1})" ${desired <= minR ? 'disabled' : ''} title="Scale down" style="padding:4px 8px; font-size:12px;">➖</button>
                 <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired + 1})" ${desired >= maxR ? 'disabled' : ''} title="Scale up" style="padding:4px 8px; font-size:12px;">➕</button>
-                <button class="btn btn-sm" onclick="wolfrunSettings('${svc.id}', '${svc.name}', ${desired}, ${minR}, ${maxR}, '${svc.lb_policy || 'round_robin'}', ${JSON.stringify(svc.allowed_nodes || [])}, '${svc.cluster_name || ''}')" title="Settings" style="padding:4px 8px; font-size:12px; color:#a78bfa;">⚙️</button>
+                <button class="btn btn-sm" onclick="wolfrunSettings('${svc.id}', '${svc.name}', ${desired}, ${minR}, ${maxR}, '${svc.lb_policy || 'round_robin'}', ${JSON.stringify(svc.allowed_nodes || [])}, '${svc.cluster_name || ''}', ${!!svc.failover})" title="Settings" style="padding:4px 8px; font-size:12px; color:#a78bfa;">⚙️</button>
                 <button class="btn btn-sm" onclick="openWolfRunPortForward('${svc.id}', '${svc.name}', '${vip || ''}')" title="Port Forward" style="padding:4px 8px; font-size:12px; color:#818cf8;" ${!vip ? 'disabled' : ''}>🔀</button>
                 <button class="btn btn-sm" onclick="wolfrunDelete('${svc.id}', '${svc.name}')" title="Remove" style="padding:4px 8px; font-size:12px; color:#ef4444;">🗑️</button>
             </td>
@@ -20196,6 +20212,8 @@ function openWolfRunDeployModal() {
     document.getElementById('wolfrun-deploy-volumes').value = '';
     document.getElementById('wolfrun-deploy-replicas').value = '1';
     document.getElementById('wolfrun-deploy-runtime').value = 'docker';
+    const foCheck = document.getElementById('wolfrun-deploy-failover');
+    if (foCheck) foCheck.checked = false;
     wolfrunRuntimeChanged();
 }
 
@@ -20217,12 +20235,15 @@ async function executeWolfRunDeploy() {
     const replicas = parseInt(document.getElementById('wolfrun-deploy-replicas').value) || 1;
     const restart = document.getElementById('wolfrun-deploy-restart').value;
 
+    const failover = document.getElementById('wolfrun-deploy-failover')?.checked || false;
+
     const payload = {
         name,
         runtime,
         replicas,
         cluster_name: wolfrunCurrentCluster,
         restart_policy: restart,
+        failover,
     };
 
     if (runtime === 'docker') {
@@ -20330,13 +20351,17 @@ async function executeWolfRunDeploy() {
 
 let wolfrunSettingsServiceId = null;
 
-function wolfrunSettings(serviceId, name, currentDesired, currentMin, currentMax, lbPolicy, allowedNodes, clusterName) {
+function wolfrunSettings(serviceId, name, currentDesired, currentMin, currentMax, lbPolicy, allowedNodes, clusterName, failover) {
     wolfrunSettingsServiceId = serviceId;
     document.getElementById('wolfrun-settings-name').textContent = name;
     document.getElementById('wolfrun-settings-desired').value = currentDesired;
     document.getElementById('wolfrun-settings-min').value = currentMin;
     document.getElementById('wolfrun-settings-max').value = currentMax;
     document.getElementById('wolfrun-settings-lb-policy').value = lbPolicy || 'round_robin';
+
+    // Failover toggle
+    let foCheck = document.getElementById('wolfrun-settings-failover');
+    if (foCheck) foCheck.checked = !!failover;
 
     // Render allowed nodes checkboxes — only nodes from this service's cluster
     const container = document.getElementById('wolfrun-settings-allowed-nodes');
@@ -20391,7 +20416,7 @@ async function saveWolfRunSettings() {
         const resp = await fetch(wolfrunApiUrl(`/api/wolfrun/services/${wolfrunSettingsServiceId}/settings`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ desired, min_replicas: min, max_replicas: max, lb_policy, allowed_nodes }),
+            body: JSON.stringify({ desired, min_replicas: min, max_replicas: max, lb_policy, allowed_nodes, failover: document.getElementById('wolfrun-settings-failover')?.checked || false }),
         });
         const data = await resp.json();
         if (resp.ok) {
@@ -20408,6 +20433,41 @@ async function saveWolfRunSettings() {
     } catch (e) {
         showToast('Settings failed: ' + e.message, 'error');
     }
+}
+
+async function loadWolfRunFailoverEvents() {
+    try {
+        const resp = await fetch(wolfrunApiUrl('/api/wolfrun/failover-events'));
+        if (!resp.ok) return;
+        const events = await resp.json();
+        const card = document.getElementById('wolfrun-failover-card');
+        const tbody = document.getElementById('wolfrun-failover-tbody');
+        const empty = document.getElementById('wolfrun-failover-empty');
+
+        if (events.length === 0) {
+            card.style.display = 'none';
+            return;
+        }
+
+        card.style.display = '';
+        empty.style.display = 'none';
+        document.getElementById('wolfrun-failover-table').style.display = '';
+
+        // Sort newest first
+        events.sort((a, b) => b.timestamp - a.timestamp);
+
+        tbody.innerHTML = events.slice(0, 20).map(e => {
+            const date = new Date(e.timestamp * 1000);
+            const timeStr = date.toLocaleString();
+            return `<tr>
+                <td style="font-size:12px; white-space:nowrap;">${timeStr}</td>
+                <td style="font-weight:600;">${e.service_name}</td>
+                <td><span style="padding:2px 8px;border-radius:6px;font-size:11px;background:rgba(239,68,68,0.12);color:#ef4444;border:1px solid rgba(239,68,68,0.2);">${e.from_node}</span></td>
+                <td><span style="padding:2px 8px;border-radius:6px;font-size:11px;background:rgba(16,185,129,0.12);color:#10b981;border:1px solid rgba(16,185,129,0.2);">${e.to_node}</span></td>
+                <td style="font-size:12px; color:var(--text-secondary);">${e.detail}</td>
+            </tr>`;
+        }).join('');
+    } catch { }
 }
 
 async function wolfrunAction(serviceId, action) {
