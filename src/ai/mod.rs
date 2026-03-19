@@ -25,10 +25,14 @@ const KNOWLEDGE_DIR_DEV: &str = "../wolfscale/web";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiConfig {
-    pub provider: String,         // "claude" or "gemini"
+    pub provider: String,         // "claude", "gemini", or "openai"
     pub claude_api_key: String,
     pub gemini_api_key: String,
-    pub model: String,            // e.g. "claude-sonnet-4-20250514", "gemini-2.0-flash"
+    #[serde(default)]
+    pub openai_api_key: String,
+    #[serde(default)]
+    pub openai_base_url: String,  // e.g. "http://litellm:4000/v1"
+    pub model: String,            // e.g. "claude-sonnet-4-20250514", "gemini-2.0-flash", "qwen3-coder-30b"
     pub email_enabled: bool,
     pub email_to: String,
     pub smtp_host: String,
@@ -50,6 +54,8 @@ impl Default for AiConfig {
             provider: "claude".to_string(),
             claude_api_key: String::new(),
             gemini_api_key: String::new(),
+            openai_api_key: String::new(),
+            openai_base_url: String::new(),
             model: "claude-sonnet-4-20250514".to_string(),
             email_enabled: false,
             email_to: String::new(),
@@ -85,6 +91,8 @@ impl AiConfig {
             "provider": self.provider,
             "claude_api_key": mask_key(&self.claude_api_key),
             "gemini_api_key": mask_key(&self.gemini_api_key),
+            "openai_api_key": mask_key(&self.openai_api_key),
+            "openai_base_url": self.openai_base_url,
             "model": self.model,
             "email_enabled": self.email_enabled,
             "email_to": self.email_to,
@@ -96,6 +104,7 @@ impl AiConfig {
             "scan_schedule": self.scan_schedule,
             "has_claude_key": !self.claude_api_key.is_empty(),
             "has_gemini_key": !self.gemini_api_key.is_empty(),
+            "has_openai_key": !self.openai_api_key.is_empty(),
             "has_smtp_pass": !self.smtp_pass.is_empty(),
         })
     }
@@ -103,6 +112,7 @@ impl AiConfig {
     fn active_key(&self) -> &str {
         match self.provider.as_str() {
             "gemini" => &self.gemini_api_key,
+            "openai" => &self.openai_api_key,
             _ => &self.claude_api_key,
         }
     }
@@ -196,6 +206,9 @@ impl AiAgent {
             let response = match config.provider.as_str() {
                 "gemini" => {
                     call_gemini(&self.client, &config.gemini_api_key, &config.model, &system_prompt, &history, &current_msg).await?
+                }
+                "openai" => {
+                    call_openai(&self.client, &config.openai_api_key, &config.openai_base_url, &config.model, &system_prompt, &history, &current_msg).await?
                 }
                 _ => {
                     call_claude(&self.client, &config.claude_api_key, &config.model, &system_prompt, &history, &current_msg).await?
@@ -335,6 +348,34 @@ impl AiAgent {
     /// List available models for the configured provider
     pub async fn list_models(&self, provider: &str, api_key: &str) -> Result<Vec<String>, String> {
         match provider {
+            "openai" => {
+                let config = self.config.lock().unwrap().clone();
+                let base_url = if config.openai_base_url.is_empty() {
+                    "https://api.openai.com/v1".to_string()
+                } else {
+                    config.openai_base_url.trim_end_matches('/').to_string()
+                };
+                let url = format!("{}/models", base_url);
+                let mut req = self.client.get(&url);
+                if !api_key.is_empty() {
+                    req = req.header("Authorization", format!("Bearer {}", api_key));
+                }
+                let resp = req.send().await
+                    .map_err(|e| format!("OpenAI API error: {}", e))?;
+                let status = resp.status();
+                let text = resp.text().await.map_err(|e| format!("OpenAI response error: {}", e))?;
+                if !status.is_success() {
+                    return Err(format!("OpenAI API {} — {}", status, text));
+                }
+                let json: serde_json::Value = serde_json::from_str(&text)
+                    .map_err(|e| format!("OpenAI JSON error: {}", e))?;
+                let models = json["data"].as_array()
+                    .map(|arr| arr.iter().filter_map(|m| {
+                        m["id"].as_str().map(|s| s.to_string())
+                    }).collect())
+                    .unwrap_or_default();
+                Ok(models)
+            }
             "gemini" => {
                 let url = format!(
                     "https://generativelanguage.googleapis.com/v1beta/models?key={}",
@@ -411,6 +452,7 @@ impl AiAgent {
 
         let result = match config.provider.as_str() {
             "gemini" => call_gemini(&self.client, &config.gemini_api_key, &config.model, system, &[], &prompt).await,
+            "openai" => call_openai(&self.client, &config.openai_api_key, &config.openai_base_url, &config.model, system, &[], &prompt).await,
             _ => call_claude(&self.client, &config.claude_api_key, &config.model, system, &[], &prompt).await,
         };
 
@@ -513,6 +555,7 @@ impl AiAgent {
 
         let result = match config.provider.as_str() {
             "gemini" => call_gemini(&self.client, &config.gemini_api_key, &config.model, system, &[], issue_description).await,
+            "openai" => call_openai(&self.client, &config.openai_api_key, &config.openai_base_url, &config.model, system, &[], issue_description).await,
             _ => call_claude(&self.client, &config.claude_api_key, &config.model, system, &[], issue_description).await,
         };
 
@@ -826,6 +869,84 @@ fn build_system_prompt(knowledge: &str, server_context: &str) -> String {
 }
 
 // ─── LLM API Calls ───
+
+async fn call_openai(
+    client: &reqwest::Client,
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+    system: &str,
+    history: &[ChatMessage],
+    user_msg: &str,
+) -> Result<String, String> {
+    let base = if base_url.is_empty() {
+        "https://api.openai.com/v1"
+    } else {
+        base_url.trim_end_matches('/')
+    };
+    let url = format!("{}/chat/completions", base);
+
+    let mut messages = Vec::new();
+
+    // System message
+    messages.push(serde_json::json!({
+        "role": "system",
+        "content": system
+    }));
+
+    // Add conversation history
+    for msg in history {
+        messages.push(serde_json::json!({
+            "role": msg.role,
+            "content": msg.content
+        }));
+    }
+
+    // Add current user message
+    messages.push(serde_json::json!({
+        "role": "user",
+        "content": user_msg
+    }));
+
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 4096,
+        "messages": messages,
+    });
+
+    let mut req = client
+        .post(&url)
+        .header("content-type", "application/json");
+
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", api_key));
+    }
+
+    let resp = req
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("OpenAI API error: {}", e))?;
+
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| format!("OpenAI response error: {}", e))?;
+
+    if !status.is_success() {
+        let lower = text.to_lowercase();
+        if status.as_u16() == 429 || lower.contains("rate_limit") {
+            return Err("OpenAI-compatible API rate limit exceeded.".to_string());
+        }
+        return Err(format!("OpenAI API {} — {}", status, text));
+    }
+
+    let json: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("OpenAI JSON error: {}", e))?;
+
+    json["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("Unexpected OpenAI response format: {}", text))
+}
 
 async fn call_claude(
     client: &reqwest::Client,

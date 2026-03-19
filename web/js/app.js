@@ -6928,10 +6928,7 @@ async function upgradeNode(nodeId) {
     if (!node) return;
 
     const machine = node.is_self ? 'this machine (local)' : (node.hostname + ' (' + node.address + ')');
-    if (!(await showConfirm('⚡ Upgrade WolfStack on ' + machine + '?\n\nThis will run the upgrade script in the background.\n\nProgress will be tracked in the task log.\n\nProceed?'))) return;
-
-    // Record current version for comparison
-    const oldVersion = node.metrics?.hostname ? (allNodes.find(n => n.id === nodeId)?.metrics?.hostname || '') : '';
+    if (!(await showConfirm('⚡ Upgrade WolfStack on ' + machine + '?\n\nThis will run the upgrade script. A terminal window will open so you can monitor progress.\n\nThe service will restart after upgrading — refresh your browser when done.\n\nProceed?'))) return;
 
     // Open console popup with type=upgrade
     let url = '/console.html?type=upgrade&name=wolfstack';
@@ -6940,40 +6937,8 @@ async function upgradeNode(nodeId) {
     }
     window.open(url, 'upgrade_console_' + nodeId, 'width=960,height=600,menubar=no,toolbar=no');
 
-    // Track in task log
-    const taskId = addTaskLogEntry({
-        cluster: node.cluster_name || 'WolfStack',
-        node: node.hostname || node.address,
-        description: 'Upgrading WolfStack...',
-        status: 'running',
-    });
-
-    showToast('Upgrade started for ' + machine, 'info');
-
-    // Poll node status to track upgrade progress
-    let wasOffline = false;
-    let startTime = Date.now();
-    const pollTimer = setInterval(() => {
-        const elapsed = Math.floor((Date.now() - startTime) / 1000);
-        const mins = Math.floor(elapsed / 60);
-        const secs = elapsed % 60;
-        const timeStr = mins > 0 ? mins + 'm ' + secs + 's' : secs + 's';
-        const currentNode = allNodes.find(n => n.id === nodeId);
-        if (!currentNode) return;
-
-        if (!currentNode.online && !wasOffline) {
-            wasOffline = true;
-            updateTaskLogEntry(taskId, { description: 'Restarting... (' + timeStr + ')', status: 'running' });
-        } else if (currentNode.online && wasOffline) {
-            clearInterval(pollTimer);
-            updateTaskLogEntry(taskId, {
-                description: 'Upgrade complete (' + timeStr + ')',
-                status: 'success',
-            });
-        } else if (currentNode.online && !wasOffline) {
-            updateTaskLogEntry(taskId, { description: 'Compiling... (' + timeStr + ')', status: 'running' });
-        }
-    }, 5000);
+    showToast('Upgrade started — watch the terminal window for progress.', 'info');
+    taskLogStart('Upgrade node: ' + machine);
 
     // Close the settings modal
     const modal = document.getElementById('node-settings-modal');
@@ -7380,20 +7345,17 @@ function renderTaskLog() {
     tbody.innerHTML = _taskLogEntries.map(entry => {
         const timeStr = entry.time.toLocaleTimeString();
         const isRunning = entry.status === 'running';
-        const isSuccess = entry.status === 'success' || entry.status === 'completed';
-        const isFailed = entry.status === 'failed' || entry.status === 'error';
+        const isFailed = entry.status === 'failed';
         const spinnerHtml = isRunning
             ? '<span style="display:inline-block; width:12px; height:12px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; vertical-align:middle; margin-right:4px;"></span>'
             : '';
-        const statusBadge = isSuccess
+        const statusBadge = entry.status === 'completed'
             ? '<span style="color:#22c55e; font-weight:500;">✓ OK</span>'
             : isFailed
                 ? '<span style="color:#ef4444; font-weight:500;">✗ Failed</span>'
-                : isRunning
-                    ? spinnerHtml + '<span style="color:var(--accent);">Running</span>'
-                    : '<span style="color:var(--text-muted);">' + escapeHtml(entry.status) + '</span>';
+                : spinnerHtml + '<span style="color:var(--accent);">Running</span>';
 
-        const rowBg = isFailed ? 'background:rgba(239,68,68,0.08);' : isRunning ? 'background:rgba(59,130,246,0.05);' : isSuccess ? 'background:rgba(34,197,94,0.05);' : '';
+        const rowBg = isFailed ? 'background:rgba(239,68,68,0.08);' : isRunning ? 'background:rgba(59,130,246,0.05);' : '';
 
         const hasLog = entry.logLines.length > 0;
         const expandBtn = hasLog ? `<span style="cursor:pointer; margin-right:4px; color:var(--text-muted);" onclick="toggleTaskLogExpand('${entry.id}')">${entry.expanded ? '▼' : '▶'}</span>` : '<span style="display:inline-block; width:16px;"></span>';
@@ -16210,6 +16172,10 @@ async function loadAiConfig() {
         if ((el = document.getElementById('ai-provider'))) el.value = cfg.provider || 'claude';
         if ((el = document.getElementById('ai-claude-key'))) el.value = cfg.has_claude_key ? cfg.claude_api_key : '';
         if ((el = document.getElementById('ai-gemini-key'))) el.value = cfg.has_gemini_key ? cfg.gemini_api_key : '';
+        if ((el = document.getElementById('ai-openai-key'))) el.value = cfg.has_openai_key ? cfg.openai_api_key : '';
+        if ((el = document.getElementById('ai-openai-url'))) el.value = cfg.openai_base_url || '';
+        if ((el = document.getElementById('ai-model-text'))) el.value = cfg.model || '';
+        onAiProviderChange();
         if ((el = document.getElementById('ai-email-enabled'))) el.checked = cfg.email_enabled || false;
         if ((el = document.getElementById('ai-email-to'))) el.value = cfg.email_to || '';
         if ((el = document.getElementById('ai-smtp-host'))) el.value = cfg.smtp_host || '';
@@ -16267,11 +16233,17 @@ async function fetchAiModels(provider, selectedModel) {
 }
 
 async function saveAiConfig() {
+    var prov = (document.getElementById('ai-provider') || {}).value || 'claude';
+    var modelVal = (prov === 'openai')
+        ? (document.getElementById('ai-model-text') || {}).value || ''
+        : (document.getElementById('ai-model') || {}).value || '';
     var config = {
-        provider: (document.getElementById('ai-provider') || {}).value || 'claude',
+        provider: prov,
         claude_api_key: (document.getElementById('ai-claude-key') || {}).value || '',
         gemini_api_key: (document.getElementById('ai-gemini-key') || {}).value || '',
-        model: (document.getElementById('ai-model') || {}).value || '',
+        openai_api_key: (document.getElementById('ai-openai-key') || {}).value || '',
+        openai_base_url: (document.getElementById('ai-openai-url') || {}).value || '',
+        model: modelVal,
         email_enabled: (document.getElementById('ai-email-enabled') || {}).checked || false,
         email_to: (document.getElementById('ai-email-to') || {}).value || '',
         smtp_host: (document.getElementById('ai-smtp-host') || {}).value || '',
@@ -16358,11 +16330,17 @@ async function loadAiAlerts() {
 
 async function testAiConnection() {
     // First save settings so the backend has the latest keys
+    var prov = (document.getElementById('ai-provider') || {}).value || 'claude';
+    var modelVal = (prov === 'openai')
+        ? (document.getElementById('ai-model-text') || {}).value || ''
+        : (document.getElementById('ai-model') || {}).value || '';
     var config = {
-        provider: (document.getElementById('ai-provider') || {}).value || 'claude',
+        provider: prov,
         claude_api_key: (document.getElementById('ai-claude-key') || {}).value || '',
         gemini_api_key: (document.getElementById('ai-gemini-key') || {}).value || '',
-        model: (document.getElementById('ai-model') || {}).value || '',
+        openai_api_key: (document.getElementById('ai-openai-key') || {}).value || '',
+        openai_base_url: (document.getElementById('ai-openai-url') || {}).value || '',
+        model: modelVal,
         email_enabled: (document.getElementById('ai-email-enabled') || {}).checked || false,
         email_to: (document.getElementById('ai-email-to') || {}).value || '',
         smtp_host: (document.getElementById('ai-smtp-host') || {}).value || '',
@@ -16412,7 +16390,20 @@ async function sendTestEmail() {
 
 function onAiProviderChange() {
     var provider = (document.getElementById('ai-provider') || {}).value || 'claude';
-    fetchAiModels(provider, '');
+    var openaiFields = document.getElementById('ai-openai-fields');
+    var modelSelect = document.getElementById('ai-model');
+    var modelText = document.getElementById('ai-model-text');
+    if (openaiFields) openaiFields.style.display = (provider === 'openai') ? 'block' : 'none';
+    if (modelSelect && modelText) {
+        if (provider === 'openai') {
+            modelSelect.style.display = 'none';
+            modelText.style.display = 'block';
+        } else {
+            modelSelect.style.display = 'block';
+            modelText.style.display = 'none';
+        }
+    }
+    if (provider !== 'openai') fetchAiModels(provider, '');
 }
 
 // ─── Config Export / Import ───
@@ -18735,93 +18726,27 @@ async function issuesUpgradeAll() {
     });
 
     var channel = (document.getElementById('issues-channel-select') || {}).value || 'master';
-
-    // Track each node upgrade — persist to localStorage so tracking survives page reload
-    var trackers = JSON.parse(localStorage.getItem('wolfstack_upgrade_trackers') || '[]');
     for (var i = 0; i < targets.length; i++) {
         var r = targets[i];
         var node = allNodes.find(function (n) { return n.id === r.node_id; });
         var safeId = (r.node_id || 'local').replace(/[^a-z0-9_-]/gi, '-');
         var url = (node && !node.is_self) ? '/api/nodes/' + encodeURIComponent(r.node_id) + '/proxy/upgrade?channel=' + channel : '/api/upgrade?channel=' + channel;
-
         try {
             await fetch(url, { method: 'POST' });
-            modal.updateRow(safeId, true, 'Upgrading...');
-            trackers.push({ nodeId: r.node_id, hostname: r.hostname || r.node_id, cluster: (node && node.cluster_name) || 'WolfStack', startedAt: Date.now(), done: false });
+            modal.updateRow(safeId, true, 'Command sent \u2713');
         } catch (e) {
             modal.updateRow(safeId, false, 'Failed: ' + e.message);
         }
     }
-    localStorage.setItem('wolfstack_upgrade_trackers', JSON.stringify(trackers));
 
-    modal.setTitle('Upgrades In Progress (' + trackers.length + ' nodes)');
+    modal.setTitle('Upgrades In Progress');
     modal.setFooter('<div style="background:rgba(234,179,8,0.1); border:1px solid rgba(234,179,8,0.3); border-radius:10px; padding:16px; text-align:center;">'
         + '<div style="font-size:24px; margin-bottom:8px;">\u23F3</div>'
-        + '<div style="font-weight:600; color:var(--text-primary); font-size:14px; margin-bottom:4px;">Upgrades in progress — tracking in task log</div>'
-        + '<div style="color:var(--text-secondary); font-size:12px;">Raspberry Pi may take up to 50 minutes. Tracking persists across browser refresh.</div>'
+        + '<div style="font-weight:600; color:var(--text-primary); font-size:14px; margin-bottom:4px;">Please wait approximately 5 minutes</div>'
+        + '<div style="color:var(--text-secondary); font-size:12px;">All servers are upgrading and will restart automatically.<br>Refresh your browser once complete.</div>'
         + '</div>');
     modal.showDone();
-
-    // Start the persistent upgrade tracker
-    _startUpgradeTracking();
 }
-
-// Persistent upgrade tracker — survives page reload
-function _startUpgradeTracking() {
-    var trackers = JSON.parse(localStorage.getItem('wolfstack_upgrade_trackers') || '[]');
-    if (trackers.length === 0) return;
-
-    // Create task log entries for any pending trackers
-    trackers.forEach(function(t) {
-        if (t.done) return;
-        if (!t.taskId) {
-            t.taskId = addTaskLogEntry({
-                cluster: t.cluster || 'WolfStack',
-                node: t.hostname,
-                description: 'Upgrading... (resumed after page reload)',
-                status: 'running',
-            });
-        }
-    });
-
-    var pollTimer = setInterval(function() {
-        var pending = 0;
-        trackers.forEach(function(t) {
-            if (t.done) return;
-            var currentNode = allNodes.find(function(n) { return n.id === t.nodeId; });
-            if (!currentNode || allNodes.length === 0) { pending++; return; }
-
-            var elapsed = Math.floor((Date.now() - t.startedAt) / 1000);
-            var timeStr = elapsed >= 60 ? Math.floor(elapsed/60) + 'm ' + (elapsed%60) + 's' : elapsed + 's';
-
-            // Track: must see node online first (seenOnline), then offline, then online again
-            if (currentNode.online && !t.seenOnline) {
-                t.seenOnline = true;
-                if (t.taskId) updateTaskLogEntry(t.taskId, { description: t.hostname + ' — compiling... (' + timeStr + ')', status: 'running' });
-                pending++;
-            } else if (!currentNode.online && t.seenOnline) {
-                t.wasOffline = true;
-                if (t.taskId) updateTaskLogEntry(t.taskId, { description: t.hostname + ' — restarting... (' + timeStr + ')', status: 'running' });
-                pending++;
-            } else if (currentNode.online && t.wasOffline) {
-                t.done = true;
-                if (t.taskId) updateTaskLogEntry(t.taskId, { description: t.hostname + ' — upgrade complete (' + timeStr + ')', status: 'success' });
-            } else {
-                if (t.taskId) updateTaskLogEntry(t.taskId, { description: t.hostname + ' — waiting... (' + timeStr + ')', status: 'running' });
-                pending++;
-            }
-        });
-
-        localStorage.setItem('wolfstack_upgrade_trackers', JSON.stringify(trackers));
-
-        if (pending === 0) {
-            clearInterval(pollTimer);
-            localStorage.removeItem('wolfstack_upgrade_trackers');
-        }
-    }, 5000);
-}
-// Resume tracking on page load
-setTimeout(function() { _startUpgradeTracking(); }, 3000);
 
 async function cleanSystem() {
     try {
@@ -29227,105 +29152,60 @@ async function deleteWolfFlow(id, name) {
 }
 
 async function triggerWolfFlow(id) {
-    // Get workflow details
+    // Find workflow name for the task log
     let wfName = id;
-    let wfTarget = '';
-    let wfStepCount = 0;
     try {
         const wfResp = await fetch(`/api/wolfflow/workflows/${id}`, { credentials: 'include' });
-        if (wfResp.ok) {
-            const wf = await wfResp.json();
-            wfName = wf.name || id;
-            wfStepCount = (wf.steps || []).length;
-            wfTarget = wf.target?.scope === 'all_nodes' ? 'all nodes' :
-                wf.target?.scope === 'local' ? 'local' :
-                wf.target?.scope === 'cluster' ? wf.target.cluster_name :
-                wf.target?.scope === 'nodes' ? (wf.target.node_ids || []).length + ' nodes' :
-                wf.target?.scope || '?';
-        }
+        if (wfResp.ok) { const wf = await wfResp.json(); wfName = wf.name || id; }
     } catch(e) {}
 
     const taskId = addTaskLogEntry({
         cluster: 'WolfFlow',
         node: wfName,
-        description: `Starting "${wfName}" (${wfStepCount} step${wfStepCount !== 1 ? 's' : ''}) on ${wfTarget}...`,
+        description: 'Running workflow...',
         status: 'running',
     });
 
     try {
         const resp = await fetch(`/api/wolfflow/workflows/${id}/run`, { method: 'POST', credentials: 'include' });
-        if (!resp.ok) {
-            const err = await resp.text();
-            throw new Error(err || 'Trigger failed');
-        }
+        if (!resp.ok) throw new Error('Trigger failed');
         showToast('Workflow triggered: ' + wfName, 'success');
 
-        // Poll for run results
-        const startTime = Date.now();
-        let pollDone = false;
+        // Poll for run results every 3s
+        let pollCount = 0;
         const pollTimer = setInterval(async () => {
-            if (pollDone) return;
-            const elapsed = Math.floor((Date.now() - startTime) / 1000);
-            const timeStr = elapsed >= 60 ? Math.floor(elapsed/60) + 'm ' + (elapsed%60) + 's' : elapsed + 's';
+            pollCount++;
+            if (pollCount > 60) { clearInterval(pollTimer); return; } // 3 min timeout
             try {
-                // Try to find the run — use workflow_id filter for efficiency
-                let run = null;
-                try {
-                    const runsResp = await fetch(`/api/wolfflow/runs?workflow_id=${encodeURIComponent(id)}&limit=1`, { credentials: 'include' });
-                    if (runsResp.ok) {
-                        const runs = await runsResp.json();
-                        if (runs.length > 0) run = runs[0];
-                    }
-                } catch(e2) {}
-                // Fallback — fetch all runs and search
-                if (!run) {
-                    try {
-                        const runsResp2 = await fetch('/api/wolfflow/runs?limit=100', { credentials: 'include' });
-                        if (runsResp2.ok) {
-                            const allRuns = await runsResp2.json();
-                            run = allRuns.find(r => r.workflow_id === id);
-                        }
-                    } catch(e3) {}
-                }
-                if (!run) {
-                    updateTaskLogEntry(taskId, { description: `"${wfName}" — waiting for run to appear (${timeStr})...`, status: 'running' });
-                    return;
-                }
-
-                const runStatus = (run.status || '').toLowerCase();
-                if (runStatus === 'running') {
-                    // Show detailed step progress
-                    const completedSteps = (run.steps || []).filter(s => s.status !== 'running');
-                    const lastStep = completedSteps.length > 0 ? completedSteps[completedSteps.length - 1] : null;
-                    const detail = lastStep
-                        ? `Step ${completedSteps.length}/${wfStepCount}: "${lastStep.step_name}" on ${lastStep.node_hostname} — ${lastStep.status}`
-                        : `Executing step 1/${wfStepCount} on ${wfTarget}`;
-                    updateTaskLogEntry(taskId, { description: `"${wfName}" — ${detail} (${timeStr})`, status: 'running' });
+                const runsResp = await fetch('/api/wolfflow/runs?limit=1', { credentials: 'include' });
+                if (!runsResp.ok) return;
+                const runs = await runsResp.json();
+                const latestRun = runs.find(r => r.workflow_id === id);
+                if (!latestRun) return;
+                if (latestRun.status === 'running') {
+                    const completedSteps = latestRun.steps ? latestRun.steps.filter(s => s.status !== 'running').length : 0;
+                    const totalSteps = latestRun.steps ? latestRun.steps.length : 0;
+                    updateTaskLogEntry(taskId, { description: `Step ${completedSteps}/${totalSteps}...`, status: 'running' });
                 } else {
-                    // Finished — stop polling immediately
-                    pollDone = true;
                     clearInterval(pollTimer);
-                    const logLines = (run.steps || []).map(s => {
-                        const outputPreview = s.output ? s.output.substring(0, 300).replace(/\n/g, ' ') : '';
-                        return `[${s.status}] ${s.step_name} on ${s.node_hostname} (${s.duration_ms}ms)${outputPreview ? '\n    ' + outputPreview : ''}`;
-                    });
-                    if (run.email_status) logLines.push(`[Email] ${run.email_status}`);
-
-                    const statusMap = { completed: 'success', failed: 'error', partial_failure: 'error' };
-                    const statusLabel = runStatus === 'completed' ? 'COMPLETED' : runStatus === 'failed' ? 'FAILED' : runStatus.toUpperCase();
+                    const logLines = (latestRun.steps || []).map(s =>
+                        `[${s.status}] ${s.step_name} on ${s.node_hostname} (${s.duration_ms}ms)${s.output ? ': ' + s.output.substring(0, 200) : ''}`
+                    );
+                    if (latestRun.email_status) {
+                        logLines.push(`[Email] ${latestRun.email_status}`);
+                    }
+                    const status = latestRun.status === 'completed' ? 'success' : 'error';
                     updateTaskLogEntry(taskId, {
-                        description: `"${wfName}" — ${statusLabel} (${(run.steps||[]).length} steps, ${timeStr})${run.email_status ? ' | Email: ' + run.email_status : ''}`,
-                        status: statusMap[runStatus] || 'error',
+                        description: `${wfName} — ${latestRun.status} (${latestRun.steps?.length || 0} steps)${latestRun.email_status ? ' | ' + latestRun.email_status : ''}`,
+                        status,
                         logLines,
                     });
                     loadWolfFlowList();
                 }
-            } catch(e) {
-                updateTaskLogEntry(taskId, { description: `"${wfName}" — polling error: ${e.message} (${timeStr})`, status: 'running' });
-            }
-        }, 2000);
+            } catch(e) {}
+        }, 3000);
     } catch (e) {
-        updateTaskLogEntry(taskId, { description: `"${wfName}" FAILED: ${e.message}`, status: 'error' });
+        updateTaskLogEntry(taskId, { description: 'Failed: ' + e.message, status: 'error' });
         showToast('Failed to trigger: ' + e.message, 'error');
     }
 }

@@ -4183,6 +4183,14 @@ pub async fn ai_save_config(
                 config.gemini_api_key = v.to_string();
             }
         }
+        if let Some(v) = body.get("openai_api_key").and_then(|v| v.as_str()) {
+            if !v.contains("••••") && !v.is_empty() {
+                config.openai_api_key = v.to_string();
+            }
+        }
+        if let Some(v) = body.get("openai_base_url").and_then(|v| v.as_str()) {
+            config.openai_base_url = v.to_string();
+        }
         if let Some(v) = body.get("model").and_then(|v| v.as_str()) {
             config.model = v.to_string();
         }
@@ -8352,9 +8360,8 @@ pub async fn wolfflow_runs_list(req: HttpRequest, state: web::Data<AppState>, qu
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let wf_id = query.get("workflow_id").map(|s| s.as_str());
     let limit = query.get("limit").and_then(|s| s.parse().ok()).unwrap_or(50);
-    let mut runs = state.wolfflow.list_runs(wf_id);
-    runs.reverse(); // newest first
-    runs.truncate(limit);
+    let runs = state.wolfflow.list_runs(wf_id);
+    let runs: Vec<_> = runs.into_iter().take(limit).collect();
     HttpResponse::Ok().json(runs)
 }
 

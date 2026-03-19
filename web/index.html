@@ -3732,6 +3732,7 @@
                                     <select id="ai-provider" class="form-control" onchange="onAiProviderChange()">
                                         <option value="claude">Claude (Anthropic)</option>
                                         <option value="gemini">Gemini (Google)</option>
+                                        <option value="openai">OpenAI Compatible (Local LLM)</option>
                                     </select>
                                 </div>
                                 <div class="form-group" style="margin-bottom:16px;">
@@ -3744,11 +3745,25 @@
                                     <input type="password" id="ai-gemini-key" class="form-control"
                                         placeholder="AIza...">
                                 </div>
+                                <div id="ai-openai-fields" style="display:none;">
+                                    <div class="form-group" style="margin-bottom:16px;">
+                                        <label>Base URL</label>
+                                        <input type="text" id="ai-openai-url" class="form-control"
+                                            placeholder="http://127.0.0.1:4000/v1">
+                                    </div>
+                                    <div class="form-group" style="margin-bottom:16px;">
+                                        <label>API Key <span style="color:#888;font-size:12px;">(leave empty if not required)</span></label>
+                                        <input type="password" id="ai-openai-key" class="form-control"
+                                            placeholder="not-needed">
+                                    </div>
+                                </div>
                                 <div class="form-group" style="margin-bottom:16px;">
                                     <label>Model</label>
                                     <select id="ai-model" class="form-control">
                                         <option value="">Select a provider and enter API key first</option>
                                     </select>
+                                    <input type="text" id="ai-model-text" class="form-control" style="display:none;margin-top:8px;"
+                                        placeholder="e.g. qwen3-coder-30b">
                                 </div>
                                 <div class="form-group" style="margin-bottom:16px;">
                                     <label>Health Check Interval</label>
