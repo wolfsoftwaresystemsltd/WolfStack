@@ -22,15 +22,54 @@ pub mod baseline;
 /// Shared HTTP client for the stateless `simple_chat` entry point
 /// (used by plugins and the wolfagents dispatcher). AiAgent owns its
 /// own `client` field, so this is only for callers who don't have an
-/// AiAgent instance handy. 120s timeout matches the inference latency
-/// budget the AI paths expect.
+/// AiAgent instance handy.
+///
+/// Three things matter here, all driven by KO4BSR's v22.8.0 report
+/// of curl-works-but-WolfStack-doesn't on `http://<lan-ip>:11434`:
+///
+/// 1. **No `local_address` binding.** The `ipv4_only_client_builder`
+///    helper binds to `0.0.0.0` to skip IPv6 candidates for inter-node
+///    polling. On hosts with policy routing or multiple default routes,
+///    binding the source address can pick a different egress route
+///    than `curl` (which leaves it to the kernel). Plain default →
+///    same routing as curl.
+/// 2. **No connection pool.** Local AI servers run in containers that
+///    rotate. A pooled connection to a stopped container means the
+///    next request stalls for the full kernel SYN budget (~30s)
+///    before reqwest gives up. `pool_max_idle_per_host(0)` forces a
+///    fresh TCP every call — harmless overhead at human-scale call
+///    rates, removes the stall.
+/// 3. **Fast `connect_timeout`.** Without it, a connect on a
+///    non-answering host blocks for the kernel SYN-retry budget
+///    (~30s) and the user sees no error until then. 5s gives a
+///    crisp failure with a useful message; the 120s outer timeout
+///    still covers actual inference.
 static AI_SIMPLE_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(|| {
-        crate::api::ipv4_only_client_builder()
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
     });
+
+/// Format a reqwest send-error with its full source chain. Reqwest's
+/// outer Display message is generic ("error sending request for url
+/// ..."); the actual cause (connection refused, operation timed out,
+/// broken pipe) lives in `e.source()` and is what an operator
+/// actually needs to debug. Walk the chain so the UI shows it.
+fn ai_connection_error(url: &str, err: &reqwest::Error) -> String {
+    use std::error::Error;
+    let mut msg = format!("Local AI connection failed ({}): {}", url, err);
+    let mut current: &dyn Error = err;
+    while let Some(src) = current.source() {
+        msg.push_str(" — ");
+        msg.push_str(&src.to_string());
+        current = src;
+    }
+    msg
+}
 
 /// Outcome of a single health check. `Ok` drives the alert→OK
 /// transition (fire "cleared" notifications on private channels).
@@ -509,7 +548,12 @@ impl AiAgent {
             last_health_check: Mutex::new(None),
             alerting_hosts: Mutex::new(std::collections::HashSet::new()),
             knowledge_base,
-            client: crate::api::ipv4_only_client_builder()
+            // See AI_SIMPLE_CLIENT above for the rationale on each
+            // setting. AiAgent makes the same kinds of calls so it
+            // gets the same client recipe.
+            client: reqwest::Client::builder()
+                .pool_max_idle_per_host(0)
+                .connect_timeout(std::time::Duration::from_secs(5))
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
@@ -2373,7 +2417,7 @@ async fn call_local_inner(
     }
 
     let resp = req.send().await
-        .map_err(|e| format!("Local AI connection failed ({}): {}", url, e))?;
+        .map_err(|e| ai_connection_error(&url, &e))?;
 
     let status = resp.status();
     let text = resp.text().await.map_err(|e| format!("Local AI response error: {}", e))?;
@@ -2870,7 +2914,7 @@ async fn call_local_no_tools(
     }
 
     let resp = req.send().await
-        .map_err(|e| format!("Local AI connection failed ({}): {}", url, e))?;
+        .map_err(|e| ai_connection_error(url, &e))?;
     let status = resp.status();
     let text = resp.text().await.map_err(|e| format!("Local AI response error: {}", e))?;
     if !status.is_success() {
