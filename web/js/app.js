@@ -47786,7 +47786,7 @@ function renderPredictiveInbox() {
                             </div>
                             <button class="btn btn-sm" onclick="predTermClose()" id="predictive-term-close" style="display:none;font-size:11px;padding:2px 8px;flex-shrink:0;">✕ Close</button>
                         </div>
-                        <div id="predictive-term-container" style="flex:1;background:#0a0a0a;padding:8px;overflow:hidden;min-height:0;">
+                        <div id="predictive-term-container" style="flex:1;background:#0a0a0a;padding:8px 8px 14px 8px;overflow:hidden;min-height:0;">
                             <div style="color:var(--text-muted);padding:24px;text-align:center;font-size:13px;line-height:1.6;">
                                 Click <strong>▶ Run</strong> or <strong>💻 Open terminal</strong> on a proposal.<br>
                                 <span style="font-size:11px;opacity:0.7;">Multiple commands on the same proposal share the session — no more 3-popup workflows.</span>
@@ -48244,7 +48244,21 @@ function predTermOpen(proposalId, meta) {
         term.loadAddon(fitAddon);
     }
     term.open(container);
-    setTimeout(() => { try { fitAddon && fitAddon.fit(); } catch (_) {} }, 50);
+    // FitAddon computes row count from the FALLBACK monospace font's
+    // cell-height when xterm.open() runs, because JetBrains Mono /
+    // Fira Code haven't necessarily loaded yet. Once they do load,
+    // xterm reflows but doesn't refit — leaving the bottom row
+    // partially clipped under the container's edge. Re-fitting on
+    // `document.fonts.ready` and again after a settle delay catches
+    // the load + final-layout case. The 50ms call covers the
+    // synchronous-layout case for browsers that have the font
+    // cached.
+    const refit = () => { try { fitAddon && fitAddon.fit(); } catch (_) {} };
+    setTimeout(refit, 50);
+    setTimeout(refit, 250);
+    if (document.fonts && document.fonts.ready) {
+        document.fonts.ready.then(refit).catch(() => {});
+    }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const isRemote = !!meta.remote_node_id;
