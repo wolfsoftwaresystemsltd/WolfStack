@@ -1659,7 +1659,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel' };
+    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', shares: 'Shares' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -1703,6 +1703,8 @@ function selectView(page) {
         dbLoadConnections();
     } else if (page === 'control-panel') {
         cpInit();
+    } else if (page === 'shares') {
+        gwLoad();
     }
 
     // Restore task log toggle button when leaving topology
@@ -48322,6 +48324,10 @@ const APP_DRAWER_TILES = [
         id: 'appstore', icon: '🛍️', name: 'App Store',
         desc: 'Browse and install applications onto any host.',
     },
+    {
+        id: 'shares', icon: '📂', name: 'Shares',
+        desc: 'Universal SMB/NFS gateway — share any storage to your LAN.',
+    },
 ];
 
 function appDrawerTileHtml(t) {
@@ -48439,3 +48445,808 @@ function appDrawerNav(pageId) {
 window.openAppDrawer = openAppDrawer;
 window.closeAppDrawer = closeAppDrawer;
 window.appDrawerNav = appDrawerNav;
+
+// ─── Shares (WolfStack Gateway) ───────────────────────────────────
+//
+// Universal SMB/NFS re-export. The page is cluster-aggregated by
+// default — `/api/gateways/cluster` fans out to every wolfstack peer
+// and merges the lists, so the operator sees every share across the
+// cluster from any node.
+
+const _gwState = {
+    gateways: [],     // last cluster-aggregated snapshot
+    status:   { smb: { installed: false, running: false }, nfs: { installed: false, running: false } },
+    loading:  false,
+};
+
+async function gwLoad() {
+    _gwState.loading = true;
+    const list = document.getElementById('gw-list');
+    if (list) list.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:30px;">Loading shares…</div>';
+
+    try {
+        // /api/gateways/cluster aggregates THIS cluster (every node)
+        // AND every federated remote cluster — one round-trip surfaces
+        // every share from every connected site.
+        const [statusR, clusterR, fedR] = await Promise.all([
+            fetch('/api/gateways/status'),
+            fetch('/api/gateways/cluster'),
+            fetch('/api/federations'),
+        ]);
+        if (statusR.ok) _gwState.status = await statusR.json();
+        if (clusterR.ok) {
+            const data = await clusterR.json();
+            _gwState.gateways = data.gateways || [];
+        }
+        if (fedR.ok) _gwState.federations = await fedR.json();
+    } catch (e) {
+        if (list) list.innerHTML = `<div style="color:var(--danger,#ef4444);padding:20px;">Failed to load: ${escapeHtml(e.message || String(e))}</div>`;
+        _gwState.loading = false;
+        return;
+    }
+    _gwState.loading = false;
+    gwRender();
+    gwRenderFederationSection();
+}
+
+function gwRender() {
+    const list = document.getElementById('gw-list');
+    const statusBox = document.getElementById('gw-daemon-status');
+    if (!list) return;
+
+    // Daemon-status banner — flag missing samba/nfs-kernel-server so
+    // operators get a clear "install this" prompt instead of cryptic
+    // errors when they try to create a share.
+    if (statusBox) {
+        const s = _gwState.status || {};
+        const lines = [];
+        if (!s.smb || !s.smb.installed) {
+            lines.push(`<span style="color:#f59e0b;">⚠️ Samba is not installed on this node</span> — <code>apt-get install -y samba</code> (required for SMB shares)`);
+        } else if (!s.smb.running) {
+            lines.push(`<span style="color:#f59e0b;">⚠️ smbd is not running</span> — <code>systemctl start smbd</code>`);
+        }
+        if (!s.nfs || !s.nfs.installed) {
+            lines.push(`<span style="color:var(--text-muted);">ℹ️ NFS server is not installed</span> — <code>apt-get install -y nfs-kernel-server</code> (only needed for NFS shares)`);
+        }
+        statusBox.innerHTML = lines.length === 0 ? '' :
+            `<div class="card"><div class="card-body" style="padding:10px 14px;font-size:12px;display:flex;flex-direction:column;gap:4px;">${lines.join('')}</div></div>`;
+    }
+
+    if (!_gwState.gateways || _gwState.gateways.length === 0) {
+        list.innerHTML = `
+            <div class="card"><div class="card-body" style="text-align:center;padding:40px 20px;">
+                <div style="font-size:48px;line-height:1;margin-bottom:12px;">📂</div>
+                <h3 style="margin:0 0 8px;">No shares yet</h3>
+                <p style="color:var(--text-muted);max-width:520px;margin:0 auto 18px;">
+                    Create a share to expose any storage WolfStack can reach as an SMB or NFS network share to your LAN.
+                </p>
+                <button class="btn btn-primary" onclick="gwOpenWizard()">+ New Share</button>
+            </div></div>
+        `;
+        return;
+    }
+
+    // Group by origin cluster so multi-cluster control panels still
+    // group cleanly.
+    const groups = new Map();
+    for (const g of _gwState.gateways) {
+        const key = (g.origin_cluster && g.origin_cluster.length > 0) ? g.origin_cluster
+                  : (g.cluster && g.cluster.length > 0) ? g.cluster
+                  : 'WolfStack';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(g);
+    }
+
+    let html = '';
+    for (const [groupName, gws] of groups) {
+        html += `<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin:8px 4px -2px;">${escapeHtml(groupName)}</div>`;
+        for (const g of gws) html += gwRenderRow(g);
+    }
+    list.innerHTML = html;
+}
+
+function gwTierBadge(tier) {
+    const colors = { fast: '#22c55e', ok: '#3b82f6', slow: '#f59e0b', cold: '#94a3b8' };
+    const c = colors[tier] || '#64748b';
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;text-transform:uppercase;background:${c}22;color:${c};border:1px solid ${c}55;">${escapeHtml(tier || 'unknown')}</span>`;
+}
+
+function gwStatusBadge(g) {
+    const rt = g.runtime || {};
+    if (g.disabled) return `<span style="color:#64748b;">⏸ disabled</span>`;
+    if (!rt.serving) return `<span style="color:#94a3b8;">⏳ not running</span>`;
+    if (!rt.healthy) return `<span style="color:#f59e0b;">⚠ unhealthy</span>`;
+    return `<span style="color:#22c55e;">● running</span>`;
+}
+
+function gwRenderRow(g) {
+    const protos = (g.protocols || []).map(p => `<span style="display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(59,130,246,0.15);color:#3b82f6;border:1px solid rgba(59,130,246,0.3);">${escapeHtml(p.toUpperCase())}</span>`).join(' ');
+    const sourceLabel = (g.sources && g.sources[0]) ? gwSourceLabel(g.sources[0]) : '(no source)';
+    // Three placement origins: same-node, peer-in-this-cluster, federated remote cluster.
+    const fed = g.federated === true;
+    const remote = fed
+        ? `<span style="font-size:10px;color:#3b82f6;">🌐 ${escapeHtml(g.origin_federation_name || 'federated')}${g.origin_hostname ? ' / ' + escapeHtml(g.origin_hostname) : ''}</span>`
+        : g.origin_self === false
+            ? `<span style="font-size:10px;color:var(--text-muted);">on ${escapeHtml(g.origin_hostname || g.origin_node_id || 'peer')}</span>`
+            : '';
+    const sessions = g.runtime && g.runtime.active_sessions ? `${g.runtime.active_sessions} sessions` : '';
+    const safeId = escapeAttr(g.id);
+    const remoteAttr = g.origin_node_id ? `,'${escapeAttr(g.origin_node_id)}'` : '';
+    // Federation-error placeholder rows render slightly differently —
+    // no protocols, just the failure reason.
+    if (g.federation_error) {
+        return `
+            <div class="card" style="border-left:3px solid #ef4444;">
+                <div class="card-body" style="display:flex;align-items:center;gap:14px;padding:14px 18px;">
+                    <div style="font-size:24px;">🌐</div>
+                    <div style="flex:1;min-width:0;">
+                        <div><strong style="font-size:14px;color:#ef4444;">${escapeHtml(g.name)}</strong></div>
+                        <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${escapeHtml(g.federation_error)}</div>
+                    </div>
+                    <button class="btn btn-sm" onclick="gwFedTest('${escapeAttr(g.origin_federation_id)}')">Retry</button>
+                </div>
+            </div>
+        `;
+    }
+    return `
+        <div class="card" style="cursor:pointer;${fed ? 'border-left:3px solid #3b82f6;' : ''}" onclick="gwOpenDetail('${safeId}'${remoteAttr})">
+            <div class="card-body" style="display:flex;align-items:center;gap:14px;padding:14px 18px;">
+                <div style="font-size:24px;">📂</div>
+                <div style="flex:1;min-width:0;">
+                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                        <strong style="font-size:14px;">${escapeHtml(g.name)}</strong>
+                        ${protos}
+                        ${gwTierBadge(g.performance_tier)}
+                        ${remote}
+                    </div>
+                    <div style="font-size:12px;color:var(--text-muted);margin-top:4px;display:flex;gap:14px;flex-wrap:wrap;">
+                        <span>↳ ${escapeHtml(sourceLabel)}</span>
+                        <span>${gwStatusBadge(g)}</span>
+                        ${sessions ? `<span>${escapeHtml(sessions)}</span>` : ''}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function gwSourceLabel(s) {
+    if (!s || !s.type) return '(unknown source)';
+    switch (s.type) {
+        case 'local':    return `Local: ${s.path}`;
+        case 'wolfdisk': return `WolfDisk: ${s.volume_id}${s.subpath ? ':' + s.subpath : ''}`;
+        case 'cephfs':   return `CephFS: ${s.cluster_id}/${s.fs_name}${s.subpath ? ':' + s.subpath : ''}`;
+        case 'smb':      return `SMB: //${s.server}/${s.share}`;
+        case 'nfs':      return `NFS: ${s.server}:${s.export}`;
+        default:         return `${s.type}`;
+    }
+}
+
+// ─── Wizard ───
+
+let _gwWizardStep = 1;
+let _gwWizardData = null;
+
+function gwOpenWizard() {
+    _gwWizardStep = 1;
+    _gwWizardData = {
+        name: '',
+        protocols: ['smb'],
+        source_type: 'local',
+        source: { type: 'local', node_id: '', path: '' },
+        auth_mode: 'anonymous',
+        anon_writable: false,
+        users: [],
+        options: { readonly: false, guest_ok: true, time_machine: false, recycle_bin: false, allow_hosts: [] },
+    };
+    gwRenderWizard();
+}
+
+function gwCloseWizard() {
+    const m = document.getElementById('gw-wizard');
+    if (m) m.remove();
+}
+
+async function gwRenderWizard() {
+    let m = document.getElementById('gw-wizard');
+    if (!m) {
+        m = document.createElement('div');
+        m.id = 'gw-wizard';
+        m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:10000;display:flex;align-items:center;justify-content:center;';
+        document.body.appendChild(m);
+    }
+    const stepNames = ['1. Name & sources', '2. Protocol & auth', '3. Options & confirm'];
+    const stepBadge = stepNames.map((s, i) => {
+        const active = i + 1 === _gwWizardStep;
+        const done = i + 1 < _gwWizardStep;
+        const color = active ? '#3b82f6' : done ? '#22c55e' : 'var(--text-muted)';
+        return `<span style="font-size:11px;font-weight:600;color:${color};">${escapeHtml(s)}</span>`;
+    }).join(`<span style="color:var(--text-muted);">→</span>`);
+
+    let body = '';
+    if (_gwWizardStep === 1)      body = await gwWizardStep1();
+    else if (_gwWizardStep === 2) body = gwWizardStep2();
+    else                          body = gwWizardStep3();
+
+    m.innerHTML = `
+        <div class="card" style="width:680px;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;">
+            <div class="card-body" style="border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+                <h3 style="margin:0;display:flex;align-items:center;gap:8px;">📂 New Share</h3>
+                <button class="btn btn-sm" onclick="gwCloseWizard()">✕</button>
+            </div>
+            <div class="card-body" style="padding:12px 18px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);">${stepBadge}</div>
+            <div class="card-body" style="overflow:auto;flex:1;">${body}</div>
+            <div class="card-body" style="border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:8px;">
+                <div>${_gwWizardStep > 1 ? `<button class="btn btn-sm" onclick="gwWizardBack()">← Back</button>` : ''}</div>
+                <div style="display:flex;gap:8px;">
+                    <button class="btn btn-sm" onclick="gwCloseWizard()">Cancel</button>
+                    ${_gwWizardStep < 3
+                        ? `<button class="btn btn-sm btn-primary" onclick="gwWizardNext()">Next →</button>`
+                        : `<button class="btn btn-sm btn-primary" onclick="gwWizardSubmit()">Create Share</button>`}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+async function gwWizardStep1() {
+    let discovered = { sources: [] };
+    try {
+        const r = await fetch('/api/gateways/sources/discover');
+        if (r.ok) discovered = await r.json();
+    } catch (_) {}
+    const d = _gwWizardData;
+    const opts = (discovered.sources || []).map((s, i) =>
+        `<option value="${i}" data-type="${escapeAttr(s.type)}">${escapeHtml(s.label)}</option>`
+    ).join('');
+    return `
+        <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px;">Share name</label>
+        <input id="gw-w-name" class="form-control" style="width:100%;margin-bottom:14px;"
+            value="${escapeAttr(d.name)}" placeholder="e.g. media, ops-share, finance"
+            oninput="_gwWizardData.name=this.value;">
+        <small style="color:var(--text-muted);display:block;margin-top:-10px;margin-bottom:14px;">
+            Letters, numbers, hyphens, underscores. This is what clients will see (e.g. <code>\\\\server\\${escapeHtml(d.name || 'name')}</code>).
+        </small>
+
+        <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px;">Source</label>
+        <select id="gw-w-source-pick" class="form-control" style="width:100%;margin-bottom:10px;" onchange="gwWizardSourcePick(this)">
+            <option value="">— pick a discovered source, or use a custom one below —</option>
+            ${opts}
+        </select>
+
+        <details style="margin-bottom:8px;" ${d.source.type === 'local' || d.source.type === 'smb' || d.source.type === 'nfs' ? 'open' : ''}>
+            <summary style="cursor:pointer;font-size:12px;font-weight:600;">Custom source</summary>
+            <div style="display:flex;gap:8px;align-items:center;margin:10px 0;">
+                <label style="font-size:12px;">Type:</label>
+                <select class="form-control" style="width:auto;" onchange="gwWizardCustomType(this.value)">
+                    <option value="local"   ${d.source.type === 'local'   ? 'selected' : ''}>Local directory</option>
+                    <option value="smb"     ${d.source.type === 'smb'     ? 'selected' : ''}>SMB re-export</option>
+                    <option value="nfs"     ${d.source.type === 'nfs'     ? 'selected' : ''}>NFS re-export</option>
+                </select>
+            </div>
+            <div id="gw-w-custom-fields">${gwWizardCustomFieldsHtml()}</div>
+        </details>
+    `;
+}
+
+function gwWizardCustomFieldsHtml() {
+    const d = _gwWizardData.source;
+    if (d.type === 'local') {
+        return `
+            <input class="form-control" style="width:100%;margin:6px 0;" placeholder="Absolute path on this node, e.g. /srv/data"
+                value="${escapeAttr(d.path || '')}" oninput="_gwWizardData.source.path=this.value;">
+            <small style="color:var(--text-muted);">Path must exist on the node that will serve this share. /etc, /proc, /sys, /dev are blocked.</small>
+        `;
+    }
+    if (d.type === 'smb') {
+        return `
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+                <input class="form-control" placeholder="server (e.g. nas.lan or 10.0.0.20)" value="${escapeAttr(d.server || '')}" oninput="_gwWizardData.source.server=this.value;">
+                <input class="form-control" placeholder="share name (e.g. media)" value="${escapeAttr(d.share || '')}" oninput="_gwWizardData.source.share=this.value;">
+                <input class="form-control" placeholder="username (blank = guest)" value="${escapeAttr(d.username || '')}" oninput="_gwWizardData.source.username=this.value;">
+                <input type="password" class="form-control" placeholder="password" value="${escapeAttr(d.password || '')}" oninput="_gwWizardData.source.password=this.value;">
+            </div>
+            <input class="form-control" style="width:100%;margin-top:6px;" placeholder="optional subpath" value="${escapeAttr(d.subpath || '')}" oninput="_gwWizardData.source.subpath=this.value;">
+        `;
+    }
+    if (d.type === 'nfs') {
+        return `
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+                <input class="form-control" placeholder="server (e.g. nas.lan)" value="${escapeAttr(d.server || '')}" oninput="_gwWizardData.source.server=this.value;">
+                <input class="form-control" placeholder="export path (e.g. /export/data)" value="${escapeAttr(d.export || '')}" oninput="_gwWizardData.source.export=this.value;">
+            </div>
+            <input class="form-control" style="width:100%;margin-top:6px;" placeholder="optional subpath" value="${escapeAttr(d.subpath || '')}" oninput="_gwWizardData.source.subpath=this.value;">
+        `;
+    }
+    return '';
+}
+
+function gwWizardCustomType(t) {
+    _gwWizardData.source = { type: t };
+    document.getElementById('gw-w-custom-fields').innerHTML = gwWizardCustomFieldsHtml();
+}
+
+function gwWizardSourcePick(sel) {
+    const opt = sel.options[sel.selectedIndex];
+    if (!opt || !opt.value) return;
+    const t = opt.getAttribute('data-type');
+    if (t === 'wolfdisk') {
+        _gwWizardData.source = { type: 'wolfdisk', volume_id: opt.textContent.replace(/^WolfDisk volume:\s*/, '').trim() };
+    } else if (t === 'cephfs') {
+        // label: "CephFS: clusterId/fsName"
+        const m = opt.textContent.match(/CephFS:\s*([^/]+)\/(.+)/);
+        if (m) _gwWizardData.source = { type: 'cephfs', cluster_id: m[1].trim(), fs_name: m[2].trim() };
+    } else if (t === 'local') {
+        _gwWizardData.source = { type: 'local', node_id: '', path: '' };
+    }
+    document.getElementById('gw-w-custom-fields').innerHTML = gwWizardCustomFieldsHtml();
+}
+
+function gwWizardStep2() {
+    const d = _gwWizardData;
+    return `
+        <label style="display:block;font-size:12px;font-weight:600;margin-bottom:6px;">Protocols</label>
+        <div style="display:flex;gap:14px;margin-bottom:18px;">
+            <label style="display:flex;align-items:center;gap:6px;">
+                <input type="checkbox" ${d.protocols.includes('smb') ? 'checked' : ''} onchange="gwWizardToggleProto('smb', this.checked)"> SMB (Windows / Mac / Linux clients)
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;">
+                <input type="checkbox" ${d.protocols.includes('nfs') ? 'checked' : ''} onchange="gwWizardToggleProto('nfs', this.checked)"> NFS (Linux / VM clients)
+            </label>
+        </div>
+
+        <label style="display:block;font-size:12px;font-weight:600;margin-bottom:6px;">Authentication</label>
+        <div style="display:flex;gap:14px;margin-bottom:14px;">
+            <label><input type="radio" name="gw-w-auth" ${d.auth_mode === 'anonymous' ? 'checked' : ''} onchange="_gwWizardData.auth_mode='anonymous';gwRenderWizard();"> Anonymous (anyone on the LAN)</label>
+            <label><input type="radio" name="gw-w-auth" ${d.auth_mode === 'users' ? 'checked' : ''} onchange="_gwWizardData.auth_mode='users';gwRenderWizard();"> Users (require login)</label>
+        </div>
+        ${d.auth_mode === 'anonymous' ? `
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;">
+                <input type="checkbox" ${d.anon_writable ? 'checked' : ''} onchange="_gwWizardData.anon_writable=this.checked;"> Allow writes (anonymous users can modify files)
+            </label>
+            <small style="color:var(--text-muted);display:block;margin-top:4px;">NFS export uses these settings too. Restrict by IP/CIDR on the next step if you don't want world-writable.</small>
+        ` : `
+            <div id="gw-w-users" style="margin-bottom:8px;">
+                ${(d.users || []).map((u, i) => `
+                    <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px;">
+                        <input class="form-control" placeholder="username" value="${escapeAttr(u.username)}" oninput="_gwWizardData.users[${i}].username=this.value;" style="flex:1;">
+                        <label style="font-size:11px;display:flex;align-items:center;gap:4px;">
+                            <input type="checkbox" ${u.writable ? 'checked' : ''} onchange="_gwWizardData.users[${i}].writable=this.checked;"> writable
+                        </label>
+                        <button class="btn btn-sm" onclick="_gwWizardData.users.splice(${i},1);gwRenderWizard();">✕</button>
+                    </div>
+                `).join('')}
+            </div>
+            <button class="btn btn-sm" onclick="_gwWizardData.users.push({username:'',writable:true});gwRenderWizard();">+ Add user</button>
+            <small style="color:var(--text-muted);display:block;margin-top:6px;">
+                NFS export will be skipped — NFSv3/v4 IP-based auth doesn't honour user grants. SMB is the only protocol active when "users" auth is selected. AD/Kerberos integration is a future release.
+            </small>
+            <small style="color:var(--text-muted);display:block;margin-top:6px;">
+                Set passwords AFTER creating the share — the dashboard prompts you. Plaintext is piped straight to <code>smbpasswd</code> and never stored by WolfStack.
+            </small>
+        `}
+    `;
+}
+
+function gwWizardToggleProto(p, on) {
+    const set = new Set(_gwWizardData.protocols);
+    if (on) set.add(p); else set.delete(p);
+    _gwWizardData.protocols = Array.from(set);
+}
+
+function gwWizardStep3() {
+    const d = _gwWizardData;
+    return `
+        <h4 style="margin:0 0 8px;">Options</h4>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;">
+            <input type="checkbox" ${d.options.readonly ? 'checked' : ''} onchange="_gwWizardData.options.readonly=this.checked;"> Read-only
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;">
+            <input type="checkbox" ${d.options.guest_ok ? 'checked' : ''} onchange="_gwWizardData.options.guest_ok=this.checked;"> Browseable / guest OK (SMB only)
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;">
+            <input type="checkbox" ${d.options.recycle_bin ? 'checked' : ''} onchange="_gwWizardData.options.recycle_bin=this.checked;"> Server-side recycle bin (SMB)
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:14px;">
+            <input type="checkbox" ${d.options.time_machine ? 'checked' : ''} onchange="_gwWizardData.options.time_machine=this.checked;"> Apple Time Machine target (SMB / fruit)
+        </label>
+
+        <h4 style="margin:14px 0 8px;">Network restrictions</h4>
+        <input class="form-control" style="width:100%;" placeholder="Allowed CIDRs (comma-separated). Empty = anyone on the LAN."
+            value="${escapeAttr((d.options.allow_hosts || []).join(', '))}"
+            oninput="_gwWizardData.options.allow_hosts=this.value.split(',').map(s=>s.trim()).filter(Boolean);">
+
+        <h4 style="margin:14px 0 8px;">Summary</h4>
+        <div style="background:var(--bg-secondary);padding:12px 14px;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.6;">
+            <div><strong>Name:</strong> ${escapeHtml(d.name || '(none)')}</div>
+            <div><strong>Source:</strong> ${escapeHtml(gwSourceLabel(d.source))}</div>
+            <div><strong>Protocols:</strong> ${escapeHtml(d.protocols.join(' + ').toUpperCase()) || '(none)'}</div>
+            <div><strong>Auth:</strong> ${escapeHtml(d.auth_mode)}${d.auth_mode === 'users' ? ' (' + d.users.length + ' user' + (d.users.length === 1 ? '' : 's') + ')' : ''}</div>
+            <div><strong>Read-only:</strong> ${d.options.readonly ? 'yes' : 'no'}</div>
+            <div><strong>Allow:</strong> ${(d.options.allow_hosts && d.options.allow_hosts.length) ? d.options.allow_hosts.join(', ') : 'any'}</div>
+        </div>
+    `;
+}
+
+function gwWizardBack() { if (_gwWizardStep > 1) { _gwWizardStep--; gwRenderWizard(); } }
+function gwWizardNext() {
+    if (_gwWizardStep === 1) {
+        if (!_gwWizardData.name || !_gwWizardData.name.trim()) { showToast('Name is required', 'error'); return; }
+        if (!_gwWizardData.source || !_gwWizardData.source.type) { showToast('Pick a source', 'error'); return; }
+        if (_gwWizardData.source.type === 'local' && !_gwWizardData.source.path) { showToast('Local source: path is required', 'error'); return; }
+        if (_gwWizardData.source.type === 'smb' && (!_gwWizardData.source.server || !_gwWizardData.source.share)) { showToast('SMB source: server and share are required', 'error'); return; }
+        if (_gwWizardData.source.type === 'nfs' && (!_gwWizardData.source.server || !_gwWizardData.source.export)) { showToast('NFS source: server and export are required', 'error'); return; }
+    }
+    if (_gwWizardStep === 2) {
+        if (!_gwWizardData.protocols || _gwWizardData.protocols.length === 0) { showToast('Pick at least one protocol', 'error'); return; }
+        if (_gwWizardData.auth_mode === 'users' && _gwWizardData.users.length === 0) { showToast('Users mode requires at least one user', 'error'); return; }
+    }
+    _gwWizardStep++;
+    gwRenderWizard();
+}
+
+async function gwWizardSubmit() {
+    const d = _gwWizardData;
+    const auth = d.auth_mode === 'anonymous'
+        ? { mode: 'anonymous', writable: !!d.anon_writable }
+        : { mode: 'users', users: d.users.map(u => ({ username: u.username, writable: !!u.writable })), default_writable: true };
+
+    // Always send sources as an array — backend normalises.
+    const body = {
+        name: d.name.trim(),
+        cluster: '',
+        mode: 'single',
+        protocols: d.protocols,
+        sources: [d.source],
+        serve_nodes: [],
+        auth,
+        options: d.options,
+    };
+    try {
+        const r = await fetch('/api/gateways', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        if (!r.ok) {
+            const msg = data.error || (data.errors ? data.errors.join('; ') : 'Failed to create');
+            showToast('Create failed: ' + msg, 'error');
+            return;
+        }
+        gwCloseWizard();
+        showToast('Share created: ' + d.name, 'success');
+        await gwLoad();
+        // If users mode, prompt operator to set passwords for each user.
+        if (auth.mode === 'users') {
+            for (const u of d.users) {
+                await gwSetPasswordPrompt(data.id, u.username, /*silentIfCancelled*/ false);
+            }
+        }
+    } catch (e) {
+        showToast('Create failed: ' + (e.message || String(e)), 'error');
+    }
+}
+
+// ─── Detail panel ───
+
+async function gwOpenDetail(id, originNodeId) {
+    // Cross-cluster: if originNodeId differs from this node, fetch
+    // through the peer-proxy. v1.0 ships local-only detail; cross-cluster
+    // shares are read-only in the list (still visible via the cluster
+    // panel) and clicking opens an info dialog explaining you need to
+    // manage them from the originating cluster.
+    const local = _gwState.gateways.find(g => g.id === id && g.origin_self !== false);
+    if (!local) {
+        const remote = _gwState.gateways.find(g => g.id === id);
+        if (remote && remote.federated) {
+            showModal(
+                `<div style="font-size:13px;line-height:1.6;">
+                    This share lives on the federated cluster <strong>${escapeHtml(remote.origin_federation_name || 'remote')}</strong>
+                    (<code>${escapeHtml(remote.origin_federation_url || '')}</code>).<br><br>
+                    Federated shares are <strong>read-only from this dashboard</strong>. To edit, open
+                    <a href="${escapeAttr(remote.origin_federation_url || '#')}" target="_blank" rel="noopener">the remote cluster's dashboard</a>
+                    and use its Shares page directly. Cross-cluster edit is a v2 feature.
+                </div>`,
+                'Federated share — read-only here'
+            );
+        } else {
+            showModal(
+                `<div style="font-size:13px;line-height:1.6;">
+                    This share lives on <strong>${escapeHtml((remote && remote.origin_hostname) || 'a peer node')}</strong>
+                    (cluster <strong>${escapeHtml((remote && remote.origin_cluster) || 'unknown')}</strong>).
+                    Open that node's dashboard to edit — peer-edit-from-anywhere is a v2 feature.
+                </div>`,
+                'Remote share'
+            );
+        }
+        return;
+    }
+    const g = local;
+    const m = document.createElement('div');
+    m.id = 'gw-detail';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:10000;display:flex;align-items:center;justify-content:center;';
+    document.body.appendChild(m);
+    const protos = (g.protocols || []).join('+').toUpperCase();
+    const ip = window.location.hostname;
+    const userBlock = (g.auth && g.auth.mode === 'users') ? `
+        <h4 style="margin:14px 0 6px;">Users</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+            ${(g.auth.users || []).map(u => `
+                <div style="display:flex;gap:6px;align-items:center;background:var(--bg-secondary);padding:6px 10px;border-radius:6px;">
+                    <strong style="flex:1;">${escapeHtml(u.username)}</strong>
+                    <span style="font-size:11px;color:${u.writable ? '#22c55e' : '#94a3b8'};">${u.writable ? 'rw' : 'ro'}</span>
+                    <button class="btn btn-sm" onclick="gwSetPasswordPrompt('${escapeAttr(g.id)}','${escapeAttr(u.username)}')">Set password</button>
+                </div>
+            `).join('')}
+        </div>
+    ` : '';
+    m.innerHTML = `
+        <div class="card" style="width:680px;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;">
+            <div class="card-body" style="border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+                <h3 style="margin:0;display:flex;align-items:center;gap:8px;">📂 ${escapeHtml(g.name)}</h3>
+                <button class="btn btn-sm" onclick="document.getElementById('gw-detail').remove()">✕</button>
+            </div>
+            <div class="card-body" style="overflow:auto;flex:1;">
+                <div style="display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;font-size:13px;">
+                    <strong>Status:</strong> <span>${gwStatusBadge(g)}</span>
+                    <strong>Tier:</strong> <span>${gwTierBadge(g.performance_tier)}</span>
+                    <strong>Protocols:</strong> <span>${escapeHtml(protos || '(none)')}</span>
+                    <strong>Source:</strong> <span>${escapeHtml(gwSourceLabel(g.sources && g.sources[0]))}</span>
+                    <strong>Mount path:</strong> <code style="font-size:11px;">${escapeHtml((g.runtime && g.runtime.mount_path) || '—')}</code>
+                    <strong>Auth:</strong> <span>${escapeHtml(g.auth && g.auth.mode || 'anonymous')}</span>
+                    <strong>Created:</strong> <span style="font-size:11px;color:var(--text-muted);">${escapeHtml(g.created_at || '—')}</span>
+                </div>
+                ${userBlock}
+                <h4 style="margin:14px 0 6px;">Connect</h4>
+                <div style="background:var(--bg-secondary);padding:10px 14px;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;display:flex;flex-direction:column;gap:4px;">
+                    ${(g.protocols || []).includes('smb') ? `
+                        <div>Linux:   <code>sudo mount -t cifs //${escapeHtml(ip)}/${escapeHtml(g.name)} /mnt</code></div>
+                        <div>Mac:     <code>open smb://${escapeHtml(ip)}/${escapeHtml(g.name)}</code></div>
+                        <div>Windows: <code>\\\\${escapeHtml(ip)}\\${escapeHtml(g.name)}</code></div>
+                    ` : ''}
+                    ${(g.protocols || []).includes('nfs') ? `
+                        <div>NFS:     <code>sudo mount -t nfs ${escapeHtml(ip)}:/${escapeHtml(g.name)} /mnt</code></div>
+                    ` : ''}
+                </div>
+                ${g.runtime && g.runtime.last_error ? `
+                    <h4 style="margin:14px 0 6px;color:#f59e0b;">Last warning</h4>
+                    <div style="background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.25);padding:8px 12px;border-radius:6px;font-size:12px;">${escapeHtml(g.runtime.last_error)}</div>
+                ` : ''}
+            </div>
+            <div class="card-body" style="border-top:1px solid var(--border);display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <button class="btn btn-sm" onclick="gwReload('${escapeAttr(g.id)}')">🔄 Reload</button>
+                    ${g.disabled
+                        ? `<button class="btn btn-sm" onclick="gwEnable('${escapeAttr(g.id)}')">▶ Enable</button>`
+                        : `<button class="btn btn-sm" onclick="gwDisable('${escapeAttr(g.id)}')">⏸ Disable</button>`}
+                </div>
+                <button class="btn btn-sm" style="background:#ef4444;color:white;" onclick="gwDelete('${escapeAttr(g.id)}','${escapeAttr(g.name)}')">🗑 Delete</button>
+            </div>
+        </div>
+    `;
+}
+
+async function gwReload(id) {
+    try {
+        const r = await fetch(`/api/gateways/${encodeURIComponent(id)}/reload`, { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok) { showToast('Reload failed: ' + (d.error || r.statusText), 'error'); return; }
+        showToast('Reloaded', 'success');
+        document.getElementById('gw-detail')?.remove();
+        await gwLoad();
+    } catch (e) { showToast('Reload failed: ' + (e.message || String(e)), 'error'); }
+}
+
+async function gwDisable(id) {
+    if (!await confirmModal('Disable this share? Clients will be disconnected. Configuration is kept.')) return;
+    try {
+        const r = await fetch(`/api/gateways/${encodeURIComponent(id)}/disable`, { method: 'POST' });
+        if (!r.ok) { const d = await r.json().catch(()=>({})); showToast('Disable failed: ' + (d.error || r.statusText), 'error'); return; }
+        showToast('Disabled', 'success');
+        document.getElementById('gw-detail')?.remove();
+        await gwLoad();
+    } catch (e) { showToast('Disable failed: ' + (e.message || String(e)), 'error'); }
+}
+
+async function gwEnable(id) {
+    try {
+        const r = await fetch(`/api/gateways/${encodeURIComponent(id)}/enable`, { method: 'POST' });
+        if (!r.ok) { const d = await r.json().catch(()=>({})); showToast('Enable failed: ' + (d.error || r.statusText), 'error'); return; }
+        showToast('Enabled', 'success');
+        document.getElementById('gw-detail')?.remove();
+        await gwLoad();
+    } catch (e) { showToast('Enable failed: ' + (e.message || String(e)), 'error'); }
+}
+
+async function gwDelete(id, name) {
+    if (!await confirmModal(`Delete share "${name}"? Clients will lose access. The underlying data is NOT deleted — only the gateway config and mounts are removed.`)) return;
+    try {
+        const r = await fetch(`/api/gateways/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (!r.ok) { const d = await r.json().catch(()=>({})); showToast('Delete failed: ' + (d.error || r.statusText), 'error'); return; }
+        showToast('Deleted', 'success');
+        document.getElementById('gw-detail')?.remove();
+        await gwLoad();
+    } catch (e) { showToast('Delete failed: ' + (e.message || String(e)), 'error'); }
+}
+
+async function gwSetPasswordPrompt(gatewayId, username) {
+    const pw = await promptModal(`Set password for "${username}"`, '', { type: 'password' });
+    if (!pw) return;
+    try {
+        const r = await fetch(`/api/gateways/${encodeURIComponent(gatewayId)}/users/${encodeURIComponent(username)}/password`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: pw }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { showToast('Set password failed: ' + (d.error || r.statusText), 'error'); return; }
+        showToast('Password set for ' + username, 'success');
+    } catch (e) { showToast('Set password failed: ' + (e.message || String(e)), 'error'); }
+}
+
+// Lightweight modal helpers — fall back to native prompt/confirm if
+// the dashboard doesn't already expose them.
+async function confirmModal(msg) {
+    if (typeof window.showConfirm === 'function') return window.showConfirm(msg);
+    return new Promise(resolve => resolve(window.confirm(msg)));
+}
+async function promptModal(label, initial, opts) {
+    if (typeof window.showPrompt === 'function') return window.showPrompt(label, initial, opts);
+    const v = window.prompt(label, initial || '');
+    return v;
+}
+
+window.gwLoad = gwLoad;
+window.gwOpenWizard = gwOpenWizard;
+window.gwCloseWizard = gwCloseWizard;
+window.gwRenderWizard = gwRenderWizard;
+window.gwWizardBack = gwWizardBack;
+window.gwWizardNext = gwWizardNext;
+window.gwWizardSubmit = gwWizardSubmit;
+window.gwWizardSourcePick = gwWizardSourcePick;
+window.gwWizardCustomType = gwWizardCustomType;
+window.gwWizardToggleProto = gwWizardToggleProto;
+window.gwOpenDetail = gwOpenDetail;
+window.gwReload = gwReload;
+window.gwDisable = gwDisable;
+window.gwEnable = gwEnable;
+window.gwDelete = gwDelete;
+window.gwSetPasswordPrompt = gwSetPasswordPrompt;
+
+// ─── Cross-cluster federation ───
+//
+// A "federated cluster" is another WolfStack cluster (different site,
+// different admin domain) this dashboard pulls share data from.
+// Shows up alongside local-cluster shares in the unified list.
+
+function gwRenderFederationSection() {
+    const section = document.getElementById('gw-fed-section');
+    const count = document.getElementById('gw-fed-count');
+    if (!section) return;
+    const list = _gwState.federations || [];
+    if (count) count.textContent = list.length === 0 ? '— add another WolfStack cluster to manage all your sites from one place' : `— ${list.length} connected`;
+
+    let rows = '';
+    for (const f of list) {
+        const ok = f.last_ok_unix && (!f.last_error || f.last_error === '');
+        const badge = f.last_error ? `<span style="color:#ef4444;">✗ ${escapeHtml(f.last_error.slice(0, 80))}</span>`
+                  : ok ? `<span style="color:#22c55e;">✓ connected</span>`
+                  : `<span style="color:var(--text-muted);">○ not yet tested</span>`;
+        rows += `
+            <div class="card" style="margin-bottom:6px;">
+                <div class="card-body" style="padding:10px 14px;display:flex;align-items:center;gap:12px;">
+                    <div style="font-size:18px;">🌐</div>
+                    <div style="flex:1;min-width:0;">
+                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                            <strong>${escapeHtml(f.name)}</strong>
+                            <code style="font-size:11px;color:var(--text-muted);">${escapeHtml(f.base_url)}</code>
+                            ${f.insecure_tls ? `<span style="font-size:10px;color:#f59e0b;">[insecure-tls]</span>` : ''}
+                        </div>
+                        <div style="font-size:11px;margin-top:2px;">${badge}</div>
+                    </div>
+                    <button class="btn btn-sm" onclick="gwFedTest('${escapeAttr(f.id)}')">Test</button>
+                    <button class="btn btn-sm" onclick="gwFedRemove('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" style="color:#ef4444;">Remove</button>
+                </div>
+            </div>
+        `;
+    }
+    section.innerHTML = `
+        ${rows}
+        <button class="btn btn-sm btn-primary" onclick="gwFedAddPrompt()">+ Add cluster</button>
+        <small style="display:block;margin-top:8px;color:var(--text-muted);font-size:11px;line-height:1.5;">
+            Connect another WolfStack cluster here to see its shares alongside this one.
+            On the remote cluster: Settings → API Keys → create a read-scope key, then paste its base URL + the key here.
+            Federated shares are read-only from this view — open the remote cluster's dashboard to edit them.
+        </small>
+    `;
+}
+
+async function gwFedAddPrompt() {
+    const m = document.createElement('div');
+    m.id = 'gw-fed-add';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:10000;display:flex;align-items:center;justify-content:center;';
+    m.innerHTML = `
+        <div class="card" style="width:520px;max-width:95vw;">
+            <div class="card-body" style="border-bottom:1px solid var(--border);">
+                <h3 style="margin:0;">🌐 Connect another cluster</h3>
+            </div>
+            <div class="card-body" style="display:flex;flex-direction:column;gap:8px;">
+                <label style="font-size:12px;font-weight:600;">Display name</label>
+                <input id="gw-fed-name" class="form-control" placeholder="e.g. Datacenter Bay 1, Home Lab, Office London">
+
+                <label style="font-size:12px;font-weight:600;margin-top:6px;">Base URL</label>
+                <input id="gw-fed-url" class="form-control" placeholder="https://wolfstack.example.com:8553">
+                <small style="color:var(--text-muted);font-size:11px;">No trailing slash. Use the URL you'd open in a browser.</small>
+
+                <label style="font-size:12px;font-weight:600;margin-top:6px;">API key from that cluster</label>
+                <input id="gw-fed-key" class="form-control" placeholder="wsk_…" type="password">
+                <small style="color:var(--text-muted);font-size:11px;">On the remote cluster: Settings → API Keys → "+ New key" with read scope. Paste it here.</small>
+
+                <label style="margin-top:6px;display:flex;align-items:center;gap:6px;font-size:12px;">
+                    <input type="checkbox" id="gw-fed-insecure">
+                    Allow self-signed TLS certificate
+                </label>
+            </div>
+            <div class="card-body" style="border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;">
+                <button class="btn btn-sm" onclick="document.getElementById('gw-fed-add').remove()">Cancel</button>
+                <button class="btn btn-sm btn-primary" onclick="gwFedSubmit()">Add &amp; test</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(m);
+}
+
+async function gwFedSubmit() {
+    const name = document.getElementById('gw-fed-name').value.trim();
+    const baseUrl = document.getElementById('gw-fed-url').value.trim();
+    const key = document.getElementById('gw-fed-key').value;
+    const insecure = document.getElementById('gw-fed-insecure').checked;
+    if (!name || !baseUrl || !key) { showToast('All fields required', 'error'); return; }
+    try {
+        const r = await fetch('/api/federations', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, base_url: baseUrl, api_key: key, insecure_tls: insecure }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+            const msg = d.error || (d.errors ? d.errors.join('; ') : 'Failed to add');
+            showToast('Add failed: ' + msg, 'error');
+            return;
+        }
+        document.getElementById('gw-fed-add').remove();
+        showToast('Cluster connected: ' + name, 'success');
+        // Probe immediately so the operator sees ✓/✗ before they wait
+        // for the next round of cluster aggregation.
+        await fetch(`/api/federations/${encodeURIComponent(d.id)}/test`, { method: 'POST' });
+        await gwLoad();
+    } catch (e) { showToast('Add failed: ' + (e.message || String(e)), 'error'); }
+}
+
+async function gwFedTest(id) {
+    try {
+        const r = await fetch(`/api/federations/${encodeURIComponent(id)}/test`, { method: 'POST' });
+        const d = await r.json();
+        if (d.ok) {
+            showToast(`✓ ${d.name} — ${d.elapsed_ms}ms`, 'success');
+        } else {
+            showToast(`✗ ${d.name}: ${d.error || 'unknown'}`, 'error', 6000);
+        }
+        await gwLoad();
+    } catch (e) { showToast('Test failed: ' + (e.message || String(e)), 'error'); }
+}
+
+async function gwFedRemove(id, name) {
+    if (!await confirmModal(`Remove "${name}" from connected clusters? Their shares will stop appearing here. The remote cluster is unaffected.`)) return;
+    try {
+        const r = await fetch(`/api/federations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (!r.ok) { const d = await r.json().catch(()=>({})); showToast('Remove failed: ' + (d.error || r.statusText), 'error'); return; }
+        showToast('Removed', 'success');
+        await gwLoad();
+    } catch (e) { showToast('Remove failed: ' + (e.message || String(e)), 'error'); }
+}
+
+window.gwRenderFederationSection = gwRenderFederationSection;
+window.gwFedAddPrompt = gwFedAddPrompt;
+window.gwFedSubmit = gwFedSubmit;
+window.gwFedTest = gwFedTest;
+window.gwFedRemove = gwFedRemove;

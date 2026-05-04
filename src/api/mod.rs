@@ -258,6 +258,13 @@ pub struct AppState {
     /// This node's identifier — copied here so predictive handlers
     /// can build proposal scopes without threading it from main.
     pub node_id: String,
+    /// WolfStack Gateway store — universal SMB/NFS re-export layer.
+    /// Cluster-synced via the existing inter-node secret pattern.
+    pub gateways: Arc<std::sync::RwLock<crate::gateway::GatewayStore>>,
+    /// Federated remote clusters this WolfStack pulls from for
+    /// cross-cluster aggregation (Shares panel today; future use:
+    /// Control Panel inventory across separate sites).
+    pub federations: Arc<std::sync::RwLock<crate::federation::FederationStore>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -5251,6 +5258,7 @@ async fn fetch_one_node_inventory(
         ("docker", "/api/containers/docker"),
         ("lxc", "/api/containers/lxc"),
         ("vm", "/api/vms"),
+        ("share", "/api/gateways"),
     ];
     let is_wolfstack_node = node.node_type == "wolfstack" || node.node_type.is_empty();
     for (kind, path) in &endpoints {
@@ -5261,17 +5269,25 @@ async fn fetch_one_node_inventory(
             fetch_remote_json(client, &node.address, node.port, path, secret).await
         };
         let Some(raw) = raw else {
-            errors.push(serde_json::json!({
-                "node_id": node.id,
-                "node_hostname": node.hostname,
-                "kind": kind,
-                "error": "unreachable or endpoint failed",
-            }));
+            // /api/gateways doesn't exist on older WolfStack peers — treat
+            // as "no shares" rather than a hard error.
+            if *kind != "share" {
+                errors.push(serde_json::json!({
+                    "node_id": node.id,
+                    "node_hostname": node.hostname,
+                    "kind": kind,
+                    "error": "unreachable or endpoint failed",
+                }));
+            }
             continue;
         };
         let arr = raw.as_array().cloned().unwrap_or_default();
         for entry in arr {
-            items.push(shape_inventory_item(&base_entry, kind, &entry));
+            if *kind == "share" {
+                items.push(shape_share_item(&base_entry, &entry));
+            } else {
+                items.push(shape_inventory_item(&base_entry, kind, &entry));
+            }
         }
     }
 
@@ -5451,6 +5467,54 @@ fn shape_inventory_item(base: &serde_json::Value, kind: &str, entry: &serde_json
         "memory_bytes": mem,
         "memory_limit_bytes": mem_limit,
     })
+}
+
+/// Normalise a WolfStack Gateway into the flat InventoryItem shape.
+/// Status maps from runtime: serving+healthy → running; serving but
+/// unhealthy → unknown; disabled or no runtime → stopped.
+fn shape_share_item(base: &serde_json::Value, entry: &serde_json::Value) -> serde_json::Value {
+    let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let disabled = entry.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let runtime = entry.get("runtime");
+    let serving = runtime.and_then(|r| r.get("serving")).and_then(|v| v.as_bool()).unwrap_or(false);
+    let healthy = runtime.and_then(|r| r.get("healthy")).and_then(|v| v.as_bool()).unwrap_or(false);
+    let status = if disabled {
+        "stopped"
+    } else if serving && healthy {
+        "running"
+    } else if serving {
+        "unknown"
+    } else {
+        "stopped"
+    };
+    let protocols = entry.get("protocols").cloned().unwrap_or(serde_json::json!([]));
+    let tier = entry.get("performance_tier").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let sessions = runtime.and_then(|r| r.get("active_sessions")).and_then(|v| v.as_u64()).unwrap_or(0);
+    serde_json::json!({
+        "node_id": base.get("node_id"),
+        "node_hostname": base.get("node_hostname"),
+        "cluster": base.get("cluster"),
+        "kind": "share",
+        "name": name,
+        "status": status,
+        "image": format!("{} · tier:{}", protocols_label(&protocols), tier),
+        "cpu_percent": 0.0,
+        "memory_bytes": 0u64,
+        "memory_limit_bytes": 0u64,
+        "share_id": id,
+        "share_protocols": protocols,
+        "share_sessions": sessions,
+        "share_tier": tier,
+    })
+}
+
+fn protocols_label(p: &serde_json::Value) -> String {
+    if let Some(arr) = p.as_array() {
+        arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_uppercase()).collect::<Vec<_>>().join("+")
+    } else {
+        String::new()
+    }
 }
 
 /// Normalise a Proxmox PveGuest into the flat InventoryItem shape.
@@ -21786,6 +21850,665 @@ async fn danger_rollback(
     }
 }
 
+// ─── Gateway API ─────────────────────────────────────────────────────
+//
+// Endpoints for the WolfStack Gateway feature (universal SMB/NFS
+// re-export). See `src/gateway/mod.rs` for the data model. Cluster
+// sync follows the existing inter-node X-WolfStack-Secret pattern;
+// every state-changing endpoint pushes the post-mutation snapshot to
+// every online wolfstack peer so all nodes converge within seconds.
+
+#[derive(Deserialize)]
+pub struct GatewayCreateRequest {
+    pub name: String,
+    #[serde(default)] pub cluster: String,
+    #[serde(default = "default_single_mode")]
+    pub mode: crate::gateway::GatewayMode,
+    pub protocols: Vec<crate::gateway::Protocol>,
+    pub sources: Vec<crate::gateway::sources::Source>,
+    #[serde(default)] pub serve_nodes: Vec<String>,
+    #[serde(default)] pub auth: crate::gateway::AuthConfig,
+    #[serde(default)] pub options: crate::gateway::GatewayOptions,
+}
+
+fn default_single_mode() -> crate::gateway::GatewayMode { crate::gateway::GatewayMode::Single }
+
+fn gateway_to_json(g: &crate::gateway::Gateway, store: &crate::gateway::GatewayStore) -> serde_json::Value {
+    let runtime = store.runtime.get(&g.id);
+    let tier = crate::gateway::performance_tier(g);
+    serde_json::json!({
+        "id": g.id,
+        "name": g.name,
+        "cluster": g.cluster,
+        "mode": g.mode,
+        "protocols": g.protocols,
+        "sources": g.sources,
+        "serve_nodes": g.serve_nodes,
+        "auth": g.auth,
+        "policy": g.policy,
+        "options": g.options,
+        "created_at": g.created_at,
+        "updated_at": g.updated_at,
+        "disabled": g.disabled,
+        "performance_tier": tier,
+        "runtime": runtime,
+    })
+}
+
+/// GET /api/gateways — list every gateway on this node.
+pub async fn gateways_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let store = state.gateways.read().unwrap_or_else(|e| e.into_inner());
+    let list: Vec<serde_json::Value> = store.gateways.values()
+        .map(|g| gateway_to_json(g, &store))
+        .collect();
+    HttpResponse::Ok().json(list)
+}
+
+/// GET /api/gateways/{id} — single gateway with runtime.
+pub async fn gateways_get(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let store = state.gateways.read().unwrap_or_else(|e| e.into_inner());
+    match store.get(&id) {
+        Some(g) => HttpResponse::Ok().json(gateway_to_json(g, &store)),
+        None => HttpResponse::NotFound().json(serde_json::json!({ "error": "gateway not found" })),
+    }
+}
+
+/// POST /api/gateways — create.
+pub async fn gateways_create(req: HttpRequest, state: web::Data<AppState>, body: web::Json<GatewayCreateRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let body = body.into_inner();
+    let id = uuid::Uuid::new_v4().to_string();
+    let g = crate::gateway::Gateway {
+        id: id.clone(),
+        name: body.name,
+        cluster: body.cluster,
+        mode: body.mode,
+        protocols: body.protocols,
+        sources: body.sources,
+        serve_nodes: body.serve_nodes,
+        auth: body.auth,
+        policy: crate::gateway::ModePolicy::Single,
+        options: body.options,
+        created_at: String::new(),
+        updated_at: String::new(),
+        disabled: false,
+    };
+    if let Err(errs) = crate::gateway::validate(&g) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "errors": errs }));
+    }
+    apply_and_persist(&state, g, &id).await
+}
+
+/// PUT /api/gateways/{id} — full replace.
+pub async fn gateways_update(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<GatewayCreateRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let body = body.into_inner();
+    // Carry over created_at + disabled — caller can't change those here.
+    let (created_at, disabled) = {
+        let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
+        match s.get(&id) {
+            Some(existing) => (existing.created_at.clone(), existing.disabled),
+            None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "gateway not found" })),
+        }
+    };
+    let g = crate::gateway::Gateway {
+        id: id.clone(),
+        name: body.name,
+        cluster: body.cluster,
+        mode: body.mode,
+        protocols: body.protocols,
+        sources: body.sources,
+        serve_nodes: body.serve_nodes,
+        auth: body.auth,
+        policy: crate::gateway::ModePolicy::Single,
+        options: body.options,
+        created_at,
+        updated_at: String::new(),
+        disabled,
+    };
+    if let Err(errs) = crate::gateway::validate(&g) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "errors": errs }));
+    }
+    apply_and_persist(&state, g, &id).await
+}
+
+/// DELETE /api/gateways/{id} — tear down + remove from config.
+pub async fn gateways_delete(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let removed = {
+        let mut s = state.gateways.write().unwrap_or_else(|e| e.into_inner());
+        s.remove(&id)
+    };
+    let g = match removed {
+        Some(g) => g,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "gateway not found" })),
+    };
+    crate::gateway::orchestrator::teardown(&g);
+    {
+        let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = s.save() {
+            tracing::warn!(target: "wolfstack::gateway", "save after delete failed: {}", e);
+        }
+    }
+    push_to_peers(&state).await;
+    HttpResponse::Ok().json(serde_json::json!({ "deleted": id }))
+}
+
+/// POST /api/gateways/{id}/reload — reapply config (re-mount, re-write
+/// daemon snippets, reload daemons). Useful after fixing an upstream
+/// problem.
+pub async fn gateways_reload(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let g = {
+        let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
+        match s.get(&id) { Some(g) => g.clone(), None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "gateway not found" })) }
+    };
+    match crate::gateway::orchestrator::apply(&g) {
+        Ok(rt) => {
+            let mut s = state.gateways.write().unwrap_or_else(|e| e.into_inner());
+            s.runtime.insert(id.clone(), rt);
+            HttpResponse::Ok().json(serde_json::json!({ "reloaded": id }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// POST /api/gateways/{id}/disable — set disabled=true and tear down
+/// without removing config.
+pub async fn gateways_disable(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let g = {
+        let mut s = state.gateways.write().unwrap_or_else(|e| e.into_inner());
+        match s.gateways.get_mut(&id) {
+            Some(g) => { g.disabled = true; g.updated_at = chrono::Utc::now().to_rfc3339(); g.clone() }
+            None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "gateway not found" })),
+        }
+    };
+    crate::gateway::orchestrator::teardown(&g);
+    {
+        let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
+        let _ = s.save();
+    }
+    push_to_peers(&state).await;
+    HttpResponse::Ok().json(serde_json::json!({ "disabled": id }))
+}
+
+/// POST /api/gateways/{id}/enable — re-apply a previously-disabled gateway.
+pub async fn gateways_enable(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let g = {
+        let mut s = state.gateways.write().unwrap_or_else(|e| e.into_inner());
+        match s.gateways.get_mut(&id) {
+            Some(g) => { g.disabled = false; g.updated_at = chrono::Utc::now().to_rfc3339(); g.clone() }
+            None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "gateway not found" })),
+        }
+    };
+    match crate::gateway::orchestrator::apply(&g) {
+        Ok(rt) => {
+            let mut s = state.gateways.write().unwrap_or_else(|e| e.into_inner());
+            s.runtime.insert(id.clone(), rt);
+            let _ = s.save();
+        }
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    }
+    push_to_peers(&state).await;
+    HttpResponse::Ok().json(serde_json::json!({ "enabled": id }))
+}
+
+#[derive(Deserialize)]
+pub struct GatewayPasswordRequest { pub password: String }
+
+/// POST /api/gateways/{id}/users/{name}/password — set an SMB user
+/// password. Plaintext is piped straight into smbpasswd; never
+/// persisted by WolfStack.
+pub async fn gateways_set_password(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+    body: web::Json<GatewayPasswordRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (id, username) = path.into_inner();
+    let body = body.into_inner();
+    if body.password.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "password is empty" }));
+    }
+    // Check the gateway exists and has this user defined.
+    {
+        let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
+        let g = match s.get(&id) { Some(g) => g, None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "gateway not found" })) };
+        let configured = match &g.auth {
+            crate::gateway::AuthConfig::Users { users, .. } => users.iter().any(|u| u.username == username),
+            _ => false,
+        };
+        if !configured {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "user is not in this gateway's auth list — add them first via PUT /api/gateways/{id}"
+            }));
+        }
+    }
+    match crate::gateway::samba::set_user_password(&username, &body.password) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// GET /api/gateways/sources/discover — populate the wizard's source
+/// picker. Lists the easy local sources right now (Local + WolfDisk
+/// volumes if WolfDisk is present + CephFS filesystems if a Ceph
+/// cluster is registered). Operators add SMB/NFS sources by free-form
+/// fields in the wizard, so they're not enumerated here.
+pub async fn gateways_discover_sources(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    let node_id = state.node_id.clone();
+
+    // WolfDisk volumes (if /mnt/wolfdisk exists)
+    let wolfdisk_root = std::path::Path::new("/mnt/wolfdisk");
+    if let Ok(rd) = std::fs::read_dir(wolfdisk_root) {
+        for e in rd.flatten() {
+            if let Some(name) = e.file_name().to_str() {
+                entries.push(serde_json::json!({
+                    "type": "wolfdisk",
+                    "node_id": node_id,
+                    "volume_id": name,
+                    "label": format!("WolfDisk volume: {}", name),
+                }));
+            }
+        }
+    }
+    // CephFS filesystems — call the existing ceph status helper.
+    let ceph = crate::ceph::get_cluster_status();
+    if let Some(cluster_id) = serde_json::to_value(&ceph).ok()
+        .and_then(|v| v.get("cluster_id").and_then(|x| x.as_str()).map(|s| s.to_string()))
+    {
+        // The existing module exposes filesystems via `ceph fs ls`.
+        if let Ok(out) = std::process::Command::new("ceph").args(["fs", "ls", "--format=json"]).output() {
+            if out.status.success() {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                    if let Some(arr) = v.as_array() {
+                        for f in arr {
+                            if let Some(name) = f.get("name").and_then(|x| x.as_str()) {
+                                entries.push(serde_json::json!({
+                                    "type": "cephfs",
+                                    "cluster_id": cluster_id,
+                                    "fs_name": name,
+                                    "label": format!("CephFS: {}/{}", cluster_id, name),
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Always include "Local directory" as a free-form source — UI
+    // surfaces a path field.
+    entries.push(serde_json::json!({
+        "type": "local",
+        "node_id": node_id,
+        "label": format!("Local directory on this node ({})", state.node_id),
+    }));
+    HttpResponse::Ok().json(serde_json::json!({ "sources": entries }))
+}
+
+/// GET /api/gateways/status — daemon-level status (Samba / NFS server
+/// installed, running, version). Used by the Shares page header to
+/// show "you need to install samba" prompts.
+pub async fn gateways_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    HttpResponse::Ok().json(serde_json::json!({
+        "smb": crate::gateway::samba::status(),
+        "nfs": crate::gateway::nfs::status(),
+    }))
+}
+
+/// GET /api/gateways/cluster — aggregate gateways from this node and
+/// every reachable peer. Powers the cross-cluster Shares panel.
+pub async fn gateways_cluster(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let mut all: Vec<serde_json::Value> = {
+        let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
+        s.gateways.values().map(|g| {
+            let mut v = gateway_to_json(g, &s);
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("origin_node_id".into(), serde_json::json!(state.node_id));
+                obj.insert("origin_self".into(), serde_json::json!(true));
+            }
+            v
+        }).collect()
+    };
+
+    // Fan out to peers — same pattern as /api/proposals/cluster.
+    let peers: Vec<_> = state.cluster.get_all_nodes().into_iter()
+        .filter(|n| !n.is_self && n.node_type == "wolfstack" && n.online)
+        .collect();
+    let secret = state.cluster_secret.clone();
+    let client = &*API_HTTP_CLIENT;
+    let mut handles = Vec::new();
+    for peer in &peers {
+        let urls = build_node_urls(&peer.address, peer.port, "/api/gateways");
+        let secret = secret.clone();
+        let peer_id = peer.self_id.clone().unwrap_or_else(|| peer.id.clone());
+        let peer_host = peer.hostname.clone();
+        let cluster_label = peer.cluster_name.clone().unwrap_or_default();
+        let h = tokio::spawn(async move {
+            for url in urls {
+                let res = client.get(&url)
+                    .timeout(std::time::Duration::from_secs(5))
+                    .header("X-WolfStack-Secret", &secret)
+                    .send().await;
+                if let Ok(resp) = res {
+                    if resp.status().is_success() {
+                        if let Ok(list) = resp.json::<Vec<serde_json::Value>>().await {
+                            return Some((peer_id, peer_host, cluster_label, list));
+                        }
+                    }
+                }
+            }
+            None
+        });
+        handles.push(h);
+    }
+    for h in handles {
+        if let Ok(Some((pid, host, cluster, mut list))) = h.await {
+            for v in list.iter_mut() {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("origin_node_id".into(), serde_json::json!(pid));
+                    obj.insert("origin_hostname".into(), serde_json::json!(host));
+                    obj.insert("origin_cluster".into(), serde_json::json!(cluster));
+                    obj.insert("origin_self".into(), serde_json::json!(false));
+                }
+            }
+            all.append(&mut list);
+        }
+    }
+
+    // ─── Federated clusters ───
+    // Each entry is a separate WolfStack cluster (different site /
+    // different admin domain). We pull its `/api/gateways/cluster` —
+    // already cluster-aggregated on the remote side — and merge the
+    // results so the operator sees every share, everywhere.
+    let federations = {
+        let s = state.federations.read().unwrap_or_else(|e| e.into_inner());
+        s.clusters.clone()
+    };
+    let mut fed_handles = Vec::new();
+    for fc in federations {
+        let label = fc.name.clone();
+        let url   = fc.base_url.clone();
+        fed_handles.push(tokio::spawn(async move {
+            let res = crate::federation::fetch_json(&fc, "/api/gateways/cluster").await;
+            (fc.id, label, url, res)
+        }));
+    }
+    for h in fed_handles {
+        if let Ok((fid, fname, furl, res)) = h.await {
+            match res {
+                Ok(v) => {
+                    let mut list: Vec<serde_json::Value> = v.get("gateways")
+                        .and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                    for entry in list.iter_mut() {
+                        if let Some(obj) = entry.as_object_mut() {
+                            obj.insert("origin_federation_id".into(),  serde_json::json!(fid));
+                            obj.insert("origin_federation_name".into(),serde_json::json!(fname));
+                            obj.insert("origin_federation_url".into(), serde_json::json!(furl));
+                            obj.insert("origin_self".into(),           serde_json::json!(false));
+                            // Federated shares are read-only from this
+                            // dashboard; the UI links you to the origin
+                            // cluster to manage. Make that explicit.
+                            obj.insert("federated".into(),             serde_json::json!(true));
+                            // Origin cluster label takes precedence over
+                            // any local "cluster" field for grouping.
+                            if !obj.get("origin_cluster").map(|v| v.is_string()).unwrap_or(false) {
+                                obj.insert("origin_cluster".into(), serde_json::json!(fname));
+                            }
+                        }
+                    }
+                    all.append(&mut list);
+                }
+                Err(e) => {
+                    // Surface the failure inline rather than silently
+                    // dropping the federation — operator needs to know
+                    // their connection is broken.
+                    all.push(serde_json::json!({
+                        "id": format!("federation-error-{}", fid),
+                        "name": format!("(unreachable) {}", fname),
+                        "disabled": true,
+                        "protocols": [],
+                        "sources": [],
+                        "performance_tier": "cold",
+                        "auth": { "mode": "anonymous" },
+                        "origin_federation_id": fid,
+                        "origin_federation_name": fname,
+                        "origin_federation_url": furl,
+                        "origin_self": false,
+                        "federated": true,
+                        "federation_error": e,
+                        "runtime": { "serving": false, "healthy": false, "last_error": e }
+                    }));
+                }
+            }
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({ "gateways": all }))
+}
+
+// ─── Federation API ───
+//
+// Cross-cluster registry — each entry is "another WolfStack cluster
+// I trust to read shares (and future inventory) from". Stored at
+// /etc/wolfstack/federations.json (mode 0600).
+
+#[derive(Deserialize)]
+pub struct FederationCreateRequest {
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    #[serde(default)] pub insecure_tls: bool,
+    /// Optional — when updating an existing entry. Empty means create.
+    #[serde(default)] pub id: String,
+}
+
+/// GET /api/federations — list (api_key redacted).
+pub async fn federations_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let s = state.federations.read().unwrap_or_else(|e| e.into_inner());
+    HttpResponse::Ok().json(s.redacted())
+}
+
+/// POST /api/federations — create or update (id present = update).
+pub async fn federations_save(req: HttpRequest, state: web::Data<AppState>, body: web::Json<FederationCreateRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let body = body.into_inner();
+    let entry = crate::federation::FederatedCluster {
+        id: body.id,
+        name: body.name,
+        base_url: body.base_url,
+        api_key: body.api_key,
+        insecure_tls: body.insecure_tls,
+        created_at: String::new(),
+        last_ok_unix: 0,
+        last_error: None,
+    };
+    if let Err(errs) = crate::federation::validate(&entry) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "errors": errs }));
+    }
+    let stored = {
+        let mut s = state.federations.write().unwrap_or_else(|e| e.into_inner());
+        let stored = s.upsert(entry);
+        if let Err(e) = s.save() {
+            tracing::warn!(target: "wolfstack::federation", "save failed: {}", e);
+        }
+        stored
+    };
+    HttpResponse::Ok().json(serde_json::json!({
+        "id": stored.id,
+        "name": stored.name,
+        "base_url": stored.base_url,
+    }))
+}
+
+/// DELETE /api/federations/{id} — remove an entry.
+pub async fn federations_delete(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let removed = {
+        let mut s = state.federations.write().unwrap_or_else(|e| e.into_inner());
+        let removed = s.remove(&id);
+        if removed { let _ = s.save(); }
+        removed
+    };
+    if removed {
+        HttpResponse::Ok().json(serde_json::json!({ "deleted": id }))
+    } else {
+        HttpResponse::NotFound().json(serde_json::json!({ "error": "federation not found" }))
+    }
+}
+
+/// POST /api/federations/{id}/test — issue a probe call to verify the
+/// entry works. Returns timing + error chain like AI test-connection.
+pub async fn federations_test(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let entry = {
+        let s = state.federations.read().unwrap_or_else(|e| e.into_inner());
+        match s.clusters.iter().find(|c| c.id == id) {
+            Some(c) => c.clone(),
+            None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "federation not found" })),
+        }
+    };
+    let started = std::time::Instant::now();
+    // Probe the cheapest endpoint that requires auth — `/api/agent/status`
+    // works on every WolfStack release back to the API-key landing.
+    let result = crate::federation::fetch_json(&entry, "/api/agent/status").await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    // Update last_ok / last_error so the UI badge reflects this probe.
+    {
+        let mut s = state.federations.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = s.clusters.iter_mut().find(|c| c.id == id) {
+            match &result {
+                Ok(_) => {
+                    c.last_ok_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                    c.last_error = None;
+                }
+                Err(e) => {
+                    c.last_error = Some(e.clone());
+                }
+            }
+        }
+        let _ = s.save();
+    }
+    match result {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+            "ok": true, "elapsed_ms": elapsed_ms,
+            "name": entry.name, "base_url": entry.base_url,
+        })),
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({
+            "ok": false, "elapsed_ms": elapsed_ms,
+            "name": entry.name, "base_url": entry.base_url,
+            "error": e,
+        })),
+    }
+}
+
+/// POST /api/gateways/sync — receive a peer's gateway snapshot.
+/// Inter-node only (X-WolfStack-Secret header).
+pub async fn gateways_sync(req: HttpRequest, state: web::Data<AppState>, body: web::Json<Vec<crate::gateway::Gateway>>) -> HttpResponse {
+    let provided = req.headers().get("X-WolfStack-Secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !crate::auth::validate_cluster_secret(provided, &state.cluster_secret)
+        && !crate::auth::validate_cluster_secret(provided, crate::auth::default_cluster_secret())
+        && !crate::auth::validate_cluster_secret(provided, &crate::auth::load_cluster_secret())
+    {
+        return HttpResponse::Unauthorized().finish();
+    }
+    let incoming = body.into_inner();
+    let changed = {
+        let mut s = state.gateways.write().unwrap_or_else(|e| e.into_inner());
+        s.merge_from_peer(incoming)
+    };
+    if changed {
+        let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
+        let _ = s.save();
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "merged": changed }))
+}
+
+// ─── Gateway internals ───
+
+async fn apply_and_persist(state: &web::Data<AppState>, g: crate::gateway::Gateway, id: &str) -> HttpResponse {
+    // Apply first — if mounting/daemon-config fails, don't persist
+    // a half-broken gateway. On failure, immediately tear down so a
+    // partial Samba snippet or stale mount doesn't leak between
+    // create attempts.
+    let stored = match crate::gateway::orchestrator::apply(&g) {
+        Ok(rt) => {
+            let mut s = state.gateways.write().unwrap_or_else(|e| e.into_inner());
+            let stored = s.upsert(g.clone());
+            s.runtime.insert(id.to_string(), rt);
+            if let Err(e) = s.save() {
+                tracing::warn!(target: "wolfstack::gateway", "save failed: {}", e);
+            }
+            stored
+        }
+        Err(e) => {
+            crate::gateway::orchestrator::teardown(&g);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": e.to_string(),
+            }));
+        }
+    };
+    push_to_peers(state).await;
+    let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
+    HttpResponse::Ok().json(gateway_to_json(&stored, &s))
+}
+
+/// Push the local gateway snapshot to every online wolfstack peer.
+/// Best-effort — peers that are slow / offline catch up on their next
+/// boot via merge_from_peer in the receive path.
+async fn push_to_peers(state: &web::Data<AppState>) {
+    let snapshot: Vec<crate::gateway::Gateway> = {
+        let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
+        crate::gateway::snapshot_for_sync(&s)
+    };
+    let peers: Vec<_> = state.cluster.get_all_nodes().into_iter()
+        .filter(|n| !n.is_self && n.node_type == "wolfstack" && n.online)
+        .collect();
+    if peers.is_empty() { return; }
+    let secret = state.cluster_secret.clone();
+    let client = (*API_HTTP_CLIENT).clone();
+    tokio::spawn(async move {
+        for peer in peers {
+            let urls = build_node_urls(&peer.address, peer.port, "/api/gateways/sync");
+            for url in urls {
+                let res = client.post(&url)
+                    .timeout(std::time::Duration::from_secs(5))
+                    .header("X-WolfStack-Secret", &secret)
+                    .json(&snapshot)
+                    .send().await;
+                if let Ok(resp) = res {
+                    let success = resp.status().is_success();
+                    let _ = resp.bytes().await;
+                    if success { break; }
+                }
+            }
+        }
+    });
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -21971,6 +22694,25 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/ai/config/sync", web::post().to(ai_sync_config))
         .route("/api/ai/test-email", web::post().to(ai_test_email))
         .route("/api/ai/test-connection", web::post().to(ai_test_connection))
+        // Gateway (universal SMB/NFS share) — see src/gateway/.
+        .route("/api/gateways",                                   web::get().to(gateways_list))
+        .route("/api/gateways",                                   web::post().to(gateways_create))
+        .route("/api/gateways/cluster",                           web::get().to(gateways_cluster))
+        .route("/api/gateways/status",                            web::get().to(gateways_status))
+        .route("/api/gateways/sources/discover",                  web::get().to(gateways_discover_sources))
+        .route("/api/gateways/sync",                              web::post().to(gateways_sync))
+        .route("/api/gateways/{id}",                              web::get().to(gateways_get))
+        .route("/api/gateways/{id}",                              web::put().to(gateways_update))
+        .route("/api/gateways/{id}",                              web::delete().to(gateways_delete))
+        .route("/api/gateways/{id}/reload",                       web::post().to(gateways_reload))
+        .route("/api/gateways/{id}/disable",                      web::post().to(gateways_disable))
+        .route("/api/gateways/{id}/enable",                       web::post().to(gateways_enable))
+        .route("/api/gateways/{id}/users/{name}/password",        web::post().to(gateways_set_password))
+        // Federation — cross-cluster registry powering the cross-cluster Shares panel.
+        .route("/api/federations",                                web::get().to(federations_list))
+        .route("/api/federations",                                web::post().to(federations_save))
+        .route("/api/federations/{id}",                           web::delete().to(federations_delete))
+        .route("/api/federations/{id}/test",                      web::post().to(federations_test))
         .route("/api/ai/suppress", web::get().to(ai_suppress_link))
         .route("/api/ai/accepted-risks", web::get().to(ai_accepted_risks_get))
         .route("/api/ai/accepted-risks", web::post().to(ai_accepted_risks_save))

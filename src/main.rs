@@ -32,6 +32,8 @@ mod predictive;
 mod wolfrun;
 mod statuspage;
 mod ceph;
+mod gateway;
+mod federation;
 mod configurator;
 mod patreon;
 mod kubernetes;
@@ -436,7 +438,44 @@ async fn main() -> std::io::Result<()> {
             predictive_metrics: predictive_metrics.clone(),
             predictive_cluster_cache: Arc::new(std::sync::Mutex::new(None)),
             node_id: node_id.clone(),
+            gateways: Arc::new(std::sync::RwLock::new(gateway::GatewayStore::load())),
+            federations: Arc::new(std::sync::RwLock::new(federation::FederationStore::load())),
         });
+
+        // Reconcile orphan daemon configs (Samba snippets / NFS exports
+        // / mount trees that aren't backed by a gateway in our store)
+        // and re-apply every persisted gateway. Mounts and daemon
+        // configs may have been wiped by a reboot; this brings them
+        // back without operator action.
+        {
+            let store = app_state.gateways.clone();
+            tokio::spawn(async move {
+                {
+                    let s = store.read().unwrap_or_else(|e| e.into_inner());
+                    crate::gateway::reconcile_on_startup(&s);
+                }
+                let snapshot: Vec<crate::gateway::Gateway> = {
+                    let s = store.read().unwrap_or_else(|e| e.into_inner());
+                    s.gateways.values().cloned().collect()
+                };
+                for g in snapshot {
+                    match crate::gateway::orchestrator::apply(&g) {
+                        Ok(rt) => {
+                            let mut s = store.write().unwrap_or_else(|e| e.into_inner());
+                            s.runtime.insert(g.id.clone(), rt);
+                            tracing::info!(target: "wolfstack::gateway", "gateway '{}' re-applied on startup", g.name);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "wolfstack::gateway",
+                                "gateway '{}' failed to re-apply on startup: {}",
+                                g.name, e
+                            );
+                        }
+                    }
+                }
+            });
+        }
 
         // Predictive ops orchestrator — 5-min loop that samples
         // disks, records into history, runs analyzers, and upserts
