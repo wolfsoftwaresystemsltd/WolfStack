@@ -265,6 +265,12 @@ pub struct AppState {
     /// cross-cluster aggregation (Shares panel today; future use:
     /// Control Panel inventory across separate sites).
     pub federations: Arc<std::sync::RwLock<crate::federation::FederationStore>>,
+    /// 30-second aggregation cache for `/api/gateways/cluster`.
+    /// Same pattern as `predictive_cluster_cache` — a dashboard
+    /// refresh every few seconds shouldn't translate into a fan-out
+    /// to N peers + M federations on every refresh. Invalidated by
+    /// every state-changing gateway / federation endpoint.
+    pub gateway_cluster_cache: Arc<std::sync::Mutex<Option<(serde_json::Value, std::time::Instant)>>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -21920,7 +21926,7 @@ pub async fn gateways_get(req: HttpRequest, state: web::Data<AppState>, path: we
 /// (`origin_node_id`); every other peer holds the config but does
 /// not serve it.
 pub async fn gateways_create(req: HttpRequest, state: web::Data<AppState>, body: web::Json<GatewayCreateRequest>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let actor = match require_auth(&req, &state) { Ok(a) => a, Err(r) => return r };
     let body = body.into_inner();
     let id = uuid::Uuid::new_v4().to_string();
     let g = crate::gateway::Gateway {
@@ -21942,13 +21948,13 @@ pub async fn gateways_create(req: HttpRequest, state: web::Data<AppState>, body:
     if let Err(errs) = crate::gateway::validate(&g) {
         return HttpResponse::BadRequest().json(serde_json::json!({ "errors": errs }));
     }
-    gateway_audit(&state, "info", "Share created", &format!("'{}' on {}", g.name, state.node_id));
+    gateway_audit(&state, &actor, "info", "Share created", &format!("'{}' on {}", g.name, state.node_id));
     apply_and_persist(&state, g, &id).await
 }
 
 /// PUT /api/gateways/{id} — full replace.
 pub async fn gateways_update(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<GatewayCreateRequest>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let actor = match require_auth(&req, &state) { Ok(a) => a, Err(r) => return r };
     let id = path.into_inner();
     let existing = match require_owner(&state, &id) { Ok(g) => g, Err(r) => return r };
     let body = body.into_inner();
@@ -21971,13 +21977,13 @@ pub async fn gateways_update(req: HttpRequest, state: web::Data<AppState>, path:
     if let Err(errs) = crate::gateway::validate(&g) {
         return HttpResponse::BadRequest().json(serde_json::json!({ "errors": errs }));
     }
-    gateway_audit(&state, "info", "Share updated", &format!("'{}'", g.name));
+    gateway_audit(&state, &actor, "info", "Share updated", &format!("'{}'", g.name));
     apply_and_persist(&state, g, &id).await
 }
 
 /// DELETE /api/gateways/{id} — tear down + remove from config.
 pub async fn gateways_delete(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let actor = match require_auth(&req, &state) { Ok(a) => a, Err(r) => return r };
     let id = path.into_inner();
     if let Err(r) = require_owner(&state, &id) { return r; }
     let removed = {
@@ -21988,7 +21994,7 @@ pub async fn gateways_delete(req: HttpRequest, state: web::Data<AppState>, path:
         Some(g) => g,
         None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "gateway not found" })),
     };
-    gateway_audit(&state, "warning", "Share deleted", &format!("'{}'", g.name));
+    gateway_audit(&state, &actor, "warning", "Share deleted", &format!("'{}'", g.name));
     crate::gateway::orchestrator::teardown(&g);
     {
         let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
@@ -21996,6 +22002,7 @@ pub async fn gateways_delete(req: HttpRequest, state: web::Data<AppState>, path:
             tracing::warn!(target: "wolfstack::gateway", "save after delete failed: {}", e);
         }
     }
+    invalidate_gateway_cluster_cache(&state);
     push_to_peers(&state).await;
     HttpResponse::Ok().json(serde_json::json!({ "deleted": id }))
 }
@@ -22004,13 +22011,17 @@ pub async fn gateways_delete(req: HttpRequest, state: web::Data<AppState>, path:
 /// daemon snippets, reload daemons). Useful after fixing an upstream
 /// problem.
 pub async fn gateways_reload(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let actor = match require_auth(&req, &state) { Ok(a) => a, Err(r) => return r };
     let id = path.into_inner();
     let g = match require_owner(&state, &id) { Ok(g) => g, Err(r) => return r };
     match crate::gateway::orchestrator::apply(&g) {
         Ok(rt) => {
-            let mut s = state.gateways.write().unwrap_or_else(|e| e.into_inner());
-            s.runtime.insert(id.clone(), rt);
+            {
+                let mut s = state.gateways.write().unwrap_or_else(|e| e.into_inner());
+                s.runtime.insert(id.clone(), rt);
+            }
+            invalidate_gateway_cluster_cache(&state);
+            gateway_audit(&state, &actor, "info", "Share reloaded", &format!("'{}'", g.name));
             HttpResponse::Ok().json(serde_json::json!({ "reloaded": id }))
         }
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
@@ -22020,7 +22031,7 @@ pub async fn gateways_reload(req: HttpRequest, state: web::Data<AppState>, path:
 /// POST /api/gateways/{id}/disable — set disabled=true and tear down
 /// without removing config.
 pub async fn gateways_disable(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let actor = match require_auth(&req, &state) { Ok(a) => a, Err(r) => return r };
     let id = path.into_inner();
     if let Err(r) = require_owner(&state, &id) { return r; }
     let g = {
@@ -22030,19 +22041,20 @@ pub async fn gateways_disable(req: HttpRequest, state: web::Data<AppState>, path
             None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "gateway not found" })),
         }
     };
-    gateway_audit(&state, "info", "Share disabled", &format!("'{}'", g.name));
+    gateway_audit(&state, &actor, "info", "Share disabled", &format!("'{}'", g.name));
     crate::gateway::orchestrator::teardown(&g);
     {
         let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
         let _ = s.save();
     }
+    invalidate_gateway_cluster_cache(&state);
     push_to_peers(&state).await;
     HttpResponse::Ok().json(serde_json::json!({ "disabled": id }))
 }
 
 /// POST /api/gateways/{id}/enable — re-apply a previously-disabled gateway.
 pub async fn gateways_enable(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let actor = match require_auth(&req, &state) { Ok(a) => a, Err(r) => return r };
     let id = path.into_inner();
     if let Err(r) = require_owner(&state, &id) { return r; }
     let g = {
@@ -22052,7 +22064,7 @@ pub async fn gateways_enable(req: HttpRequest, state: web::Data<AppState>, path:
             None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "gateway not found" })),
         }
     };
-    gateway_audit(&state, "info", "Share enabled", &format!("'{}'", g.name));
+    gateway_audit(&state, &actor, "info", "Share enabled", &format!("'{}'", g.name));
     match crate::gateway::orchestrator::apply(&g) {
         Ok(rt) => {
             let mut s = state.gateways.write().unwrap_or_else(|e| e.into_inner());
@@ -22061,6 +22073,7 @@ pub async fn gateways_enable(req: HttpRequest, state: web::Data<AppState>, path:
         }
         Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
     }
+    invalidate_gateway_cluster_cache(&state);
     push_to_peers(&state).await;
     HttpResponse::Ok().json(serde_json::json!({ "enabled": id }))
 }
@@ -22077,7 +22090,7 @@ pub async fn gateways_set_password(
     path: web::Path<(String, String)>,
     body: web::Json<GatewayPasswordRequest>,
 ) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let actor = match require_auth(&req, &state) { Ok(a) => a, Err(r) => return r };
     let (id, username) = path.into_inner();
     let g = match require_owner(&state, &id) { Ok(g) => g, Err(r) => return r };
     let body = body.into_inner();
@@ -22094,7 +22107,7 @@ pub async fn gateways_set_password(
             "error": "user is not in this gateway's auth list — add them first via PUT /api/gateways/{id}"
         }));
     }
-    gateway_audit(&state, "info", "Share password set", &format!("user '{}' on share '{}'", username, g.name));
+    gateway_audit(&state, &actor, "info", "Share password set", &format!("user '{}' on share '{}'", username, g.name));
     match crate::gateway::samba::set_user_password(&username, &body.password) {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
@@ -22178,10 +22191,103 @@ pub async fn gateways_status(req: HttpRequest, state: web::Data<AppState>) -> Ht
     }))
 }
 
+/// GET /api/gateways/{id}/sessions — list active SMB connections for
+/// this share. Only meaningful when the gateway is owned by this node;
+/// for peer-owned gateways the operator opens the originating cluster.
+pub async fn gateways_sessions(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let g = match require_owner(&state, &id) { Ok(g) => g, Err(r) => return r };
+    let share_name = g.name.clone();
+
+    // `smbstatus -j` produces JSON describing every active session
+    // and connection. We filter by `service` field == this share name.
+    if crate::gateway::sources::which_helper("smbstatus").is_none() {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "share": share_name,
+            "sessions": [],
+            "warning": "smbstatus not installed",
+        }));
+    }
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("smbstatus").args(["-j"]).output()
+    }).await;
+
+    let parsed = match out {
+        Ok(Ok(o)) if o.status.success() => serde_json::from_slice::<serde_json::Value>(&o.stdout).ok(),
+        _ => None,
+    };
+    let mut sessions: Vec<serde_json::Value> = Vec::new();
+    if let Some(v) = parsed {
+        // smbstatus -j emits {"sessions": {...}, "tcons": {...}, ...}
+        // Each tcon (tree connection) carries `service` (share name)
+        // and `session_id`. We surface (service, machine, username,
+        // connected_at) tuples — enough for the operator to spot
+        // who's connected.
+        if let Some(tcons) = v.get("tcons").and_then(|t| t.as_object()) {
+            for (tid, tcon) in tcons {
+                let service = tcon.get("service").and_then(|x| x.as_str()).unwrap_or("");
+                if !service.eq_ignore_ascii_case(&share_name) { continue; }
+                let session_id = tcon.get("session_id").and_then(|x| x.as_str()).unwrap_or("");
+                let machine = tcon.get("machine").and_then(|x| x.as_str()).unwrap_or("");
+                let connected_at = tcon.get("connected_at").and_then(|x| x.as_str()).unwrap_or("");
+                let username = v.get("sessions")
+                    .and_then(|s| s.get(session_id))
+                    .and_then(|s| s.get("username"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                sessions.push(serde_json::json!({
+                    "tcon_id": tid,
+                    "session_id": session_id,
+                    "service": service,
+                    "machine": machine,
+                    "username": username,
+                    "connected_at": connected_at,
+                }));
+            }
+        }
+    }
+    HttpResponse::Ok().json(serde_json::json!({
+        "share": share_name,
+        "sessions": sessions,
+    }))
+}
+
 /// GET /api/gateways/cluster — aggregate gateways from this node and
 /// every reachable peer. Powers the cross-cluster Shares panel.
+///
+/// Cached for 30s to keep dashboard refreshes cheap on big clusters
+/// (5 peers + 3 federations would otherwise be 8 outbound HTTPS calls
+/// every page load). Invalidated by every state-changing gateway /
+/// federation endpoint via `invalidate_gateway_cluster_cache`.
+const GATEWAY_CLUSTER_CACHE_TTL_SECS: u64 = 30;
+
+fn invalidate_gateway_cluster_cache(state: &web::Data<AppState>) {
+    let mut cache = state.gateway_cluster_cache.lock().unwrap_or_else(|e| e.into_inner());
+    *cache = None;
+}
+
 pub async fn gateways_cluster(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    // Cache hit?
+    {
+        let cache = state.gateway_cluster_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((value, ts)) = &*cache {
+            if ts.elapsed().as_secs() < GATEWAY_CLUSTER_CACHE_TTL_SECS {
+                let mut response = value.clone();
+                if let Some(obj) = response.as_object_mut() {
+                    obj.insert("cached_for_seconds".into(), serde_json::json!(ts.elapsed().as_secs()));
+                }
+                return HttpResponse::Ok().json(response);
+            }
+        }
+    }
+
     let mut all: Vec<serde_json::Value> = {
         let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
         s.gateways.values().map(|g| {
@@ -22307,7 +22413,159 @@ pub async fn gateways_cluster(req: HttpRequest, state: web::Data<AppState>) -> H
         }
     }
 
-    HttpResponse::Ok().json(serde_json::json!({ "gateways": all }))
+    let response = serde_json::json!({ "gateways": all });
+    {
+        let mut cache = state.gateway_cluster_cache.lock().unwrap_or_else(|e| e.into_inner());
+        *cache = Some((response.clone(), std::time::Instant::now()));
+    }
+    HttpResponse::Ok().json(response)
+}
+
+// ─── Array API ───
+//
+// Disk-array management for vanilla mdadm and the NoNRAID kernel
+// driver. List, detail, start/stop, parity check (now or scheduled).
+// Every mutating endpoint is gated behind require_auth — these are
+// destructive ops (a misclick stops the array → drops mounted FSes).
+
+#[derive(Deserialize)]
+pub struct ArrayParityRequest {
+    /// "check" (read-only verify, the safe default) or "repair"
+    /// (overwrite mismatches — only when you trust the data).
+    #[serde(default = "default_check_action")]
+    pub action: String,
+}
+fn default_check_action() -> String { "check".to_string() }
+
+/// GET /api/array — list every md / nonraid array on this node.
+pub async fn array_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let arrays = tokio::task::spawn_blocking(crate::array::list_arrays).await.unwrap_or_default();
+    HttpResponse::Ok().json(serde_json::json!({
+        "backend": match crate::array::detect_backend() {
+            crate::array::Backend::Mdadm => "mdadm",
+            crate::array::Backend::Nonraid => "nonraid",
+        },
+        "arrays": arrays,
+    }))
+}
+
+/// Validate an array name against a strict whitelist. Used by every
+/// path-bearing endpoint — `parity_check` writes to
+/// `/sys/block/{name}/md/sync_action` and `start_array`/`stop_array`
+/// pass the name to `mdadm /dev/{name}`, so anything other than the
+/// kernel's own naming convention is a path-traversal attempt.
+fn validate_array_name(name: &str) -> Result<(), HttpResponse> {
+    if name.is_empty() || name.len() > 32
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "invalid array name — only alphanumeric, '_' and '-' allowed (max 32 chars)"
+        })));
+    }
+    Ok(())
+}
+
+/// GET /api/array/{name} — detail (per-disk SMART, role refinement).
+/// Slower than the list because it runs smartctl per disk; up to
+/// 5s per disk on a misbehaving USB enclosure.
+pub async fn array_detail(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    if let Err(resp) = validate_array_name(&name) { return resp; }
+    let result = tokio::task::spawn_blocking(move || crate::array::array_detail(&name)).await;
+    match result {
+        Ok(Some(arr)) => HttpResponse::Ok().json(arr),
+        Ok(None) => HttpResponse::NotFound().json(serde_json::json!({ "error": "array not found" })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/array/{name}/start — assemble (mdadm) or start (mdcmd).
+pub async fn array_start(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    let actor = match require_auth(&req, &state) { Ok(a) => a, Err(r) => return r };
+    let name = path.into_inner();
+    if let Err(resp) = validate_array_name(&name) { return resp; }
+    let n2 = name.clone();
+    let result = tokio::task::spawn_blocking(move || crate::array::start_array(&n2)).await;
+    let alert_severity;
+    let body = match result {
+        Ok(Ok(msg)) => { alert_severity = "info"; serde_json::json!({ "ok": true, "output": msg }) }
+        Ok(Err(e)) => { alert_severity = "error"; serde_json::json!({ "ok": false, "error": e.to_string() }) }
+        Err(e) => { alert_severity = "error"; serde_json::json!({ "ok": false, "error": format!("{}", e) }) }
+    };
+    gateway_audit(&state, &actor, alert_severity, "Array started", &format!("/dev/{}", name));
+    HttpResponse::Ok().json(body)
+}
+
+/// POST /api/array/{name}/stop — STOPS the array. Destructive: any
+/// mounted filesystem on the array goes away.
+pub async fn array_stop(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    let actor = match require_auth(&req, &state) { Ok(a) => a, Err(r) => return r };
+    let name = path.into_inner();
+    if let Err(resp) = validate_array_name(&name) { return resp; }
+    let n2 = name.clone();
+    let result = tokio::task::spawn_blocking(move || crate::array::stop_array(&n2)).await;
+    let body = match result {
+        Ok(Ok(msg)) => serde_json::json!({ "ok": true, "output": msg }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        Err(e) => serde_json::json!({ "ok": false, "error": format!("{}", e) }),
+    };
+    gateway_audit(&state, &actor, "warning", "Array stopped", &format!("/dev/{}", name));
+    HttpResponse::Ok().json(body)
+}
+
+/// POST /api/array/{name}/parity — start a parity check.
+pub async fn array_parity(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<ArrayParityRequest>) -> HttpResponse {
+    let actor = match require_auth(&req, &state) { Ok(a) => a, Err(r) => return r };
+    let name = path.into_inner();
+    if let Err(resp) = validate_array_name(&name) { return resp; }
+    let action = body.into_inner().action;
+    let n2 = name.clone();
+    let a2 = action.clone();
+    let result = tokio::task::spawn_blocking(move || crate::array::parity_check(&n2, &a2)).await;
+    let body = match result {
+        Ok(Ok(msg)) => serde_json::json!({ "ok": true, "output": msg }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        Err(e) => serde_json::json!({ "ok": false, "error": format!("{}", e) }),
+    };
+    gateway_audit(&state, &actor, "info", "Parity check triggered",
+        &format!("/dev/{} action={}", name, action));
+    HttpResponse::Ok().json(body)
+}
+
+/// POST /api/array/{name}/parity/cancel — cancel an in-progress parity check.
+pub async fn array_parity_cancel(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    let actor = match require_auth(&req, &state) { Ok(a) => a, Err(r) => return r };
+    let name = path.into_inner();
+    if let Err(resp) = validate_array_name(&name) { return resp; }
+    let n2 = name.clone();
+    let result = tokio::task::spawn_blocking(move || crate::array::parity_cancel(&n2)).await;
+    let body = match result {
+        Ok(Ok(msg)) => serde_json::json!({ "ok": true, "output": msg }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        Err(e) => serde_json::json!({ "ok": false, "error": format!("{}", e) }),
+    };
+    gateway_audit(&state, &actor, "info", "Parity check cancelled", &format!("/dev/{}", name));
+    HttpResponse::Ok().json(body)
+}
+
+/// GET /api/array/config — schedules + alert overrides.
+pub async fn array_config_get(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    HttpResponse::Ok().json(crate::array::ArrayConfig::load())
+}
+
+/// POST /api/array/config — replace schedules + alert overrides.
+pub async fn array_config_save(req: HttpRequest, state: web::Data<AppState>, body: web::Json<crate::array::ArrayConfig>) -> HttpResponse {
+    let actor = match require_auth(&req, &state) { Ok(a) => a, Err(r) => return r };
+    let cfg = body.into_inner();
+    if let Err(e) = cfg.save() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() }));
+    }
+    gateway_audit(&state, &actor, "info", "Array schedule saved",
+        &format!("{} schedule(s)", cfg.schedules.len()));
+    HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
 }
 
 // ─── Federation API ───
@@ -22358,6 +22616,7 @@ pub async fn federations_save(req: HttpRequest, state: web::Data<AppState>, body
         }
         stored
     };
+    invalidate_gateway_cluster_cache(&state);
     HttpResponse::Ok().json(serde_json::json!({
         "id": stored.id,
         "name": stored.name,
@@ -22376,6 +22635,7 @@ pub async fn federations_delete(req: HttpRequest, state: web::Data<AppState>, pa
         removed
     };
     if removed {
+        invalidate_gateway_cluster_cache(&state);
         HttpResponse::Ok().json(serde_json::json!({ "deleted": id }))
     } else {
         HttpResponse::NotFound().json(serde_json::json!({ "error": "federation not found" }))
@@ -22450,6 +22710,7 @@ pub async fn gateways_sync(req: HttpRequest, state: web::Data<AppState>, body: w
     if changed {
         let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
         let _ = s.save();
+        invalidate_gateway_cluster_cache(&state);
     }
     HttpResponse::Ok().json(serde_json::json!({ "merged": changed }))
 }
@@ -22458,7 +22719,16 @@ pub async fn gateways_sync(req: HttpRequest, state: web::Data<AppState>, body: w
 
 /// Append a gateway audit entry to the shared alert_log. Surfaced in
 /// the Tasks panel so operators see who created/edited/deleted what.
-fn gateway_audit(state: &web::Data<AppState>, severity: &str, title: &str, detail: &str) {
+/// `actor` is the username string returned by `require_auth` — either
+/// a real account, "cluster-node" for inter-node calls, or
+/// "apikey:<name>" for API-key authenticated mutations.
+fn gateway_audit(
+    state: &web::Data<AppState>,
+    actor: &str,
+    severity: &str,
+    title: &str,
+    detail: &str,
+) {
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
     let hostname = state.cluster.get_all_nodes().into_iter()
         .find(|n| n.is_self).map(|n| n.hostname).unwrap_or_default();
@@ -22470,7 +22740,7 @@ fn gateway_audit(state: &web::Data<AppState>, severity: &str, title: &str, detai
         timestamp: now,
         severity: severity.into(),
         title: title.into(),
-        detail: detail.into(),
+        detail: format!("{} (by {})", detail, actor),
         hostname,
         cluster,
     });
@@ -22526,6 +22796,7 @@ async fn apply_and_persist(state: &web::Data<AppState>, g: crate::gateway::Gatew
             }));
         }
     };
+    invalidate_gateway_cluster_cache(state);
     push_to_peers(state).await;
     let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
     HttpResponse::Ok().json(gateway_to_json(&stored, &s))
@@ -22763,6 +23034,16 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/gateways/{id}/disable",                      web::post().to(gateways_disable))
         .route("/api/gateways/{id}/enable",                       web::post().to(gateways_enable))
         .route("/api/gateways/{id}/users/{name}/password",        web::post().to(gateways_set_password))
+        .route("/api/gateways/{id}/sessions",                     web::get().to(gateways_sessions))
+        // Disk-array (mdadm / NoNRAID) — see src/array/.
+        .route("/api/array",                                      web::get().to(array_list))
+        .route("/api/array/config",                               web::get().to(array_config_get))
+        .route("/api/array/config",                               web::post().to(array_config_save))
+        .route("/api/array/{name}",                               web::get().to(array_detail))
+        .route("/api/array/{name}/start",                         web::post().to(array_start))
+        .route("/api/array/{name}/stop",                          web::post().to(array_stop))
+        .route("/api/array/{name}/parity",                        web::post().to(array_parity))
+        .route("/api/array/{name}/parity/cancel",                 web::post().to(array_parity_cancel))
         // Federation — cross-cluster registry powering the cross-cluster Shares panel.
         .route("/api/federations",                                web::get().to(federations_list))
         .route("/api/federations",                                web::post().to(federations_save))

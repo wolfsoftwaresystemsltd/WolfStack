@@ -34,6 +34,7 @@ mod statuspage;
 mod ceph;
 mod gateway;
 mod federation;
+mod array;
 mod configurator;
 mod patreon;
 mod kubernetes;
@@ -440,7 +441,169 @@ async fn main() -> std::io::Result<()> {
             node_id: node_id.clone(),
             gateways: Arc::new(std::sync::RwLock::new(gateway::GatewayStore::load())),
             federations: Arc::new(std::sync::RwLock::new(federation::FederationStore::load())),
+            gateway_cluster_cache: Arc::new(std::sync::Mutex::new(None)),
         });
+
+        // Storage-array health watcher — every 60s, scan /proc/mdstat
+        // and per-disk SMART. Fire an alert_log entry on first
+        // observation of a degraded array, faulty disk, or
+        // SMART-FAILED drive. Suppression is per-condition so we
+        // don't spam the operator every minute while the same disk is
+        // still faulty — only on transitions.
+        {
+            let alert_log = app_state.alert_log.clone();
+            let cluster = app_state.cluster.clone();
+            let cluster_for_label = cluster.clone();
+            tokio::spawn(async move {
+                let mut last_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    // list_arrays() is fast (just /proc/mdstat) but
+                    // doesn't populate per-disk SMART. We need SMART
+                    // for the FAILED-disk alert path, so hydrate via
+                    // array_detail() per array. spawn_blocking because
+                    // smartctl is a sync subprocess call.
+                    let arrays = tokio::task::spawn_blocking(|| {
+                        crate::array::list_arrays().into_iter()
+                            .filter_map(|a| crate::array::array_detail(&a.name))
+                            .collect::<Vec<_>>()
+                    }).await.unwrap_or_default();
+                    let hostname = cluster.get_all_nodes().into_iter()
+                        .find(|n| n.is_self).map(|n| n.hostname).unwrap_or_default();
+                    let cluster_name = cluster_for_label.get_self_cluster_name();
+
+                    let mut current = std::collections::HashSet::new();
+                    let mut new_alerts: Vec<(String, String, String)> = Vec::new();
+                    for arr in &arrays {
+                        if arr.state == "degraded" {
+                            let key = format!("array_degraded:{}", arr.name);
+                            current.insert(key.clone());
+                            if !last_seen.contains(&key) {
+                                new_alerts.push((
+                                    "critical".into(),
+                                    format!("Array degraded: /dev/{}", arr.name),
+                                    format!("level={} disks=[{}]", arr.level,
+                                        arr.disks.iter().map(|d| format!("{}({})", d.device, d.state)).collect::<Vec<_>>().join(", ")),
+                                ));
+                            }
+                        }
+                        for d in &arr.disks {
+                            if d.state == "faulty" || d.state == "missing" {
+                                let key = format!("array_disk:{}:{}", arr.name, d.device);
+                                current.insert(key.clone());
+                                if !last_seen.contains(&key) {
+                                    new_alerts.push((
+                                        "critical".into(),
+                                        format!("Disk {} on /dev/{} is {}", d.device, arr.name, d.state),
+                                        format!("model={} role={}",
+                                            d.model.clone().unwrap_or_default(), d.role),
+                                    ));
+                                }
+                            }
+                            if d.smart_status.eq_ignore_ascii_case("FAILED") {
+                                let key = format!("array_smart:{}", d.device);
+                                current.insert(key.clone());
+                                if !last_seen.contains(&key) {
+                                    new_alerts.push((
+                                        "critical".into(),
+                                        format!("SMART failure on {}", d.device),
+                                        format!("array=/dev/{} model={}", arr.name,
+                                            d.model.clone().unwrap_or_default()),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    if !new_alerts.is_empty() {
+                        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
+                        // 1. Write to the in-memory alert_log so the
+                        //    dashboard's Tasks panel shows the event
+                        //    immediately.
+                        {
+                            let mut log = alert_log.write().unwrap_or_else(|e| e.into_inner());
+                            let mut next_id = log.last().map(|e| e.id + 1).unwrap_or(1);
+                            for (sev, title, detail) in &new_alerts {
+                                log.push(api::AlertLogEntry {
+                                    id: next_id,
+                                    timestamp: now.clone(),
+                                    severity: sev.clone(),
+                                    title: title.clone(),
+                                    detail: detail.clone(),
+                                    hostname: hostname.clone(),
+                                    cluster: cluster_name.clone(),
+                                });
+                                next_id += 1;
+                            }
+                            while log.len() > 200 { log.remove(0); }
+                        }
+                        // 2. Fan out to the operator's configured
+                        //    channels: Discord/Slack/Telegram via the
+                        //    alerting module, email via the AI module
+                        //    (uses the same SMTP creds the daily
+                        //    report uses). Both are best-effort — a
+                        //    failed dispatch logs a warning but never
+                        //    blocks the watcher.
+                        let alert_cfg = crate::alerting::AlertConfig::load();
+                        let ai_cfg = crate::ai::AiConfig::load();
+                        for (_sev, title, detail) in new_alerts {
+                            let body = format!(
+                                "Host: {}\nCluster: {}\n\n{}",
+                                hostname, cluster_name, detail
+                            );
+                            crate::alerting::send_alert(&alert_cfg, &title, &body).await;
+                            if ai_cfg.email_enabled && !ai_cfg.email_to.is_empty() {
+                                let cfg = ai_cfg.clone();
+                                let subj = title.clone();
+                                let b = body.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    if let Err(e) = crate::ai::send_alert_email(&cfg, &subj, &b) {
+                                        tracing::warn!(
+                                            target: "wolfstack::array",
+                                            "email dispatch failed: {}", e
+                                        );
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    last_seen = current;
+                }
+            });
+        }
+
+        // Storage-array scheduler — runs every 60s, fires parity
+        // checks when their cron expression matches the current
+        // minute. Lightweight (one /etc/wolfstack/arrays.json read +
+        // one cron-match per schedule per minute); doesn't run anything
+        // until an actual schedule is configured.
+        {
+            tokio::spawn(async move {
+                let mut last_minute = String::new();
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                    let now = chrono::Local::now().naive_local();
+                    let minute_key = now.format("%Y-%m-%dT%H:%M").to_string();
+                    if minute_key == last_minute { continue; }
+                    last_minute = minute_key;
+
+                    let cfg = crate::array::ArrayConfig::load();
+                    for sched in cfg.schedules {
+                        if !sched.enabled { continue; }
+                        if !crate::wolfflow::cron_matches(&sched.cron, &now) { continue; }
+                        let array = sched.array.clone();
+                        let action = sched.action.clone();
+                        tokio::task::spawn_blocking(move || {
+                            match crate::array::parity_check(&array, &action) {
+                                Ok(_) => tracing::info!(target: "wolfstack::array",
+                                    "scheduled parity {} started on /dev/{}", action, array),
+                                Err(e) => tracing::warn!(target: "wolfstack::array",
+                                    "scheduled parity on /dev/{} failed: {}", array, e),
+                            }
+                        });
+                    }
+                }
+            });
+        }
 
         // Reconcile orphan daemon configs (Samba snippets / NFS exports
         // / mount trees that aren't backed by a gateway in our store)

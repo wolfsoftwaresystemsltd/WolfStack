@@ -2113,6 +2113,29 @@
             </div>
         </div>
 
+        <!-- ═══ Storage Array Page (mdadm / NoNRAID) ═══ -->
+        <div id="page-array" class="page-view" style="display:none;">
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-body" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+                    <div>
+                        <h2 style="margin:0;display:flex;align-items:center;gap:10px;">
+                            <span style="font-size:28px;">💽</span>Storage Array
+                        </h2>
+                        <p style="margin:6px 0 0;color:var(--text-muted);font-size:13px;">
+                            Manage Linux mdadm RAID and NoNRAID parity arrays. Start/stop, parity checks, scheduled verification, drive health alerts. Auto-detects which backend is on this host.
+                        </p>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <span id="array-backend-badge" style="font-size:11px;color:var(--text-muted);"></span>
+                        <button class="btn btn-sm" onclick="arrayLoad()" title="Refresh">🔄</button>
+                    </div>
+                </div>
+            </div>
+            <div id="array-list" style="display:flex;flex-direction:column;gap:10px;">
+                <div style="color:var(--text-muted);text-align:center;padding:30px;">Loading arrays…</div>
+            </div>
+        </div>
+
         <!-- ═══ Issues Page ═══ -->
         <div id="page-issues" class="page-view" style="display:none; padding-top:0;">
             <!-- Header -->

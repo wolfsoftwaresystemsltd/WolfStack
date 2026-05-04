@@ -1659,7 +1659,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', shares: 'Shares' };
+    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', shares: 'Shares', array: 'Storage Array' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -1705,6 +1705,8 @@ function selectView(page) {
         cpInit();
     } else if (page === 'shares') {
         gwLoad();
+    } else if (page === 'array') {
+        arrayLoad();
     }
 
     // Restore task log toggle button when leaving topology
@@ -48328,6 +48330,10 @@ const APP_DRAWER_TILES = [
         id: 'shares', icon: '📂', name: 'Shares',
         desc: 'Universal SMB/NFS gateway — share any storage to your LAN.',
     },
+    {
+        id: 'array', icon: '💽', name: 'Storage Array',
+        desc: 'mdadm / NoNRAID parity arrays. Status, parity checks, drive alerts.',
+    },
 ];
 
 function appDrawerTileHtml(t) {
@@ -48629,6 +48635,7 @@ let _gwWizardData = null;
 
 function gwOpenWizard() {
     _gwWizardStep = 1;
+    _gwWizardEditId = null;
     _gwWizardData = {
         name: '',
         protocols: ['smb'],
@@ -48641,6 +48648,31 @@ function gwOpenWizard() {
     };
     gwRenderWizard();
 }
+
+/// Open the wizard pre-populated with an existing gateway's config —
+/// shares the wizard with create, only the submit verb (POST vs PUT)
+/// and starting state differ.
+function gwOpenEdit(g) {
+    _gwWizardStep = 1;
+    _gwWizardEditId = g.id;
+    const auth = g.auth || { mode: 'anonymous' };
+    _gwWizardData = {
+        name: g.name || '',
+        protocols: g.protocols || ['smb'],
+        source_type: (g.sources && g.sources[0] && g.sources[0].type) || 'local',
+        source: (g.sources && g.sources[0]) || { type: 'local', node_id: '', path: '' },
+        auth_mode: auth.mode || 'anonymous',
+        anon_writable: !!auth.writable,
+        users: (auth.users || []).map(u => ({ username: u.username, writable: !!u.writable })),
+        options: Object.assign(
+            { readonly: false, guest_ok: true, time_machine: false, recycle_bin: false, allow_hosts: [], smb_workgroup: 'WORKGROUP' },
+            g.options || {}
+        ),
+    };
+    gwRenderWizard();
+}
+
+let _gwWizardEditId = null;
 
 function gwCloseWizard() {
     const m = document.getElementById('gw-wizard');
@@ -48668,10 +48700,13 @@ async function gwRenderWizard() {
     else if (_gwWizardStep === 2) body = gwWizardStep2();
     else                          body = gwWizardStep3();
 
+    const isEdit = !!_gwWizardEditId;
+    const submitLabel = isEdit ? 'Save changes' : 'Create Share';
+    const titleLabel  = isEdit ? `Edit Share` : 'New Share';
     m.innerHTML = `
         <div class="card" style="width:680px;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;">
             <div class="card-body" style="border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
-                <h3 style="margin:0;display:flex;align-items:center;gap:8px;">📂 New Share</h3>
+                <h3 style="margin:0;display:flex;align-items:center;gap:8px;">📂 ${titleLabel}</h3>
                 <button class="btn btn-sm" onclick="gwCloseWizard()">✕</button>
             </div>
             <div class="card-body" style="padding:12px 18px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);">${stepBadge}</div>
@@ -48682,7 +48717,7 @@ async function gwRenderWizard() {
                     <button class="btn btn-sm" onclick="gwCloseWizard()">Cancel</button>
                     ${_gwWizardStep < 3
                         ? `<button class="btn btn-sm btn-primary" onclick="gwWizardNext()">Next →</button>`
-                        : `<button class="btn btn-sm btn-primary" onclick="gwWizardSubmit()">Create Share</button>`}
+                        : `<button class="btn btn-sm btn-primary" onclick="gwWizardSubmit()">${submitLabel}</button>`}
                 </div>
             </div>
         </div>
@@ -48695,9 +48730,13 @@ async function gwWizardStep1() {
         const r = await fetch('/api/gateways/sources/discover');
         if (r.ok) discovered = await r.json();
     } catch (_) {}
+    // Stash structured source dicts so the picker handler can adopt
+    // them directly — no regex-parsing the label text, which would
+    // break the moment we changed the label format.
+    window._gwDiscoveredSources = discovered.sources || [];
     const d = _gwWizardData;
-    const opts = (discovered.sources || []).map((s, i) =>
-        `<option value="${i}" data-type="${escapeAttr(s.type)}">${escapeHtml(s.label)}</option>`
+    const opts = (discovered.sources || []).map((_, i) =>
+        `<option value="${i}">${escapeHtml((discovered.sources || [])[i].label || '(unlabelled)')}</option>`
     ).join('');
     return `
         <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px;">Share name</label>
@@ -48767,18 +48806,14 @@ function gwWizardCustomType(t) {
 }
 
 function gwWizardSourcePick(sel) {
-    const opt = sel.options[sel.selectedIndex];
-    if (!opt || !opt.value) return;
-    const t = opt.getAttribute('data-type');
-    if (t === 'wolfdisk') {
-        _gwWizardData.source = { type: 'wolfdisk', volume_id: opt.textContent.replace(/^WolfDisk volume:\s*/, '').trim() };
-    } else if (t === 'cephfs') {
-        // label: "CephFS: clusterId/fsName"
-        const m = opt.textContent.match(/CephFS:\s*([^/]+)\/(.+)/);
-        if (m) _gwWizardData.source = { type: 'cephfs', cluster_id: m[1].trim(), fs_name: m[2].trim() };
-    } else if (t === 'local') {
-        _gwWizardData.source = { type: 'local', node_id: '', path: '' };
-    }
+    const idx = parseInt(sel.value, 10);
+    const list = window._gwDiscoveredSources || [];
+    const src = (Number.isInteger(idx) && list[idx]) ? list[idx] : null;
+    if (!src) return;
+    // Adopt the structured source directly — no regex over labels.
+    // Strip the "label" field which is presentational only.
+    const { label, ...rest } = src;
+    _gwWizardData.source = rest;
     document.getElementById('gw-w-custom-fields').innerHTML = gwWizardCustomFieldsHtml();
 }
 
@@ -48896,7 +48931,6 @@ async function gwWizardSubmit() {
         ? { mode: 'anonymous', writable: !!d.anon_writable }
         : { mode: 'users', users: d.users.map(u => ({ username: u.username, writable: !!u.writable })), default_writable: true };
 
-    // Always send sources as an array — backend normalises.
     const body = {
         name: d.name.trim(),
         cluster: '',
@@ -48907,28 +48941,34 @@ async function gwWizardSubmit() {
         auth,
         options: d.options,
     };
+    const isEdit = !!_gwWizardEditId;
+    const url = isEdit ? `/api/gateways/${encodeURIComponent(_gwWizardEditId)}` : '/api/gateways';
+    const method = isEdit ? 'PUT' : 'POST';
     try {
-        const r = await fetch('/api/gateways', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+        const r = await fetch(url, {
+            method,
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
         const data = await r.json();
         if (!r.ok) {
-            const msg = data.error || (data.errors ? data.errors.join('; ') : 'Failed to create');
-            showToast('Create failed: ' + msg, 'error');
+            const msg = data.error || (data.errors ? data.errors.join('; ') : (isEdit ? 'Failed to save' : 'Failed to create'));
+            showToast((isEdit ? 'Save' : 'Create') + ' failed: ' + msg, 'error');
             return;
         }
         gwCloseWizard();
-        showToast('Share created: ' + d.name, 'success');
+        showToast((isEdit ? 'Share saved: ' : 'Share created: ') + d.name, 'success');
         await gwLoad();
-        // If users mode, prompt operator to set passwords for each user.
-        if (auth.mode === 'users') {
+        // For new gateways with users-mode auth, prompt for each
+        // password. For edits we skip — operator already set them
+        // before, and adding new users via edit is equally explicit.
+        if (!isEdit && auth.mode === 'users') {
             for (const u of d.users) {
-                await gwSetPasswordPrompt(data.id, u.username, /*silentIfCancelled*/ false);
+                await gwSetPasswordPrompt(data.id, u.username);
             }
         }
     } catch (e) {
-        showToast('Create failed: ' + (e.message || String(e)), 'error');
+        showToast((isEdit ? 'Save' : 'Create') + ' failed: ' + (e.message || String(e)), 'error');
     }
 }
 
@@ -49020,6 +49060,7 @@ async function gwOpenDetail(id, originNodeId) {
             </div>
             <div class="card-body" style="border-top:1px solid var(--border);display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
                 <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <button class="btn btn-sm" onclick="gwEditFrom('${escapeAttr(g.id)}')">✎ Edit</button>
                     <button class="btn btn-sm" onclick="gwReload('${escapeAttr(g.id)}')">🔄 Reload</button>
                     ${g.disabled
                         ? `<button class="btn btn-sm" onclick="gwEnable('${escapeAttr(g.id)}')">▶ Enable</button>`
@@ -49029,6 +49070,16 @@ async function gwOpenDetail(id, originNodeId) {
             </div>
         </div>
     `;
+}
+
+function gwEditFrom(id) {
+    const g = _gwState.gateways.find(x => x.id === id && x.origin_self !== false);
+    if (!g) {
+        showToast("Can only edit shares owned by this node", 'error');
+        return;
+    }
+    document.getElementById('gw-detail')?.remove();
+    gwOpenEdit(g);
 }
 
 async function gwReload(id) {
@@ -49090,12 +49141,42 @@ async function gwSetPasswordPrompt(gatewayId, username) {
 }
 
 // Modal helpers. Always use the dashboard's built-in styled modals
-// (showConfirm / showPrompt). For password input we build a small
-// type=password variant inline so the plaintext never appears
-// on-screen — showPrompt is type=text only.
+// (showConfirm / showPrompt). When showConfirm is unavailable we
+// build a small DOM modal inline rather than falling back to
+// window.confirm — browser-chrome dialogs are blocked in iframes,
+// look terrible on mobile, and are sometimes suppressible.
 async function confirmModal(msg) {
     if (typeof window.showConfirm === 'function') return window.showConfirm(msg);
-    return new Promise(resolve => resolve(window.confirm(msg)));
+    return new Promise(resolve => {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:100002;display:flex;align-items:center;justify-content:center;';
+        const modal = document.createElement('div');
+        modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:480px;width:90%;color:var(--text-primary,#e4e4e7);font-family:inherit;box-shadow:0 20px 60px rgba(0,0,0,0.5);';
+        const body = document.createElement('div');
+        body.style.cssText = 'font-size:13px;line-height:1.55;color:var(--text-secondary,#a1a1aa);white-space:pre-wrap;';
+        body.textContent = msg;
+        const btnWrap = document.createElement('div');
+        btnWrap.style.cssText = 'margin-top:18px;display:flex;justify-content:flex-end;gap:8px;';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'btn btn-sm';
+        cancelBtn.textContent = 'Cancel';
+        const okBtn = document.createElement('button');
+        okBtn.className = 'btn btn-sm btn-primary';
+        okBtn.textContent = 'Confirm';
+        cancelBtn.onclick = () => { overlay.remove(); resolve(false); };
+        okBtn.onclick = () => { overlay.remove(); resolve(true); };
+        overlay.onclick = (e) => { if (e.target === overlay) { overlay.remove(); resolve(false); } };
+        document.addEventListener('keydown', function esc(e) {
+            if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', esc); resolve(false); }
+        });
+        btnWrap.appendChild(cancelBtn);
+        btnWrap.appendChild(okBtn);
+        modal.appendChild(body);
+        modal.appendChild(btnWrap);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        okBtn.focus();
+    });
 }
 async function promptModal(label, initial, opts) {
     if (opts && opts.type === 'password') return passwordPrompt(label);
@@ -49145,6 +49226,8 @@ function passwordPrompt(label) {
 
 window.gwLoad = gwLoad;
 window.gwOpenWizard = gwOpenWizard;
+window.gwOpenEdit = gwOpenEdit;
+window.gwEditFrom = gwEditFrom;
 window.gwCloseWizard = gwCloseWizard;
 window.gwRenderWizard = gwRenderWizard;
 window.gwWizardBack = gwWizardBack;
@@ -49307,3 +49390,221 @@ window.gwFedAddPrompt = gwFedAddPrompt;
 window.gwFedSubmit = gwFedSubmit;
 window.gwFedTest = gwFedTest;
 window.gwFedRemove = gwFedRemove;
+
+// ─── Storage Array (mdadm / NoNRAID) ───────────────────────────────
+//
+// Klas's request: a small GUI inside WolfStack to manage Unraid →
+// Debian + NoNRAID migrations. Same UI works for vanilla Linux mdadm
+// since both expose identical /proc/mdstat semantics. Backend
+// auto-detects mdcmd vs mdadm.
+
+const _arrayState = {
+    backend: 'mdadm',
+    arrays: [],
+    config: { schedules: [], alert_overrides: [] },
+};
+
+async function arrayLoad() {
+    const list = document.getElementById('array-list');
+    if (list) list.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:30px;">Loading…</div>';
+    try {
+        const [r, cfgR] = await Promise.all([
+            fetch('/api/array'),
+            fetch('/api/array/config'),
+        ]);
+        if (r.ok) {
+            const d = await r.json();
+            _arrayState.backend = d.backend || 'mdadm';
+            _arrayState.arrays = d.arrays || [];
+        }
+        if (cfgR.ok) _arrayState.config = await cfgR.json();
+    } catch (e) {
+        if (list) list.innerHTML = `<div style="color:var(--danger,#ef4444);padding:20px;">Failed: ${escapeHtml(e.message || String(e))}</div>`;
+        return;
+    }
+    arrayRender();
+}
+
+function arrayRender() {
+    const list = document.getElementById('array-list');
+    const badge = document.getElementById('array-backend-badge');
+    if (!list) return;
+    if (badge) {
+        badge.textContent = _arrayState.backend === 'nonraid' ? 'Backend: NoNRAID (mdcmd)' : 'Backend: Linux mdadm';
+    }
+    if (!_arrayState.arrays || _arrayState.arrays.length === 0) {
+        list.innerHTML = `
+            <div class="card"><div class="card-body" style="text-align:center;padding:40px 20px;">
+                <div style="font-size:48px;line-height:1;margin-bottom:12px;">💽</div>
+                <h3 style="margin:0 0 8px;">No arrays detected</h3>
+                <p style="color:var(--text-muted);max-width:520px;margin:0 auto;">
+                    No mdadm or NoNRAID arrays are present on this node.
+                    To create one, use <code>mdadm --create</code> or NoNRAID's setup tooling at the CLI —
+                    WolfStack will pick up the array as soon as it's assembled and visible in <code>/proc/mdstat</code>.
+                </p>
+            </div></div>
+        `;
+        return;
+    }
+    list.innerHTML = _arrayState.arrays.map(arrayRowHtml).join('');
+}
+
+function arrayStateBadge(s) {
+    const map = {
+        clean: ['#22c55e', '✓'],
+        active: ['#22c55e', '✓'],
+        degraded: ['#ef4444', '⚠'],
+        recovering: ['#f59e0b', '↻'],
+        resyncing: ['#3b82f6', '↻'],
+        checking: ['#3b82f6', '🔍'],
+        stopped: ['#94a3b8', '⏸'],
+    };
+    const [c, icon] = map[s] || ['#94a3b8', '?'];
+    return `<span style="display:inline-block;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${icon} ${escapeHtml(s)}</span>`;
+}
+
+function bytesPretty(n) {
+    if (!n) return '0';
+    const u = ['B','KiB','MiB','GiB','TiB','PiB'];
+    let i = 0; let v = n;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return v.toFixed(v < 10 ? 1 : 0) + ' ' + u[i];
+}
+
+function arrayRowHtml(a) {
+    const sched = (_arrayState.config.schedules || []).find(s => s.array === a.name);
+    const sync = (a.sync_progress != null)
+        ? `<div style="margin-top:6px;height:6px;background:rgba(59,130,246,0.15);border-radius:3px;overflow:hidden;">
+                <div style="width:${a.sync_progress}%;height:100%;background:#3b82f6;"></div>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${a.sync_progress}%${a.sync_speed_kbs ? ` · ${(a.sync_speed_kbs/1024).toFixed(1)} MiB/s` : ''}</div>` : '';
+    const disksHtml = (a.disks || []).map(d => {
+        const stateColor = d.state === 'faulty' ? '#ef4444'
+            : d.state === 'spare' ? '#94a3b8'
+            : d.state === 'in_sync' || d.state === 'active' ? '#22c55e' : '#f59e0b';
+        const smartColor = d.smart_status === 'PASSED' ? '#22c55e'
+            : d.smart_status === 'FAILED' ? '#ef4444' : '#94a3b8';
+        return `
+            <tr>
+                <td style="padding:4px 10px;font-family:ui-monospace,Menlo,monospace;">${escapeHtml(d.device)}</td>
+                <td style="padding:4px 10px;">${escapeHtml(d.role)}</td>
+                <td style="padding:4px 10px;color:${stateColor};">${escapeHtml(d.state)}</td>
+                <td style="padding:4px 10px;">${bytesPretty(d.size_bytes)}</td>
+                <td style="padding:4px 10px;color:${smartColor};">${escapeHtml(d.smart_status)}${d.temperature_c != null ? ` · ${d.temperature_c}°C` : ''}</td>
+                <td style="padding:4px 10px;font-size:11px;color:var(--text-muted);">${escapeHtml(d.model || '')}</td>
+            </tr>
+        `;
+    }).join('');
+    return `
+        <div class="card">
+            <div class="card-body" style="padding:14px 18px;">
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                    <strong style="font-size:15px;">/dev/${escapeHtml(a.name)}</strong>
+                    <span style="font-size:12px;color:var(--text-muted);">${escapeHtml(a.level)}</span>
+                    ${arrayStateBadge(a.state)}
+                    <span style="font-size:11px;color:var(--text-muted);margin-left:auto;">
+                        ${bytesPretty(a.used_bytes)} / ${bytesPretty(a.size_bytes)}
+                    </span>
+                </div>
+                ${sync}
+                <table style="width:100%;margin-top:10px;border-collapse:collapse;font-size:12px;">
+                    <thead>
+                        <tr style="text-align:left;color:var(--text-muted);">
+                            <th style="padding:6px 10px;font-size:11px;font-weight:600;border-bottom:1px solid var(--border);">Device</th>
+                            <th style="padding:6px 10px;font-size:11px;font-weight:600;border-bottom:1px solid var(--border);">Role</th>
+                            <th style="padding:6px 10px;font-size:11px;font-weight:600;border-bottom:1px solid var(--border);">State</th>
+                            <th style="padding:6px 10px;font-size:11px;font-weight:600;border-bottom:1px solid var(--border);">Size</th>
+                            <th style="padding:6px 10px;font-size:11px;font-weight:600;border-bottom:1px solid var(--border);">SMART</th>
+                            <th style="padding:6px 10px;font-size:11px;font-weight:600;border-bottom:1px solid var(--border);">Model</th>
+                        </tr>
+                    </thead>
+                    <tbody>${disksHtml}</tbody>
+                </table>
+                <div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+                    ${a.state === 'stopped'
+                        ? `<button class="btn btn-sm" onclick="arrayStart('${escapeAttr(a.name)}')">▶ Start</button>`
+                        : `<button class="btn btn-sm" onclick="arrayStop('${escapeAttr(a.name)}')">⏸ Stop</button>`}
+                    ${a.state === 'checking' || a.state === 'resyncing' || a.state === 'recovering'
+                        ? `<button class="btn btn-sm" onclick="arrayParityCancel('${escapeAttr(a.name)}')">✕ Cancel parity</button>`
+                        : `<button class="btn btn-sm" onclick="arrayParity('${escapeAttr(a.name)}','check')">🔍 Parity check</button>
+                           <button class="btn btn-sm" onclick="arrayParity('${escapeAttr(a.name)}','repair')" title="Overwrite mismatches with parity">🛠 Parity repair</button>`}
+                    <button class="btn btn-sm" onclick="arraySchedulePrompt('${escapeAttr(a.name)}')">
+                        🗓 Schedule${sched ? ` <small style="color:var(--text-muted);">(${escapeHtml(sched.cron)})</small>` : ''}
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+async function arrayStart(name) {
+    if (!await confirmModal(`Start /dev/${name}? This will assemble the array and bring its filesystems online.`)) return;
+    const r = await fetch(`/api/array/${encodeURIComponent(name)}/start`, { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) showToast('Array started', 'success'); else showToast(d.error || 'Start failed', 'error');
+    await arrayLoad();
+}
+
+async function arrayStop(name) {
+    if (!await confirmModal(`Stop /dev/${name}? Mounted filesystems on this array will become inaccessible. This is destructive — only do it if you know what you're doing.`)) return;
+    const r = await fetch(`/api/array/${encodeURIComponent(name)}/stop`, { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) showToast('Array stopped', 'success'); else showToast(d.error || 'Stop failed', 'error');
+    await arrayLoad();
+}
+
+async function arrayParity(name, action) {
+    const verb = action === 'repair' ? 'parity REPAIR (will overwrite mismatches with parity-derived values)' : 'parity check (read-only verify)';
+    if (!await confirmModal(`Start ${verb} on /dev/${name}? This can take many hours on a large array. Other I/O still works during the scan but at reduced speed.`)) return;
+    const r = await fetch(`/api/array/${encodeURIComponent(name)}/parity`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+    });
+    const d = await r.json();
+    if (d.ok) showToast(`${action === 'repair' ? 'Repair' : 'Check'} started`, 'success'); else showToast(d.error || 'Parity start failed', 'error');
+    await arrayLoad();
+}
+
+async function arrayParityCancel(name) {
+    if (!await confirmModal(`Cancel the parity operation on /dev/${name}? You can re-run it later — the array stays operational either way.`)) return;
+    const r = await fetch(`/api/array/${encodeURIComponent(name)}/parity/cancel`, { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) showToast('Parity cancelled', 'success'); else showToast(d.error || 'Cancel failed', 'error');
+    await arrayLoad();
+}
+
+async function arraySchedulePrompt(name) {
+    const existing = (_arrayState.config.schedules || []).find(s => s.array === name);
+    const cron = await promptModal(
+        `Cron expression for parity check on /dev/${name}\n\nExamples:\n  0 3 * * 0   — every Sunday 03:00\n  0 4 1 * *   — first of month at 04:00\n  (empty to remove schedule)`,
+        existing ? existing.cron : '0 3 * * 0',
+    );
+    if (cron === null) return;
+    let cfg = JSON.parse(JSON.stringify(_arrayState.config));
+    cfg.schedules = (cfg.schedules || []).filter(s => s.array !== name);
+    if (cron && cron.trim()) {
+        cfg.schedules.push({ array: name, cron: cron.trim(), action: 'check', enabled: true });
+    }
+    const r = await fetch('/api/array/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg),
+    });
+    const d = await r.json();
+    if (d.ok) {
+        _arrayState.config = cfg;
+        showToast(cron && cron.trim() ? 'Schedule saved' : 'Schedule removed', 'success');
+        arrayRender();
+    } else {
+        showToast(d.error || 'Schedule save failed', 'error');
+    }
+}
+
+window.arrayLoad = arrayLoad;
+window.arrayRender = arrayRender;
+window.arrayStart = arrayStart;
+window.arrayStop = arrayStop;
+window.arrayParity = arrayParity;
+window.arrayParityCancel = arrayParityCancel;
+window.arraySchedulePrompt = arraySchedulePrompt;
