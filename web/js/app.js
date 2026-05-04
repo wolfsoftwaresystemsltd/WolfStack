@@ -33071,66 +33071,46 @@ let spAvailableWolfrunServices = [];
 
 async function loadContainersForMonitor() {
     spAvailableContainers = [];
-    const clusterNodes = allNodes.filter(n => {
-        const nodeCluster = n.cluster_name || 'WolfStack';
-        return nodeCluster === spCurrentCluster && n.online;
-    });
-
-    // /api/nodes/{id}/proxy/... rejects self-targeted calls (returns
-    // 400 "Use local API for self node"), so for the local node we
-    // hit /api/containers/* directly. Without this the local node's
-    // containers never appear in the dropdown — on single-node
-    // installs the picker was completely empty.
-    const containerUrl = (node, suffix) =>
-        node.is_self ? `/api/containers/${suffix}` : `/api/nodes/${node.id}/proxy/containers/${suffix}`;
-
-    // The /api/containers/* endpoints return ContainerInfo (name, state
-    // both lowercase). The previous code read Docker-API-shaped fields
-    // (c.Names, c.State, c.Id) which don't exist on this endpoint —
-    // the `||` fallbacks rescued `name`, but `state` always came out
-    // as the long Docker status string ("Up 5 minutes") rather than
-    // "running" / "stopped". That broke the green/red dot in the
-    // dropdown options.
-    for (const node of clusterNodes) {
-        try {
-            const dockerRes = await fetch(containerUrl(node, 'docker'));
-            if (dockerRes.ok) {
-                const containers = await dockerRes.json();
-                containers.forEach(c => {
-                    spAvailableContainers.push({
-                        name: c.name || c.Names?.[0]?.replace(/^\//, '') || c.id?.slice(0, 12),
-                        runtime: 'docker',
-                        node: node.hostname,
-                        node_id: node.id,
-                        state: c.state || c.State || c.status
-                    });
-                });
-            }
-        } catch (e) { }
-
-        try {
-            const lxcRes = await fetch(containerUrl(node, 'lxc'));
-            if (lxcRes.ok) {
-                const containers = await lxcRes.json();
-                containers.forEach(c => {
-                    spAvailableContainers.push({
-                        name: c.name,
-                        runtime: 'lxc',
-                        node: node.hostname,
-                        node_id: node.id,
-                        state: c.state
-                    });
-                });
-            }
-        } catch (e) { }
-    }
+    // /api/containers/cluster fans out across the cluster on the
+    // backend. spUrl() targets the cluster the operator is creating
+    // a status page for — local cluster goes direct, remote/federated
+    // clusters are reached via spApiBase() through their gateway
+    // node. This single call replaces a brittle frontend fan-out
+    // that:
+    //   (a) skipped the local node because the node-proxy rejects
+    //       self-targeted calls with HTTP 400, and
+    //   (b) returned nothing on remote clusters because the local
+    //       allNodes list doesn't carry remote-cluster peers.
+    try {
+        const resp = await fetch(spUrl('containers/cluster'));
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const list = Array.isArray(data) ? data : (data.containers || []);
+        for (const c of list) {
+            spAvailableContainers.push({
+                // ContainerInfo is lowercase (name, state, runtime).
+                // No Docker-API-shape fallback: the cluster endpoint
+                // always returns ContainerInfo, so claiming to handle
+                // a different shape would just hide future regressions.
+                name: c.name,
+                runtime: c.runtime,
+                node: c.node_hostname || '',
+                node_id: c.node_id || '',
+                state: c.state,
+            });
+        }
+    } catch (e) { /* best-effort — picker falls back to manual entry */ }
 }
 
 async function loadWolfrunServicesForMonitor() {
     spAvailableWolfrunServices = [];
+    // Use spUrl() — the status-page form's cluster context — instead
+    // of wolfrunApiUrl() which keys off `wolfrunCurrentCluster`
+    // (the WolfRun page's own selected cluster, often unrelated to
+    // the status page being edited). When the two diverged the
+    // picker silently fetched the wrong cluster's services.
     try {
-        const url = wolfrunApiUrl('/api/wolfrun/services');
-        const resp = await fetch(url);
+        const resp = await fetch(spUrl('wolfrun/services'));
         if (resp.ok) {
             const services = await resp.json();
             spAvailableWolfrunServices = services.filter(s => {

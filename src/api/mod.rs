@@ -4492,6 +4492,114 @@ pub async fn docker_list(req: HttpRequest, state: web::Data<AppState>) -> HttpRe
     HttpResponse::Ok().json(containers)
 }
 
+/// GET /api/containers/cluster — list every Docker + LXC container
+/// across this node and every reachable cluster peer. Same fan-out
+/// pattern as /api/gateways/cluster and /api/array/cluster. Each
+/// entry is tagged with `runtime` ("docker" or "lxc"), `node_id`, and
+/// `node_hostname` so the frontend can group / filter without an
+/// extra round-trip.
+///
+/// Powers the status-page Container monitor picker — needs to work
+/// when the operator is configuring a status page on a federated /
+/// remote cluster, where the local server's node-proxy can't reach
+/// the remote peers but the remote cluster's gateway node can.
+/// Calling /api/containers/cluster on a remote cluster (via the
+/// status page's spApiBase) returns *that* cluster's full inventory.
+pub async fn containers_cluster(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    // Self — both runtimes.
+    let self_node = state.cluster.get_all_nodes().into_iter().find(|n| n.is_self);
+    let self_id = state.node_id.clone();
+    let self_hostname = self_node.as_ref().map(|n| n.hostname.clone()).unwrap_or_default();
+
+    let mut all: Vec<serde_json::Value> = Vec::new();
+    for c in containers::docker_list_all_cached() {
+        if let Ok(mut v) = serde_json::to_value(&c) {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("node_id".into(), serde_json::json!(self_id));
+                obj.insert("node_hostname".into(), serde_json::json!(self_hostname));
+            }
+            all.push(v);
+        }
+    }
+    for c in containers::lxc_list_all_cached() {
+        if let Ok(mut v) = serde_json::to_value(&c) {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("node_id".into(), serde_json::json!(self_id));
+                obj.insert("node_hostname".into(), serde_json::json!(self_hostname));
+            }
+            all.push(v);
+        }
+    }
+
+    // Peers — fan out in parallel. Same shape as
+    // gateways_cluster/array_cluster: try the existing /api/containers/*
+    // endpoints with the cluster secret. Proxmox-typed nodes don't run
+    // our containers module so we skip them.
+    let peers: Vec<_> = state.cluster.get_all_nodes().into_iter()
+        .filter(|n| !n.is_self && n.node_type == "wolfstack" && n.online)
+        .collect();
+    let secret = state.cluster_secret.clone();
+    let client = &*API_HTTP_CLIENT;
+    let mut handles = Vec::new();
+    for peer in &peers {
+        let docker_urls = build_node_urls(&peer.address, peer.port, "/api/containers/docker");
+        let lxc_urls    = build_node_urls(&peer.address, peer.port, "/api/containers/lxc");
+        let secret = secret.clone();
+        let peer_id = peer.self_id.clone().unwrap_or_else(|| peer.id.clone());
+        let peer_host = peer.hostname.clone();
+        let h = tokio::spawn(async move {
+            let docker_fut = async {
+                for url in &docker_urls {
+                    if let Ok(resp) = client.get(url)
+                        .timeout(std::time::Duration::from_secs(5))
+                        .header("X-WolfStack-Secret", &secret).send().await
+                    {
+                        if resp.status().is_success() {
+                            if let Ok(v) = resp.json::<Vec<serde_json::Value>>().await {
+                                return v;
+                            }
+                        }
+                    }
+                }
+                Vec::new()
+            };
+            let lxc_fut = async {
+                for url in &lxc_urls {
+                    if let Ok(resp) = client.get(url)
+                        .timeout(std::time::Duration::from_secs(5))
+                        .header("X-WolfStack-Secret", &secret).send().await
+                    {
+                        if resp.status().is_success() {
+                            if let Ok(v) = resp.json::<Vec<serde_json::Value>>().await {
+                                return v;
+                            }
+                        }
+                    }
+                }
+                Vec::new()
+            };
+            let (docker_v, lxc_v) = tokio::join!(docker_fut, lxc_fut);
+            (peer_id, peer_host, docker_v, lxc_v)
+        });
+        handles.push(h);
+    }
+    for h in handles {
+        if let Ok((pid, host, docker_v, lxc_v)) = h.await {
+            for mut entry in docker_v.into_iter().chain(lxc_v.into_iter()) {
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.insert("node_id".into(), serde_json::json!(pid));
+                    obj.insert("node_hostname".into(), serde_json::json!(host));
+                }
+                all.push(entry);
+            }
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({ "containers": all }))
+}
+
 /// GET /api/containers/docker/search?q=<query> — search Docker Hub
 pub async fn docker_search(
     req: HttpRequest,
@@ -23364,6 +23472,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/install-component", web::post().to(install_component_in_container))
         .route("/api/containers/running", web::get().to(list_running_containers))
         .route("/api/containers/component-version", web::get().to(container_component_version))
+        // Cluster aggregate (Docker + LXC across this node and every
+        // reachable peer). Registered before parameterised routes so
+        // it isn't swallowed by `/{runtime}/{id}/...`.
+        .route("/api/containers/cluster", web::get().to(containers_cluster))
         // Docker
         .route("/api/containers/docker", web::get().to(docker_list))
         .route("/api/containers/docker/search", web::get().to(docker_search))
