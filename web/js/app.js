@@ -49587,8 +49587,11 @@ function arrayRowHtml(a) {
                 ${isCeph ? `<div style="margin-top:8px;font-size:11px;color:var(--text-muted);">${escapeHtml(a.ceph_health_detail || '')} · v${escapeHtml(a.ceph_version || '?')}</div>` : ''}
                 <div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
                     ${isCeph
-                        ? `<a class="btn btn-sm" href="wolfstack-ceph.php" style="text-decoration:none;">Open Ceph manager →</a>
-                           <span style="font-size:11px;color:var(--text-muted);">Cluster-managed; mutating ops live in the Ceph page</span>`
+                        ? (isFederated
+                            ? `<a class="btn btn-sm" href="${escapeAttr(a.origin_federation_url || '#')}" target="_blank" rel="noopener" style="text-decoration:none;">Open Ceph manager on ${escapeHtml(a.origin_federation_name || 'remote cluster')} →</a>
+                               <span style="font-size:11px;color:var(--text-muted);">Cluster-managed; mutating ops live on the originating cluster</span>`
+                            : `<button class="btn btn-sm" onclick="selectServerView('${escapeAttr(a.origin_node_id || currentNodeId || '')}', 'ceph')">Open Ceph manager →</button>
+                               <span style="font-size:11px;color:var(--text-muted);">Cluster-managed; mutating ops live in the Ceph page</span>`)
                         : isLocal
                         ? `${a.state === 'stopped'
                                 ? `<button class="btn btn-sm" onclick="arrayStart('${escapeAttr(a.name)}')">▶ Start</button>`
