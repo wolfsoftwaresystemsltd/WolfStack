@@ -48617,8 +48617,21 @@ async function predictiveApprove(id) {
 }
 
 async function predictiveAck(findingType, nodeId, resourceId) {
+    // Refuse the Node-scope fallback. When a proposal has no
+    // resource_id, falling through to AckScope::Node would suppress
+    // EVERY future finding of this type on this node — which is
+    // almost never what the operator intends and clears the inbox in
+    // a single click. If the proposal lacks a resource_id, the right
+    // action is Dismiss (one-off) or Snooze (temporary), not Ack.
+    if (!resourceId || !String(resourceId).trim()) {
+        showToast(
+            'This finding has no specific resource, so an Ack would suppress every "' + findingType + '" on this node — use Dismiss for a one-off, or Snooze for temporary suppression.',
+            'warning', 6000,
+        );
+        return;
+    }
     const reason = await showPrompt(
-        `Acknowledge "${findingType}" as intentional for this resource? Future findings of this exact type and scope will be suppressed for 180 days. The reason becomes part of the audit trail.`,
+        `Acknowledge "${findingType}" on ${resourceId} as intentional? Future findings with the SAME finding type AND resource will be suppressed for 180 days. Other findings on this node are not affected.`,
         'Permanent acknowledgement',
         '',
     );
@@ -48627,9 +48640,7 @@ async function predictiveAck(findingType, nodeId, resourceId) {
         showToast('A reason is required for an acknowledgement', 'warning', 3500);
         return;
     }
-    const scope = resourceId
-        ? { kind: 'resource', node_id: nodeId, resource_id: resourceId }
-        : { kind: 'node', node_id: nodeId };
+    const scope = { kind: 'resource', node_id: nodeId, resource_id: resourceId };
     try {
         const r = await fetch('/api/proposal-acks', {
             method: 'POST',

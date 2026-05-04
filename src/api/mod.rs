@@ -17856,7 +17856,18 @@ pub async fn predictive_proposal_snooze(
                 "until": until.to_rfc3339(),
             }))
         }
-        Err(e) => HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
+        Err(_) => {
+            // Cross-node: the proposal lives on a peer. Forward the
+            // POST to its origin so the peer's local store records
+            // the snooze. Without this, Snooze on any peer-owned
+            // proposal silently 404s — the dashboard surfaces every
+            // proposal cluster-wide via the aggregate, so operators
+            // have no way of knowing they're looking at a peer-owned
+            // one until they click an action and see it fail.
+            drop(store);
+            forward_proposal_action_to_peers(&state, &id, "snooze",
+                serde_json::json!({ "hours": hours })).await
+        }
     }
 }
 
@@ -17887,14 +17898,18 @@ pub async fn predictive_proposal_dismiss(
         Ok(g) => g,
         Err(e) => e.into_inner(),
     };
-    match store.dismiss(&id, reason) {
+    match store.dismiss(&id, reason.clone()) {
         Ok(()) => {
             let _ = store.save();
             drop(store);
             invalidate_cluster_cache(&state);
             HttpResponse::Ok().json(serde_json::json!({ "success": true }))
         }
-        Err(e) => HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
+        Err(_) => {
+            drop(store);
+            forward_proposal_action_to_peers(&state, &id, "dismiss",
+                serde_json::json!({ "reason": reason })).await
+        }
     }
 }
 
@@ -17921,8 +17936,71 @@ pub async fn predictive_proposal_approve(
             invalidate_cluster_cache(&state);
             HttpResponse::Ok().json(serde_json::json!({ "success": true }))
         }
-        Err(e) => HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
+        Err(_) => {
+            drop(store);
+            forward_proposal_action_to_peers(&state, &id, "approve",
+                serde_json::json!({})).await
+        }
     }
+}
+
+/// POST /api/proposals/{id}/{action} fan-out fallback. Tries every
+/// online wolfstack peer in parallel using the cluster secret;
+/// returns the first 2xx response, or 404 if no peer owns the
+/// proposal. Used by snooze / dismiss / approve when the local
+/// store doesn't have the id — i.e. the proposal lives on a peer
+/// and the operator is acting from the cluster-aggregate inbox.
+///
+/// Each peer's own handler will record the action AND invalidate
+/// its own cluster cache, so a subsequent `/api/proposals/cluster`
+/// from any node sees fresh state.
+async fn forward_proposal_action_to_peers(
+    state: &web::Data<AppState>,
+    proposal_id: &str,
+    action: &str,
+    body: serde_json::Value,
+) -> HttpResponse {
+    let peers: Vec<_> = state.cluster.get_all_nodes().into_iter()
+        .filter(|n| !n.is_self && n.node_type == "wolfstack" && n.online)
+        .collect();
+    if peers.is_empty() {
+        return HttpResponse::NotFound().json(serde_json::json!({
+            "error": "proposal not found"
+        }));
+    }
+    let secret = state.cluster_secret.clone();
+    let path = format!("/api/proposals/{}/{}",
+        urlencoding::encode(proposal_id),
+        urlencoding::encode(action));
+    let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+    let client = &*API_HTTP_CLIENT;
+    for peer in peers {
+        for url in build_node_urls(&peer.address, peer.port, &path) {
+            let res = client.post(&url)
+                .timeout(std::time::Duration::from_secs(10))
+                .header("X-WolfStack-Secret", &secret)
+                .header("content-type", "application/json")
+                .body(body_bytes.clone())
+                .send()
+                .await;
+            let Ok(resp) = res else { continue; };
+            let status = resp.status();
+            if status.is_success() {
+                if let Ok(v) = resp.json::<serde_json::Value>().await {
+                    return HttpResponse::Ok().json(v);
+                }
+                return HttpResponse::Ok().json(serde_json::json!({ "success": true }));
+            }
+            // 404 means this peer doesn't own the proposal — try next.
+            // Other errors (5xx, auth) are also "try next" because the
+            // operator wants ANY peer to succeed; we'll surface a final
+            // not-found if every peer rejects.
+            let _ = resp.bytes().await;
+        }
+    }
+    HttpResponse::NotFound().json(serde_json::json!({
+        "error": "proposal not found on any reachable cluster peer"
+    }))
 }
 
 /// GET /api/proposals/{id}/command/{idx} — return one of a
