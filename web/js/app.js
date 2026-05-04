@@ -49408,14 +49408,22 @@ async function arrayLoad() {
     const list = document.getElementById('array-list');
     if (list) list.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:30px;">Loading…</div>';
     try {
+        // /api/array/cluster aggregates THIS cluster (every node)
+        // AND every federated remote cluster — one round-trip
+        // surfaces every array from every connected site.
         const [r, cfgR] = await Promise.all([
-            fetch('/api/array'),
+            fetch('/api/array/cluster'),
             fetch('/api/array/config'),
         ]);
         if (r.ok) {
             const d = await r.json();
-            _arrayState.backend = d.backend || 'mdadm';
             _arrayState.arrays = d.arrays || [];
+            // Backend label is per-array now; pick the local node's
+            // for the header badge (or fall back to the first entry).
+            const local = (_arrayState.arrays || []).find(a => a.origin_self !== false);
+            _arrayState.backend = (local && local.backend)
+                || ((_arrayState.arrays[0] || {}).backend)
+                || 'mdadm';
         }
         if (cfgR.ok) _arrayState.config = await cfgR.json();
     } catch (e) {
@@ -49438,26 +49446,45 @@ function arrayRender() {
                 <div style="font-size:48px;line-height:1;margin-bottom:12px;">💽</div>
                 <h3 style="margin:0 0 8px;">No arrays detected</h3>
                 <p style="color:var(--text-muted);max-width:520px;margin:0 auto;">
-                    No mdadm or NoNRAID arrays are present on this node.
+                    No mdadm or NoNRAID arrays are present on any node in this cluster, and none of your federated clusters reported any.
                     To create one, use <code>mdadm --create</code> or NoNRAID's setup tooling at the CLI —
-                    WolfStack will pick up the array as soon as it's assembled and visible in <code>/proc/mdstat</code>.
+                    WolfStack will pick up the array as soon as it's assembled and visible in <code>/proc/mdstat</code> on any node.
                 </p>
             </div></div>
         `;
         return;
     }
-    list.innerHTML = _arrayState.arrays.map(arrayRowHtml).join('');
+
+    // Group by (cluster, hostname) so multi-node + multi-cluster
+    // setups stay readable. Same pattern as the Shares page.
+    const groups = new Map();
+    for (const a of _arrayState.arrays) {
+        const cluster = a.origin_cluster || a.origin_federation_name || 'WolfStack';
+        const host    = a.origin_hostname || a.origin_node_id || 'this node';
+        const key = `${cluster} / ${host}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(a);
+    }
+    let html = '';
+    for (const [groupName, arrs] of groups) {
+        html += `<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin:8px 4px -2px;">${escapeHtml(groupName)}</div>`;
+        for (const a of arrs) html += arrayRowHtml(a);
+    }
+    list.innerHTML = html;
 }
 
 function arrayStateBadge(s) {
     const map = {
-        clean: ['#22c55e', '✓'],
-        active: ['#22c55e', '✓'],
-        degraded: ['#ef4444', '⚠'],
-        recovering: ['#f59e0b', '↻'],
-        resyncing: ['#3b82f6', '↻'],
-        checking: ['#3b82f6', '🔍'],
-        stopped: ['#94a3b8', '⏸'],
+        clean:        ['#22c55e', '✓'],
+        active:       ['#22c55e', '✓'],
+        degraded:     ['#ef4444', '⚠'],
+        recovering:   ['#f59e0b', '↻'],
+        resyncing:    ['#3b82f6', '↻'],
+        reshaping:    ['#3b82f6', '↻'],
+        checking:     ['#3b82f6', '🔍'],
+        inactive:     ['#94a3b8', '⏸'],
+        stopped:      ['#94a3b8', '⏸'],
+        unreachable:  ['#ef4444', '✗'],
     };
     const [c, icon] = map[s] || ['#94a3b8', '?'];
     return `<span style="display:inline-block;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${icon} ${escapeHtml(s)}</span>`;
@@ -49472,7 +49499,24 @@ function bytesPretty(n) {
 }
 
 function arrayRowHtml(a) {
-    const sched = (_arrayState.config.schedules || []).find(s => s.array === a.name);
+    // Federation-error placeholder rows render slightly differently —
+    // no disks, no actions, just the failure reason.
+    if (a.federation_error) {
+        return `
+            <div class="card" style="border-left:3px solid #ef4444;">
+                <div class="card-body" style="display:flex;align-items:center;gap:14px;padding:14px 18px;">
+                    <div style="font-size:24px;">🌐</div>
+                    <div style="flex:1;min-width:0;">
+                        <div><strong style="font-size:14px;color:#ef4444;">${escapeHtml(a.name)}</strong></div>
+                        <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${escapeHtml(a.federation_error)}</div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+    const isLocal = a.origin_self !== false;
+    const isFederated = !!a.federated;
+    const sched = isLocal ? (_arrayState.config.schedules || []).find(s => s.array === a.name) : null;
     const sync = (a.sync_progress != null)
         ? `<div style="margin-top:6px;height:6px;background:rgba(59,130,246,0.15);border-radius:3px;overflow:hidden;">
                 <div style="width:${a.sync_progress}%;height:100%;background:#3b82f6;"></div>
@@ -49495,13 +49539,17 @@ function arrayRowHtml(a) {
             </tr>
         `;
     }).join('');
+    const remoteBadge = isFederated
+        ? `<span style="font-size:10px;color:#3b82f6;">🌐 ${escapeHtml(a.origin_federation_name || 'federated')}${a.origin_hostname ? ' / ' + escapeHtml(a.origin_hostname) : ''}</span>`
+        : (!isLocal ? `<span style="font-size:10px;color:var(--text-muted);">on ${escapeHtml(a.origin_hostname || a.origin_node_id || 'peer')}</span>` : '');
     return `
-        <div class="card">
+        <div class="card" style="${isFederated ? 'border-left:3px solid #3b82f6;' : ''}">
             <div class="card-body" style="padding:14px 18px;">
                 <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
                     <strong style="font-size:15px;">/dev/${escapeHtml(a.name)}</strong>
                     <span style="font-size:12px;color:var(--text-muted);">${escapeHtml(a.level)}</span>
                     ${arrayStateBadge(a.state)}
+                    ${remoteBadge}
                     <span style="font-size:11px;color:var(--text-muted);margin-left:auto;">
                         ${bytesPretty(a.used_bytes)} / ${bytesPretty(a.size_bytes)}
                     </span>
@@ -49521,16 +49569,18 @@ function arrayRowHtml(a) {
                     <tbody>${disksHtml}</tbody>
                 </table>
                 <div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
-                    ${a.state === 'stopped'
-                        ? `<button class="btn btn-sm" onclick="arrayStart('${escapeAttr(a.name)}')">▶ Start</button>`
-                        : `<button class="btn btn-sm" onclick="arrayStop('${escapeAttr(a.name)}')">⏸ Stop</button>`}
-                    ${a.state === 'checking' || a.state === 'resyncing' || a.state === 'recovering'
-                        ? `<button class="btn btn-sm" onclick="arrayParityCancel('${escapeAttr(a.name)}')">✕ Cancel parity</button>`
-                        : `<button class="btn btn-sm" onclick="arrayParity('${escapeAttr(a.name)}','check')">🔍 Parity check</button>
-                           <button class="btn btn-sm" onclick="arrayParity('${escapeAttr(a.name)}','repair')" title="Overwrite mismatches with parity">🛠 Parity repair</button>`}
-                    <button class="btn btn-sm" onclick="arraySchedulePrompt('${escapeAttr(a.name)}')">
-                        🗓 Schedule${sched ? ` <small style="color:var(--text-muted);">(${escapeHtml(sched.cron)})</small>` : ''}
-                    </button>
+                    ${isLocal
+                        ? `${a.state === 'stopped'
+                                ? `<button class="btn btn-sm" onclick="arrayStart('${escapeAttr(a.name)}')">▶ Start</button>`
+                                : `<button class="btn btn-sm" onclick="arrayStop('${escapeAttr(a.name)}')">⏸ Stop</button>`}
+                            ${a.state === 'checking' || a.state === 'resyncing' || a.state === 'recovering' || a.state === 'reshaping'
+                                ? `<button class="btn btn-sm" onclick="arrayParityCancel('${escapeAttr(a.name)}')">✕ Cancel parity</button>`
+                                : `<button class="btn btn-sm" onclick="arrayParity('${escapeAttr(a.name)}','check')">🔍 Parity check</button>
+                                   <button class="btn btn-sm" onclick="arrayParity('${escapeAttr(a.name)}','repair')" title="Overwrite mismatches with parity">🛠 Parity repair</button>`}
+                            <button class="btn btn-sm" onclick="arraySchedulePrompt('${escapeAttr(a.name)}')">
+                                🗓 Schedule${sched ? ` <small style="color:var(--text-muted);">(${escapeHtml(sched.cron)})</small>` : ''}
+                            </button>`
+                        : `<span style="font-size:11px;color:var(--text-muted);">Read-only view — manage from ${escapeHtml(a.origin_hostname || a.origin_node_id || 'the originating dashboard')}${isFederated ? ` (open <a href="${escapeAttr(a.origin_federation_url || '#')}" target="_blank" rel="noopener">${escapeHtml(a.origin_federation_name || 'remote cluster')}</a>)` : ''}</span>`}
                 </div>
             </div>
         </div>

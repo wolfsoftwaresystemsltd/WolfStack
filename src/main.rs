@@ -442,6 +442,7 @@ async fn main() -> std::io::Result<()> {
             gateways: Arc::new(std::sync::RwLock::new(gateway::GatewayStore::load())),
             federations: Arc::new(std::sync::RwLock::new(federation::FederationStore::load())),
             gateway_cluster_cache: Arc::new(std::sync::Mutex::new(None)),
+            array_cluster_cache: Arc::new(std::sync::Mutex::new(None)),
         });
 
         // Storage-array health watcher — every 60s, scan /proc/mdstat

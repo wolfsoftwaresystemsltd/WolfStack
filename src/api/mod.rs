@@ -271,6 +271,11 @@ pub struct AppState {
     /// to N peers + M federations on every refresh. Invalidated by
     /// every state-changing gateway / federation endpoint.
     pub gateway_cluster_cache: Arc<std::sync::Mutex<Option<(serde_json::Value, std::time::Instant)>>>,
+    /// 30-second aggregation cache for `/api/array/cluster` —
+    /// matches the gateway_cluster_cache pattern. Invalidated by
+    /// every state-changing array endpoint (start, stop, parity,
+    /// parity-cancel, schedule save) plus federation save/delete.
+    pub array_cluster_cache: Arc<std::sync::Mutex<Option<(serde_json::Value, std::time::Instant)>>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -22471,6 +22476,192 @@ fn validate_array_name(name: &str) -> Result<(), HttpResponse> {
     Ok(())
 }
 
+/// GET /api/array/cluster — aggregate arrays from this node, every
+/// reachable cluster peer, AND every federated remote cluster.
+/// Same fan-out pattern as `/api/gateways/cluster`. Each entry is
+/// tagged with its origin (`origin_node_id`, `origin_hostname`,
+/// `origin_cluster`, and for federated entries `origin_federation_*`)
+/// so the frontend can group / route actions correctly. Cached for
+/// 30s; invalidated by every state-changing array endpoint.
+const ARRAY_CLUSTER_CACHE_TTL_SECS: u64 = 30;
+
+fn invalidate_array_cluster_cache(state: &web::Data<AppState>) {
+    let mut cache = state.array_cluster_cache.lock().unwrap_or_else(|e| e.into_inner());
+    *cache = None;
+}
+
+pub async fn array_cluster(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    // Cache hit?
+    {
+        let cache = state.array_cluster_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((value, ts)) = &*cache {
+            if ts.elapsed().as_secs() < ARRAY_CLUSTER_CACHE_TTL_SECS {
+                let mut response = value.clone();
+                if let Some(obj) = response.as_object_mut() {
+                    obj.insert("cached_for_seconds".into(), serde_json::json!(ts.elapsed().as_secs()));
+                }
+                return HttpResponse::Ok().json(response);
+            }
+        }
+    }
+
+    // Self.
+    let self_arrays = tokio::task::spawn_blocking(crate::array::list_arrays).await.unwrap_or_default();
+    let self_backend = match crate::array::detect_backend() {
+        crate::array::Backend::Mdadm => "mdadm",
+        crate::array::Backend::Nonraid => "nonraid",
+    };
+    let nodes_snapshot = state.cluster.get_all_nodes();
+    let self_node = nodes_snapshot.iter().find(|n| n.is_self).cloned();
+    let self_node_id = state.node_id.clone();
+    let self_hostname = self_node.as_ref().map(|n| n.hostname.clone()).unwrap_or_default();
+    let self_cluster = state.cluster.get_self_cluster_name();
+    let mut all: Vec<serde_json::Value> = self_arrays.into_iter().map(|a| {
+        let mut v = serde_json::to_value(&a).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("origin_node_id".into(), serde_json::json!(self_node_id));
+            obj.insert("origin_hostname".into(), serde_json::json!(self_hostname));
+            obj.insert("origin_cluster".into(), serde_json::json!(self_cluster));
+            obj.insert("origin_self".into(), serde_json::json!(true));
+            obj.insert("backend".into(), serde_json::json!(self_backend));
+        }
+        v
+    }).collect();
+
+    // Peers — only online wolfstack nodes that aren't ourselves.
+    // Proxmox-typed nodes don't run our array module so we skip them.
+    let peers: Vec<_> = nodes_snapshot.into_iter()
+        .filter(|n| !n.is_self && n.node_type == "wolfstack" && n.online)
+        .collect();
+    let secret = state.cluster_secret.clone();
+    let client = &*API_HTTP_CLIENT;
+    let mut handles = Vec::new();
+    for peer in &peers {
+        let urls = build_node_urls(&peer.address, peer.port, "/api/array");
+        let secret = secret.clone();
+        let peer_id = peer.self_id.clone().unwrap_or_else(|| peer.id.clone());
+        let peer_host = peer.hostname.clone();
+        let cluster_label = peer.cluster_name.clone().unwrap_or_default();
+        let h = tokio::spawn(async move {
+            for url in urls {
+                let res = client.get(&url)
+                    .timeout(std::time::Duration::from_secs(8))
+                    .header("X-WolfStack-Secret", &secret)
+                    .send().await;
+                if let Ok(resp) = res {
+                    if resp.status().is_success() {
+                        if let Ok(v) = resp.json::<serde_json::Value>().await {
+                            return Some((peer_id, peer_host, cluster_label, v));
+                        }
+                    }
+                }
+            }
+            None
+        });
+        handles.push(h);
+    }
+    for h in handles {
+        if let Ok(Some((pid, host, cluster, v))) = h.await {
+            let backend = v.get("backend").and_then(|x| x.as_str()).unwrap_or("mdadm").to_string();
+            if let Some(arrays) = v.get("arrays").and_then(|x| x.as_array()) {
+                for entry in arrays {
+                    let mut e = entry.clone();
+                    if let Some(obj) = e.as_object_mut() {
+                        obj.insert("origin_node_id".into(), serde_json::json!(pid));
+                        obj.insert("origin_hostname".into(), serde_json::json!(host));
+                        obj.insert("origin_cluster".into(), serde_json::json!(cluster));
+                        obj.insert("origin_self".into(), serde_json::json!(false));
+                        obj.insert("backend".into(), serde_json::json!(backend));
+                    }
+                    all.push(e);
+                }
+            }
+        }
+    }
+
+    // Federated clusters — same pattern as gateways_cluster. Each
+    // remote cluster runs its own /api/array/cluster (or /api/array
+    // for older WolfStack peers that pre-date this endpoint). We try
+    // /api/array/cluster first to get THEIR full aggregation, falling
+    // back to /api/array on 404 so older clusters still surface their
+    // local arrays.
+    let federations = {
+        let s = state.federations.read().unwrap_or_else(|e| e.into_inner());
+        s.clusters.clone()
+    };
+    let mut fed_handles = Vec::new();
+    for fc in federations {
+        let label = fc.name.clone();
+        let url   = fc.base_url.clone();
+        fed_handles.push(tokio::spawn(async move {
+            let res = match crate::federation::fetch_json(&fc, "/api/array/cluster").await {
+                Ok(v) => Ok(v),
+                Err(_) => crate::federation::fetch_json(&fc, "/api/array").await,
+            };
+            (fc.id, label, url, res)
+        }));
+    }
+    for h in fed_handles {
+        if let Ok((fid, fname, furl, res)) = h.await {
+            match res {
+                Ok(v) => {
+                    let backend = v.get("backend").and_then(|x| x.as_str()).unwrap_or("mdadm").to_string();
+                    if let Some(arrays) = v.get("arrays").and_then(|x| x.as_array()) {
+                        for entry in arrays {
+                            let mut e = entry.clone();
+                            if let Some(obj) = e.as_object_mut() {
+                                obj.insert("origin_federation_id".into(),  serde_json::json!(fid));
+                                obj.insert("origin_federation_name".into(),serde_json::json!(fname));
+                                obj.insert("origin_federation_url".into(), serde_json::json!(furl));
+                                obj.insert("origin_self".into(),           serde_json::json!(false));
+                                obj.insert("federated".into(),             serde_json::json!(true));
+                                if !obj.contains_key("origin_cluster")
+                                    || !obj.get("origin_cluster").map(|v| v.is_string()).unwrap_or(false)
+                                {
+                                    obj.insert("origin_cluster".into(), serde_json::json!(fname));
+                                }
+                                if !obj.contains_key("backend") {
+                                    obj.insert("backend".into(), serde_json::json!(backend));
+                                }
+                            }
+                            all.push(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Surface the failure inline rather than silently
+                    // dropping the federation — same pattern as
+                    // gateways_cluster.
+                    all.push(serde_json::json!({
+                        "name": format!("(unreachable) {}", fname),
+                        "level": "unknown",
+                        "state": "unreachable",
+                        "disks": [],
+                        "size_bytes": 0u64,
+                        "used_bytes": 0u64,
+                        "backend": "unknown",
+                        "origin_federation_id": fid,
+                        "origin_federation_name": fname,
+                        "origin_federation_url": furl,
+                        "origin_self": false,
+                        "federated": true,
+                        "federation_error": e,
+                    }));
+                }
+            }
+        }
+    }
+
+    let response = serde_json::json!({ "arrays": all });
+    {
+        let mut cache = state.array_cluster_cache.lock().unwrap_or_else(|e| e.into_inner());
+        *cache = Some((response.clone(), std::time::Instant::now()));
+    }
+    HttpResponse::Ok().json(response)
+}
+
 /// GET /api/array/{name} — detail (per-disk SMART, role refinement).
 /// Slower than the list because it runs smartctl per disk; up to
 /// 5s per disk on a misbehaving USB enclosure.
@@ -22500,6 +22691,7 @@ pub async fn array_start(req: HttpRequest, state: web::Data<AppState>, path: web
         Err(e) => { alert_severity = "error"; serde_json::json!({ "ok": false, "error": format!("{}", e) }) }
     };
     gateway_audit(&state, &actor, alert_severity, "Array started", &format!("/dev/{}", name));
+    invalidate_array_cluster_cache(&state);
     HttpResponse::Ok().json(body)
 }
 
@@ -22517,6 +22709,7 @@ pub async fn array_stop(req: HttpRequest, state: web::Data<AppState>, path: web:
         Err(e) => serde_json::json!({ "ok": false, "error": format!("{}", e) }),
     };
     gateway_audit(&state, &actor, "warning", "Array stopped", &format!("/dev/{}", name));
+    invalidate_array_cluster_cache(&state);
     HttpResponse::Ok().json(body)
 }
 
@@ -22536,6 +22729,7 @@ pub async fn array_parity(req: HttpRequest, state: web::Data<AppState>, path: we
     };
     gateway_audit(&state, &actor, "info", "Parity check triggered",
         &format!("/dev/{} action={}", name, action));
+    invalidate_array_cluster_cache(&state);
     HttpResponse::Ok().json(body)
 }
 
@@ -22552,6 +22746,7 @@ pub async fn array_parity_cancel(req: HttpRequest, state: web::Data<AppState>, p
         Err(e) => serde_json::json!({ "ok": false, "error": format!("{}", e) }),
     };
     gateway_audit(&state, &actor, "info", "Parity check cancelled", &format!("/dev/{}", name));
+    invalidate_array_cluster_cache(&state);
     HttpResponse::Ok().json(body)
 }
 
@@ -22570,6 +22765,7 @@ pub async fn array_config_save(req: HttpRequest, state: web::Data<AppState>, bod
     }
     gateway_audit(&state, &actor, "info", "Array schedule saved",
         &format!("{} schedule(s)", cfg.schedules.len()));
+    invalidate_array_cluster_cache(&state);
     HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
 }
 
@@ -22622,6 +22818,7 @@ pub async fn federations_save(req: HttpRequest, state: web::Data<AppState>, body
         stored
     };
     invalidate_gateway_cluster_cache(&state);
+    invalidate_array_cluster_cache(&state);
     HttpResponse::Ok().json(serde_json::json!({
         "id": stored.id,
         "name": stored.name,
@@ -22641,6 +22838,7 @@ pub async fn federations_delete(req: HttpRequest, state: web::Data<AppState>, pa
     };
     if removed {
         invalidate_gateway_cluster_cache(&state);
+        invalidate_array_cluster_cache(&state);
         HttpResponse::Ok().json(serde_json::json!({ "deleted": id }))
     } else {
         HttpResponse::NotFound().json(serde_json::json!({ "error": "federation not found" }))
@@ -23045,6 +23243,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/gateways/{id}/sessions",                     web::get().to(gateways_sessions))
         // Disk-array (mdadm / NoNRAID) — see src/array/.
         .route("/api/array",                                      web::get().to(array_list))
+        .route("/api/array/cluster",                              web::get().to(array_cluster))
         .route("/api/array/config",                               web::get().to(array_config_get))
         .route("/api/array/config",                               web::post().to(array_config_save))
         .route("/api/array/{name}",                               web::get().to(array_detail))
