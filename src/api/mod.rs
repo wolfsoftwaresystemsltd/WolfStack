@@ -21336,10 +21336,25 @@ pub async fn wolfnote_notes_create(
 
 // ─── Plugin System ───
 
-/// GET /api/plugins — list all plugins
+/// GET /api/plugins — list all plugins.
+///
+/// On Free installs the feature is gated, but plugins on disk are
+/// still listed so operators can see what would unlock with a Pro
+/// licence. We mask `has_css` / `has_frontend` to false in that case
+/// so the dashboard's asset loader doesn't fire `<link>`/`<script>`
+/// requests at `/api/plugins/{id}/file/...` (which 403 under the
+/// feature gate and clutter the JS console with red errors on every
+/// page load).
 pub async fn plugins_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    HttpResponse::Ok().json(crate::plugins::list())
+    let mut plugins = crate::plugins::list();
+    if !crate::compat::has_feature("plugins") {
+        for p in &mut plugins {
+            p.manifest.has_css = false;
+            p.manifest.has_frontend = false;
+        }
+    }
+    HttpResponse::Ok().json(plugins)
 }
 
 /// POST /api/plugins/reload — rescan plugins directory

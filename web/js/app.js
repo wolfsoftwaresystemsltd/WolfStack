@@ -47700,16 +47700,33 @@ let predictiveBadgeTimer = null;
 function renderPredictiveInbox() {
     const container = document.getElementById('page-inbox');
     if (!container) return;
+    // Make this page-view a flex column at the height of .main-content
+    // so the inner predictive-shell's `height:100%` actually resolves
+    // to the available viewport-minus-chrome rather than the
+    // intrinsic content height. Without this, the terminal pane
+    // drops past the viewport bottom on tall lists.
+    container.style.height = '100%';
+    container.style.display = 'flex';
+    container.style.flexDirection = 'column';
+    container.style.minHeight = '0';
+    container.style.padding = '0';
     if (!container.querySelector('.predictive-shell')) {
         // Two-column layout: left = proposals list, right = embedded
         // terminal. Replaces the per-command popup-window terminal so
         // a proposal with three non-destructive commands runs all
         // three in the same shell instead of spawning three windows.
-        // The split collapses to one column under 1100px for laptop
-        // screens (terminal becomes a sticky panel below the list).
+        //
+        // The shell is a flex column that fills `.main-content`
+        // exactly (the dashboard's outer layer already accounts for
+        // the top-bar and footer via max-height), and the split is
+        // `flex:1` inside it. That keeps the terminal pane on screen
+        // at all times and scrolls only the proposals list inside its
+        // column. The contextual help <details> panels live inside
+        // the list-scroll wrapper so they reach the user without
+        // pushing the terminal off the bottom of the viewport.
         container.innerHTML = `
-            <div class="predictive-shell" style="padding:20px 24px;max-width:1600px;margin:0 auto;">
-                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;gap:16px;flex-wrap:wrap;">
+            <div class="predictive-shell" style="padding:20px 24px;max-width:1600px;margin:0 auto;height:100%;display:flex;flex-direction:column;min-height:0;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;gap:16px;flex-wrap:wrap;flex-shrink:0;">
                     <div style="flex:1;min-width:280px;">
                         <h2 style="margin:0 0 6px 0;font-size:22px;color:var(--text-primary);">🔮 Predictive Inbox</h2>
                         <div style="font-size:13px;color:var(--text-muted);line-height:1.5;">
@@ -47722,9 +47739,36 @@ function renderPredictiveInbox() {
                         <button class="btn btn-sm" onclick="predictiveRunNow()" id="predictive-run-now">🔄 Run analyzer now</button>
                     </div>
                 </div>
-                <div class="predictive-split" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,560px);gap:16px;align-items:stretch;height:calc(100vh - 200px);min-height:480px;">
-                    <div id="predictive-list" style="min-width:0;overflow-y:auto;padding-right:6px;">
-                        <div style="color:var(--text-muted);padding:40px;text-align:center;">Loading…</div>
+                <div class="predictive-split" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,560px);gap:16px;align-items:stretch;flex:1;min-height:0;">
+                    <div id="predictive-list-scroll" style="min-width:0;overflow-y:auto;padding-right:6px;">
+                        <div id="predictive-list">
+                            <div style="color:var(--text-muted);padding:40px;text-align:center;">Loading…</div>
+                        </div>
+                        <details style="margin-top:24px;background:rgba(96,165,250,0.05);border:1px solid rgba(96,165,250,0.2);border-radius:8px;padding:0;">
+                            <summary style="padding:10px 14px;cursor:pointer;font-size:12px;color:#60a5fa;font-weight:600;">ℹ How this works</summary>
+                            <div style="padding:0 14px 12px 14px;font-size:12px;color:var(--text-secondary);line-height:1.55;">
+                                The analyzer needs at least
+                                <strong>3 samples spanning ≥30 minutes</strong> of history before it can fit a trend
+                                line, and only emits a proposal when a resource is in a state worth flagging
+                                (e.g. for disk-fill: ≥50% used <em>and</em> growing toward 95%). On a healthy
+                                cluster, &quot;No predictions right now&quot; is the correct answer and clicking
+                                <em>Run analyzer now</em> may produce nothing visible — that's working as
+                                intended, not a bug.
+                            </div>
+                        </details>
+                        <details style="margin-top:8px;background:rgba(168,85,247,0.04);border:1px solid rgba(168,85,247,0.2);border-radius:8px;padding:0;margin-bottom:8px;">
+                            <summary style="padding:10px 14px;cursor:pointer;font-size:12px;color:#c084fc;font-weight:600;">📡 What's currently watched</summary>
+                            <div style="padding:0 14px 12px 14px;font-size:12px;color:var(--text-secondary);line-height:1.55;">
+                                Every analyzer item from the original roadmap is live: host filesystem usage,
+                                Docker / LXC container storage and memory pressure, restart-loops, host CPU/memory
+                                thresholds, certificate expiry, backup freshness, VM disk-fill, and security
+                                posture (services on public IPs, sshd permissive auth). Sampled every 5 minutes
+                                on each cluster node; aggregated cluster-wide here. First-appearance Critical/High
+                                findings page Discord/Slack/Telegram/email channels — once per finding, not on
+                                every refresh. Stale findings auto-resolve when the analyzer no longer sees the
+                                condition.
+                            </div>
+                        </details>
                     </div>
                     <div id="predictive-terminal-pane" style="background:var(--bg-card,#1e2028);border:1px solid var(--border,#2d2f3a);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;min-height:0;">
                         <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border,#2d2f3a);background:var(--bg-secondary,#16181f);flex-shrink:0;">
@@ -47757,7 +47801,7 @@ function renderPredictiveInbox() {
                             grid-template-columns: 1fr !important;
                             height: auto !important;
                         }
-                        #predictive-list {
+                        #predictive-list-scroll {
                             max-height: 60vh;
                         }
                         #predictive-terminal-pane { height: 380px !important; }
@@ -47768,7 +47812,7 @@ function renderPredictiveInbox() {
                     @media (max-width: 640px) {
                         .predictive-shell { padding: 12px !important; }
                         .predictive-split { gap: 12px !important; }
-                        #predictive-list { max-height: 55vh; }
+                        #predictive-list-scroll { max-height: 55vh; }
                         #predictive-terminal-pane { height: 300px !important; }
                         /* xterm uses fixed font sizing — drop one
                            notch on phones so an 80-col line fits the
@@ -47782,51 +47826,6 @@ function renderPredictiveInbox() {
                         #predictive-term-close { min-height: 36px; min-width: 60px; }
                     }
                 </style>
-                <details style="margin-top:24px;background:rgba(96,165,250,0.05);border:1px solid rgba(96,165,250,0.2);border-radius:8px;padding:0;">
-                    <summary style="padding:10px 14px;cursor:pointer;font-size:12px;color:#60a5fa;font-weight:600;">ℹ How this works</summary>
-                    <div style="padding:0 14px 12px 14px;font-size:12px;color:var(--text-secondary);line-height:1.55;">
-                        The analyzer needs at least
-                        <strong>3 samples spanning ≥30 minutes</strong> of history before it can fit a trend
-                        line, and only emits a proposal when a resource is in a state worth flagging
-                        (e.g. for disk-fill: ≥50% used <em>and</em> growing toward 95%). On a healthy
-                        cluster, &quot;No predictions right now&quot; is the correct answer and clicking
-                        <em>Run analyzer now</em> may produce nothing visible — that's working as
-                        intended, not a bug.
-                    </div>
-                </details>
-                <details style="margin-top:8px;background:rgba(168,85,247,0.04);border:1px solid rgba(168,85,247,0.2);border-radius:8px;padding:0;">
-                    <summary style="padding:10px 14px;cursor:pointer;font-size:12px;color:#c084fc;font-weight:600;">📡 What's currently watched</summary>
-                    <div style="padding:0 14px 12px 14px;font-size:12px;color:var(--text-secondary);line-height:1.55;">
-                        Sampled every 5 minutes on each cluster node:
-                        <ul style="margin:6px 0 6px 18px;padding:0;">
-                            <li><strong>Host filesystem usage</strong> — every real mount via <code>df</code> (pseudo-filesystems filtered)</li>
-                            <li><strong>Docker container storage</strong> — per running container, runtime-specific finding type so acks are scope-precise</li>
-                            <li><strong>LXC container storage</strong> — per running container; same shared linear-fit logic</li>
-                            <li><strong>Docker restart-loops</strong> — flags containers whose <code>RestartCount</code> climbs ≥3 in 10 min (or ≥5 = Critical); &quot;restarting&quot; state bumps severity one tier</li>
-                            <li><strong>Host thresholds</strong> — CPU / memory / disk-free / swap / load / failed-systemd via the unified threshold analyzer (replaces the legacy per-2s Issues-page dispatch for these conditions)</li>
-                            <li><strong>Certificate expiry</strong> — Let's Encrypt certs (via certbot) and WolfStack-managed TLS files in <code>/etc/wolfstack/tls/</code>: Warn at &lt;14 d, High at &lt;7 d, Critical at &lt;3 d or already expired</li>
-                            <li><strong>Container memory pressure</strong> — Docker + LXC, Warn ≥80 % of cgroup limit, High ≥90 %, Critical ≥95 %; runtime-specific finding types so acks scope precisely</li>
-                            <li><strong>Backup freshness</strong> — every enabled schedule: Warn at 2× interval missed, High at 4×, Critical at 7× (or never-ran)</li>
-                            <li><strong>VM disk-fill</strong> — qcow2 sparse-file size vs allocated, per WolfStack-managed VM (Proxmox-managed VMs and raw disks need qemu-guest-agent — flagged when added)</li>
-                            <li><strong>Security posture</strong> — services bound on publicly-routable interfaces (Docker API plain on public IP = Critical, MariaDB on RFC1918-only LAN = Warn, etc.); sshd <code>PermitRootLogin yes</code> / <code>PasswordAuthentication yes</code> with severity scaled by sshd's actual reachability — first analyzer to consume the unified <code>NetworkReachability</code> classifier</li>
-                        </ul>
-                        Cluster-wide already: this Inbox aggregates findings from every reachable peer
-                        across every cluster (cached 30 s server-side; per-peer fetch failures surface as a yellow warning above
-                        the list — never silent gaps; multi-cluster setups get a cluster filter and grouped headers).
-                        First-appearance Critical/High findings dispatch via the existing Discord/Slack/Telegram/email channels —
-                        once per finding, not on every refresh, and auto-resolved findings don't re-page.
-                        Stale findings auto-resolve when the analyzer no longer sees the condition
-                        (audit-logged as <code>condition_cleared</code>, distinct from operator-applied).
-                        The plan is complete: every analyzer item from the original roadmap is live.
-                        Active-attack scans (SSH brute-force, crypto miners, /tmp binaries, suspicious outbound)
-                        remain in <code>security.rs</code> for now — they're event-detection at a different cadence
-                        and the convergence shape is non-trivial; surfaced via the System Check page.
-                        Future iterations: AI-source proposals using the same Inbox surface,
-                        OneClick remediation handlers (today's plans are all Manual = operator runs the commands themselves),
-                        and per-tenant RBAC for the multi-operator case.
-                        Each ships as a complete, tested, banner-updated delta — never half-done.
-                    </div>
-                </details>
             </div>
         `;
     }
@@ -48152,12 +48151,18 @@ const predTermState = {
 };
 
 async function predictiveRunCmd(proposalId, cmdIdx) {
+    // Spinner ON before the await so the operator gets immediate
+    // feedback. Otherwise nothing visible happens between click and
+    // WS open — especially noticeable when the proposal lives on a
+    // peer (cluster-secret round-trip first, then the WS hop).
+    predTermShowSpinner('Resolving target…');
     let meta;
     try {
         const r = await fetch(`/api/proposals/${encodeURIComponent(proposalId)}/command/${encodeURIComponent(cmdIdx)}`);
         if (!r.ok) {
             const data = await r.json().catch(() => ({}));
             const msg = data.error || r.statusText;
+            predTermResetSpinner();
             // Federated proposals: pre-flight returns 404 because the
             // local store + same-cluster fan-out can't reach the
             // origin cluster. Tell the operator clearly instead of
@@ -48174,6 +48179,7 @@ async function predictiveRunCmd(proposalId, cmdIdx) {
         }
         meta = await r.json();
     } catch (e) {
+        predTermResetSpinner();
         showToast(`Open terminal errored: ${e.message || String(e)}`, 'error');
         return;
     }
@@ -48183,6 +48189,7 @@ async function predictiveRunCmd(proposalId, cmdIdx) {
     // non-destructive commands shouldn't open three windows.
     if (predTermState.proposalId === proposalId
         && predTermState.ws && predTermState.ws.readyState === WebSocket.OPEN) {
+        predTermResetSpinner();
         predTermState.ws.send(meta.command + '\n');
         if (predTermState.term) predTermState.term.focus();
         return;
@@ -48306,17 +48313,56 @@ function predTermOpen(proposalId, meta) {
     if (closeBtn) closeBtn.style.display = '';
 }
 
+/// Show the inline spinner with a status message — used to give
+/// immediate feedback while the metadata fetch is in flight, before
+/// the WS even starts negotiating. Caller is responsible for
+/// hiding it again on success (predTermOpen handles that on WS
+/// open / close / error) or on early return (predTermResetSpinner).
+function predTermShowSpinner(message) {
+    const spinner = document.getElementById('predictive-term-spinner');
+    const icon    = document.getElementById('predictive-term-icon');
+    const status  = document.getElementById('predictive-term-status');
+    if (spinner) spinner.style.display = '';
+    if (icon)    icon.style.display    = 'none';
+    if (status) {
+        status.textContent = message || 'Connecting…';
+        status.style.color = '';
+    }
+}
+
+/// Hide the spinner without otherwise touching session state. Called
+/// on early-return paths (fetch errors, federated 404s) so the
+/// header doesn't keep spinning forever.
+function predTermResetSpinner() {
+    const spinner = document.getElementById('predictive-term-spinner');
+    const icon    = document.getElementById('predictive-term-icon');
+    if (spinner) spinner.style.display = 'none';
+    if (icon)    icon.style.display    = '';
+    // If no session is live, restore the idle status text.
+    if (!predTermState.proposalId) {
+        const status = document.getElementById('predictive-term-status');
+        if (status) {
+            status.textContent = 'No active terminal';
+            status.style.color = 'var(--text-muted)';
+        }
+    }
+}
+
 /// "Open terminal" button on a proposal — same pane, same connection
 /// model as predictiveRunCmd, but no command auto-runs. Operator
 /// drops at a clean prompt on the proposal's actual target (host /
 /// docker exec / lxc-attach / vm serial), so they can investigate or
 /// remediate manually without leaving the inbox.
 async function predictiveOpenTerm(proposalId) {
+    // Spinner ON before the metadata fetch so the operator sees
+    // immediate feedback — same reasoning as predictiveRunCmd.
+    predTermShowSpinner('Resolving target…');
     let meta;
     try {
         const r = await fetch(`/api/proposals/${encodeURIComponent(proposalId)}/console-target`);
         if (!r.ok) {
             const data = await r.json().catch(() => ({}));
+            predTermResetSpinner();
             if (r.status === 404) {
                 showToast(
                     'This proposal lives on a federated cluster — open that cluster\'s dashboard to access its terminal.',
@@ -48329,6 +48375,7 @@ async function predictiveOpenTerm(proposalId) {
         }
         meta = await r.json();
     } catch (e) {
+        predTermResetSpinner();
         showToast(`Open terminal errored: ${e.message || String(e)}`, 'error');
         return;
     }
@@ -48336,6 +48383,7 @@ async function predictiveOpenTerm(proposalId) {
     // Same proposal already open → just focus, don't tear down.
     if (predTermState.proposalId === proposalId
         && predTermState.ws && predTermState.ws.readyState === WebSocket.OPEN) {
+        predTermResetSpinner();
         if (predTermState.term) predTermState.term.focus();
         return;
     }
