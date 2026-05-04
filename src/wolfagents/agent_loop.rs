@@ -67,15 +67,6 @@ pub struct ToolCallTrace {
     pub status: String,
 }
 
-/// Default cap value the operator sees in the UI when they tick
-/// "Cap agent tool-calls per turn" with no prior config. Off by
-/// default — when uncapped the loop runs until the model itself
-/// emits an end_turn. See `AiConfig::effective_agent_max_tool_calls`
-/// for the use-time clamp ([1, 100] when enabled, `usize::MAX`
-/// otherwise).
-#[allow(dead_code)]
-const MAX_ROUNDS_DEFAULT: usize = 6;
-
 /// Drive a full agent turn. Assembles the conversation (history +
 /// optional cluster context + this user message), chooses the provider
 /// path, and returns an AgentTurn summary.

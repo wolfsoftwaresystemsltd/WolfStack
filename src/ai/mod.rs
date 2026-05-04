@@ -180,9 +180,33 @@ impl Default for AiConfig {
 impl AiConfig {
     pub fn load() -> Self {
         match std::fs::read_to_string(&ai_config_path()) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Ok(content) => Self::parse_with_migrations(&content),
             Err(_) => Self::default(),
         }
+    }
+
+    /// Deserialise from raw JSON, applying upgrade-time migrations.
+    /// Pure — no filesystem or global state — so tests can pin
+    /// behaviour without touching disk.
+    ///
+    /// **v22.9.5 → v22.9.6**: v22.9.5 shipped a hard-on cap
+    /// (`agent_max_tool_calls`, no enabled flag). v22.9.6 made the
+    /// cap a per-flag opt-in, off by default. A naive load of a
+    /// v22.9.5 file would silently drop the operator's explicit cap
+    /// because the new flag would default to false. Detect the v22.9.5
+    /// shape (cap field present, enabled flag absent) and preserve
+    /// their choice by flipping the new flag on.
+    pub fn parse_with_migrations(content: &str) -> Self {
+        let preserve_v925_cap = match serde_json::from_str::<serde_json::Value>(content) {
+            Ok(v) => v.get("agent_max_tool_calls").is_some()
+                && v.get("agent_tool_call_limit_enabled").is_none(),
+            Err(_) => false,
+        };
+        let mut cfg: Self = serde_json::from_str(content).unwrap_or_default();
+        if preserve_v925_cap {
+            cfg.agent_tool_call_limit_enabled = true;
+        }
+        cfg
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -478,6 +502,123 @@ mod config_validation_tests {
         };
         let err = config.validate().unwrap_err();
         assert!(err.contains("Invalid provider"));
+    }
+}
+
+#[cfg(test)]
+mod agent_tool_call_limit_tests {
+    use super::*;
+
+    #[test]
+    fn cap_disabled_returns_max() {
+        let cfg = AiConfig {
+            agent_tool_call_limit_enabled: false,
+            agent_max_tool_calls: 5, // ignored when disabled
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_agent_max_tool_calls(), usize::MAX);
+    }
+
+    #[test]
+    fn cap_enabled_in_range_returned_verbatim() {
+        let cfg = AiConfig {
+            agent_tool_call_limit_enabled: true,
+            agent_max_tool_calls: 12,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_agent_max_tool_calls(), 12);
+    }
+
+    #[test]
+    fn cap_enabled_zero_clamps_up_to_one() {
+        // A hand-edited config or older save that wrote 0 must not
+        // truncate the agent turn to zero rounds — clamp up.
+        let cfg = AiConfig {
+            agent_tool_call_limit_enabled: true,
+            agent_max_tool_calls: 0,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_agent_max_tool_calls(), 1);
+    }
+
+    #[test]
+    fn cap_enabled_huge_clamps_down_to_one_hundred() {
+        // Defence against a typo / hand-edit pushing the cap to a
+        // bill-melting value.
+        let cfg = AiConfig {
+            agent_tool_call_limit_enabled: true,
+            agent_max_tool_calls: 99_999,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_agent_max_tool_calls(), 100);
+    }
+
+    #[test]
+    fn migration_v925_config_preserves_cap() {
+        // v22.9.5 wrote `agent_max_tool_calls` but no enabled flag.
+        // After migration the operator's cap must stay on.
+        let v925_json = r#"{
+            "provider": "claude",
+            "claude_api_key": "",
+            "gemini_api_key": "",
+            "openai_api_key": "",
+            "openrouter_api_key": "",
+            "local_url": "",
+            "local_api_key": "",
+            "model": "claude-sonnet-4-20250514",
+            "email_enabled": false,
+            "email_to": "",
+            "smtp_host": "smtp.gmail.com",
+            "smtp_port": 587,
+            "smtp_user": "",
+            "smtp_pass": "",
+            "smtp_tls": "starttls",
+            "check_interval_minutes": 60,
+            "scan_schedule": "off",
+            "accepted_risks": [],
+            "agent_max_tool_calls": 6
+        }"#;
+        let cfg = AiConfig::parse_with_migrations(v925_json);
+        assert!(cfg.agent_tool_call_limit_enabled,
+            "v22.9.5 config must keep its cap enabled after migration");
+        assert_eq!(cfg.agent_max_tool_calls, 6);
+        assert_eq!(cfg.effective_agent_max_tool_calls(), 6);
+    }
+
+    #[test]
+    fn migration_v926_config_respects_explicit_off() {
+        // v22.9.6+ writes both fields. An explicit `false` must NOT
+        // be overridden by the migration.
+        let v926_json = r#"{
+            "provider": "claude",
+            "model": "claude-sonnet-4-20250514",
+            "agent_max_tool_calls": 6,
+            "agent_tool_call_limit_enabled": false
+        }"#;
+        let cfg = AiConfig::parse_with_migrations(v926_json);
+        assert!(!cfg.agent_tool_call_limit_enabled,
+            "v22.9.6 config with explicit enabled=false must stay off");
+        assert_eq!(cfg.effective_agent_max_tool_calls(), usize::MAX);
+    }
+
+    #[test]
+    fn migration_legacy_config_no_cap_field_stays_off() {
+        // A pre-v22.9.5 config has neither field. Default behaviour
+        // is off — the migration must NOT spuriously turn the cap on.
+        let legacy_json = r#"{
+            "provider": "claude",
+            "model": "claude-sonnet-4-20250514"
+        }"#;
+        let cfg = AiConfig::parse_with_migrations(legacy_json);
+        assert!(!cfg.agent_tool_call_limit_enabled,
+            "legacy config without either field must default to off");
+    }
+
+    #[test]
+    fn migration_garbage_json_returns_default() {
+        let cfg = AiConfig::parse_with_migrations("not json at all {{");
+        assert_eq!(cfg.provider, AiConfig::default().provider);
+        assert!(!cfg.agent_tool_call_limit_enabled);
     }
 }
 
