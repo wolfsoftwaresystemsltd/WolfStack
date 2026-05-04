@@ -130,9 +130,20 @@ pub struct AiConfig {
     /// than 3-4 for realistic ops tasks, but reasoning models like
     /// o-series / GPT-5 / Claude Opus benefit from more headroom on
     /// multi-step investigations. Reddit feature ask (rauttb,
-    /// 2026-05-04). Clamped to [1, 25] at use time.
+    /// 2026-05-04). Range when enabled: [1, 100].
+    ///
+    /// Only consulted when `agent_tool_call_limit_enabled` is true —
+    /// otherwise the loop runs until the model itself emits an
+    /// end_turn / no-more-tools response. Default is **off** so
+    /// reasoning-heavy investigations don't get truncated mid-thought.
     #[serde(default = "default_agent_max_tool_calls")]
     pub agent_max_tool_calls: u32,
+    /// Whether to apply the `agent_max_tool_calls` cap. When false the
+    /// agent loop runs uncapped — fine for trusted Claude / Gemini /
+    /// OpenAI models, risky for misbehaving local models that loop
+    /// forever. Default off; flip on if you see runaway tool use.
+    #[serde(default)]
+    pub agent_tool_call_limit_enabled: bool,
 }
 
 fn default_agent_max_tool_calls() -> u32 { 6 }
@@ -161,6 +172,7 @@ impl Default for AiConfig {
             scan_schedule: "off".to_string(),
             accepted_risks: Vec::new(),
             agent_max_tool_calls: default_agent_max_tool_calls(),
+            agent_tool_call_limit_enabled: false,
         }
     }
 }
@@ -183,12 +195,16 @@ impl AiConfig {
         crate::paths::write_secure(&path, json).map_err(|e| e.to_string())
     }
 
-    /// Effective tool-call ceiling — clamps the configured value to
-    /// the supported range so a malformed config (a hand-edited JSON
-    /// at 0 or 9999, or an old config without the field) doesn't melt
-    /// the AI budget. Range: [1, 25].
+    /// Effective tool-call ceiling. `usize::MAX` means "no cap" — used
+    /// when the operator has the limit disabled. When enabled the
+    /// configured value is clamped to [1, 100] so a malformed config
+    /// (hand-edited JSON at 0 or 99999) can't either truncate the
+    /// turn to zero rounds or melt the AI budget.
     pub fn effective_agent_max_tool_calls(&self) -> usize {
-        self.agent_max_tool_calls.clamp(1, 25) as usize
+        if !self.agent_tool_call_limit_enabled {
+            return usize::MAX;
+        }
+        self.agent_max_tool_calls.clamp(1, 100) as usize
     }
 
     /// Return config with API keys masked for frontend display
@@ -211,7 +227,8 @@ impl AiConfig {
             "check_interval_minutes": self.check_interval_minutes,
             "scan_schedule": self.scan_schedule,
             "accepted_risks": self.accepted_risks,
-            "agent_max_tool_calls": self.effective_agent_max_tool_calls(),
+            "agent_max_tool_calls": self.agent_max_tool_calls,
+            "agent_tool_call_limit_enabled": self.agent_tool_call_limit_enabled,
             "has_claude_key": !self.claude_api_key.is_empty(),
             "has_gemini_key": !self.gemini_api_key.is_empty(),
             "has_openai_key": !self.openai_api_key.is_empty(),

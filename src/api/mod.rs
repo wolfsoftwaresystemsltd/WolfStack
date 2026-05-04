@@ -7732,7 +7732,10 @@ pub async fn ai_save_config(
             // Range-clamp on save so the on-disk file always holds a
             // sane value — defence-in-depth alongside the use-time
             // clamp in `effective_agent_max_tool_calls`.
-            config.agent_max_tool_calls = (v as u32).clamp(1, 25);
+            config.agent_max_tool_calls = (v as u32).clamp(1, 100);
+        }
+        if let Some(v) = body.get("agent_tool_call_limit_enabled").and_then(|v| v.as_bool()) {
+            config.agent_tool_call_limit_enabled = v;
         }
 
         // Validate provider and model compatibility

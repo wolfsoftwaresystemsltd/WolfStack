@@ -5107,13 +5107,20 @@
                                     </select>
                                 </div>
                                 <div class="form-group" style="margin-bottom:16px;">
-                                    <label>Agent tool-call limit</label>
+                                    <label style="display:flex;align-items:center;gap:8px;">
+                                        <input type="checkbox" id="ai-agent-limit-enabled"
+                                            onchange="onAgentLimitToggle()">
+                                        Cap agent tool-calls per turn
+                                    </label>
                                     <input type="number" id="ai-agent-max-tool-calls" class="form-control"
-                                        min="1" max="25" step="1" value="6">
+                                        min="1" max="100" step="1" value="6"
+                                        style="margin-top:6px;" disabled>
                                     <small style="color:var(--text-muted);font-size:11px;">
-                                        Max rounds of tool_use ping-pong per WolfAgent turn. Range 1–25; default 6.
-                                        Raise for reasoning-heavy investigations (Opus, o-series, GPT-5);
-                                        keep low to cap spend on misbehaving prompts.
+                                        Off by default — the agent runs until the model itself stops
+                                        calling tools. Tick to apply a cap (rounds 1–100). Default cap
+                                        is 6; raise for reasoning-heavy investigations
+                                        (Opus, o-series, GPT-5), tighten if a misbehaving local model
+                                        loops forever.
                                     </small>
                                 </div>
                                 <div class="form-group" style="margin-bottom:16px;">

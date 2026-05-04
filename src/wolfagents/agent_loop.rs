@@ -67,11 +67,12 @@ pub struct ToolCallTrace {
     pub status: String,
 }
 
-/// Default max rounds of the tool_use ping-pong per user turn when
-/// no AiConfig is in scope. Claude rarely needs more than 3-4 for
-/// realistic ops tasks; 6 is the safe cap. Operators can override
-/// in Settings → AI Agent → "Agent tool-call limit". Range [1, 25],
-/// clamped at use time by `AiConfig::effective_agent_max_tool_calls`.
+/// Default cap value the operator sees in the UI when they tick
+/// "Cap agent tool-calls per turn" with no prior config. Off by
+/// default — when uncapped the loop runs until the model itself
+/// emits an end_turn. See `AiConfig::effective_agent_max_tool_calls`
+/// for the use-time clamp ([1, 100] when enabled, `usize::MAX`
+/// otherwise).
 #[allow(dead_code)]
 const MAX_ROUNDS_DEFAULT: usize = 6;
 
@@ -343,7 +344,7 @@ async fn openai_tool_loop(
     Ok(AgentTurn {
         response: format!(
             "(agent aborted after {} tool-use rounds — raise the limit in \
-             Settings → AI Agent → Agent tool-call limit, or tighten the \
+             Settings → AI Agent → \"Cap agent tool-calls per turn\", or tighten the \
              system prompt so the agent reaches a conclusion faster)",
             max_rounds
         ),
@@ -533,7 +534,7 @@ async fn gemini_tool_loop(
     Ok(AgentTurn {
         response: format!(
             "(agent aborted after {} tool-use rounds — raise the limit in \
-             Settings → AI Agent → Agent tool-call limit, or tighten the \
+             Settings → AI Agent → \"Cap agent tool-calls per turn\", or tighten the \
              system prompt so the agent reaches a conclusion faster)",
             max_rounds
         ),
@@ -941,7 +942,7 @@ async fn claude_tool_loop(
     Ok(AgentTurn {
         response: format!(
             "(agent aborted after {} tool-use rounds — raise the limit in \
-             Settings → AI Agent → Agent tool-call limit, or tighten the \
+             Settings → AI Agent → \"Cap agent tool-calls per turn\", or tighten the \
              system prompt so the agent reaches a conclusion faster)",
             max_rounds
         ),
