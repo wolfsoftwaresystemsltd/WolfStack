@@ -125,7 +125,17 @@ pub struct AiConfig {
     /// the one-click suppress link in alert emails.
     #[serde(default)]
     pub accepted_risks: Vec<String>,
+    /// Per-turn tool-call ceiling for WolfAgents. Each round of the
+    /// tool_use ping-pong counts as one — Claude rarely needs more
+    /// than 3-4 for realistic ops tasks, but reasoning models like
+    /// o-series / GPT-5 / Claude Opus benefit from more headroom on
+    /// multi-step investigations. Reddit feature ask (rauttb,
+    /// 2026-05-04). Clamped to [1, 25] at use time.
+    #[serde(default = "default_agent_max_tool_calls")]
+    pub agent_max_tool_calls: u32,
 }
+
+fn default_agent_max_tool_calls() -> u32 { 6 }
 
 fn default_scan_schedule() -> String { "off".to_string() }
 
@@ -150,6 +160,7 @@ impl Default for AiConfig {
             check_interval_minutes: 60,
             scan_schedule: "off".to_string(),
             accepted_risks: Vec::new(),
+            agent_max_tool_calls: default_agent_max_tool_calls(),
         }
     }
 }
@@ -172,6 +183,14 @@ impl AiConfig {
         crate::paths::write_secure(&path, json).map_err(|e| e.to_string())
     }
 
+    /// Effective tool-call ceiling — clamps the configured value to
+    /// the supported range so a malformed config (a hand-edited JSON
+    /// at 0 or 9999, or an old config without the field) doesn't melt
+    /// the AI budget. Range: [1, 25].
+    pub fn effective_agent_max_tool_calls(&self) -> usize {
+        self.agent_max_tool_calls.clamp(1, 25) as usize
+    }
+
     /// Return config with API keys masked for frontend display
     pub fn masked(&self) -> serde_json::Value {
         serde_json::json!({
@@ -192,6 +211,7 @@ impl AiConfig {
             "check_interval_minutes": self.check_interval_minutes,
             "scan_schedule": self.scan_schedule,
             "accepted_risks": self.accepted_risks,
+            "agent_max_tool_calls": self.effective_agent_max_tool_calls(),
             "has_claude_key": !self.claude_api_key.is_empty(),
             "has_gemini_key": !self.gemini_api_key.is_empty(),
             "has_openai_key": !self.openai_api_key.is_empty(),

@@ -7728,6 +7728,12 @@ pub async fn ai_save_config(
                 .filter(|s| !s.is_empty() && s.len() <= 200)
                 .collect();
         }
+        if let Some(v) = body.get("agent_max_tool_calls").and_then(|v| v.as_u64()) {
+            // Range-clamp on save so the on-disk file always holds a
+            // sane value — defence-in-depth alongside the use-time
+            // clamp in `effective_agent_max_tool_calls`.
+            config.agent_max_tool_calls = (v as u32).clamp(1, 25);
+        }
 
         // Validate provider and model compatibility
         if let Err(e) = config.validate() {

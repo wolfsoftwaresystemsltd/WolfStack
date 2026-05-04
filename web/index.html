@@ -5107,6 +5107,16 @@
                                     </select>
                                 </div>
                                 <div class="form-group" style="margin-bottom:16px;">
+                                    <label>Agent tool-call limit</label>
+                                    <input type="number" id="ai-agent-max-tool-calls" class="form-control"
+                                        min="1" max="25" step="1" value="6">
+                                    <small style="color:var(--text-muted);font-size:11px;">
+                                        Max rounds of tool_use ping-pong per WolfAgent turn. Range 1–25; default 6.
+                                        Raise for reasoning-heavy investigations (Opus, o-series, GPT-5);
+                                        keep low to cap spend on misbehaving prompts.
+                                    </small>
+                                </div>
+                                <div class="form-group" style="margin-bottom:16px;">
                                     <label>Health Check Interval</label>
                                     <select id="ai-check-interval" class="form-control">
                                         <option value="15">Every 15 minutes</option>

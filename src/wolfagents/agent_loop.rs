@@ -67,10 +67,13 @@ pub struct ToolCallTrace {
     pub status: String,
 }
 
-/// Max rounds of the tool_use ping-pong per user turn. Claude rarely
-/// needs more than 3-4 for realistic ops tasks; 6 is a safety cap so
-/// a misbehaving prompt can't melt the AI budget.
-const MAX_ROUNDS: usize = 6;
+/// Default max rounds of the tool_use ping-pong per user turn when
+/// no AiConfig is in scope. Claude rarely needs more than 3-4 for
+/// realistic ops tasks; 6 is the safe cap. Operators can override
+/// in Settings → AI Agent → "Agent tool-call limit". Range [1, 25],
+/// clamped at use time by `AiConfig::effective_agent_max_tool_calls`.
+#[allow(dead_code)]
+const MAX_ROUNDS_DEFAULT: usize = 6;
 
 /// Drive a full agent turn. Assembles the conversation (history +
 /// optional cluster context + this user message), chooses the provider
@@ -188,8 +191,9 @@ async fn openai_tool_loop(
 
     let tools_json = build_openai_tools(agent);
     let mut trace: Vec<ToolCallTrace> = Vec::new();
+    let max_rounds = cfg.effective_agent_max_tool_calls();
 
-    for _round in 0..MAX_ROUNDS {
+    for _round in 0..max_rounds {
         let mut body = serde_json::json!({
             "model": cfg.model,
             "messages": messages,
@@ -335,12 +339,13 @@ async fn openai_tool_loop(
         }
     }
 
-    warn!("wolfagents: agent {} (openai-compat) hit MAX_ROUNDS", agent.id);
+    warn!("wolfagents: agent {} (openai-compat) hit max_rounds={}", agent.id, max_rounds);
     Ok(AgentTurn {
         response: format!(
-            "(agent aborted after {} tool-use rounds — increase the round cap or \
-             tighten the system prompt so the agent reaches a conclusion faster)",
-            MAX_ROUNDS
+            "(agent aborted after {} tool-use rounds — raise the limit in \
+             Settings → AI Agent → Agent tool-call limit, or tighten the \
+             system prompt so the agent reaches a conclusion faster)",
+            max_rounds
         ),
         tool_calls: trace,
         stop_reason: "max_rounds".to_string(),
@@ -376,7 +381,7 @@ fn build_openai_tools(agent: &Agent) -> Vec<serde_json::Value> {
 /// - Tool calls come back as a `functionCall` part on a model turn.
 /// - Tool results are sent as a `functionResponse` part on a user turn.
 /// - No explicit stop_reason — we stop when the model emits text with
-///   no functionCall, or we hit MAX_ROUNDS.
+///   no functionCall, or we hit the configured max_rounds.
 async fn gemini_tool_loop(
     agent: &Agent,
     cfg: &crate::ai::AiConfig,
@@ -405,13 +410,14 @@ async fn gemini_tool_loop(
 
     let function_decls = build_gemini_function_decls(agent);
     let mut trace: Vec<ToolCallTrace> = Vec::new();
+    let max_rounds = cfg.effective_agent_max_tool_calls();
 
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
         cfg.model, cfg.gemini_api_key
     );
 
-    for _round in 0..MAX_ROUNDS {
+    for _round in 0..max_rounds {
         let mut body = serde_json::json!({
             "contents": contents,
             "systemInstruction": {
@@ -523,12 +529,13 @@ async fn gemini_tool_loop(
         }));
     }
 
-    warn!("wolfagents: agent {} (gemini) hit MAX_ROUNDS ({}) — abandoning turn", agent.id, MAX_ROUNDS);
+    warn!("wolfagents: agent {} (gemini) hit max_rounds={} — abandoning turn", agent.id, max_rounds);
     Ok(AgentTurn {
         response: format!(
-            "(agent aborted after {} tool-use rounds — increase the round cap or \
-             tighten the system prompt so the agent reaches a conclusion faster)",
-            MAX_ROUNDS
+            "(agent aborted after {} tool-use rounds — raise the limit in \
+             Settings → AI Agent → Agent tool-call limit, or tighten the \
+             system prompt so the agent reaches a conclusion faster)",
+            max_rounds
         ),
         tool_calls: trace,
         stop_reason: "max_rounds".to_string(),
@@ -804,8 +811,9 @@ async fn claude_tool_loop(
 
     let tools_json = build_claude_tools(agent);
     let mut trace: Vec<ToolCallTrace> = Vec::new();
+    let max_rounds = cfg.effective_agent_max_tool_calls();
 
-    for round in 0..MAX_ROUNDS {
+    for round in 0..max_rounds {
         let mut body = serde_json::json!({
             "model": cfg.model,
             "max_tokens": 4096,
@@ -929,12 +937,13 @@ async fn claude_tool_loop(
         let _ = round;
     }
 
-    warn!("wolfagents: agent {} hit MAX_ROUNDS ({}) — abandoning turn", agent.id, MAX_ROUNDS);
+    warn!("wolfagents: agent {} hit max_rounds={} — abandoning turn", agent.id, max_rounds);
     Ok(AgentTurn {
         response: format!(
-            "(agent aborted after {} tool-use rounds — increase the round cap or \
-             tighten the system prompt so the agent reaches a conclusion faster)",
-            MAX_ROUNDS
+            "(agent aborted after {} tool-use rounds — raise the limit in \
+             Settings → AI Agent → Agent tool-call limit, or tighten the \
+             system prompt so the agent reaches a conclusion faster)",
+            max_rounds
         ),
         tool_calls: trace,
         stop_reason: "max_rounds".to_string(),

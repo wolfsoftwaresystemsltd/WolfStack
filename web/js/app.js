@@ -21369,6 +21369,7 @@ async function loadAiConfig() {
         if ((el = document.getElementById('ai-smtp-pass'))) el.value = cfg.has_smtp_pass ? cfg.smtp_pass : '';
         if ((el = document.getElementById('ai-smtp-tls'))) el.value = cfg.smtp_tls || 'starttls';
         if ((el = document.getElementById('ai-check-interval'))) el.value = cfg.check_interval_minutes || 60;
+        if ((el = document.getElementById('ai-agent-max-tool-calls'))) el.value = cfg.agent_max_tool_calls || 6;
         // Fetch models for the current provider, then select the saved model
         await fetchAiModels(cfg.provider || 'claude', cfg.model || '');
     } catch (e) {
@@ -21435,6 +21436,7 @@ async function saveAiConfig() {
         smtp_pass: (document.getElementById('ai-smtp-pass') || {}).value || '',
         smtp_tls: (document.getElementById('ai-smtp-tls') || {}).value || 'starttls',
         check_interval_minutes: parseInt((document.getElementById('ai-check-interval') || {}).value) || 60,
+        agent_max_tool_calls: Math.min(25, Math.max(1, parseInt((document.getElementById('ai-agent-max-tool-calls') || {}).value) || 6)),
     };
     try {
         var resp = await fetch('/api/ai/config', {
@@ -21531,6 +21533,7 @@ async function testAiConnection() {
         smtp_pass: (document.getElementById('ai-smtp-pass') || {}).value || '',
         smtp_tls: (document.getElementById('ai-smtp-tls') || {}).value || 'starttls',
         check_interval_minutes: parseInt((document.getElementById('ai-check-interval') || {}).value) || 60,
+        agent_max_tool_calls: Math.min(25, Math.max(1, parseInt((document.getElementById('ai-agent-max-tool-calls') || {}).value) || 6)),
     };
 
     // Show an in-progress modal IMMEDIATELY so the operator knows
