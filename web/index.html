@@ -2958,10 +2958,15 @@
                     <h3>💾 Backup Manager</h3>
                     <div style="display:flex; gap:8px; align-items:center;">
                         <select id="backup-storage-select" class="form-control"
+                            onchange="onBackupStorageChange()"
                             style="width:auto; min-width:220px; padding:5px 10px; font-size:12px;">
                             <option value="local:/var/lib/wolfstack/backups">📁 Local — /var/lib/wolfstack/backups
                             </option>
                         </select>
+                        <input type="text" id="backup-storage-subpath" placeholder="Subdirectory (optional)"
+                            title="Optional subdirectory under the WolfDisk mount root. Leave empty to back up to the mount root."
+                            style="display:none; width:auto; min-width:160px; padding:5px 10px; font-size:12px; border-radius:6px; border:1px solid var(--border); background:var(--bg-input); color:var(--text-primary); font-family:var(--font-mono);">
+                        <button id="backup-storage-subpath-browse" class="btn btn-sm" onclick="browseWolfDiskSubpath()" title="Browse to pick a subdirectory" style="display:none; font-size:12px; padding:5px 10px;">📁</button>
                         <button class="btn btn-sm btn-primary" onclick="backupSelected()">⚡ Backup Now</button>
                         <button class="btn btn-sm"
                             style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"
@@ -3925,10 +3930,16 @@
                         <button id="compose-tab-env" class="btn btn-sm" onclick="switchComposeTab('env')" style="border-radius:0; opacity:0.6;">.env</button>
                     </div>
                     <div id="compose-tab-yaml-content">
-                        <textarea id="compose-yaml-editor" style="width:100%; height:60vh; margin:0; padding:12px 16px; border:none; background:var(--bg-primary); color:var(--text-primary); font-family:var(--font-mono); font-size:13px; line-height:1.5; resize:vertical; tab-size:2; white-space:pre; overflow-wrap:normal; overflow-x:auto;" spellcheck="false" placeholder="# docker-compose.yml"></textarea>
+                        <div class="code-editor-wrap" style="display:flex; height:60vh; background:var(--bg-primary); position:relative;">
+                            <div class="code-editor-gutter" id="compose-yaml-editor-gutter"><div class="code-editor-gutter-inner">1</div></div>
+                            <textarea id="compose-yaml-editor" style="flex:1; margin:0; padding:12px 12px 12px 8px; border:none; background:transparent; color:var(--text-primary); font-family:var(--font-mono); font-size:13px; line-height:1.5; resize:none; tab-size:2; white-space:pre; overflow-wrap:normal; overflow:auto;" spellcheck="false" placeholder="# docker-compose.yml"></textarea>
+                        </div>
                     </div>
                     <div id="compose-tab-env-content" style="display:none;">
-                        <textarea id="compose-env-editor" style="width:100%; height:60vh; margin:0; padding:12px 16px; border:none; background:var(--bg-primary); color:var(--text-primary); font-family:var(--font-mono); font-size:13px; line-height:1.5; resize:vertical; tab-size:2; white-space:pre; overflow-wrap:normal; overflow-x:auto;" spellcheck="false" placeholder="# Environment variables&#10;KEY=value"></textarea>
+                        <div class="code-editor-wrap" style="display:flex; height:60vh; background:var(--bg-primary); position:relative;">
+                            <div class="code-editor-gutter" id="compose-env-editor-gutter"><div class="code-editor-gutter-inner">1</div></div>
+                            <textarea id="compose-env-editor" style="flex:1; margin:0; padding:12px 12px 12px 8px; border:none; background:transparent; color:var(--text-primary); font-family:var(--font-mono); font-size:13px; line-height:1.5; resize:none; tab-size:2; white-space:pre; overflow-wrap:normal; overflow:auto;" spellcheck="false" placeholder="# Environment variables&#10;KEY=value"></textarea>
+                        </div>
                     </div>
                 </div>
                 <div class="modal-footer" style="display:flex; justify-content:space-between;">

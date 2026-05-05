@@ -161,6 +161,13 @@ pub struct BackupStorage {
     /// Extra CIFS mount options, e.g. `vers=2.1` for older NAS.
     #[serde(default)]
     pub smb_options: String,
+    /// Subdirectory under the WolfDisk mount point to write backups
+    /// into. Empty means write to the mount root (default, original
+    /// behaviour). Sanitized at write time — leading/trailing
+    /// slashes are trimmed, `..` segments are rejected so a
+    /// misconfigured destination can't escape the mount root.
+    #[serde(default)]
+    pub wolfdisk_subpath: String,
 }
 
 #[allow(dead_code)]
@@ -241,7 +248,144 @@ impl Default for BackupStorage {
             smb_password: String::new(),
             smb_domain: String::new(),
             smb_options: String::new(),
+            wolfdisk_subpath: String::new(),
         }
+    }
+}
+
+impl BackupStorage {
+    /// Resolve the local-filesystem write path for a Local or
+    /// WolfDisk destination, joining the WolfDisk subpath under the
+    /// mount root when set. For non-Local/Wolfdisk types the
+    /// configured `path` is returned unchanged.
+    ///
+    /// Sanitization:
+    ///   - Trims trailing slashes from the base path.
+    ///   - Trims leading/trailing slashes from the subpath.
+    ///   - Drops empty / `.` / `..` segments. The save-time API
+    ///     check rejects `..` outright, but this defence-in-depth
+    ///     filter ensures an older config file (or a hand-edited
+    ///     `/etc/wolfstack/backup.json`) can't escape the mount.
+    pub fn resolved_local_path(&self) -> String {
+        let base = self.path.trim_end_matches('/').to_string();
+        if !matches!(self.storage_type, StorageType::Wolfdisk) {
+            return self.path.clone();
+        }
+        let raw = self.wolfdisk_subpath.trim().trim_matches('/');
+        if raw.is_empty() { return base; }
+        let safe: Vec<&str> = raw.split('/')
+            .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+            .collect();
+        if safe.is_empty() { return base; }
+        format!("{}/{}", base, safe.join("/"))
+    }
+
+    /// Validate a WolfDisk subpath at the API save boundary. Strict
+    /// — any `..` or `.` segment is rejected (vs the lenient
+    /// resolver which silently strips them). Empty subpath is
+    /// allowed (it means "use the mount root", the default).
+    ///
+    /// `.` is rejected even though it's harmless, because keeping
+    /// the validator and resolver consistent avoids the surprise
+    /// where an operator types `./backups` and the storage label
+    /// shows `backups` — a silent normalisation that looks like
+    /// the system "ate" their input.
+    pub fn validate_wolfdisk_subpath(sub: &str) -> Result<(), String> {
+        let s = sub.trim().trim_matches('/');
+        if s.is_empty() { return Ok(()); }
+        for seg in s.split('/') {
+            if seg.is_empty() {
+                return Err("WolfDisk subpath has empty segment (consecutive slashes)".into());
+            }
+            if seg == ".." {
+                return Err("WolfDisk subpath must not contain '..' segments".into());
+            }
+            if seg == "." {
+                return Err("WolfDisk subpath must not contain '.' segments — drop it".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wd(path: &str, sub: &str) -> BackupStorage {
+        BackupStorage {
+            storage_type: StorageType::Wolfdisk,
+            path: path.to_string(),
+            wolfdisk_subpath: sub.to_string(),
+            ..BackupStorage::default()
+        }
+    }
+
+    #[test]
+    fn resolved_local_path_no_subpath_returns_mount_root() {
+        let s = wd("/mnt/wolfdisk-data", "");
+        assert_eq!(s.resolved_local_path(), "/mnt/wolfdisk-data");
+    }
+
+    #[test]
+    fn resolved_local_path_joins_subpath() {
+        let s = wd("/mnt/wolfdisk-data", "backups/prod");
+        assert_eq!(s.resolved_local_path(), "/mnt/wolfdisk-data/backups/prod");
+    }
+
+    #[test]
+    fn resolved_local_path_strips_leading_trailing_slashes() {
+        let s = wd("/mnt/wolfdisk-data/", "/backups/prod/");
+        assert_eq!(s.resolved_local_path(), "/mnt/wolfdisk-data/backups/prod");
+    }
+
+    #[test]
+    fn resolved_local_path_drops_dot_dot_segments() {
+        // The lenient resolver is defence in depth — the API save
+        // boundary rejects `..` outright, but if a hand-edited
+        // config file makes it past, we still don't escape the mount.
+        let s = wd("/mnt/wolfdisk-data", "../../etc/passwd");
+        assert_eq!(s.resolved_local_path(), "/mnt/wolfdisk-data/etc/passwd");
+    }
+
+    #[test]
+    fn resolved_local_path_for_local_returns_path_unchanged() {
+        let s = BackupStorage {
+            storage_type: StorageType::Local,
+            path: "/var/lib/wolfstack/backups".into(),
+            wolfdisk_subpath: "ignored".into(),  // shouldn't apply for Local
+            ..BackupStorage::default()
+        };
+        assert_eq!(s.resolved_local_path(), "/var/lib/wolfstack/backups");
+    }
+
+    #[test]
+    fn validate_subpath_rejects_dot_dot() {
+        assert!(BackupStorage::validate_wolfdisk_subpath("../etc").is_err());
+        assert!(BackupStorage::validate_wolfdisk_subpath("backups/../../etc").is_err());
+    }
+
+    #[test]
+    fn validate_subpath_rejects_single_dot() {
+        // Resolver silently strips `.` segments; the validator
+        // rejects them so the operator gets clear feedback rather
+        // than a surprise normalisation.
+        assert!(BackupStorage::validate_wolfdisk_subpath("./backups").is_err());
+        assert!(BackupStorage::validate_wolfdisk_subpath("backups/./prod").is_err());
+    }
+
+    #[test]
+    fn validate_subpath_rejects_consecutive_slashes() {
+        assert!(BackupStorage::validate_wolfdisk_subpath("backups//prod").is_err());
+    }
+
+    #[test]
+    fn validate_subpath_accepts_empty_and_normal() {
+        assert!(BackupStorage::validate_wolfdisk_subpath("").is_ok());
+        assert!(BackupStorage::validate_wolfdisk_subpath("   ").is_ok());
+        assert!(BackupStorage::validate_wolfdisk_subpath("backups").is_ok());
+        assert!(BackupStorage::validate_wolfdisk_subpath("backups/prod").is_ok());
+        assert!(BackupStorage::validate_wolfdisk_subpath("/backups/prod/").is_ok());
     }
 }
 
@@ -1235,7 +1379,7 @@ fn store_backup_with_notes(local_path: &Path, storage: &BackupStorage, filename:
         StorageType::Local => store_local(local_path, &storage.path, filename),
         StorageType::S3 => store_s3(local_path, storage, filename),
         StorageType::Remote => store_remote(local_path, &storage.remote_url, filename),
-        StorageType::Wolfdisk => store_local(local_path, &storage.path, filename),
+        StorageType::Wolfdisk => store_local(local_path, &storage.resolved_local_path(), filename),
         StorageType::Pbs => store_pbs_with_notes(local_path, storage, filename, notes),
         StorageType::Nfs => {
             let dir = ensure_nfs_mounted(storage)?;
@@ -1300,9 +1444,13 @@ pub fn test_storage(storage: &BackupStorage) -> Result<String, String> {
             if storage.path.is_empty() {
                 return Err("path is required".into());
             }
-            std::fs::create_dir_all(&storage.path)
-                .map_err(|e| format!("Failed to create {}: {}", storage.path, e))?;
-            Ok(format!("OK — writes will go to {}", storage.path))
+            if matches!(storage.storage_type, StorageType::Wolfdisk) {
+                BackupStorage::validate_wolfdisk_subpath(&storage.wolfdisk_subpath)?;
+            }
+            let target = storage.resolved_local_path();
+            std::fs::create_dir_all(&target)
+                .map_err(|e| format!("Failed to create {}: {}", target, e))?;
+            Ok(format!("OK — writes will go to {}", target))
         }
         // S3 / Remote / PBS each have their own connectivity concerns; they
         // aren't wired through this check yet because their failure modes
@@ -1727,7 +1875,7 @@ fn retrieve_backup(entry: &BackupEntry) -> Result<PathBuf, String> {
 
     match entry.storage.storage_type {
         StorageType::Local | StorageType::Wolfdisk => {
-            let source = Path::new(&entry.storage.path).join(&entry.filename);
+            let source = Path::new(&entry.storage.resolved_local_path()).join(&entry.filename);
             if !source.exists() {
                 return Err(format!("Backup file not found: {}", source.display()));
             }
@@ -2553,7 +2701,14 @@ fn storage_label(storage: &BackupStorage) -> String {
         StorageType::Local => format!("local: {}", storage.path),
         StorageType::S3 => format!("S3: {}", storage.bucket),
         StorageType::Remote => format!("remote: {}", storage.remote_url),
-        StorageType::Wolfdisk => format!("WolfDisk: {}", storage.path),
+        StorageType::Wolfdisk => {
+            let sub = storage.wolfdisk_subpath.trim().trim_matches('/');
+            if sub.is_empty() {
+                format!("WolfDisk: {}", storage.path)
+            } else {
+                format!("WolfDisk: {}/{}", storage.path.trim_end_matches('/'), sub)
+            }
+        }
         StorageType::Pbs => format!("PBS: {}", storage.pbs_server),
         StorageType::Nfs => format!("NFS: {}", storage.nfs_source),
         StorageType::Smb => {
@@ -2577,7 +2732,7 @@ pub fn delete_backup(id: &str) -> Result<String, String> {
     // Try to delete the file from storage
     match entry.storage.storage_type {
         StorageType::Local | StorageType::Wolfdisk => {
-            let path = Path::new(&entry.storage.path).join(&entry.filename);
+            let path = Path::new(&entry.storage.resolved_local_path()).join(&entry.filename);
             if path.exists() {
                 let _ = fs::remove_file(&path);
             }
@@ -3039,7 +3194,7 @@ pub fn check_schedules() {
                     let entry = &config.entries[idx];
                     match entry.storage.storage_type {
                         StorageType::Local | StorageType::Wolfdisk => {
-                            let path = Path::new(&entry.storage.path).join(&entry.filename);
+                            let path = Path::new(&entry.storage.resolved_local_path()).join(&entry.filename);
                             let _ = fs::remove_file(&path);
                         },
                         StorageType::Nfs => {

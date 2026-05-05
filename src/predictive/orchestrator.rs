@@ -28,7 +28,8 @@ use std::time::Duration;
 use crate::predictive::{
     AckStore, Context, MetricsHistory, ProposalStore,
     disk_fill, container_disk, container_restart, container_memory,
-    threshold, cert_expiry, backup_freshness, vm_disk, security_posture, notify,
+    threshold, cert_expiry, backup_freshness, vm_disk, security_posture,
+    vulnerability, notify,
 };
 
 /// Cadence between ticks once the loop is running.
@@ -57,6 +58,14 @@ const SYSTEMD_TIMEOUT: Duration = Duration::from_secs(5);
 /// (low ms) but the worst case if `/etc/letsencrypt/live` lives on
 /// a hung NFS bind is that we're sitting in `read_dir`.
 const CERT_SAMPLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Hard timeout for the full vulnerability sample (host + LXC fan-
+/// out). Larger than the others because it shells out to apt/dnf
+/// per LXC container, with each call doing a non-trivial amount of
+/// dependency-tree work. The inner sampler has its own per-target
+/// caps; this is the outer wall-clock guard so a slow tick doesn't
+/// blow past the 5-min cadence.
+const VULN_SAMPLE_TIMEOUT: Duration = Duration::from_secs(75);
 
 /// Resolved (Approved/Dismissed) proposals are pruned on every
 /// tick once they're older than this. Pending and active-Snoozed
@@ -102,7 +111,7 @@ pub async fn tick(
     // 1. Sample data sources concurrently with hard timeouts. Each
     //    sampler kills its child process on timeout — stuck NFS or
     //    a wedged docker daemon can no longer hang the orchestrator.
-    let (host_facts, container_facts, restart_facts, failed_units, cert_facts, mem_facts, backup_facts, vm_facts, sshd_cfg) = tokio::join!(
+    let (host_facts, container_facts, restart_facts, failed_units, cert_facts, mem_facts, backup_facts, vm_facts, sshd_cfg, vuln_facts) = tokio::join!(
         disk_fill::sample_disks_now_async(DF_TIMEOUT),
         container_disk::sample_containers_now_async(CONTAINER_SAMPLE_TIMEOUT),
         container_restart::sample_docker_restarts_now_async(CONTAINER_SAMPLE_TIMEOUT),
@@ -112,6 +121,7 @@ pub async fn tick(
         backup_freshness::sample_backup_freshness_now_async(SYSTEMD_TIMEOUT),
         vm_disk::sample_vm_disks_now_async(CERT_SAMPLE_TIMEOUT),
         security_posture::sample_sshd_config_now_async(SYSTEMD_TIMEOUT),
+        vulnerability::sample_now_async(VULN_SAMPLE_TIMEOUT),
     );
     // Sample current SystemMetrics off the shared monitor — same
     // sysinfo source as the live UI, so threshold findings line up
@@ -122,10 +132,13 @@ pub async fn tick(
             mon.lock().ok().map(|mut m| m.collect())
         }).await.ok().flatten()
     };
+    let no_vuln_data = vuln_facts.host_updates.is_empty()
+        && vuln_facts.lxc_results.iter().all(|r| r.updates.is_empty() && r.error.is_some());
     let no_data = host_facts.is_empty() && container_facts.is_empty()
         && restart_facts.is_empty() && cert_facts.is_empty()
         && mem_facts.is_empty() && backup_facts.is_empty()
-        && vm_facts.is_empty() && sys_metrics_opt.is_none();
+        && vm_facts.is_empty() && sys_metrics_opt.is_none()
+        && no_vuln_data;
     if no_data {
         tracing::debug!("predictive tick: no usable data from any sampler");
         return;
@@ -249,6 +262,9 @@ pub async fn tick(
     new_proposals.extend(security_posture::analyze(
         &ctx, &sshd_cfg, &acks_snap, &proposals_snap,
     ));
+    new_proposals.extend(vulnerability::analyze(
+        &ctx, &vuln_facts, &acks_snap, &proposals_snap,
+    ));
 
     // 5b. Build the "covered" set — every (finding_type, scope) the
     //     analyzers had data for this tick. Auto-resolve uses this
@@ -265,6 +281,7 @@ pub async fn tick(
     covered.extend(backup_freshness::covered_scopes(&ctx, &backup_facts));
     covered.extend(vm_disk::covered_scopes(&ctx, &vm_facts));
     covered.extend(security_posture::covered_scopes(&ctx, &sshd_cfg));
+    covered.extend(vulnerability::covered_scopes(&ctx, &vuln_facts));
     let emitted: Vec<(String, crate::predictive::ProposalScope)> = new_proposals.iter()
         .map(|p| (p.finding_type.clone(), p.scope.clone()))
         .collect();

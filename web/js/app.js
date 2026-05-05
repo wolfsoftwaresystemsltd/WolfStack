@@ -1165,6 +1165,193 @@ function hidePageLoadingOverlay(pageEl) {
     }
 }
 
+// ─── File browser modal — reusable path picker ───
+//
+// Pop a modal that lets the operator click through directories and
+// pick a path instead of typing one. Used wherever an input takes
+// a host filesystem path — backup subpath under WolfDisk, mount
+// sources, etc. — so a typo can't sneak past validation later.
+//
+// Usage:
+//   openFileBrowser({
+//     start: '/mnt/wolfdisk-data',  // initial directory
+//     kind: 'dir' | 'file' | 'any', // restrict the picker to this kind
+//     title: 'Choose subdirectory',
+//     onSelect: (chosen) => { ... },
+//   });
+//
+// `kind: 'dir'` hides files entirely and selects on Select-button.
+// `kind: 'file'` lets dirs be navigated into but only files can be
+// chosen as the final value (double-click selects).
+// `kind: 'any'` shows everything, double-click on dirs navigates,
+// double-click on files selects.
+//
+// Backed by GET /api/fs/browse — auth-gated. The endpoint excludes
+// /proc, /sys, /dev, /run automatically; everything else (including
+// /etc and /root) is browsable because the operator authenticated
+// to a server that already runs as root.
+function openFileBrowser(opts) {
+    const o = opts || {};
+    const start = o.start || '/';
+    const kind = o.kind || 'any';
+    const title = o.title || 'Choose path';
+    const onSelect = typeof o.onSelect === 'function' ? o.onSelect : null;
+    let currentPath = start;
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;';
+    overlay.innerHTML = `
+      <div style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;width:680px;max-width:95%;max-height:85vh;display:flex;flex-direction:column;color:var(--text-primary,#e4e4e7);box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+        <div style="padding:14px 18px;border-bottom:1px solid var(--border-color,#2d2f3a);display:flex;align-items:center;gap:10px;">
+          <h3 style="margin:0;flex:1;font-size:15px;color:var(--accent-light,#60a5fa);">📁 ${escapeHtml(title)}</h3>
+          <button class="btn btn-sm" id="fb-close" title="Close">✕</button>
+        </div>
+        <div style="padding:10px 14px;border-bottom:1px solid var(--border-color,#2d2f3a);display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          <button class="btn btn-sm" id="fb-up" title="Parent directory">⬆️</button>
+          <button class="btn btn-sm" id="fb-home" title="Filesystem root">🏠</button>
+          <input id="fb-path" type="text" value="${escapeAttr(start)}" spellcheck="false" autocomplete="off"
+                 style="flex:1;min-width:200px;font-family:var(--font-mono,monospace);font-size:12px;padding:6px 10px;border:1px solid var(--border-color,#3f4150);border-radius:6px;background:var(--bg-input,var(--bg-tertiary,#2d2f3a));color:var(--text-primary,#e4e4e7);">
+          <button class="btn btn-sm" id="fb-go" title="Go to typed path (Enter)">Go</button>
+          <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;">
+            <input type="checkbox" id="fb-hidden"> show hidden
+          </label>
+        </div>
+        <div id="fb-list" style="flex:1;overflow:auto;padding:6px 4px;min-height:280px;"></div>
+        <div style="padding:10px 14px;border-top:1px solid var(--border-color,#2d2f3a);display:flex;justify-content:space-between;gap:8px;align-items:center;">
+          <span id="fb-hint" style="font-size:11px;color:var(--text-muted);">${kind === 'dir' ? 'Pick a directory' : kind === 'file' ? 'Double-click a file to choose' : 'Double-click to enter a directory'}</span>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-sm" id="fb-cancel">Cancel</button>
+            <button class="btn btn-sm btn-primary" id="fb-select">Select</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const list = overlay.querySelector('#fb-list');
+    const pathInput = overlay.querySelector('#fb-path');
+    const hiddenCb = overlay.querySelector('#fb-hidden');
+    // Forward declare the escape handler ref so close() can detach
+    // it. Otherwise every open-then-close-via-X cycle leaks one
+    // dead listener on `document` — harmless individually, but in a
+    // long session the count creeps up.
+    let escHandlerRef = null;
+    const close = () => {
+        overlay.remove();
+        if (escHandlerRef) {
+            document.removeEventListener('keydown', escHandlerRef);
+            escHandlerRef = null;
+        }
+    };
+
+    function joinPath(base, name) {
+        const trimmed = base.replace(/\/+$/, '');
+        return (trimmed === '' ? '' : trimmed) + '/' + name;
+    }
+
+    // Sequence guard so a slow earlier request can't clobber the
+    // display of a faster later one. The operator double-clicking
+    // through dirs A → B can produce out-of-order responses; we
+    // discard everything except the most recent.
+    let loadSeq = 0;
+
+    async function load(path) {
+        const mySeq = ++loadSeq;
+        currentPath = path;
+        pathInput.value = path;
+        list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted);">Loading…</div>';
+        try {
+            const r = await fetch(apiUrl(`/api/fs/browse?path=${encodeURIComponent(path)}&show_hidden=${hiddenCb.checked}`));
+            // If a newer load() started while we were waiting on
+            // the network, drop this response — the newer one will
+            // (or already did) paint the list.
+            if (mySeq !== loadSeq) return;
+            const data = await r.json();
+            if (mySeq !== loadSeq) return;
+            if (data.error) {
+                list.innerHTML = `<div style="padding:24px;color:#f87171;text-align:center;font-size:13px;">${escapeHtml(data.error)}</div>`;
+                return;
+            }
+            currentPath = data.path || path;
+            pathInput.value = currentPath;
+            const items = (data.entries || []).filter(e => {
+                if (kind === 'dir') return e.kind === 'dir';
+                // For 'file' and 'any', dirs are still shown so the
+                // operator can navigate INTO them — selection logic
+                // below restricts what counts as a final pick.
+                return true;
+            });
+            if (items.length === 0) {
+                list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13px;">(empty)</div>';
+                return;
+            }
+            list.innerHTML = items.map(e => {
+                const icon = e.kind === 'dir' ? '📁' : e.kind === 'symlink' ? '🔗' : '📄';
+                const size = e.kind === 'file' && e.size != null ? formatBytes(e.size) : '';
+                return `<div class="fb-entry" data-name="${escapeAttr(e.name)}" data-kind="${escapeAttr(e.kind)}"
+                          style="display:flex;align-items:center;gap:10px;padding:6px 12px;cursor:pointer;border-radius:4px;font-size:13px;user-select:none;">
+                    <span style="font-size:14px;flex-shrink:0;">${icon}</span>
+                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(e.name)}</span>
+                    <span style="font-size:11px;color:var(--text-muted);">${escapeHtml(size)}</span>
+                </div>`;
+            }).join('');
+            list.querySelectorAll('.fb-entry').forEach(div => {
+                div.onmouseenter = () => { div.style.background = 'var(--bg-card-hover,rgba(255,255,255,0.03))'; };
+                div.onmouseleave = () => {
+                    if (!div.classList.contains('fb-selected')) div.style.background = '';
+                };
+                div.onclick = () => {
+                    list.querySelectorAll('.fb-entry').forEach(d => {
+                        d.classList.remove('fb-selected'); d.style.background = '';
+                    });
+                    div.classList.add('fb-selected');
+                    div.style.background = 'rgba(96,165,250,0.18)';
+                    pathInput.value = joinPath(currentPath, div.dataset.name);
+                };
+                div.ondblclick = () => {
+                    const k = div.dataset.kind;
+                    const next = joinPath(currentPath, div.dataset.name);
+                    if (k === 'dir') {
+                        load(next);
+                    } else if (kind !== 'dir' && onSelect) {
+                        onSelect(next);
+                        close();
+                    }
+                };
+            });
+        } catch (e) {
+            list.innerHTML = `<div style="padding:24px;color:#f87171;text-align:center;font-size:13px;">${escapeHtml(e.message || String(e))}</div>`;
+        }
+    }
+
+    overlay.querySelector('#fb-close').onclick = close;
+    overlay.querySelector('#fb-cancel').onclick = close;
+    overlay.querySelector('#fb-up').onclick = () => {
+        const parts = currentPath.replace(/\/+$/, '').split('/');
+        if (parts.length > 1) parts.pop();
+        load(parts.join('/') || '/');
+    };
+    overlay.querySelector('#fb-home').onclick = () => load('/');
+    overlay.querySelector('#fb-go').onclick = () => load(pathInput.value || '/');
+    pathInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); load(pathInput.value || '/'); }
+    });
+    hiddenCb.onchange = () => load(currentPath);
+    overlay.querySelector('#fb-select').onclick = () => {
+        const chosen = pathInput.value || currentPath;
+        if (onSelect) onSelect(chosen);
+        close();
+    };
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    escHandlerRef = (e) => {
+        if (e.key === 'Escape' && document.body.contains(overlay)) close();
+    };
+    document.addEventListener('keydown', escHandlerRef);
+
+    load(start);
+}
+window.openFileBrowser = openFileBrowser;
+
 // ─── Skeleton loaders — replace "Loading..." text screens ───
 //
 // Skeletons mirror the eventual layout so there's no jump on hydration.
@@ -19139,13 +19326,19 @@ async function populateStorageDropdown() {
             mounts.filter(m => m.status === 'mounted' && m.mount_point).forEach(m => {
                 const icon = ICONS[m.type] || '📦';
                 const label = `${icon} ${m.name} — ${m.mount_point}`;
-                const val = `mount:${m.mount_point}`;
+                // Encode the mount type in the option value so
+                // getSelectedStorage() can map a WolfDisk mount to
+                // {type:'wolfdisk', ...} (which the backend treats
+                // specially: it accepts a per-destination subpath
+                // under the mount root).
+                const val = `mount:${m.type || 'directory'}:${m.mount_point}`;
                 sel.innerHTML += `<option value="${escapeHtml(val)}">${escapeHtml(label)}</option>`;
             });
         }
     } catch (e) {
         console.error('Failed to load storage mounts for backup dropdown:', e);
     }
+    onBackupStorageChange();
     // Add PBS option if configured — make it the default
     try {
         const pbsResp = await fetch(apiUrl('/api/backups/pbs/config'));
@@ -19236,6 +19429,67 @@ function getSelectedTargets() {
 // Cached PBS config for use as storage target
 let _cachedPbsConfig = null;
 
+/// Show or hide the "Subdirectory" input + browse button based on
+/// which storage destination is currently selected. Only WolfDisk
+/// mounts get the input — Local writes already let the operator
+/// type any path, and NFS/SMB/PBS each have their own subpath
+/// model handled elsewhere.
+function onBackupStorageChange() {
+    const sel = document.getElementById('backup-storage-select');
+    const sub = document.getElementById('backup-storage-subpath');
+    const browse = document.getElementById('backup-storage-subpath-browse');
+    if (!sel || !sub) return;
+    const val = sel.value || '';
+    // mount:<type>:<mount_point> — WolfDisk gets the subpath input.
+    // Older option values (mount:<mount_point>) lack the type and
+    // default to "no subpath" — operator can re-pick from the list
+    // after a hard refresh to pick up the upgraded encoding.
+    const isWolfdisk = val.startsWith('mount:wolfdisk:');
+    sub.style.display = isWolfdisk ? '' : 'none';
+    if (browse) browse.style.display = isWolfdisk ? '' : 'none';
+    if (!isWolfdisk) sub.value = '';
+}
+
+/// Launch the file browser starting at the currently-selected
+/// WolfDisk mount root, restricted to directories. On select,
+/// converts the chosen absolute path back to a relative subpath
+/// under the mount root and writes it to the subpath input.
+function browseWolfDiskSubpath() {
+    const sel = document.getElementById('backup-storage-select');
+    const sub = document.getElementById('backup-storage-subpath');
+    if (!sel || !sub) { showToast('Backup destination not on this page', 'warning'); return; }
+    const val = sel.value || '';
+    if (!val.startsWith('mount:wolfdisk:')) {
+        showToast('Pick a WolfDisk destination first', 'warning');
+        return;
+    }
+    const mountPoint = val.substring('mount:wolfdisk:'.length).replace(/\/+$/, '');
+    // Start the picker INSIDE the current subpath if one is set —
+    // saves the operator from re-clicking through the same chain.
+    const current = (sub.value || '').replace(/^\/+|\/+$/g, '');
+    const startAt = current ? `${mountPoint}/${current}` : mountPoint;
+    openFileBrowser({
+        start: startAt,
+        kind: 'dir',
+        title: `Choose subdirectory under ${mountPoint}`,
+        onSelect: (chosen) => {
+            const norm = String(chosen || '').replace(/\/+$/, '');
+            if (norm === mountPoint) {
+                sub.value = '';
+                return;
+            }
+            if (norm.startsWith(mountPoint + '/')) {
+                sub.value = norm.substring(mountPoint.length + 1);
+                return;
+            }
+            // The picker can't normally walk outside the WolfDisk
+            // mount because the operator started there, but a typed
+            // path could escape. Refuse cleanly.
+            showToast('Selected path must be under the WolfDisk mount root', 'error');
+        },
+    });
+}
+
 async function getSelectedStorage() {
     const sel = document.getElementById('backup-storage-select');
     if (!sel) return { type: 'local', path: '/var/lib/wolfstack/backups' };
@@ -19243,7 +19497,35 @@ async function getSelectedStorage() {
     if (val.startsWith('local:')) {
         return { type: 'local', path: val.substring(6) };
     } else if (val.startsWith('mount:')) {
-        return { type: 'local', path: val.substring(6) };
+        // New encoding: mount:<type>:<mount_point>. The colon in
+        // <mount_point> is theoretically allowed in a Linux path but
+        // the storage subsystem rejects it at create time, so we can
+        // splitn(2) safely and treat the rest as the path.
+        const rest = val.substring(6);
+        const sepIdx = rest.indexOf(':');
+        if (sepIdx > 0) {
+            const mountType = rest.substring(0, sepIdx);
+            const mountPath = rest.substring(sepIdx + 1);
+            if (mountType === 'wolfdisk') {
+                const subEl = document.getElementById('backup-storage-subpath');
+                const subRaw = (subEl && subEl.value || '').trim();
+                // Reject `..` segments client-side. The backend also
+                // validates, but failing here gives a faster error.
+                if (subRaw.split('/').some(s => s === '..')) {
+                    showToast('Subdirectory must not contain ".." segments', 'error');
+                    throw new Error('invalid wolfdisk subpath');
+                }
+                return {
+                    type: 'wolfdisk',
+                    path: mountPath,
+                    wolfdisk_subpath: subRaw,
+                };
+            }
+            return { type: 'local', path: mountPath };
+        }
+        // Legacy encoding (mount:<mount_point>) — pre-this-feature
+        // dropdowns persisted with the old format; treat as local.
+        return { type: 'local', path: rest };
     } else if (val.startsWith('pbs:')) {
         // Load the full PBS config so the backend has all fields
         if (!_cachedPbsConfig) {
@@ -19394,7 +19676,11 @@ function formatStorageLabel(storage) {
         case 'local': return `📁 ${storage.path || '/var/lib/wolfstack/backups'}`;
         case 's3': return `☁️ s3://${storage.bucket || '?'}`;
         case 'remote': return `🌐 ${storage.remote_url || '?'}`;
-        case 'wolfdisk': return `💾 ${storage.path || '?'}`;
+        case 'wolfdisk': {
+            const sub = (storage.wolfdisk_subpath || '').trim().replace(/^\/+|\/+$/g, '');
+            const base = (storage.path || '?').replace(/\/+$/, '');
+            return sub ? `💾 ${base}/${sub}` : `💾 ${base}`;
+        }
         default: return storage.type || '—';
     }
 }
@@ -40182,8 +40468,86 @@ document.addEventListener('keydown', function(e) {
         const end = ta.selectionEnd;
         ta.value = ta.value.substring(0, start) + '  ' + ta.value.substring(end);
         ta.selectionStart = ta.selectionEnd = start + 2;
+        // The line count doesn't change here (no newline inserted)
+        // but force a sync anyway so a future change to the indent
+        // size that DOES add lines stays correct.
+        if (ta._gutterSync) ta._gutterSync();
     }
 });
+
+/// Wire a line-number gutter to a textarea. The gutter element must
+/// be a sibling immediately preceding the textarea in the DOM (per
+/// the layout in index.html — `.code-editor-wrap` flex container,
+/// gutter on the left, textarea on the right).
+///
+/// Sync model:
+///   - On `input` and on programmatic value changes, recompute the
+///     line count and rebuild the gutter inner HTML.
+///   - On `scroll`, mirror the textarea's scrollTop onto the gutter
+///     inner element via `top` (overflow:hidden on the gutter itself
+///     means setting scrollTop on the gutter wouldn't move anything).
+///
+/// `errorLines` is an optional Set<number> of 1-indexed line numbers
+/// to highlight (used after a Validate failure that names a line).
+function attachLineNumberGutter(textareaId, errorLines) {
+    const ta = document.getElementById(textareaId);
+    if (!ta) return;
+    const gutter = document.getElementById(textareaId + '-gutter');
+    if (!gutter) return;
+    const inner = gutter.querySelector('.code-editor-gutter-inner');
+    if (!inner) return;
+
+    const errs = errorLines instanceof Set ? errorLines : null;
+
+    // Stash the current error set on the textarea so the input/scroll
+    // listeners (wired ONCE per textarea) can read it via closure
+    // through `ta._gutterErrs`. Otherwise a re-call with a fresh
+    // errorLines set would produce a new `rebuild` closure that the
+    // existing listener never sees, and the operator's first
+    // keystroke after a Validate failure would clear the highlight
+    // mid-edit. Storing the set on the element keeps the listener
+    // closure stable while still letting callers update the data.
+    ta._gutterErrs = errs && errs.size > 0 ? errs : null;
+
+    const rebuild = () => {
+        const lineCount = Math.max(1, (ta.value.match(/\n/g) || []).length + 1);
+        // Pin the gutter width based on digit count so a 1000-line
+        // file doesn't look cramped at 3 chars and a 10-line file
+        // doesn't waste space at 4 chars.
+        const digits = String(lineCount).length;
+        gutter.style.minWidth = `${Math.max(44, 14 + digits * 9)}px`;
+        const activeErrs = ta._gutterErrs;
+        if (activeErrs && activeErrs.size > 0) {
+            // Build line-by-line so we can wrap error lines in a span.
+            const parts = [];
+            for (let i = 1; i <= lineCount; i++) {
+                if (activeErrs.has(i)) parts.push(`<span class="code-editor-gutter-line-error">${i}</span>`);
+                else parts.push(String(i));
+            }
+            inner.innerHTML = parts.join('\n');
+        } else {
+            // Plain numeric column — fastest path, no per-line spans.
+            const numbers = [];
+            for (let i = 1; i <= lineCount; i++) numbers.push(i);
+            inner.textContent = numbers.join('\n');
+        }
+    };
+
+    const syncScroll = () => {
+        inner.style.top = `${-ta.scrollTop}px`;
+    };
+
+    ta._gutterSync = () => { rebuild(); syncScroll(); };
+    if (!ta._gutterWired) {
+        // Listeners are attached once and read `ta._gutterErrs` each
+        // call — keeps the highlight stable across re-attaches.
+        ta.addEventListener('input', () => { rebuild(); syncScroll(); });
+        ta.addEventListener('scroll', syncScroll, { passive: true });
+        ta._gutterWired = true;
+    }
+    rebuild();
+    syncScroll();
+}
 
 async function loadComposeStacks() {
     try {
@@ -40245,6 +40609,8 @@ function showComposeCreate() {
     document.getElementById('compose-yaml-editor').value = '# Docker Compose\nservices:\n  app:\n    image: nginx:latest\n    ports:\n      - "8080:80"\n    restart: unless-stopped\n';
     document.getElementById('compose-env-editor').value = '# Environment variables\n# KEY=value\n';
     document.getElementById('compose-validate-result').textContent = '';
+    attachLineNumberGutter('compose-yaml-editor');
+    attachLineNumberGutter('compose-env-editor');
     switchComposeTab('yaml');
 
     // Add name input above editor
@@ -40286,6 +40652,8 @@ async function openComposeEditor(name) {
         showToast('Failed to load stack files: ' + e.message, 'error');
     }
 
+    attachLineNumberGutter('compose-yaml-editor');
+    attachLineNumberGutter('compose-env-editor');
     switchComposeTab('yaml');
     document.getElementById('compose-editor-modal').classList.add('active');
 }
@@ -40385,8 +40753,43 @@ async function validateComposeYaml() {
         const data = await resp.json();
         if (data.valid) {
             resultEl.innerHTML = '<span style="color:#22c55e;">✓ Valid</span>';
+            // Clear any previous error highlight on the gutter.
+            attachLineNumberGutter('compose-yaml-editor');
         } else {
             resultEl.innerHTML = `<span style="color:var(--danger-color, #ef4444);">✗ ${escapeHtml(data.error || 'Invalid')}</span>`;
+            // Pull out 1-indexed line number(s) the validator named so
+            // we can colour those rows in the gutter — operators
+            // shouldn't have to count down to find the line referenced
+            // in the error. Common formats:
+            //   "yaml: line 5: ..."
+            //   "line 12, column 3: ..."
+            //   "at line 42:"
+            // The regex picks up any "line N" mention and we stash the
+            // collected numbers as the gutter's error set.
+            const errLines = new Set();
+            const errText = String(data.error || '');
+            const re = /\bline\s+(\d+)/gi;
+            let m;
+            while ((m = re.exec(errText)) !== null) {
+                const n = parseInt(m[1], 10);
+                if (Number.isFinite(n) && n > 0) errLines.add(n);
+            }
+            attachLineNumberGutter('compose-yaml-editor', errLines);
+            // Scroll the textarea so the FIRST error line is visible.
+            // line N (1-indexed) sits at (N-1) * line-height from top.
+            if (errLines.size > 0) {
+                const ta = document.getElementById('compose-yaml-editor');
+                if (ta) {
+                    const firstLine = Math.min(...errLines);
+                    // Approximate line-height from computed style.
+                    const cs = window.getComputedStyle(ta);
+                    const fontPx = parseFloat(cs.fontSize) || 13;
+                    // 1.5x line-height matches the inline style on the textarea.
+                    const lh = parseFloat(cs.lineHeight) || (fontPx * 1.5);
+                    const target = Math.max(0, (firstLine - 3) * lh);
+                    ta.scrollTop = target;
+                }
+            }
         }
     } catch (e) {
         resultEl.innerHTML = `<span style="color:var(--danger-color, #ef4444);">Error: ${escapeHtml(e.message)}</span>`;
@@ -47694,6 +48097,19 @@ const predictiveState = {
     clusterFilter: null,  // null → all clusters
     nodeFilter: null,     // null → all nodes within the cluster filter
     loading: false,
+    // expandedIds: which rows are currently showing their full body.
+    // selectedIds: which rows are checked for a bulk action.
+    // pendingUndoIds: proposals that have been optimistically removed
+    //   but are still inside their undo window (deferred network call
+    //   has not fired yet). The 60s badge poll filters these out so
+    //   a cluster snapshot taken mid-undo doesn't re-add the row the
+    //   operator thought they'd just dismissed/approved. Cleared by
+    //   the undo handler when the operator hits Undo, or when the
+    //   timeout fires and the API call goes out.
+    // All three are kept on the client only — they don't survive reload.
+    expandedIds: new Set(),
+    selectedIds: new Set(),
+    pendingUndoIds: new Set(),
 };
 let predictiveBadgeTimer = null;
 
@@ -47746,8 +48162,8 @@ function renderPredictiveInbox() {
                         <button class="btn btn-sm" onclick="predictiveRunNow()" id="predictive-run-now">🔄 Run analyzer now</button>
                     </div>
                 </div>
-                <div class="predictive-split" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,560px);gap:16px;align-items:stretch;flex:1;min-height:0;">
-                    <div id="predictive-list-scroll" style="min-width:0;overflow-y:auto;padding-right:6px;">
+                <div class="predictive-split" style="display:flex;align-items:stretch;flex:1;min-height:0;gap:0;">
+                    <div id="predictive-list-scroll" style="flex:1 1 auto;min-width:0;overflow-y:auto;padding-right:6px;">
                         <div id="predictive-list">
                             <div style="color:var(--text-muted);padding:40px;text-align:center;">Loading…</div>
                         </div>
@@ -47768,23 +48184,29 @@ function renderPredictiveInbox() {
                             <div style="padding:0 14px 12px 14px;font-size:12px;color:var(--text-secondary);line-height:1.55;">
                                 Every analyzer item from the original roadmap is live: host filesystem usage,
                                 Docker / LXC container storage and memory pressure, restart-loops, host CPU/memory
-                                thresholds, certificate expiry, backup freshness, VM disk-fill, and security
-                                posture (services on public IPs, sshd permissive auth). Sampled every 5 minutes
-                                on each cluster node; aggregated cluster-wide here. First-appearance Critical/High
-                                findings page Discord/Slack/Telegram/email channels — once per finding, not on
-                                every refresh. Stale findings auto-resolve when the analyzer no longer sees the
-                                condition.
+                                thresholds, certificate expiry, backup freshness, VM disk-fill, security
+                                posture (services on public IPs, sshd permissive auth), and CVE susceptibility
+                                (pending security updates from apt / dnf on the host and inside running LXC
+                                containers — Docker / VM scans need a guest agent or image scanner and aren't
+                                wired up yet). Sampled every 5 minutes on each cluster node; aggregated cluster-wide
+                                here. First-appearance Critical/High findings page Discord/Slack/Telegram/email
+                                channels — once per finding, not on every refresh. Stale findings auto-resolve
+                                when the analyzer no longer sees the condition.
                             </div>
                         </details>
                     </div>
-                    <div id="predictive-terminal-pane" style="background:var(--bg-card,#1e2028);border:1px solid var(--border,#2d2f3a);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;min-height:0;">
-                        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border,#2d2f3a);background:var(--bg-secondary,#16181f);flex-shrink:0;">
+                    <div id="predictive-splitter" title="Drag to resize · double-click to reset" style="flex:0 0 8px;cursor:col-resize;background:transparent;position:relative;margin:0 4px;user-select:none;touch-action:none;"></div>
+                    <div id="predictive-terminal-pane" style="background:var(--bg-card,#1e2028);border:1px solid var(--border,#2d2f3a);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;min-height:0;flex:0 0 560px;">
+                        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border,#2d2f3a);background:var(--bg-secondary,#16181f);flex-shrink:0;gap:8px;">
                             <div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;min-width:0;">
                                 <span id="predictive-term-spinner" style="display:none;width:14px;height:14px;border:2px solid rgba(96,165,250,0.25);border-top-color:#60a5fa;border-radius:50%;animation:predTermSpin 0.7s linear infinite;flex-shrink:0;"></span>
                                 <span id="predictive-term-icon" style="font-size:16px;flex-shrink:0;">💻</span>
                                 <span id="predictive-term-status" style="color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">No active terminal</span>
                             </div>
-                            <button class="btn btn-sm" onclick="predTermClose()" id="predictive-term-close" style="display:none;font-size:11px;padding:2px 8px;flex-shrink:0;">✕ Close</button>
+                            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                                <button class="btn btn-sm" onclick="predictiveToggleMaximize()" id="predictive-term-max" title="Maximize terminal" style="font-size:11px;padding:2px 8px;">⛶</button>
+                                <button class="btn btn-sm" onclick="predTermClose()" id="predictive-term-close" style="display:none;font-size:11px;padding:2px 8px;">✕ Close</button>
+                            </div>
                         </div>
                         <div id="predictive-term-container" style="flex:1;background:#0a0a0a;padding:8px 8px 14px 8px;overflow:hidden;min-height:0;">
                             <div style="color:var(--text-muted);padding:24px;text-align:center;font-size:13px;line-height:1.6;">
@@ -47799,28 +48221,58 @@ function renderPredictiveInbox() {
                         from { transform: rotate(0deg); }
                         to   { transform: rotate(360deg); }
                     }
+                    /* Drag splitter — invisible by default, lights up
+                       on hover/active so it discoverable without being
+                       visual noise at rest. */
+                    #predictive-splitter::after {
+                        content: '';
+                        position: absolute;
+                        top: 50%;
+                        left: 50%;
+                        transform: translate(-50%, -50%);
+                        width: 2px;
+                        height: 36px;
+                        background: var(--border, #2d2f3a);
+                        border-radius: 1px;
+                        transition: background 0.15s, height 0.15s;
+                    }
+                    #predictive-splitter:hover::after,
+                    #predictive-splitter.dragging::after {
+                        background: #60a5fa;
+                        height: 64px;
+                    }
+                    .predictive-split.maximized #predictive-list-scroll,
+                    .predictive-split.maximized #predictive-splitter { display: none; }
+                    .predictive-split.maximized #predictive-terminal-pane { flex: 1 1 auto !important; }
                     /* Tablet / small laptop — stack to one column. The
-                       fixed split-grid height becomes a sum of the
-                       list's max-height and the terminal's height so
-                       neither overlaps the other. */
+                       splitter and persisted width are not meaningful in
+                       a single-column stack, so we hide the splitter and
+                       reset the terminal pane to a fixed height. */
                     @media (max-width: 1100px) {
                         .predictive-split {
-                            grid-template-columns: 1fr !important;
+                            flex-direction: column !important;
                             height: auto !important;
                         }
+                        #predictive-splitter { display: none !important; }
                         #predictive-list-scroll {
                             max-height: 60vh;
+                            flex: 0 1 auto !important;
                         }
-                        #predictive-terminal-pane { height: 380px !important; }
+                        #predictive-terminal-pane {
+                            flex: 0 0 380px !important;
+                            height: 380px !important;
+                        }
                     }
                     /* Phone — tighter outer padding, shorter terminal
                        so at least one proposal stays visible above it
                        without scrolling. */
                     @media (max-width: 640px) {
                         .predictive-shell { padding: 12px !important; }
-                        .predictive-split { gap: 12px !important; }
                         #predictive-list-scroll { max-height: 55vh; }
-                        #predictive-terminal-pane { height: 300px !important; }
+                        #predictive-terminal-pane {
+                            flex: 0 0 300px !important;
+                            height: 300px !important;
+                        }
                         /* xterm uses fixed font sizing — drop one
                            notch on phones so an 80-col line fits the
                            pane width. */
@@ -47828,15 +48280,158 @@ function renderPredictiveInbox() {
                         #predictive-term-container .xterm-viewport,
                         #predictive-term-container .xterm-screen { font-size: 11px !important; }
                     }
-                    /* Touch-target sizing for the Close button. */
+                    /* Touch-target sizing for header buttons. */
                     @media (pointer: coarse) {
-                        #predictive-term-close { min-height: 36px; min-width: 60px; }
+                        #predictive-term-close,
+                        #predictive-term-max { min-height: 36px; min-width: 40px; }
                     }
                 </style>
             </div>
         `;
     }
+    predictiveSetupSplitter();
     predictiveLoad();
+}
+
+/// Drag-to-resize between the proposals list and the embedded
+/// terminal pane. Persists the chosen terminal-pane width in
+/// localStorage so it survives page reloads. Bypassed on the
+/// stacked single-column layout (≤1100px) — the splitter is hidden
+/// via media query and we don't apply a persisted pixel width that
+/// would fight with the column-direction layout.
+///
+/// Why pixels not percent: the inbox's outer width changes with the
+/// sidebar collapse state and window resize. A persisted percentage
+/// would survive both, but operators usually want "give me a wider
+/// terminal" expressed as "this many columns of xterm" — a pixel
+/// width is a closer proxy than a percent. We clamp on resize so a
+/// previously-saved 800px terminal doesn't push the proposals list
+/// to zero width on a narrower window.
+const PRED_TERM_WIDTH_KEY = 'wolfstack.predictive.term_width_px';
+const PRED_TERM_WIDTH_MIN = 360;
+const PRED_TERM_WIDTH_DEFAULT = 560;
+function predictiveSetupSplitter() {
+    const split = document.querySelector('.predictive-split');
+    const splitter = document.getElementById('predictive-splitter');
+    const termPane = document.getElementById('predictive-terminal-pane');
+    if (!split || !splitter || !termPane) return;
+    if (splitter.dataset.wired === '1') {
+        // Re-render of renderPredictiveInbox keeps the same DOM, so we
+        // don't re-attach. Just re-apply the persisted width in case
+        // we're back from a maximized state.
+        predictiveApplyTermWidth();
+        return;
+    }
+    splitter.dataset.wired = '1';
+
+    predictiveApplyTermWidth();
+
+    let dragStartX = 0;
+    let dragStartWidth = 0;
+    const onMove = (e) => {
+        const x = e.touches ? e.touches[0].clientX : e.clientX;
+        const splitWidth = split.clientWidth;
+        // Drag LEFT increases terminal width (terminal is on the
+        // right). Compute the new width from the delta and clamp so
+        // the list pane keeps at least 360px of breathing room.
+        const desired = dragStartWidth - (x - dragStartX);
+        const maxTerm = Math.max(PRED_TERM_WIDTH_MIN, splitWidth - 360 - 16);
+        const clamped = Math.max(PRED_TERM_WIDTH_MIN, Math.min(maxTerm, desired));
+        termPane.style.flex = `0 0 ${clamped}px`;
+        // Refit while dragging so the operator sees the column count
+        // change in real time, not just on mouseup.
+        try { predTermState.fitAddon && predTermState.fitAddon.fit(); } catch (_) {}
+    };
+    const onUp = () => {
+        splitter.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.removeEventListener('touchmove', onMove);
+        document.removeEventListener('touchend', onUp);
+        // Persist the final width.
+        const m = /0 0 (\d+(?:\.\d+)?)px/.exec(termPane.style.flex || '');
+        if (m) {
+            try { localStorage.setItem(PRED_TERM_WIDTH_KEY, String(Math.round(parseFloat(m[1])))); } catch (_) {}
+        }
+        try { predTermState.fitAddon && predTermState.fitAddon.fit(); } catch (_) {}
+    };
+    const onDown = (e) => {
+        // Skip when the layout has stacked (mobile) — the splitter is
+        // hidden via media query, but a stylus/keyboard route could
+        // still trigger this. getBoundingClientRect().width === 0
+        // when display:none.
+        if (splitter.getBoundingClientRect().width === 0) return;
+        if (split.classList.contains('maximized')) return;
+        e.preventDefault();
+        dragStartX = e.touches ? e.touches[0].clientX : e.clientX;
+        dragStartWidth = termPane.getBoundingClientRect().width;
+        splitter.classList.add('dragging');
+        document.body.style.cursor = 'col-resize';
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        document.addEventListener('touchmove', onMove, { passive: false });
+        document.addEventListener('touchend', onUp);
+    };
+    splitter.addEventListener('mousedown', onDown);
+    splitter.addEventListener('touchstart', onDown, { passive: false });
+    splitter.addEventListener('dblclick', () => {
+        try { localStorage.removeItem(PRED_TERM_WIDTH_KEY); } catch (_) {}
+        termPane.style.flex = `0 0 ${PRED_TERM_WIDTH_DEFAULT}px`;
+        try { predTermState.fitAddon && predTermState.fitAddon.fit(); } catch (_) {}
+    });
+
+    // Re-clamp on window resize so a previously-saved 900px terminal
+    // doesn't push the list pane to zero on a narrower viewport.
+    window.addEventListener('resize', () => {
+        if (split.classList.contains('maximized')) return;
+        const splitWidth = split.clientWidth;
+        if (splitWidth <= 0) return;
+        const cur = termPane.getBoundingClientRect().width;
+        const maxTerm = Math.max(PRED_TERM_WIDTH_MIN, splitWidth - 360 - 16);
+        if (cur > maxTerm) {
+            termPane.style.flex = `0 0 ${maxTerm}px`;
+            try { predTermState.fitAddon && predTermState.fitAddon.fit(); } catch (_) {}
+        }
+    });
+}
+
+function predictiveApplyTermWidth() {
+    const termPane = document.getElementById('predictive-terminal-pane');
+    if (!termPane) return;
+    let saved = PRED_TERM_WIDTH_DEFAULT;
+    try {
+        const v = localStorage.getItem(PRED_TERM_WIDTH_KEY);
+        if (v) {
+            const n = parseInt(v, 10);
+            if (Number.isFinite(n) && n >= PRED_TERM_WIDTH_MIN) saved = n;
+        }
+    } catch (_) {}
+    termPane.style.flex = `0 0 ${saved}px`;
+}
+
+/// Toggle the terminal pane between split (default) and maximized
+/// (full inbox width, list pane hidden). Refits xterm on each
+/// transition so the visible column count matches the new pixel
+/// width — without a refit the terminal looks "frozen" mid-line at
+/// the old width until something else triggers a fit.
+function predictiveToggleMaximize() {
+    const split = document.querySelector('.predictive-split');
+    const btn = document.getElementById('predictive-term-max');
+    if (!split) return;
+    const becomingMax = !split.classList.contains('maximized');
+    split.classList.toggle('maximized', becomingMax);
+    if (btn) {
+        btn.title = becomingMax ? 'Restore split' : 'Maximize terminal';
+        btn.textContent = becomingMax ? '⊟' : '⛶';
+    }
+    // Two refits: one synchronous so xterm reflows immediately, one
+    // after a frame so the post-layout final width is also picked up
+    // (the flex transition is instant in CSS but layout still runs in
+    // the next frame).
+    const refit = () => { try { predTermState.fitAddon && predTermState.fitAddon.fit(); } catch (_) {} };
+    refit();
+    requestAnimationFrame(refit);
 }
 
 async function predictiveLoad() {
@@ -47960,6 +48555,30 @@ function predictiveRender() {
         html += row;
     }
 
+    // Bulk-action toolbar — always rendered (display toggles based on
+    // selection size). Master checkbox toggles every VISIBLE row so a
+    // filter scopes the bulk action; bar buttons fan out per-id but
+    // optimistic-remove all selected rows in one go.
+    if (filtered.length > 0) {
+        html += `
+            <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;margin-bottom:10px;background:var(--bg-secondary,#16181f);border:1px solid var(--border-color,#2d2f3a);border-radius:8px;">
+                <input type="checkbox" id="predictive-bulk-master"
+                       onchange="predictiveSelectAllVisible(this.checked)"
+                       title="Select all visible"
+                       style="margin:0;cursor:pointer;width:16px;height:16px;">
+                <label for="predictive-bulk-master" style="font-size:11px;color:var(--text-muted);cursor:pointer;">Select all (${filtered.length})</label>
+                <div id="predictive-bulk-bar" style="display:none;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap;">
+                    <span class="pred-bulk-count" style="font-size:12px;color:var(--text-secondary);font-weight:500;">0 selected</span>
+                    <button class="btn btn-sm btn-primary" onclick="predictiveBulkApprove()" title="Mark every selected proposal as applied">✓ Mark applied</button>
+                    <button class="btn btn-sm" onclick="predictiveBulkSnooze(24)">⏰ Snooze 24h</button>
+                    <button class="btn btn-sm" onclick="predictiveBulkSnooze(168)">⏰ Snooze 1w</button>
+                    <button class="btn btn-sm" onclick="predictiveBulkDismiss()">✗ Dismiss…</button>
+                    <button class="btn btn-sm" onclick="predictiveClearSelection()" title="Clear selection without acting">✕</button>
+                </div>
+            </div>
+        `;
+    }
+
     if (filtered.length === 0) {
         const filterMsg = (predictiveState.clusterFilter || predictiveState.nodeFilter)
             ? `<div style="font-size:13px;line-height:1.55;max-width:520px;margin:0 auto;">No proposals match the current filter. Clear it to see findings from the rest of the cluster.</div>`
@@ -47982,17 +48601,17 @@ function predictiveRender() {
         });
         const orderedClusters = Object.keys(groups).sort();
         for (const c of orderedClusters) {
-            html += `<div style="margin-top:18px;margin-bottom:8px;font-size:13px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">${escapeHtml(c)} — ${groups[c].length} finding${groups[c].length === 1 ? '' : 's'}</div>`;
-            html += groups[c].map(predictiveCardHtml).join('');
+            html += `<div style="margin-top:14px;margin-bottom:6px;font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">${escapeHtml(c)} — ${groups[c].length} finding${groups[c].length === 1 ? '' : 's'}</div>`;
+            html += groups[c].map(predictiveRowHtml).join('');
         }
     } else {
-        html += filtered.map(predictiveCardHtml).join('');
+        html += filtered.map(predictiveRowHtml).join('');
     }
 
     list.innerHTML = html;
-    // Kick off the per-card history fetches now that the slots are
-    // in the DOM. Fire-and-forget — populates each slot as its
-    // response arrives, doesn't block the render.
+    predictiveUpdateBulkBar();
+    // Kick off the per-card history fetches for any expanded rows.
+    // Fire-and-forget — populates each slot as its response arrives.
     predictivePopulateHistorySlots();
 }
 
@@ -48033,17 +48652,83 @@ function predictiveRuntimeBadge(p) {
     return { label: 'FINDING', icon: '📌', color: '#64748b' };
 }
 
-function predictiveCardHtml(p) {
+/// Per-proposal severity colour + label. Used by both the compact
+/// row and the expanded body so the eye carries the same meaning
+/// across both states.
+function predictiveSevStyle(p) {
     const sev = p.severity || 'info';
     const colors = { critical: '#ef4444', high: '#f97316', warn: '#fbbf24', info: '#60a5fa' };
     const labels = { critical: 'CRITICAL', high: 'HIGH', warn: 'WARN', info: 'INFO' };
-    const c = colors[sev] || '#94a3b8';
+    return { color: colors[sev] || '#94a3b8', label: labels[sev] || sev.toUpperCase() };
+}
+
+/// Resolve cluster + hostname for a proposal once. Hostname is the
+/// human-friendly answer to "which server?"; cluster groups it. Both
+/// the compact row and the expanded body reuse this.
+function predictiveLocator(p) {
+    const clusterByNode = {};
+    const hostnameByNode = {};
+    (predictiveState.nodes || []).forEach(n => {
+        clusterByNode[n.node_id] = n.cluster_name || 'WolfStack';
+        if (n.hostname) hostnameByNode[n.node_id] = n.hostname;
+    });
+    return {
+        cluster: clusterByNode[p.scope.node_id] || '',
+        host:    hostnameByNode[p.scope.node_id] || p.scope.node_id,
+        resource: p.scope.resource_id || '',
+    };
+}
+
+/// Compact row used in the new expandable-grid layout. Two-line
+/// summary (server name → issue title) + checkbox + chevron. Click
+/// anywhere except the checkbox / action buttons toggles the
+/// expanded body. The actions move into the expanded body so the
+/// row stays scannable; bulk actions are exposed via the master bar
+/// when ≥1 row is checked.
+function predictiveRowHtml(p) {
+    const { color: c, label: sevLabel } = predictiveSevStyle(p);
+    const { cluster, host, resource } = predictiveLocator(p);
+    const expanded = predictiveState.expandedIds.has(p.id);
+    const selected = predictiveState.selectedIds.has(p.id);
+
+    const snoozedBadge = (p.status && p.status.kind === 'snoozed')
+        ? '<span style="background:rgba(96,165,250,0.18);color:#60a5fa;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;margin-left:6px;">SNOOZED</span>'
+        : '';
+
+    return `
+        <div class="pred-row${expanded ? ' expanded' : ''}" data-pid="${escapeAttr(p.id)}"
+             style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-left:4px solid ${c};border-radius:8px;margin-bottom:6px;overflow:hidden;">
+            <div class="pred-row-head" onclick="predictiveToggleExpand('${escapeAttr(p.id)}', event)"
+                 style="display:grid;grid-template-columns:auto auto 1fr auto;gap:10px;align-items:center;padding:10px 12px;cursor:pointer;">
+                <input type="checkbox" class="pred-row-check"
+                       onclick="event.stopPropagation();predictiveToggleSelect('${escapeAttr(p.id)}', this.checked)"
+                       ${selected ? 'checked' : ''}
+                       style="margin:0;cursor:pointer;width:16px;height:16px;flex-shrink:0;">
+                <span style="background:${c};color:#fff;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:0.5px;min-width:62px;text-align:center;">${sevLabel}</span>
+                <div style="min-width:0;display:flex;flex-direction:column;gap:2px;">
+                    <div style="font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:6px;flex-wrap:nowrap;overflow:hidden;">
+                        ${cluster ? `<span style="color:#c084fc;font-weight:500;flex-shrink:0;">${escapeHtml(cluster)}</span><span style="opacity:0.5;flex-shrink:0;">·</span>` : ''}
+                        <span title="${escapeAttr(p.scope.node_id)}" style="color:var(--text-secondary);font-weight:500;flex-shrink:0;">🖥️ ${escapeHtml(host)}</span>
+                        ${resource ? `<span style="opacity:0.5;flex-shrink:0;">·</span><code style="background:var(--bg-tertiary,#2d2f3a);padding:1px 6px;border-radius:4px;font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">${escapeHtml(resource)}</code>` : ''}
+                    </div>
+                    <div style="font-size:13px;color:var(--text-primary);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(p.title)}${snoozedBadge}</div>
+                </div>
+                <span class="pred-row-chev" style="color:var(--text-muted);font-size:12px;transform:rotate(${expanded ? '90deg' : '0deg'});transition:transform 0.15s;flex-shrink:0;">▶</span>
+            </div>
+            ${expanded ? `<div class="pred-row-body" style="border-top:1px solid var(--border-color,#2d2f3a);padding:14px 16px;">${predictiveExpandedBody(p)}</div>` : ''}
+        </div>
+    `;
+}
+
+/// The full detail panel shown when a row is expanded — evidence,
+/// why, history graph, remediation commands, and the per-proposal
+/// action buttons. This is what the original card layout contained;
+/// it's now hidden behind a click on the compact row.
+function predictiveExpandedBody(p) {
     const sourceBadge = p.source === 'ai'
         ? '<span style="background:rgba(168,85,247,0.18);color:#c084fc;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:600;margin-left:6px;">🤖 AI</span>'
         : '';
-
     const runtime = predictiveRuntimeBadge(p);
-
     const evidence = (p.evidence || []).map(e => `
         <div style="display:inline-block;background:var(--bg-tertiary,#2d2f3a);padding:4px 10px;border-radius:6px;margin-right:6px;margin-bottom:6px;font-size:12px;">
             <span style="color:var(--text-muted);">${escapeHtml(e.label)}:</span>
@@ -48051,7 +48736,6 @@ function predictiveCardHtml(p) {
             ${e.detail ? `<span style="color:var(--text-muted);margin-left:8px;font-size:11px;">${escapeHtml(e.detail)}</span>` : ''}
         </div>
     `).join('');
-
     const remediation = predictiveRemediationHtml(p.remediation, p.id);
 
     let snoozeNotice = '';
@@ -48061,52 +48745,85 @@ function predictiveCardHtml(p) {
         snoozeNotice = `<div style="background:rgba(96,165,250,0.1);padding:8px 12px;border-radius:6px;font-size:12px;color:#60a5fa;margin-bottom:12px;">⏰ Snoozed until ${escapeHtml(untilStr)} — will re-fire after.</div>`;
     }
 
-    // Resolve cluster_name + hostname for this proposal's node.
-    // Hostname is the human-friendly answer to "which server?";
-    // cluster groups it; resource_id (e.g. "docker:postgres", "/var/log",
-    // "vm:opnsense:...") finishes the address.
-    const clusterByNode = {};
-    const hostnameByNode = {};
-    (predictiveState.nodes || []).forEach(n => {
-        clusterByNode[n.node_id] = n.cluster_name || 'WolfStack';
-        if (n.hostname) hostnameByNode[n.node_id] = n.hostname;
-    });
-    const cluster = clusterByNode[p.scope.node_id] || '';
-    const host = hostnameByNode[p.scope.node_id] || p.scope.node_id;
-    const resource = p.scope.resource_id || '';
-
     return `
-        <div style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-left:4px solid ${c};border-radius:10px;padding:16px 18px;margin-bottom:12px;">
-            <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px;gap:12px;">
-                <div style="flex:1;min-width:0;">
-                    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
-                        <span style="background:${c};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:0.5px;">${labels[sev] || sev.toUpperCase()}</span>
-                        <span style="background:${runtime.color};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:0.5px;display:inline-flex;align-items:center;gap:4px;">${runtime.icon} ${runtime.label}</span>
-                        ${sourceBadge}
-                    </div>
-                    <div style="font-size:15px;font-weight:600;color:var(--text-primary);margin-bottom:4px;">${escapeHtml(p.title)}</div>
-                    <div style="font-size:12px;color:var(--text-muted);display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                        ${cluster ? `<span style="color:#c084fc;font-weight:500;">${escapeHtml(cluster)}</span><span>·</span>` : ''}
-                        <span title="${escapeAttr(p.scope.node_id)}" style="color:var(--text-secondary);font-weight:500;">🖥️ ${escapeHtml(host)}</span>
-                        ${resource ? `<span>·</span><code style="background:var(--bg-tertiary,#2d2f3a);padding:1px 6px;border-radius:4px;font-size:11px;">${escapeHtml(resource)}</code>` : ''}
-                        <span style="opacity:0.5;margin-left:6px;">${escapeHtml(p.finding_type)}</span>
-                    </div>
-                </div>
-            </div>
-            ${snoozeNotice}
-            <div style="font-size:13px;color:var(--text-secondary);line-height:1.55;margin-bottom:12px;">${escapeHtml(p.why)}</div>
-            ${predictiveHistorySlot(p)}
-            ${evidence ? `<div style="margin-bottom:12px;">${evidence}</div>` : ''}
-            ${remediation}
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <button class="btn btn-sm btn-primary" onclick="predictiveApprove('${escapeAttr(p.id)}')">✓ Mark applied</button>
-                <button class="btn btn-sm" onclick="predictiveOpenTerm('${escapeAttr(p.id)}')" title="Open an interactive shell on this proposal's target — host, container, or VM">💻 Open terminal</button>
-                <button class="btn btn-sm" onclick="predictiveSnoozeMenu('${escapeAttr(p.id)}', this)">⏰ Snooze</button>
-                <button class="btn btn-sm" onclick="predictiveDismiss('${escapeAttr(p.id)}')">✗ Dismiss</button>
-                <button class="btn btn-sm" onclick="predictiveAck('${escapeAttr(p.finding_type)}', '${escapeAttr(p.scope.node_id)}', '${escapeAttr(p.scope.resource_id || '')}')">🛡 Ack as intentional</button>
-            </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
+            <span style="background:${runtime.color};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:0.5px;display:inline-flex;align-items:center;gap:4px;">${runtime.icon} ${runtime.label}</span>
+            ${sourceBadge}
+            <span style="opacity:0.5;font-size:11px;color:var(--text-muted);margin-left:auto;">${escapeHtml(p.finding_type)}</span>
+        </div>
+        ${snoozeNotice}
+        <div style="font-size:13px;color:var(--text-secondary);line-height:1.55;margin-bottom:12px;">${escapeHtml(p.why)}</div>
+        ${predictiveHistorySlot(p)}
+        ${evidence ? `<div style="margin-bottom:12px;">${evidence}</div>` : ''}
+        ${remediation}
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn btn-sm btn-primary" onclick="predictiveApprove('${escapeAttr(p.id)}')">✓ Mark applied</button>
+            <button class="btn btn-sm" onclick="predictiveOpenTerm('${escapeAttr(p.id)}')" title="Open an interactive shell on this proposal's target — host, container, or VM">💻 Open terminal</button>
+            <button class="btn btn-sm" onclick="predictiveSnoozeMenu('${escapeAttr(p.id)}', this)">⏰ Snooze</button>
+            <button class="btn btn-sm" onclick="predictiveDismiss('${escapeAttr(p.id)}')">✗ Dismiss</button>
+            <button class="btn btn-sm" onclick="predictiveAck('${escapeAttr(p.finding_type)}', '${escapeAttr(p.scope.node_id)}', '${escapeAttr(p.scope.resource_id || '')}')">🛡 Ack as intentional</button>
         </div>
     `;
+}
+
+/// Toggle a row's expanded state. Click on a button or input inside
+/// the row should NOT toggle — those have their own handlers and
+/// have called event.stopPropagation, so we only re-check the
+/// composedPath as a defensive measure.
+function predictiveToggleExpand(id, ev) {
+    if (ev) {
+        const t = ev.target;
+        if (t && (t.tagName === 'BUTTON' || t.tagName === 'INPUT' || t.closest('button') || t.closest('input'))) return;
+    }
+    if (predictiveState.expandedIds.has(id)) predictiveState.expandedIds.delete(id);
+    else predictiveState.expandedIds.add(id);
+    predictiveRender();
+}
+
+function predictiveToggleSelect(id, checked) {
+    if (checked) predictiveState.selectedIds.add(id);
+    else predictiveState.selectedIds.delete(id);
+    predictiveUpdateBulkBar();
+}
+
+/// Select-all checkbox in the master toolbar — toggles selection for
+/// every currently-VISIBLE proposal (so a filter narrows the bulk
+/// scope, which matches the operator's mental model).
+function predictiveSelectAllVisible(checked) {
+    const visible = predictiveCurrentlyVisible();
+    if (checked) visible.forEach(p => predictiveState.selectedIds.add(p.id));
+    else visible.forEach(p => predictiveState.selectedIds.delete(p.id));
+    predictiveRender();
+}
+
+/// Returns the proposals matching the current filter — used to scope
+/// "select all" and to know what bulk actions apply to.
+function predictiveCurrentlyVisible() {
+    const all = predictiveState.proposals || [];
+    const clusterByNode = {};
+    (predictiveState.nodes || []).forEach(n => { clusterByNode[n.node_id] = n.cluster_name || 'WolfStack'; });
+    let v = all;
+    if (predictiveState.clusterFilter) v = v.filter(p => (clusterByNode[p.scope?.node_id] || 'WolfStack') === predictiveState.clusterFilter);
+    if (predictiveState.nodeFilter)    v = v.filter(p => p.scope && p.scope.node_id === predictiveState.nodeFilter);
+    return v;
+}
+
+function predictiveUpdateBulkBar() {
+    const bar = document.getElementById('predictive-bulk-bar');
+    if (!bar) return;
+    const n = predictiveState.selectedIds.size;
+    bar.style.display = n > 0 ? 'flex' : 'none';
+    const label = bar.querySelector('.pred-bulk-count');
+    if (label) label.textContent = `${n} selected`;
+    // Sync the master checkbox: checked when every visible row is
+    // selected, indeterminate when some are.
+    const master = document.getElementById('predictive-bulk-master');
+    if (master) {
+        const visible = predictiveCurrentlyVisible();
+        const selectedVisible = visible.filter(p => predictiveState.selectedIds.has(p.id)).length;
+        master.checked = visible.length > 0 && selectedVisible === visible.length;
+        master.indeterminate = selectedVisible > 0 && selectedVisible < visible.length;
+    }
 }
 
 // ─── Trend graphs ───
@@ -48362,7 +49079,11 @@ async function predictiveRunCmd(proposalId, cmdIdx) {
     // before the await so the operator gets immediate feedback.
     // Otherwise nothing visible happens between click and WS open
     // (especially noticeable when the proposal lives on a peer:
-    // cluster-secret round-trip first, then the WS hop).
+    // cluster-secret round-trip first, then the WS hop). We also
+    // paint a centered overlay into the terminal container itself,
+    // so the pane changes within one frame instead of leaving the
+    // "Click ▶ Run…" placeholder visible during the fetch.
+    predictiveShowTerminalStub('Resolving target…');
     predTermShowSpinner('Resolving target…');
     let meta;
     try {
@@ -48625,6 +49346,26 @@ function predictiveSetupHeightSync(inbox) {
     inbox._predHeightApply = apply;
 }
 
+/// Paint an immediate "Resolving…" / "Connecting…" overlay into
+/// the terminal container BEFORE the metadata fetch runs, so the
+/// pane visibly reacts to a click within one frame instead of
+/// waiting for the cluster-proxy round-trip + WS handshake. Without
+/// this the operator sees the static "Click ▶ Run…" placeholder
+/// the whole time and concludes the click was lost.
+///
+/// Replaced as soon as predTermOpen() runs `container.innerHTML = ''`
+/// to host xterm — no cleanup needed beyond that.
+function predictiveShowTerminalStub(message) {
+    const container = document.getElementById('predictive-term-container');
+    if (!container) return;
+    container.innerHTML = `
+        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;height:100%;color:#9ca3af;font-size:13px;text-align:center;padding:20px;">
+            <div style="width:36px;height:36px;border:3px solid rgba(96,165,250,0.25);border-top-color:#60a5fa;border-radius:50%;animation:predTermSpin 0.8s linear infinite;"></div>
+            <div>${escapeHtml(message || 'Connecting…')}</div>
+        </div>
+    `;
+}
+
 /// Show the inline spinner with a status message — used to give
 /// immediate feedback while the metadata fetch is in flight, before
 /// the WS even starts negotiating. Caller is responsible for
@@ -48666,8 +49407,14 @@ function predTermResetSpinner() {
 /// docker exec / lxc-attach / vm serial), so they can investigate or
 /// remediate manually without leaving the inbox.
 async function predictiveOpenTerm(proposalId) {
-    // Spinner ON before the metadata fetch so the operator sees
-    // immediate feedback — same reasoning as predictiveRunCmd.
+    // Visible stub BEFORE the metadata fetch so the operator sees the
+    // terminal pane react inside one frame. The fetch can take 500ms
+    // ‑ 2 s on a peer node (cluster proxy hop), and the previous
+    // code only flipped the small header spinner — the pane's
+    // contents stayed at "Click ▶ Run…" the whole time, which read
+    // as a frozen click. We paint a centered spinner + status
+    // immediately, then let the fetch + WS handshake replace it.
+    predictiveShowTerminalStub('Resolving target…');
     predTermShowSpinner('Resolving target…');
     let meta;
     try {
@@ -48817,28 +49564,34 @@ async function predictiveSnooze(id, hours) {
 ///
 /// Returns a "restore point" the caller can pass back to
 /// `predictiveOptimisticRestore` if the API call fails.
-function predictiveOptimisticRemove(id) {
+function predictiveOptimisticRemove(id, opts) {
+    const silent = opts && opts.silent;
     const list = predictiveState.proposals || [];
     const idx = list.findIndex(p => p.id === id);
     let removed = null;
     if (idx >= 0) {
         removed = list[idx];
         list.splice(idx, 1);
-        predictiveRender();
-        predictiveBadgeUpdate();
+        if (!silent) {
+            predictiveRender();
+            predictiveBadgeUpdate();
+        }
     }
     return { idx, removed };
 }
 
-function predictiveOptimisticRestore(point) {
+function predictiveOptimisticRestore(point, opts) {
+    const silent = opts && opts.silent;
     if (!point || !point.removed || point.idx < 0) return;
     const list = predictiveState.proposals || [];
     // Insert at the original index, but cap to current length in
     // case the list has shrunk further from another action.
     const insertAt = Math.min(point.idx, list.length);
     list.splice(insertAt, 0, point.removed);
-    predictiveRender();
-    predictiveBadgeUpdate();
+    if (!silent) {
+        predictiveRender();
+        predictiveBadgeUpdate();
+    }
 }
 
 async function predictiveDismiss(id) {
@@ -48872,29 +49625,217 @@ async function predictiveDismiss(id) {
     }
 }
 
+/// Mark applied — instant action with a 6 s Undo window. The
+/// previous flow showed a confirm modal first, which (with the
+/// 150 ms fade-in) felt like a lag on every single click. The
+/// outcome is non-destructive (just records that the operator
+/// ran the remediation), so a Gmail-style "did, with undo"
+/// pattern is the right tradeoff: zero clicks before the row
+/// disappears, recoverable for 6 s if it was a mis-click.
 async function predictiveApprove(id) {
-    const ok = await showConfirm(
-        'Mark this proposal as applied? This records that you ran the suggested remediation; it does not execute anything itself.',
-        'Mark applied',
-    );
-    if (!ok) return;
-    // Optimistic UI: same pattern as dismiss.
+    // Hold the network call for `undoWindowMs`. If the operator hits
+    // Undo we restore the row and never fire the request. If the
+    // window elapses, we fire — at that point the toast has gone and
+    // there's no longer a way to recover client-side.
+    //
+    // Track the id in `pendingUndoIds` for the duration of the
+    // window so the 60s badge poll doesn't re-introduce the row from
+    // a cluster snapshot taken before the deferred POST landed.
+    const undoWindowMs = 6000;
     const point = predictiveOptimisticRemove(id);
-    showToast('Marked applied', 'success', 1500);
-    try {
-        const r = await fetch(`/api/proposals/${encodeURIComponent(id)}/approve`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-        });
-        if (!r.ok) {
-            const data = await r.json().catch(() => ({}));
+    predictiveState.pendingUndoIds.add(id);
+    let undone = false;
+    showUndoToast(
+        '✓ Marked applied',
+        'Undo',
+        undoWindowMs,
+        () => {
+            undone = true;
+            predictiveState.pendingUndoIds.delete(id);
             predictiveOptimisticRestore(point);
-            showToast(`Mark applied failed: ${data.error || r.statusText}`, 'error');
+        },
+    );
+    setTimeout(async () => {
+        if (undone) return;
+        try {
+            const r = await fetch(`/api/proposals/${encodeURIComponent(id)}/approve`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+            });
+            if (!r.ok) {
+                const data = await r.json().catch(() => ({}));
+                predictiveOptimisticRestore(point);
+                showToast(`Mark applied failed: ${data.error || r.statusText}`, 'error');
+            }
+        } catch (e) {
+            predictiveOptimisticRestore(point);
+            showToast(`Mark applied errored: ${e.message || String(e)}`, 'error');
+        } finally {
+            // Always clear the undo flag — successful POST means the
+            // server agrees the row is gone (so badge poll won't
+            // return it anyway), and a failed POST has already
+            // restored the row (so we WANT future polls to keep it).
+            predictiveState.pendingUndoIds.delete(id);
         }
-    } catch (e) {
-        predictiveOptimisticRestore(point);
-        showToast(`Mark applied errored: ${e.message || String(e)}`, 'error');
+    }, undoWindowMs);
+}
+
+/// Toast with an inline action button — used by Mark applied so the
+/// operator can recover from a mis-click within `windowMs`. Built on
+/// top of showToast (so positioning + dismiss-X stay consistent),
+/// then we swap the auto-text-escaped message span for our own
+/// markup containing the action button.
+///
+/// The callback runs at most once even if the operator double-
+/// clicks. `windowMs` doubles as the toast's auto-hide duration —
+/// the toast and the undo window share the same timer, so once the
+/// toast slides away the action is no longer recoverable.
+function showUndoToast(message, actionLabel, windowMs, onAction) {
+    const id = `pred-undo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    showToast(message, 'success', windowMs, id);
+    let fired = false;
+    // showToast text-escapes the message via msgSpan.textContent. We
+    // need a real button beside it, so we locate the toast we just
+    // created (by id) and append the button to its .toast-message
+    // span. requestAnimationFrame defers until showToast has finished
+    // building the toast node.
+    requestAnimationFrame(() => {
+        const node = document.getElementById(id);
+        if (!node) return;
+        const msg = node.querySelector('.toast-message');
+        if (!msg) return;
+        const btn = document.createElement('button');
+        btn.textContent = actionLabel;
+        btn.style.cssText = 'margin-left:10px;background:transparent;border:1px solid currentColor;color:inherit;padding:2px 10px;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;';
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            if (fired) return;
+            fired = true;
+            try { if (typeof onAction === 'function') onAction(); } finally {
+                if (node.parentNode) node.parentNode.removeChild(node);
+            }
+        };
+        msg.appendChild(btn);
+    });
+}
+
+/// Bulk handlers — fan out the existing per-id endpoints, optimistic-
+/// remove every selected row up front, restore on per-id failure.
+/// We accept that a partial failure (one of N) leaves the rest
+/// removed; the operator sees a per-id error toast and the failed
+/// row reappears on the next badge poll anyway.
+async function predictiveBulkApprove() {
+    const ids = Array.from(predictiveState.selectedIds);
+    if (ids.length === 0) return;
+    predictiveState.selectedIds.clear();
+    // Silent splice in a tight loop, then ONE render — beats N
+    // separate renders when the operator selects 20+ rows.
+    const points = ids.map(id => ({ id, point: predictiveOptimisticRemove(id, { silent: true }) }));
+    // Track every id in pendingUndoIds so the badge poll doesn't
+    // re-introduce any of them mid-window. See predictiveApprove for
+    // the rationale; same pattern, fan-out to N ids.
+    ids.forEach(id => predictiveState.pendingUndoIds.add(id));
+    predictiveRender();
+    predictiveBadgeUpdate();
+    const undoWindowMs = 6000;
+    let undone = false;
+    showUndoToast(
+        `✓ Marked ${ids.length} applied`,
+        'Undo',
+        undoWindowMs,
+        () => {
+            undone = true;
+            ids.forEach(id => predictiveState.pendingUndoIds.delete(id));
+            points.forEach(p => predictiveOptimisticRestore(p.point, { silent: true }));
+            predictiveRender();
+            predictiveBadgeUpdate();
+        },
+    );
+    setTimeout(async () => {
+        if (undone) return;
+        let fails = 0;
+        for (const { id, point } of points) {
+            try {
+                const r = await fetch(`/api/proposals/${encodeURIComponent(id)}/approve`, { method: 'POST' });
+                if (!r.ok) { predictiveOptimisticRestore(point, { silent: true }); fails++; }
+            } catch (_) { predictiveOptimisticRestore(point, { silent: true }); fails++; }
+        }
+        // Clear the undo flags — succeeded ids are gone server-side,
+        // failed ids have been restored locally.
+        ids.forEach(id => predictiveState.pendingUndoIds.delete(id));
+        if (fails > 0) {
+            showToast(`${fails} of ${ids.length} approvals failed`, 'error');
+            predictiveRender();
+            predictiveBadgeUpdate();
+        }
+    }, undoWindowMs);
+}
+
+async function predictiveBulkSnooze(hours) {
+    const ids = Array.from(predictiveState.selectedIds);
+    if (ids.length === 0) return;
+    predictiveState.selectedIds.clear();
+    const points = ids.map(id => ({ id, point: predictiveOptimisticRemove(id, { silent: true }) }));
+    predictiveRender();
+    predictiveBadgeUpdate();
+    showToast(`Snoozed ${ids.length} for ${hours === 168 ? '1 week' : hours + ' hours'}`, 'success', 2000);
+    let fails = 0;
+    for (const { id, point } of points) {
+        try {
+            const r = await fetch(`/api/proposals/${encodeURIComponent(id)}/snooze`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ hours }),
+            });
+            if (!r.ok) { predictiveOptimisticRestore(point, { silent: true }); fails++; }
+        } catch (_) { predictiveOptimisticRestore(point, { silent: true }); fails++; }
     }
+    if (fails > 0) {
+        showToast(`${fails} of ${ids.length} snoozes failed`, 'error');
+        predictiveRender();
+        predictiveBadgeUpdate();
+    }
+}
+
+async function predictiveBulkDismiss() {
+    const ids = Array.from(predictiveState.selectedIds);
+    if (ids.length === 0) return;
+    const reason = await showPrompt(
+        `Why are you dismissing these ${ids.length} proposals? The same reason is logged on each for the audit trail.`,
+        `Dismiss ${ids.length} proposals`,
+        '',
+    );
+    if (reason === null) return;
+    if (!reason.trim()) {
+        showToast('A reason is required so the dismissals are auditable', 'warning', 3500);
+        return;
+    }
+    predictiveState.selectedIds.clear();
+    const points = ids.map(id => ({ id, point: predictiveOptimisticRemove(id, { silent: true }) }));
+    predictiveRender();
+    predictiveBadgeUpdate();
+    showToast(`Dismissed ${ids.length}`, 'success', 1500);
+    let fails = 0;
+    for (const { id, point } of points) {
+        try {
+            const r = await fetch(`/api/proposals/${encodeURIComponent(id)}/dismiss`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reason: reason.trim() }),
+            });
+            if (!r.ok) { predictiveOptimisticRestore(point, { silent: true }); fails++; }
+        } catch (_) { predictiveOptimisticRestore(point, { silent: true }); fails++; }
+    }
+    if (fails > 0) {
+        showToast(`${fails} of ${ids.length} dismissals failed`, 'error');
+        predictiveRender();
+        predictiveBadgeUpdate();
+    }
+}
+
+function predictiveClearSelection() {
+    predictiveState.selectedIds.clear();
+    predictiveRender();
 }
 
 async function predictiveAck(findingType, nodeId, resourceId) {
@@ -49015,7 +49956,19 @@ function predictiveStartBadgePoll() {
             const r = await fetch('/api/proposals/cluster');
             if (r.ok) {
                 const body = await r.json();
-                predictiveState.proposals = body.proposals || [];
+                // Filter out proposals the operator has already
+                // optimistically removed but whose deferred API call
+                // hasn't fired yet (Mark-applied undo window). Without
+                // this filter, a cluster snapshot taken between the
+                // click and the deferred POST re-introduces the row,
+                // which makes it flicker — disappear, reappear,
+                // disappear again 6s later when the API finally fires.
+                const fresh = body.proposals || [];
+                if (predictiveState.pendingUndoIds && predictiveState.pendingUndoIds.size > 0) {
+                    predictiveState.proposals = fresh.filter(p => !predictiveState.pendingUndoIds.has(p.id));
+                } else {
+                    predictiveState.proposals = fresh;
+                }
                 predictiveState.nodes = body.nodes || [];
                 predictiveBadgeUpdate();
             }
@@ -49036,6 +49989,14 @@ window.predictiveCopyCmd = predictiveCopyCmd;
 window.predictiveStartBadgePoll = predictiveStartBadgePoll;
 window.predictiveSetNodeFilter = predictiveSetNodeFilter;
 window.predictiveSetClusterFilter = predictiveSetClusterFilter;
+window.predictiveToggleMaximize = predictiveToggleMaximize;
+window.predictiveToggleExpand = predictiveToggleExpand;
+window.predictiveToggleSelect = predictiveToggleSelect;
+window.predictiveSelectAllVisible = predictiveSelectAllVisible;
+window.predictiveBulkApprove = predictiveBulkApprove;
+window.predictiveBulkSnooze = predictiveBulkSnooze;
+window.predictiveBulkDismiss = predictiveBulkDismiss;
+window.predictiveClearSelection = predictiveClearSelection;
 window.predictiveRunCmd = predictiveRunCmd;
 window.predictiveOpenTerm = predictiveOpenTerm;
 window.predTermClose = predTermClose;

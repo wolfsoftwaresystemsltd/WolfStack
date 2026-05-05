@@ -9313,6 +9313,17 @@ pub async fn backup_create(
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
     let mut storage = body.storage.clone();
+    // Validate the WolfDisk subpath at the API boundary so a
+    // crafted POST can't silently pick a sanitized-but-different
+    // path. The lenient resolver in resolved_local_path() strips
+    // `..` segments defence-in-depth, but we want the operator to
+    // get a clear 400 rather than a backup that ran to a different
+    // directory than they asked for.
+    if matches!(storage.storage_type, backup::StorageType::Wolfdisk) {
+        if let Err(e) = backup::BackupStorage::validate_wolfdisk_subpath(&storage.wolfdisk_subpath) {
+            return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
+        }
+    }
     backup::merge_pbs_secrets(&mut storage);
     let entries = backup::create_backup(body.target.clone(), storage);
     let success_count = entries.iter().filter(|e| e.status == backup::BackupStatus::Completed).count();
@@ -9331,6 +9342,15 @@ pub async fn backup_stream(
     if let Err(e) = require_auth(&req, &state) { return e; }
 
     let mut storage = body.storage.clone();
+    // Mirror backup_create's WolfDisk subpath validation. SSE-stream
+    // path is the one most operators hit from the UI, so a 400 here
+    // surfaces the error in the streaming console rather than letting
+    // the run silently retarget a sanitized path.
+    if matches!(storage.storage_type, backup::StorageType::Wolfdisk) {
+        if let Err(e) = backup::BackupStorage::validate_wolfdisk_subpath(&storage.wolfdisk_subpath) {
+            return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
+        }
+    }
     backup::merge_pbs_secrets(&mut storage);
 
     let target = body.target.clone();
@@ -9512,6 +9532,14 @@ pub async fn backup_schedule_create(
     // Cluster-wide scheduler UI sends only `{type:"pbs"}`; fill in saved
     // server/credentials so the schedule is runnable without a second round-trip.
     let mut storage = body.storage.clone();
+    // Validate the WolfDisk subpath at the schedule-save boundary
+    // too — a recurring schedule that resolves to a sanitized path
+    // would silently write to the wrong place every night.
+    if matches!(storage.storage_type, backup::StorageType::Wolfdisk) {
+        if let Err(e) = backup::BackupStorage::validate_wolfdisk_subpath(&storage.wolfdisk_subpath) {
+            return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
+        }
+    }
     backup::merge_pbs_secrets(&mut storage);
     let schedule = backup::BackupSchedule {
         id: uuid::Uuid::new_v4().to_string(),
@@ -10320,6 +10348,123 @@ pub async fn storage_create_mount(
         Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Internal error: {}", e) })),
     }
+}
+
+/// GET /api/fs/browse?path=...&show_hidden=...
+///
+/// Lists immediate children of a directory for the operator-facing
+/// file picker modal. Auth-gated (admin session cookie). Excludes
+/// known noisy pseudo-filesystems (`/proc`, `/sys`, `/dev`, `/run`)
+/// because those produce thousands of useless rows in a click-driven
+/// picker — operators with a real reason to inspect them have shell
+/// access already.
+///
+/// The endpoint never reads file contents and never recurses; the
+/// per-call cost is bounded by the number of immediate children.
+/// Symlinks are reported as their own kind without following — the
+/// caller decides whether to traverse.
+///
+/// Errors (path doesn't exist, permission denied) are returned as
+/// HTTP 200 with a populated `error` field rather than HTTP 4xx, so
+/// the frontend can show the message inline in the picker without
+/// translating status codes. Auth failures still return 401.
+#[derive(Deserialize)]
+pub struct FsBrowseQuery {
+    pub path: Option<String>,
+    #[serde(default)]
+    pub show_hidden: bool,
+}
+
+#[derive(Serialize)]
+pub struct FsBrowseEntry {
+    pub name: String,
+    pub kind: String,             // "dir" | "file" | "symlink" | "other"
+    pub size: Option<u64>,        // bytes; None for non-files
+    pub modified: Option<String>, // RFC3339 UTC
+}
+
+#[derive(Serialize)]
+pub struct FsBrowseResponse {
+    pub path: String,
+    pub parent: Option<String>,
+    pub entries: Vec<FsBrowseEntry>,
+    pub error: Option<String>,
+}
+
+pub async fn fs_browse(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    q: web::Query<FsBrowseQuery>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+
+    let path_raw = q.path.clone().unwrap_or_else(|| "/".to_string());
+    let path = std::path::PathBuf::from(&path_raw);
+    // Canonicalize so a request like `/etc/../etc/passwd` collapses
+    // to `/etc/passwd` and a symlink target is resolved before we
+    // run the noise-filter check. If the path doesn't exist the
+    // operator gets a clear "Cannot access" message rather than an
+    // empty listing.
+    let canon = match std::fs::canonicalize(&path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::Ok().json(FsBrowseResponse {
+            path: path_raw, parent: None, entries: vec![],
+            error: Some(format!("Cannot access: {}", e)),
+        }),
+    };
+
+    const DENIED_ROOTS: &[&str] = &["/proc", "/sys", "/dev", "/run"];
+    let canon_str = canon.to_string_lossy().to_string();
+    if DENIED_ROOTS.iter().any(|r| canon_str == *r || canon_str.starts_with(&format!("{}/", r))) {
+        return HttpResponse::Ok().json(FsBrowseResponse {
+            path: canon_str, parent: None, entries: vec![],
+            error: Some("Path is on a pseudo-filesystem (/proc, /sys, /dev, /run) — not browsable".into()),
+        });
+    }
+
+    let dir_iter = match std::fs::read_dir(&canon) {
+        Ok(d) => d,
+        Err(e) => return HttpResponse::Ok().json(FsBrowseResponse {
+            path: canon_str, parent: None, entries: vec![],
+            error: Some(format!("Cannot list: {}", e)),
+        }),
+    };
+
+    let mut entries: Vec<FsBrowseEntry> = Vec::new();
+    for ent in dir_iter.flatten() {
+        let name = ent.file_name().to_string_lossy().to_string();
+        if !q.show_hidden && name.starts_with('.') { continue; }
+        // Use symlink_metadata so a symlink reports as `symlink`
+        // rather than the kind of its target — operators picking
+        // a path want to know what's actually on disk.
+        let meta = ent.metadata().ok();
+        let kind = if let Some(m) = &meta {
+            if m.is_dir() { "dir" }
+            else if m.is_file() { "file" }
+            else if m.file_type().is_symlink() { "symlink" }
+            else { "other" }
+        } else { "other" };
+        let size = meta.as_ref().filter(|m| m.is_file()).map(|m| m.len());
+        let modified = meta.as_ref().and_then(|m| m.modified().ok())
+            .map(|t| {
+                let dt: chrono::DateTime<chrono::Utc> = t.into();
+                dt.to_rfc3339()
+            });
+        entries.push(FsBrowseEntry { name, kind: kind.into(), size, modified });
+    }
+    // Dirs first, then files; alphabetical case-insensitive within
+    // each group. Matches the behaviour every other file picker
+    // operators have used (Finder, Explorer, GTK, KDE).
+    entries.sort_by(|a, b| {
+        let kind_order = (a.kind != "dir").cmp(&(b.kind != "dir"));
+        if kind_order != std::cmp::Ordering::Equal { return kind_order; }
+        a.name.to_lowercase().cmp(&b.name.to_lowercase())
+    });
+
+    let parent = canon.parent().map(|p| p.to_string_lossy().to_string());
+    HttpResponse::Ok().json(FsBrowseResponse {
+        path: canon_str, parent, entries, error: None,
+    })
 }
 
 /// PUT /api/storage/mounts/{id} — update a mount
@@ -23973,6 +24118,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/ceph/rbd/{pool}", web::get().to(ceph_list_rbd))
         .route("/api/ceph/rbd", web::post().to(ceph_create_rbd))
         .route("/api/ceph/rbd/{pool}/{image}", web::delete().to(ceph_delete_rbd))
+        // Filesystem browser (operator-facing path picker)
+        .route("/api/fs/browse", web::get().to(fs_browse))
         // Storage Manager
         .route("/api/storage/mounts", web::get().to(storage_list_mounts))
         .route("/api/storage/mounts", web::post().to(storage_create_mount))

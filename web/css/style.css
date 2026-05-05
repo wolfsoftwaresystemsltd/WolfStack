@@ -2720,6 +2720,46 @@ body.sidebar-collapsed #task-log-footer {
     background: var(--bg-card-hover);
 }
 
+/* ─── Code editor gutter ───
+   Used by the docker-compose editor (and any other plain-textarea
+   code editor) to show line numbers alongside the source. The
+   gutter is overflow:hidden; its inner element is positioned and
+   moved via `top` to mirror the textarea's scrollTop. Width is
+   pinned so a 9999-line file doesn't reflow the layout. */
+.code-editor-wrap {
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+.code-editor-gutter {
+    flex: 0 0 auto;
+    min-width: 44px;
+    padding: 12px 6px 12px 8px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    border-right: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.5;
+    text-align: right;
+    user-select: none;
+    overflow: hidden;
+    position: relative;
+}
+.code-editor-gutter-inner {
+    position: relative;
+    top: 0;
+    white-space: pre;
+    pointer-events: none;
+}
+.code-editor-gutter-line-error {
+    color: #f87171;
+    font-weight: 600;
+    background: rgba(239, 68, 68, 0.15);
+    margin: 0 -6px 0 -8px;
+    padding: 0 6px 0 8px;
+}
+
 /* ─── Modal ─── */
 .modal-overlay {
     position: fixed;
