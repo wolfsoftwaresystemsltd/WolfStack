@@ -29,7 +29,7 @@ use crate::predictive::{
     AckStore, Context, MetricsHistory, ProposalStore,
     disk_fill, container_disk, container_restart, container_memory,
     threshold, cert_expiry, backup_freshness, vm_disk, security_posture,
-    vulnerability, notify,
+    vulnerability, osv, notify,
 };
 
 /// Cadence between ticks once the loop is running.
@@ -66,6 +66,14 @@ const CERT_SAMPLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// caps; this is the outer wall-clock guard so a slow tick doesn't
 /// blow past the 5-min cadence.
 const VULN_SAMPLE_TIMEOUT: Duration = Duration::from_secs(75);
+
+/// Hard timeout for the OSV sampler. Inventory collection is fast
+/// (local subprocess); the HTTP layer is internally rate-limited to
+/// once per hour, so most ticks return cached results in under a
+/// second. The first scan after a restart can take ~30s for a
+/// fleet's worth of unique packages — we budget 90s as a hard cap so
+/// even a slow OSV response can't blow past the 5-min cadence.
+const OSV_SAMPLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Resolved (Approved/Dismissed) proposals are pruned on every
 /// tick once they're older than this. Pending and active-Snoozed
@@ -111,7 +119,7 @@ pub async fn tick(
     // 1. Sample data sources concurrently with hard timeouts. Each
     //    sampler kills its child process on timeout — stuck NFS or
     //    a wedged docker daemon can no longer hang the orchestrator.
-    let (host_facts, container_facts, restart_facts, failed_units, cert_facts, mem_facts, backup_facts, vm_facts, sshd_cfg, vuln_facts) = tokio::join!(
+    let (host_facts, container_facts, restart_facts, failed_units, cert_facts, mem_facts, backup_facts, vm_facts, sshd_cfg, vuln_facts, osv_facts) = tokio::join!(
         disk_fill::sample_disks_now_async(DF_TIMEOUT),
         container_disk::sample_containers_now_async(CONTAINER_SAMPLE_TIMEOUT),
         container_restart::sample_docker_restarts_now_async(CONTAINER_SAMPLE_TIMEOUT),
@@ -122,6 +130,7 @@ pub async fn tick(
         vm_disk::sample_vm_disks_now_async(CERT_SAMPLE_TIMEOUT),
         security_posture::sample_sshd_config_now_async(SYSTEMD_TIMEOUT),
         vulnerability::sample_now_async(VULN_SAMPLE_TIMEOUT),
+        osv::sample_now_async(OSV_SAMPLE_TIMEOUT),
     );
     // Sample current SystemMetrics off the shared monitor — same
     // sysinfo source as the live UI, so threshold findings line up
@@ -134,11 +143,14 @@ pub async fn tick(
     };
     let no_vuln_data = vuln_facts.host_updates.is_empty()
         && vuln_facts.lxc_results.iter().all(|r| r.updates.is_empty() && r.error.is_some());
+    let no_osv_data = osv_facts.findings.is_empty()
+        && osv_facts.covered_targets.is_empty()
+        && osv_facts.unrecognized_derivatives.is_empty();
     let no_data = host_facts.is_empty() && container_facts.is_empty()
         && restart_facts.is_empty() && cert_facts.is_empty()
         && mem_facts.is_empty() && backup_facts.is_empty()
         && vm_facts.is_empty() && sys_metrics_opt.is_none()
-        && no_vuln_data;
+        && no_vuln_data && no_osv_data;
     if no_data {
         tracing::debug!("predictive tick: no usable data from any sampler");
         return;
@@ -265,6 +277,9 @@ pub async fn tick(
     new_proposals.extend(vulnerability::analyze(
         &ctx, &vuln_facts, &acks_snap, &proposals_snap,
     ));
+    new_proposals.extend(osv::analyze(
+        &ctx, &osv_facts, &acks_snap, &proposals_snap,
+    ));
 
     // 5b. Build the "covered" set — every (finding_type, scope) the
     //     analyzers had data for this tick. Auto-resolve uses this
@@ -282,6 +297,13 @@ pub async fn tick(
     covered.extend(vm_disk::covered_scopes(&ctx, &vm_facts));
     covered.extend(security_posture::covered_scopes(&ctx, &sshd_cfg));
     covered.extend(vulnerability::covered_scopes(&ctx, &vuln_facts));
+    covered.extend(osv::covered_scopes(&ctx, &osv_facts));
+    // Mark every PRIOR pending OSV proposal whose target was scanned
+    // this tick as covered, even if its CVE didn't re-emit. That's
+    // what closes the loop when a package gets upgraded — the CVE
+    // drops out of the OSV match list and auto_resolve_cleared sees
+    // it covered-but-not-emitted.
+    covered.extend(osv::extra_covered_from_store(&ctx, &osv_facts, &proposals_snap));
     let emitted: Vec<(String, crate::predictive::ProposalScope)> = new_proposals.iter()
         .map(|p| (p.finding_type.clone(), p.scope.clone()))
         .collect();

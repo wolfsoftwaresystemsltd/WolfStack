@@ -58,6 +58,7 @@ pub mod backup_freshness;
 pub mod vm_disk;
 pub mod security_posture;
 pub mod vulnerability;
+pub mod osv;
 pub mod notify;
 pub mod cluster;
 pub mod orchestrator;

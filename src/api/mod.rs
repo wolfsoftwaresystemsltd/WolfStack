@@ -18669,6 +18669,54 @@ pub async fn predictive_acks_remove(
     }
 }
 
+// ─── OSV scanner config ───────────────────────────────────────────
+
+/// GET /api/predictive/osv-config — return the current OSV scanner
+/// configuration: enabled flag, OSV/KEV endpoints, kev_only mode, and
+/// any per-distro ecosystem overrides.
+pub async fn predictive_osv_config_get(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let _ = state;  // config lives on disk, not in AppState
+    let cfg = crate::predictive::osv::OsvConfig::load();
+    HttpResponse::Ok().json(cfg)
+}
+
+/// PUT /api/predictive/osv-config — replace the on-disk config. Body
+/// is the same `OsvConfig` shape the GET returns. Validation is
+/// minimal: an empty endpoint string is rejected because OSV would
+/// resolve `/v1/querybatch` against the empty origin, which fails
+/// silently rather than surfacing an obvious config mistake.
+pub async fn predictive_osv_config_put(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<crate::predictive::osv::OsvConfig>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cfg = body.into_inner();
+    if cfg.endpoint.trim().is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "OSV endpoint cannot be empty — leave default \
+                      (https://api.osv.dev) or specify a self-hosted mirror",
+        }));
+    }
+    if cfg.kev_endpoint.trim().is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "KEV endpoint cannot be empty — leave default \
+                      (CISA's KEV feed) or specify a mirror URL",
+        }));
+    }
+    if let Err(e) = cfg.save() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("failed to persist OSV config: {}", e),
+        }));
+    }
+    invalidate_cluster_cache(&state);
+    HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+}
+
 // ─── WhatsApp webhook (inbound via Twilio) ───
 
 /// POST /api/whatsapp/webhook — Twilio delivers inbound WhatsApp
@@ -24470,6 +24518,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/proposal-acks", web::get().to(predictive_acks_list))
         .route("/api/proposal-acks", web::post().to(predictive_acks_create))
         .route("/api/proposal-acks/{id}", web::delete().to(predictive_acks_remove))
+        .route("/api/predictive/osv-config", web::get().to(predictive_osv_config_get))
+        .route("/api/predictive/osv-config", web::put().to(predictive_osv_config_put))
         // WolfAgents — named AI agents with persistent memory.
         .route("/api/agents", web::get().to(agents_list))
         .route("/api/agents", web::post().to(agents_create))
