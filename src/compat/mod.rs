@@ -139,14 +139,18 @@ pub fn runtime_status() -> serde_json::Value {
     }
 }
 
-/// Normalise the host cap reported to UIs and gates. Enterprise is
-/// always unlimited, regardless of what a legacy per-installation
-/// licence stored in max_nodes.
-pub fn effective_cap(tier: &str, raw_max: u32) -> u32 {
-    match tier {
-        "homelab" | "pro" => raw_max,
-        _ => 0,
-    }
+/// Normalise the host cap reported to UIs and gates.
+///
+/// Pre-2026-05-06 Enterprise was sold as unlimited, so legacy licences
+/// (and hand-issued sponsor / Custom-tier licences) carry `max_nodes=0`
+/// meaning "no cap". Self-serve Enterprise sold from 2026-05-06 onward
+/// carries `max_nodes=100`; Custom-tier quotes carry whatever the sales
+/// engagement scoped (e.g. 250, 500, 1000).
+///
+/// Returns whatever the licence says — `0` continues to mean unlimited
+/// for grandfathered customers and Custom-tier licences without a cap.
+pub fn effective_cap(_tier: &str, raw_max: u32) -> u32 {
+    raw_max
 }
 
 /// Public read-only view of the active licence — None when unlicensed
