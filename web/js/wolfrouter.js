@@ -1064,7 +1064,20 @@
             from: { kind: 'any' }, to: { kind: 'any' },
             protocol: 'any', ports: [],
             state_track: true, log_match: false, comment: '',
+            node_id: null,
         };
+        // Cluster-scoped views require every rule to be pinned to a
+        // node in the cluster (cluster_guard_node_id on the backend
+        // rejects cluster-agnostic rules with HTTP 403). Build the
+        // node options from the loaded topology so the user has the
+        // same picker the LAN/WAN editors do. Default to the first
+        // node — that's the user's own host on a single-node setup,
+        // which is the overwhelmingly common case.
+        const topoNodes = (wrState.topology?.nodes || []);
+        const defaultNodeId = r.node_id || topoNodes[0]?.node_id || '';
+        const nodeOptions = topoNodes.map(n =>
+            `<option value="${escHtml(n.node_id)}"${n.node_id === defaultNodeId ? ' selected' : ''}>${escHtml(n.node_name || n.node_id)}</option>`
+        ).join('');
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay active';
         overlay.style.zIndex = '10000';
@@ -1076,6 +1089,12 @@
                 </div>
                 <div class="modal-body" style="font-size:13px;">
                     <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                        <label style="grid-column:1/-1;">Node
+                            <select id="wr-f-node" class="form-control">
+                                ${nodeOptions || '<option value="">(no nodes loaded — refresh the page)</option>'}
+                            </select>
+                            <span style="font-size:11px;color:var(--text-muted);">Rules are node-scoped. Pick which node enforces this rule.</span>
+                        </label>
                         <label>Action
                             <select id="wr-f-action" class="form-control">
                                 <option value="allow">Allow</option>
@@ -1452,9 +1471,23 @@
         const comment = document.getElementById('wr-f-comment').value;
         const log_match = document.getElementById('wr-f-log').checked;
         const enabled = document.getElementById('wr-f-enabled').checked;
+        // Node selector — required by the cluster-scoped view's
+        // backend guard. Falls back to the existing rule's node_id
+        // (edit case) or the first topology node (new rule, common
+        // case: user's own host) so the field is never silently
+        // empty.
+        const nodeSel = document.getElementById('wr-f-node');
+        const node_id = (nodeSel && nodeSel.value)
+            || (wrState.rules.find(r => r.id === id)?.node_id)
+            || (wrState.topology?.nodes?.[0]?.node_id)
+            || null;
+        if (!node_id) {
+            alert('Cannot save: no node available to attach this rule to. Reload the WolfRouter page so topology populates, or pick a different cluster.');
+            return;
+        }
         const existing = wrState.rules.find(r => r.id === id);
         const rule = existing ? { ...existing } : { id: '', enabled: true, order: 0, state_track: true };
-        Object.assign(rule, { enabled, action, direction, from, to, protocol, ports, comment, log_match });
+        Object.assign(rule, { enabled, action, direction, from, to, protocol, ports, comment, log_match, node_id });
         const method = id ? 'PUT' : 'POST';
         const url = wrUrl(id ? '/api/router/rules/' + id : '/api/router/rules');
         const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rule) });
