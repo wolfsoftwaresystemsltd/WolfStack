@@ -43,45 +43,6 @@ pub struct ContainerAlert {
     pub threshold: f32,
 }
 
-/// Check a node's metrics against alerting thresholds.
-/// Returns a list of triggered alerts.
-pub fn check_thresholds(config: &AlertConfig, cpu_pct: f32, mem_pct: f32, disk_pct: f32) -> Vec<ThresholdAlert> {
-    let mut alerts = Vec::new();
-    if config.alert_cpu && cpu_pct >= config.cpu_threshold {
-        alerts.push(ThresholdAlert { alert_type: "cpu".into(), current: cpu_pct, threshold: config.cpu_threshold });
-    }
-    if config.alert_memory && mem_pct >= config.memory_threshold {
-        alerts.push(ThresholdAlert { alert_type: "memory".into(), current: mem_pct, threshold: config.memory_threshold });
-    }
-    if config.alert_disk && disk_pct >= config.disk_threshold {
-        alerts.push(ThresholdAlert { alert_type: "disk".into(), current: disk_pct, threshold: config.disk_threshold });
-    }
-    alerts
-}
-
-/// Check container memory usage against threshold.
-/// Returns a list of containers that exceed the configured container memory threshold.
-pub fn check_container_thresholds(
-    config: &AlertConfig,
-    stats: &[crate::containers::ContainerStats],
-    runtime: &str,
-) -> Vec<ContainerAlert> {
-    if !config.alert_containers { return vec![]; }
-    let threshold = config.container_memory_threshold;
-
-    stats.iter()
-        .filter(|s| s.memory_limit > 0 && s.memory_percent >= threshold as f64)
-        .map(|s| ContainerAlert {
-            container_name: s.name.clone(),
-            runtime: runtime.to_string(),
-            memory_percent: s.memory_percent,
-            memory_usage: s.memory_usage,
-            memory_limit: s.memory_limit,
-            threshold,
-        })
-        .collect()
-}
-
 /// Check if a specific alert is in cooldown. Returns true if it should be suppressed.
 pub fn is_in_cooldown(cooldowns: &HashMap<String, Instant>, node_id: &str, alert_type: &str) -> bool {
     let key = format!("{}:{}", node_id, alert_type);

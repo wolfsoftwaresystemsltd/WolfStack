@@ -20,6 +20,7 @@
 //! age in the UI represents "how long has this been an issue") while
 //! refreshing severity, evidence, and `updated_at`.
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -426,8 +427,12 @@ impl ProposalStore {
         before - self.proposals.len()
     }
 
-    /// Per-rule statistics for trust calibration. Used to demote
-    /// noisy rules (the "auto-quiet" behaviour from the plan).
+    /// Test-only per-rule statistics. Used by the trust-calibration
+    /// test cases to assert "rules that get dismissed often should
+    /// auto-quiet"; the production auto-quiet path consumes
+    /// `proposals` directly so this aggregator isn't on a live
+    /// code path.
+    #[cfg(test)]
     pub fn stats_by_rule(&self) -> HashMap<String, RuleStats> {
         let mut out: HashMap<String, RuleStats> = HashMap::new();
         for p in &self.proposals {
@@ -447,6 +452,7 @@ impl ProposalStore {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RuleStats {
     pub fired: u64,

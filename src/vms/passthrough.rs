@@ -1325,7 +1325,7 @@ mod network_preflight_tests {
     }
 
     #[test]
-    fn bridge_passthrough_iface_matching_default_route_does_NOT_block_start() {
+    fn bridge_passthrough_iface_matching_default_route_does_not_block_start() {
         // PapaSchlumpf scenario, 2026-05-06: HA VM uses
         // `passthrough_interface` (bridge mode — host's IP gets moved
         // onto br-pt-X). The original v22.7.3 preflight rejected this

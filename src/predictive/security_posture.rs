@@ -477,11 +477,10 @@ mod tests {
     fn mariadb_on_public_ip_is_high() {
         // The exact false-positive scenario from session memory:
         // the Inbox's binding-on-public finding scaled by reachability.
-        let ifaces = vec![iface("eth0", "203.0.113.5", "inet")];
-        let socks = vec![sock("0.0.0.0", 3306)];
         // The doc-range 203.0.113.0/24 is treated as non-routable by
         // `is_publicly_routable_v4` (it's RFC 5737 documentation
-        // space). Use a real-world public IP for the test fixture.
+        // space), so the fixture uses a real-world public IP.
+        let socks = vec![sock("0.0.0.0", 3306)];
         let ifaces = vec![iface("eth0", "145.224.67.239", "inet")];
         let p = analyze_listening_services(
             &ctx_with(ifaces, socks),

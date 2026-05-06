@@ -37,7 +37,6 @@
 //! went away for the weekend". 7 d is the ambient awareness tier —
 //! still worth knowing about, doesn't need urgency.
 
-use std::process::Command;
 use std::time::Duration;
 
 use crate::predictive::{
@@ -73,36 +72,16 @@ pub struct DiskFact {
     pub avail_bytes: u64,
 }
 
-/// Sample mounts via `df` and return one fact per real filesystem.
-///
-/// Pseudo / virtual filesystems are filtered out: `tmpfs`, `devtmpfs`,
-/// `proc`, `sysfs`, `cgroup*`, `overlay`, `squashfs`, `fuse.snapfuse`,
-/// `tracefs`, `bpf`, `debugfs`, `securityfs`, `pstore`, `mqueue`,
-/// `nsfs`, `ramfs`. Without this, we'd see hundreds of mounts and
-/// analyze each.
-///
-/// Synchronous variant — kept for the test harness (which substitutes
-/// the runner closure) and for any caller that's already inside
-/// `spawn_blocking`. Production callers should prefer
-/// [`sample_disks_now_async`] which wraps the call in
-/// `tokio::time::timeout` so a stuck NFS mount can't block the
-/// orchestrator forever (`statfs(2)` per mount under df).
-pub fn sample_disks_now() -> Vec<DiskFact> {
-    sample_disks_with_df_runner(|| {
-        Command::new("df")
-            .args(["-B1", "--output=target,fstype,size,used,avail,pcent"])
-            .output()
-            .ok()
-            .and_then(|o| if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).to_string())
-            } else { None })
-    })
-}
-
 /// Async timeout-bounded variant. Used by the orchestrator. On
 /// timeout the child process is killed (tokio::process drops kill
 /// the child) and we return an empty Vec — analyzers will then
 /// silently skip the tick rather than hang.
+///
+/// Pseudo / virtual filesystems are filtered out by `parse_df_output`:
+/// `tmpfs`, `devtmpfs`, `proc`, `sysfs`, `cgroup*`, `overlay`,
+/// `squashfs`, `fuse.snapfuse`, `tracefs`, `bpf`, `debugfs`,
+/// `securityfs`, `pstore`, `mqueue`, `nsfs`, `ramfs`. Without this,
+/// we'd see hundreds of mounts and analyze each.
 pub async fn sample_disks_now_async(timeout: Duration) -> Vec<DiskFact> {
     let cmd = tokio::process::Command::new("df")
         .args(["-B1", "--output=target,fstype,size,used,avail,pcent"])
@@ -124,15 +103,6 @@ pub async fn sample_disks_now_async(timeout: Duration) -> Vec<DiskFact> {
             Vec::new()
         }
     }
-}
-
-/// Pure parser/filter — the test harness calls this with synthetic
-/// `df` output so we don't need to mount fixtures.
-pub(crate) fn sample_disks_with_df_runner<F>(runner: F) -> Vec<DiskFact>
-where F: FnOnce() -> Option<String>
-{
-    let Some(text) = runner() else { return Vec::new(); };
-    parse_df_output(&text)
 }
 
 fn parse_df_output(text: &str) -> Vec<DiskFact> {

@@ -776,7 +776,7 @@ pub async fn get_topology(
 
     let mut nodes = Vec::new();
     if include_self {
-        nodes.push(topology::compute_local(&self_id, &self_name, &cfg));
+        nodes.push(topology::compute_local(&self_id, &self_name, &cfg, &state.router));
     }
 
     // Fan out to every other online cluster node's topology-local
@@ -984,7 +984,7 @@ pub async fn get_topology_local(
     let cfg = state.router.config.read().unwrap().clone();
     let self_id = crate::agent::self_node_id();
     let self_name = self_node_name();
-    let t = topology::compute_local(&self_id, &self_name, &cfg);
+    let t = topology::compute_local(&self_id, &self_name, &cfg, &state.router);
     HttpResponse::Ok().json(t)
 }
 
@@ -5816,7 +5816,227 @@ pub fn configure(cfg: &mut actix_web::web::ServiceConfig) {
         .route("/api/router/subnet-routes/diagnostics",     web::get().to(diagnostics_subnet_routes))
         .route("/api/router/subnet-routes/orphan/remove",   web::post().to(remove_orphan_subnet_route))
         .route("/api/router/subnet-routes/{id}",            web::put().to(update_subnet_route))
-        .route("/api/router/subnet-routes/{id}",            web::delete().to(delete_subnet_route));
+        .route("/api/router/subnet-routes/{id}",            web::delete().to(delete_subnet_route))
+        // Recovery — surfaces parse-error state, lists rollback
+        // snapshots, and lets the user restore one or commit an
+        // artefact-reconstructed config when no snapshot is left.
+        .route("/api/router/recovery",                      web::get().to(get_recovery_state))
+        .route("/api/router/recovery/restore",              web::post().to(restore_recovery))
+        .route("/api/router/recovery/reconstruct",          web::get().to(preview_artifact_reconstruction))
+        .route("/api/router/recovery/reconstruct",          web::post().to(commit_artifact_reconstruction));
+}
+
+// ─── Recovery API ───
+//
+// Three endpoints, dead simple:
+//   * GET  /api/router/recovery        — full state for the UI banner.
+//   * POST /api/router/recovery/restore { path } — atomic rollback.
+//   * GET  /api/router/recovery/reconstruct — preview reconstructed
+//                                             config from artefacts.
+//   * POST /api/router/recovery/reconstruct — commit it.
+//
+// Auth: same session-cookie auth as every other /api/router endpoint.
+// Authorization: any logged-in user — these are admin operations on a
+// box the user already has shell-equivalent access to via the
+// WolfStack UI, so we don't gate by role beyond that.
+
+#[derive(serde::Serialize)]
+struct RecoveryState {
+    /// True when the most recent startup load failed and saves are
+    /// currently blocked. Frontend uses this to decide whether to
+    /// render the rollback banner at the top of the WolfRouter page.
+    load_failed: bool,
+    /// Detail of the load failure (serde error + quarantine path)
+    /// when `load_failed=true`. Null otherwise.
+    load_error: Option<super::LoadError>,
+    /// All available recovery targets (`.bak.<ts>` rolling backups
+    /// and `.broken-<ts>` quarantined parse failures), newest first.
+    snapshots: Vec<super::RecoverySnapshot>,
+    /// True when artefact reconstruction would yield at least one
+    /// LAN or WAN — used by the UI to decide whether to show the
+    /// "Reconstruct from system artefacts" button as active.
+    artifact_reconstruction_available: bool,
+}
+
+async fn get_recovery_state(
+    req: actix_web::HttpRequest,
+    state: actix_web::web::Data<crate::api::AppState>,
+) -> actix_web::HttpResponse {
+    if let Err(resp) = crate::api::require_auth(&req, &state) { return resp; }
+    let load_failed = super::save_blocked_by_load_failure();
+    let load_error = state.router.load_error.read().ok()
+        .and_then(|g| g.clone());
+    // Snapshot listing is fast (a single readdir + per-entry parse
+    // probe of small JSON files), safe to run inline. The artefact
+    // reconstruction probe walks /etc/ppp/peers + dnsmasq.d and
+    // parses each — only worth doing when the banner will actually
+    // render, i.e. when load_failed is true. The frontend uses
+    // `load_failed` itself as the banner gate, so when that's
+    // false we just return `false` for the button state without
+    // spending the I/O.
+    let snapshots = super::list_recovery_snapshots();
+    let recon_available = if load_failed {
+        let r = tokio::task::spawn_blocking(super::reconstruct_from_artifacts)
+            .await.ok();
+        r.map(|r| !r.recovered_items.is_empty()).unwrap_or(false)
+    } else {
+        false
+    };
+    actix_web::HttpResponse::Ok().json(RecoveryState {
+        load_failed,
+        load_error,
+        snapshots,
+        artifact_reconstruction_available: recon_available,
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct RestoreReq {
+    /// Absolute path to the snapshot to restore. Validated by
+    /// `restore_recovery_snapshot` to live inside ROUTER_DIR and
+    /// match a known prefix — anything else is rejected.
+    path: String,
+}
+
+#[derive(serde::Serialize)]
+struct RestoreResp {
+    ok: bool,
+    /// Human-readable message — "restored, restart required" or the
+    /// underlying error.
+    message: String,
+}
+
+async fn restore_recovery(
+    req: actix_web::HttpRequest,
+    state: actix_web::web::Data<crate::api::AppState>,
+    body: actix_web::web::Json<RestoreReq>,
+) -> actix_web::HttpResponse {
+    if let Err(resp) = crate::api::require_auth(&req, &state) { return resp; }
+    let path = body.path.clone();
+    // restore_recovery_snapshot does the disk work; spawn_blocking
+    // because std::fs blocks the executor.
+    let result = tokio::task::spawn_blocking(move || {
+        super::restore_recovery_snapshot(&path)
+    }).await.unwrap_or_else(|_| Err("restore task panicked".into()));
+
+    match result {
+        Ok(()) => {
+            // Reload in-memory config from the freshly-restored
+            // file so the running process reflects the rollback
+            // without requiring a service restart. We re-run
+            // load_with_status so all the latches and load_error
+            // state get updated coherently.
+            let (cfg, outcome) = super::RouterConfig::load_with_status();
+            *state.router.config.write().unwrap() = cfg;
+            match outcome {
+                super::LoadOutcome::Loaded | super::LoadOutcome::Fresh => {
+                    state.router.mark_clean();
+                }
+                super::LoadOutcome::ParseError { error, .. } => {
+                    // The user picked a snapshot that doesn't parse
+                    // either — keep the latch up and surface the
+                    // error so they pick a different one.
+                    if let Ok(mut g) = state.router.load_error.write() {
+                        *g = Some(super::LoadError {
+                            quarantine_path: String::new(),
+                            error: error.clone(),
+                            observed_at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs()).unwrap_or(0),
+                        });
+                    }
+                    return actix_web::HttpResponse::Ok().json(RestoreResp {
+                        ok: false,
+                        message: format!(
+                            "Snapshot restored to disk but it does not parse \
+                             with the current binary ({}). Pick another \
+                             snapshot or use 'Reconstruct from artefacts'.",
+                            error
+                        ),
+                    });
+                }
+            }
+            actix_web::HttpResponse::Ok().json(RestoreResp {
+                ok: true,
+                message: "Config restored. The running ruleset still reflects \
+                          the previous (lost) state — review the LANs/WANs in \
+                          WolfRouter, then click Apply to push the restored \
+                          config into the kernel.".into(),
+            })
+        }
+        Err(e) => actix_web::HttpResponse::Ok().json(RestoreResp {
+            ok: false,
+            message: e,
+        }),
+    }
+}
+
+async fn preview_artifact_reconstruction(
+    req: actix_web::HttpRequest,
+    state: actix_web::web::Data<crate::api::AppState>,
+) -> actix_web::HttpResponse {
+    if let Err(resp) = crate::api::require_auth(&req, &state) { return resp; }
+    let r = tokio::task::spawn_blocking(|| super::reconstruct_from_artifacts())
+        .await.unwrap_or_else(|_| super::ArtifactReconstruction {
+            config: super::RouterConfig::default(),
+            recovered_items: Vec::new(),
+            notes: vec!["reconstruction task panicked".into()],
+        });
+    actix_web::HttpResponse::Ok().json(r)
+}
+
+async fn commit_artifact_reconstruction(
+    req: actix_web::HttpRequest,
+    state: actix_web::web::Data<crate::api::AppState>,
+) -> actix_web::HttpResponse {
+    if let Err(resp) = crate::api::require_auth(&req, &state) { return resp; }
+    // Reconstruct, write to disk DIRECTLY (the save() latch is
+    // currently set), then clear the latch so future edits persist.
+    let result = tokio::task::spawn_blocking(|| -> Result<super::ArtifactReconstruction, String> {
+        let r = super::reconstruct_from_artifacts();
+        if r.recovered_items.is_empty() {
+            return Err(
+                "Artefact reconstruction found nothing to recover. The \
+                 dnsmasq.d snippets and PPPoE peer files are also gone — \
+                 there's no automated path back. The WolfRouter config \
+                 must be rebuilt by hand.".into()
+            );
+        }
+        let json = serde_json::to_string_pretty(&r.config)
+            .map_err(|e| format!("serialize failed: {}", e))?;
+        std::fs::create_dir_all(super::ROUTER_DIR)
+            .map_err(|e| format!("create_dir_all failed: {}", e))?;
+        let live = super::RouterConfig::path();
+        // Pre-rotate any existing live file so the user can roll
+        // back the reconstruction itself if it's wrong.
+        if std::path::Path::new(&live).exists() {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs()).unwrap_or(0);
+            let bak = format!("{}.bak.{}", live, ts);
+            let _ = std::fs::copy(&live, &bak);
+        }
+        let tmp = format!("{}.tmp", live);
+        std::fs::write(&tmp, json)
+            .map_err(|e| format!("write failed: {}", e))?;
+        std::fs::rename(&tmp, &live)
+            .map_err(|e| format!("atomic rename failed: {}", e))?;
+        Ok(r)
+    }).await.unwrap_or_else(|_| Err("reconstruction task panicked".into()));
+
+    match result {
+        Ok(r) => {
+            // Reload + clear the latch.
+            let (cfg, _outcome) = super::RouterConfig::load_with_status();
+            *state.router.config.write().unwrap() = cfg;
+            state.router.mark_clean();
+            actix_web::HttpResponse::Ok().json(r)
+        }
+        Err(e) => actix_web::HttpResponse::BadRequest().json(serde_json::json!({
+            "ok": false,
+            "error": e,
+        })),
+    }
 }
 
 /// GET /api/router/host-dns — detect what's holding port 53 on this

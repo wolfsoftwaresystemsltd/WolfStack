@@ -113,6 +113,24 @@ struct Cli {
     /// systemd ExecStart line written by setup.sh --agent.
     #[arg(long)]
     agent: bool,
+
+    /// Print available WolfRouter recovery snapshots and exit. Use when
+    /// the WolfRouter UI itself isn't reachable (or you want to confirm
+    /// what's available before logging in). Lists each snapshot with
+    /// its kind (backup / quarantine), age, size, and whether it
+    /// parses cleanly with this binary.
+    #[arg(long)]
+    wolfrouter_recover: bool,
+
+    /// Restore a specific WolfRouter recovery snapshot to the live
+    /// config.json. Pass the absolute path printed by
+    /// `--wolfrouter-recover`. The currently-live config (if any)
+    /// is rotated to a new `.bak.<ts>` so the rollback itself is
+    /// reversible. After running this, restart the wolfstack service
+    /// (`systemctl restart wolfstack`) so the restored config takes
+    /// effect in the running ruleset.
+    #[arg(long, value_name = "PATH")]
+    wolfrouter_restore: Option<String>,
 }
 
 /// Serve the login page for unauthenticated requests to /
@@ -210,6 +228,63 @@ async fn main() -> std::io::Result<()> {
         let token = api::load_join_token();
         println!("{}", token);
         return Ok(());
+    }
+
+    // --wolfrouter-recover: print recovery snapshots and exit. Used
+    // when the WolfRouter UI is unreachable (e.g. the wipe regression
+    // happened and the user can't get to the rollback banner because
+    // the running config is empty). Prints a copy-pasteable
+    // `--wolfrouter-restore <path>` invocation per snapshot.
+    if cli.wolfrouter_recover {
+        let snapshots = networking::router::list_recovery_snapshots();
+        if snapshots.is_empty() {
+            println!("No WolfRouter recovery snapshots found in {}.",
+                     networking::router::ROUTER_DIR);
+            println!("Looked for: config.json.bak.<unix-ts>  (rolling backups)");
+            println!("            config.json.broken-<unix-ts>  (quarantined parse failures)");
+            println!();
+            println!("If you upgraded from a pre-fix build the wipe happened");
+            println!("BEFORE rolling backups existed, so there's nothing here.");
+            println!("Try `wolfstack` then visit /api/router/recovery/reconstruct");
+            println!("from the WolfRouter UI to rebuild from on-disk artefacts");
+            println!("(dnsmasq.d snippets + /etc/ppp/peers files).");
+            return Ok(());
+        }
+        println!("WolfRouter recovery snapshots (newest first):");
+        println!();
+        for s in &snapshots {
+            let age = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs().saturating_sub(s.timestamp))
+                .unwrap_or(0);
+            let parses = if s.parses { "parses OK " } else { "DOES NOT PARSE" };
+            println!("  [{}] {}  ({} bytes, {}s old, {})",
+                     s.kind, s.path, s.size_bytes, age, parses);
+        }
+        println!();
+        println!("Restore the newest one with:");
+        println!("    sudo wolfstack --wolfrouter-restore {}",
+                 snapshots[0].path);
+        println!();
+        println!("(Then `sudo systemctl restart wolfstack` to apply.)");
+        return Ok(());
+    }
+
+    // --wolfrouter-restore <path>: atomic restore of a snapshot to the
+    // live config.json, then exit. The next service start picks it up.
+    if let Some(snapshot_path) = cli.wolfrouter_restore.as_deref() {
+        match networking::router::restore_recovery_snapshot(snapshot_path) {
+            Ok(()) => {
+                println!("Restored {} to live WolfRouter config.", snapshot_path);
+                println!("Run `sudo systemctl restart wolfstack` to apply the");
+                println!("restored config in the running ruleset.");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Restore failed: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 
     // Load persistent port config; CLI --port still overrides the API port

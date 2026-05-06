@@ -72,18 +72,6 @@ pub struct UnusedPackagesFacts {
     pub host_removable: Vec<RemovablePackage>,
 }
 
-impl UnusedPackagesFacts {
-    pub fn total_size_mb(&self) -> u64 {
-        self.host_removable.iter().filter_map(|p| p.size_mb).sum()
-    }
-    pub fn total_cves_retired(&self) -> u32 {
-        self.host_removable.iter().map(|p| p.open_cves).sum()
-    }
-    pub fn risky_package_count(&self) -> usize {
-        self.host_removable.iter().filter(|p| p.open_cves > 0).count()
-    }
-}
-
 /// Synchronous probe. Picks the distro autoremove path and parses
 /// it; the list is RAW (no CVE cross-ref yet). Cross-ref happens in
 /// `analyze` so the analyzer can use the orchestrator's already-

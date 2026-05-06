@@ -67,11 +67,11 @@ pub mod cluster;
 pub mod orchestrator;
 
 pub use proposal::{
-    ApprovalOutcome, Evidence, Proposal, ProposalScope, ProposalSource,
-    ProposalStatus, ProposalStore, RemediationPlan, RuleStats, Severity,
+    ApprovalOutcome, Proposal, ProposalScope,
+    ProposalStore, RemediationPlan,
 };
 pub use ack::{Ack, AckScope, AckStore};
-pub use metrics::{MetricSample, MetricsHistory};
+pub use metrics::MetricsHistory;
 
 /// How reachable a service binding is from the outside world.
 ///

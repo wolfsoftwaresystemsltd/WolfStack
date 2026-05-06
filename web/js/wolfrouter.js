@@ -89,6 +89,225 @@
         return path + sep + 'cluster=' + encodeURIComponent(wrState.cluster);
     }
 
+    // ─── Recovery banner ───
+    //
+    // When startup load failed and saves are blocked, render a
+    // bright dismissible-but-pinned banner at the top of the
+    // WolfRouter page with: (a) the parse error verbatim,
+    // (b) every available rollback snapshot with one-click restore,
+    // (c) a "Reconstruct from artefacts" button when nothing
+    // restorable exists. The user gets out of the recovery state
+    // without leaving the WolfRouter page or touching a CLI.
+
+    async function wrFetchRecoveryState() {
+        try {
+            const r = await fetch('/api/router/recovery');
+            if (!r.ok) return null;
+            return await r.json();
+        } catch (_) { return null; }
+    }
+
+    function wrRenderRecoveryBanner(rec) {
+        const host = document.getElementById('page-wolfrouter');
+        if (!host) return;
+        // Idempotent: replace any existing banner so re-fetches don't pile up.
+        let bar = document.getElementById('wr-recovery-banner');
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = 'wr-recovery-banner';
+            host.insertBefore(bar, host.firstChild);
+        }
+        const err = (rec.load_error && rec.load_error.error) || 'config.json failed to load';
+        const quarantine = (rec.load_error && rec.load_error.quarantine_path) || '';
+        const snaps = Array.isArray(rec.snapshots) ? rec.snapshots : [];
+        const reconAvail = !!rec.artifact_reconstruction_available;
+
+        const snapRows = snaps.map(s => {
+            const ageS = Math.max(0, Math.floor(Date.now() / 1000 - (s.timestamp || 0)));
+            const ageStr = ageS < 60 ? `${ageS}s ago`
+                : ageS < 3600 ? `${Math.floor(ageS/60)}m ago`
+                : ageS < 86400 ? `${Math.floor(ageS/3600)}h ago`
+                : `${Math.floor(ageS/86400)}d ago`;
+            const kindBadge = s.kind === 'broken'
+                ? '<span style="background:#dc2626;color:#fff;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:600;">QUARANTINED</span>'
+                : '<span style="background:#16a34a;color:#fff;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:600;">BACKUP</span>';
+            const parsesBadge = s.parses
+                ? '<span style="color:#16a34a;font-size:11px;">✓ parses</span>'
+                : '<span style="color:#dc2626;font-size:11px;font-weight:600;">✗ does NOT parse with this build</span>';
+            const safePath = String(s.path || '').replace(/'/g, "\\'");
+            return `
+                <tr>
+                    <td style="padding:6px 10px;">${kindBadge}</td>
+                    <td style="padding:6px 10px;font-family:monospace;font-size:12px;">${escapeHtml(s.path || '')}</td>
+                    <td style="padding:6px 10px;font-size:12px;color:#555;">${ageStr}</td>
+                    <td style="padding:6px 10px;font-size:12px;color:#555;">${(s.size_bytes||0).toLocaleString()} B</td>
+                    <td style="padding:6px 10px;">${parsesBadge}</td>
+                    <td style="padding:6px 10px;">
+                        <button class="btn btn-sm btn-primary"
+                                onclick="wrRestoreSnapshot('${safePath}')">
+                            Restore this
+                        </button>
+                    </td>
+                </tr>`;
+        }).join('');
+
+        const noSnapsBlock = snaps.length === 0
+            ? `<div style="padding:12px;background:#fee2e2;border-radius:4px;margin:12px 0;color:#7f1d1d;">
+                  <strong>No rollback snapshots are available.</strong>
+                  This usually means the wipe happened on a build that
+                  did not yet keep rolling backups (anything before this
+                  fix). Use <em>Reconstruct from artefacts</em> below to
+                  rebuild what's recoverable from the dnsmasq snippets
+                  and PPPoE peer files that survive on disk independently.
+               </div>`
+            : '';
+
+        const reconBlock = `
+            <div style="margin-top:14px;padding:12px;background:#fef3c7;border-radius:4px;border:1px solid #fbbf24;">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+                    <div>
+                        <strong>Reconstruct from system artefacts</strong>
+                        <div style="font-size:12px;color:#78350f;margin-top:4px;">
+                            Rebuild a best-effort config.json from the dnsmasq
+                            snippets in /etc/wolfstack/router/dnsmasq.d/ and the
+                            PPPoE peer files in /etc/ppp/peers/. Firewall rules,
+                            zones, proxies, and subnet routes can NOT be
+                            reconstructed — those will need to be re-entered.
+                            ${reconAvail ? '' : '<br>(No artefacts found — nothing to reconstruct.)'}
+                        </div>
+                    </div>
+                    <button class="btn btn-sm ${reconAvail ? 'btn-primary' : 'btn-disabled'}"
+                            ${reconAvail ? '' : 'disabled'}
+                            onclick="wrPreviewReconstruction()">
+                        Preview reconstruction
+                    </button>
+                </div>
+            </div>`;
+
+        bar.innerHTML = `
+            <div style="background:#fef2f2;border:2px solid #dc2626;border-radius:6px;padding:16px 20px;margin:0 0 16px 0;">
+                <div style="display:flex;align-items:flex-start;gap:12px;">
+                    <span style="font-size:24px;line-height:1;">⚠️</span>
+                    <div style="flex:1;">
+                        <div style="font-size:16px;font-weight:700;color:#991b1b;">
+                            WolfRouter is in recovery mode — config.json failed to load
+                        </div>
+                        <div style="font-size:13px;color:#7f1d1d;margin-top:4px;">
+                            Your saved WolfRouter configuration could not be
+                            parsed at startup. Saves are <strong>blocked</strong>
+                            so the unparseable file will not be overwritten.
+                            Pick a snapshot below to roll back, or reconstruct
+                            from on-disk artefacts.
+                        </div>
+                        <details style="margin-top:8px;">
+                            <summary style="cursor:pointer;color:#7f1d1d;font-size:12px;">
+                                Parser error
+                            </summary>
+                            <pre style="background:#fff;border:1px solid #fecaca;padding:8px;border-radius:4px;font-size:11px;color:#7f1d1d;white-space:pre-wrap;margin-top:6px;">${escapeHtml(err)}</pre>
+                            ${quarantine ? `<div style="font-size:11px;color:#7f1d1d;margin-top:4px;">
+                                Original file copied to <code>${escapeHtml(quarantine)}</code> for inspection.
+                            </div>` : ''}
+                        </details>
+                        ${noSnapsBlock}
+                        ${snaps.length > 0 ? `
+                            <div style="margin-top:12px;">
+                                <div style="font-weight:600;color:#7f1d1d;margin-bottom:6px;">Available snapshots (newest first):</div>
+                                <table style="width:100%;background:#fff;border-radius:4px;border-collapse:collapse;">
+                                    <thead>
+                                        <tr style="background:#f9fafb;font-size:11px;text-transform:uppercase;color:#6b7280;">
+                                            <th style="padding:6px 10px;text-align:left;">Kind</th>
+                                            <th style="padding:6px 10px;text-align:left;">Path</th>
+                                            <th style="padding:6px 10px;text-align:left;">Age</th>
+                                            <th style="padding:6px 10px;text-align:left;">Size</th>
+                                            <th style="padding:6px 10px;text-align:left;">Parseable</th>
+                                            <th style="padding:6px 10px;"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>${snapRows}</tbody>
+                                </table>
+                            </div>
+                        ` : ''}
+                        ${reconBlock}
+                    </div>
+                </div>
+            </div>`;
+    }
+
+    function escapeHtml(s) {
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    async function wrRestoreSnapshot(path) {
+        if (!confirm(`Restore this snapshot?\n\n${path}\n\nThe currently-live config.json will be saved to a fresh .bak.<ts> first so this rollback is itself reversible.`)) {
+            return;
+        }
+        try {
+            const r = await fetch('/api/router/recovery/restore', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path }),
+            });
+            const data = await r.json();
+            if (data.ok) {
+                alert(data.message || 'Restored.');
+                // Reload the WolfRouter page so the rack picks up the
+                // restored config.
+                if (wrState && wrState.cluster) {
+                    showWolfRouterForCluster(wrState.cluster);
+                } else {
+                    window.location.reload();
+                }
+            } else {
+                alert('Restore failed: ' + (data.message || 'unknown error'));
+            }
+        } catch (e) {
+            alert('Restore request failed: ' + (e && e.message ? e.message : e));
+        }
+    }
+    window.wrRestoreSnapshot = wrRestoreSnapshot;
+
+    async function wrPreviewReconstruction() {
+        try {
+            const r = await fetch('/api/router/recovery/reconstruct');
+            if (!r.ok) {
+                alert('Could not load reconstruction preview.');
+                return;
+            }
+            const recon = await r.json();
+            const items = (recon.recovered_items || []).map(s => `  • ${s}`).join('\n')
+                       || '  (nothing recoverable)';
+            const notes = (recon.notes || []).map(s => `  • ${s}`).join('\n');
+            const proceed = confirm(
+                `Artefact reconstruction preview:\n\n` +
+                `RECOVERED ITEMS:\n${items}\n\n` +
+                `IMPORTANT NOTES:\n${notes}\n\n` +
+                `Click OK to commit this reconstruction as your new config.json. ` +
+                `The currently-live file (if any) is rotated to a .bak.<ts> first.`
+            );
+            if (!proceed) return;
+            const c = await fetch('/api/router/recovery/reconstruct', { method: 'POST' });
+            if (c.ok) {
+                alert('Reconstruction committed. Reloading WolfRouter…');
+                if (wrState && wrState.cluster) {
+                    showWolfRouterForCluster(wrState.cluster);
+                } else {
+                    window.location.reload();
+                }
+            } else {
+                const err = await c.json().catch(() => ({}));
+                alert('Commit failed: ' + (err.error || c.statusText));
+            }
+        } catch (e) {
+            alert('Reconstruction request failed: ' + (e && e.message ? e.message : e));
+        }
+    }
+    window.wrPreviewReconstruction = wrPreviewReconstruction;
+
     // Expose hooks the HTML and app.js call directly.
     window.wrLoadAll = wrLoadAll;
     window.wrStartPolling = wrStartPolling;
@@ -164,12 +383,22 @@
         wrShowClusterLoading(clusterName);
 
         try {
-            // Always try to load the topology + config first so the rack
-            // renders whatever data IS reachable. Preflight results are
-            // informational and get shown in the below-rack diagnostics
-            // panel afterwards — they no longer replace the diagram.
-            // This is the shift the user asked for: the diagram is king,
-            // diagnostics support it rather than shoving it aside.
+            // Recovery banner runs FIRST and supersedes everything
+            // else when the on-disk config failed to load. The banner
+            // surfaces the rollback snapshot list and the artefact
+            // reconstruction button — without it the page would just
+            // render a blank rack and the user would have no idea
+            // why their LANs / WANs / rules vanished. See
+            // /api/router/recovery (backend gates persistence on the
+            // same load_failed flag).
+            const rec = await wrFetchRecoveryState();
+            if (rec && rec.load_failed) {
+                wrRenderRecoveryBanner(rec);
+                // Still load topology underneath so the user sees
+                // the live rack — but every save endpoint returns an
+                // error until they pick a snapshot, so we leave the
+                // banner pinned to the top of the page.
+            }
             wrClearDiagnosticsPanel();
             const pf = await wrRunPreflight();
             await wrLoadAll();

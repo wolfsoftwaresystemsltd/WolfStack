@@ -356,11 +356,6 @@ pub struct Inventory {
     /// from `uname -r`. Always queried separately because the
     /// installed-kernel-packages list contains stale versions.
     pub running_kernel: Option<RunningKernel>,
-    /// Why this inventory is empty / partial. Set when we couldn't
-    /// reach the package database — kept so the analyzer can decide
-    /// whether to auto-resolve old findings (we don't, if data is
-    /// missing).
-    pub error: Option<String>,
 }
 
 impl Default for EcosystemResolution {
@@ -913,20 +908,12 @@ pub fn resolve_ecosystem(
     EcosystemResolution::Unsupported { id }
 }
 
-/// Bare ecosystem lookup — uses no overrides and no system distro-
-/// info CSV. Kept for tests and for callers who only need the simple
-/// Some/None answer; production code paths use [`resolve_ecosystem`]
-/// directly so the breadcrumb logic can fire.
-///
-/// Derivative handling: Linux Mint, Pop!_OS, Elementary, Zorin, etc.
-/// inherit Ubuntu's package versions and codename. We map them to
-/// the underlying Ubuntu ecosystem via `UBUNTU_CODENAME` /
-/// `ID_LIKE`. Same idea for Devuan/Parrot/Kali → Debian.
-///
-/// All ecosystem strings here are sourced from the OSV schema
-/// defined-ecosystems table (https://ossf.github.io/osv-schema/);
-/// none are inferred or guessed.
-pub fn ecosystem_from_os_release(text: &str) -> Option<String> {
+/// Bare ecosystem lookup used only by the tests in this module —
+/// production code paths use `resolve_ecosystem` directly so the
+/// breadcrumb logic can fire on `Unsupported` /
+/// `UnrecognizedDerivative`.
+#[cfg(test)]
+fn ecosystem_from_os_release(text: &str) -> Option<String> {
     match resolve_ecosystem(text, &HashMap::new(), &DistroInfo::default()) {
         EcosystemResolution::Mapped(s) => Some(s),
         _ => None,
@@ -1055,31 +1042,11 @@ pub fn collect_host_inventory(
         _ => Vec::new(),
     };
     let running_kernel = collect_running_kernel(pm);
-    let error = match &resolution {
-        EcosystemResolution::Unknown => Some("missing or unreadable /etc/os-release".to_string()),
-        EcosystemResolution::Unsupported { id } => {
-            Some(format!("distro `{}` not in OSV — pocket scanner is authoritative", id))
-        }
-        EcosystemResolution::UnrecognizedDerivative { id, parent, codename_hint } => {
-            Some(format!(
-                "derivative `{}` (parent: {}) — codename `{}` unrecognised; \
-                 install distro-info-data or set distro_overrides",
-                id,
-                parent.label(),
-                codename_hint.as_deref().unwrap_or("<none>"),
-            ))
-        }
-        EcosystemResolution::Mapped(_) if entries.is_empty() && pm != PackageManager::None => {
-            Some(format!("could not enumerate installed packages via {}", pm.label()))
-        }
-        _ => None,
-    };
     Inventory {
         target: ScanTargetOwned::Host,
         entries,
         resolution,
         running_kernel,
-        error,
     }
 }
 
@@ -1108,7 +1075,6 @@ pub fn collect_lxc_inventory(
                 entries: Vec::new(),
                 resolution,
                 running_kernel: None,
-                error: Some("container distro not in OSV ecosystem map (or unrecognised derivative)".into()),
             };
         }
     };
@@ -1136,9 +1102,6 @@ pub fn collect_lxc_inventory(
     }).collect();
     Inventory {
         target: ScanTargetOwned::Lxc(name.to_string()),
-        error: if entries.is_empty() {
-            Some("no supported package manager reachable in container (dpkg/rpm/apk)".into())
-        } else { None },
         entries,
         resolution,
         running_kernel: None,
@@ -1319,8 +1282,6 @@ struct OsvBatchResult {
 #[derive(Debug, Deserialize)]
 struct OsvBatchVulnRef {
     id: String,
-    #[serde(default)]
-    modified: Option<DateTime<Utc>>,
 }
 
 /// Full OSV vuln record — exactly the subset of fields we use,
@@ -1362,8 +1323,6 @@ struct OsvAffected {
 struct OsvAffectedPackage {
     #[serde(default)]
     name: String,
-    #[serde(default)]
-    ecosystem: String,
 }
 
 #[derive(Debug, Deserialize, Default)]

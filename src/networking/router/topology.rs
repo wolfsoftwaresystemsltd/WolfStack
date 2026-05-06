@@ -208,43 +208,87 @@ fn delta_bps(map: &mut HashMap<String, BpsSample>, iface: &str, bytes: u64, now:
 /// WireGuard bridges → Wolfnet (the VPN's whole point is reaching
 /// WolfNet), default-route NIC → WAN. Persists once seeded so the
 /// user can override later. Returns true if anything changed.
-pub fn ensure_default_zones(node_id: &str) -> bool {
+///
+/// Called from `compute_local` on every topology poll. Two
+/// safety properties matter here:
+///   1. **Mutate in-place on the live RouterState** — older
+///      versions loaded `RouterConfig` from disk into a local
+///      copy and saved that, which meant a parse-error startup
+///      where the in-memory config was the empty default would
+///      atomic-rename the empty default + auto-zones over the
+///      user's last-known-good file. Now we mutate the same
+///      `RwLock<RouterConfig>` the API endpoints read from, so
+///      a startup that landed in the parse-error state has its
+///      in-memory config remain visibly empty without any disk
+///      write being attempted.
+///   2. **Persistence is gated on `RouterState::may_save`** —
+///      `loaded_clean=false` means we skip the save entirely and
+///      log once. The in-memory auto-zones are still applied so
+///      the running rack view is sensible while the user picks a
+///      recovery snapshot.
+pub fn ensure_default_zones(state: &RouterState, node_id: &str) -> bool {
     use std::process::Command;
-    let mut changed = false;
-    let mut cfg = match RouterConfig::load() {
-        c => c,
-    };
-    // Pull current interface names cheaply.
     let text = Command::new("ip").args(["-j", "link"]).output().ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_else(|| "[]".into());
     let links: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap_or_default();
     let primary = crate::networking::detect_primary_interface();
-    for link in links {
-        let name = match link.get("ifname").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() && s != "lo" => s.to_string(),
-            _ => continue,
+
+    // First mutate in-place under the write lock. Compute the
+    // changes inside the lock so two concurrent topology polls
+    // don't race on a stale view of `cfg.zones`.
+    let mut changed = false;
+    {
+        let mut cfg = match state.config.write() {
+            Ok(g) => g,
+            Err(_) => return false, // poisoned — caller logs separately
         };
-        // Skip if the user has already chosen a zone for this iface.
-        if cfg.zones.get(node_id, &name).is_some() { continue; }
-        let auto_zone = if name.starts_with("wn") || name.starts_with("wolfnet") {
-            Some(Zone::Wolfnet)
-        } else if name.starts_with("wg-") {
-            // WireGuard bridge feeds WolfNet — same trust domain.
-            Some(Zone::Wolfnet)
-        } else if name == primary {
-            Some(Zone::Wan)
-        } else {
-            None
-        };
-        if let Some(z) = auto_zone {
-            cfg.zones.set(node_id, &name, z);
-            changed = true;
+        for link in &links {
+            let name = match link.get("ifname").and_then(|v| v.as_str()) {
+                Some(s) if !s.is_empty() && s != "lo" => s.to_string(),
+                _ => continue,
+            };
+            if cfg.zones.get(node_id, &name).is_some() { continue; }
+            let auto_zone = if name.starts_with("wn") || name.starts_with("wolfnet") {
+                Some(Zone::Wolfnet)
+            } else if name.starts_with("wg-") {
+                Some(Zone::Wolfnet)
+            } else if name == primary {
+                Some(Zone::Wan)
+            } else {
+                None
+            };
+            if let Some(z) = auto_zone {
+                cfg.zones.set(node_id, &name, z);
+                changed = true;
+            }
         }
     }
-    if changed {
-        let _ = cfg.save();
+
+    if changed && state.may_save() {
+        // Snapshot under the read lock so save() doesn't hold the
+        // write lock during disk I/O.
+        let snapshot = state.config.read().map(|g| g.clone()).ok();
+        if let Some(s) = snapshot {
+            if let Err(e) = s.save() {
+                tracing::warn!(
+                    "WolfRouter: ensure_default_zones could not persist \
+                     auto-zones for node {}: {}. In-memory state has the \
+                     auto-zones; the next user save will pick them up.",
+                    node_id, e,
+                );
+            }
+        }
+    } else if changed && !state.may_save() {
+        // Loud, but only once per process — the watchdog tick logs
+        // at debug to avoid spamming logs while the user is in the
+        // recovery flow.
+        tracing::debug!(
+            "WolfRouter: skipping persist of auto-zones — startup load \
+             failed and the recovery flow has not completed yet. Pick a \
+             snapshot in the rollback panel to restore persistence.",
+        );
     }
     changed
 }
@@ -506,10 +550,14 @@ pub fn compute_local(
     node_id: &str,
     node_name: &str,
     config: &RouterConfig,
+    state: &RouterState,
 ) -> NodeTopology {
     // Seed defaults for WolfStack-managed interfaces if the user
     // hasn't zoned them yet. Cheap (one ip-link call) and idempotent.
-    let _ = ensure_default_zones(node_id);
+    // Operates on the live `state.config` so the in-memory view
+    // stays consistent with what the API endpoints read; persistence
+    // is gated inside `ensure_default_zones` on `state.may_save()`.
+    let _ = ensure_default_zones(state, node_id);
 
     let bps = sample_bps();
     let interfaces = walk_interfaces(&bps, config, node_id);

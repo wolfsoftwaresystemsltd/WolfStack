@@ -99,9 +99,13 @@ impl Ack {
         }
     }
 
-    /// Acks-without-expiry are accepted but discouraged — call this
-    /// constructor only when the operator has explicitly opted out
-    /// of the renewal prompt.
+    /// Test-only constructor for acks-without-expiry. Production
+    /// flows always hand the operator a renewal prompt so this
+    /// branch never fires in non-test code; kept gated on
+    /// `cfg(test)` rather than deleted because the tests cover
+    /// the "infinite ack still flagged active after a year"
+    /// invariant.
+    #[cfg(test)]
     pub fn permanent(
         finding_type: impl Into<String>,
         scope: AckScope,
@@ -185,9 +189,10 @@ impl AckStore {
         })
     }
 
-    /// Acks whose expiry is approaching — used by the dashboard to
-    /// surface a "review your acknowledgements" nudge. Window is the
-    /// number of days ahead to consider.
+    /// Test-only: Acks whose expiry is approaching. Surface tests
+    /// rely on this for "review your acknowledgements" coverage,
+    /// but production has no consumer yet.
+    #[cfg(test)]
     pub fn expiring_within(&self, days: i64) -> Vec<&Ack> {
         let now = Utc::now();
         let horizon = now + Duration::days(days);

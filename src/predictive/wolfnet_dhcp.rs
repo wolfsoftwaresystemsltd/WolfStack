@@ -239,7 +239,7 @@ mod tests {
     fn healthy(name: &str) -> WolfnetTapHealth {
         WolfnetTapHealth {
             tap: format!("tap-{}", name),
-            gateway_ip: "10.10.10.250".into(),
+            gateway_ip: "10.10.10.254".into(),
             wolfnet_ip: "10.10.10.5".into(),
             tap_exists: true,
             tap_up: true,

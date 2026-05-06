@@ -75,16 +75,6 @@ const LOAD_CRITICAL_MULT: f64 = 2.0; // load > 2 × cpu_count
 /// resource_id; per-unit systemd uses the unit name.
 const NODE_RESOURCE: &str = "host";
 
-/// All six finding types this analyzer can emit. Used by the
-/// orchestrator to build the "covered" set for auto-resolve so a
-/// CPU spike that subsides actually clears the proposal.
-pub const ALL_FINDING_TYPES: &[&str] = &[
-    FINDING_HOST_CPU,
-    FINDING_HOST_MEMORY,
-    FINDING_HOST_SWAP,
-    FINDING_HOST_LOAD,
-];
-
 /// Sample failed systemd units. Returns an empty Vec if `systemctl`
 /// errors or isn't present.
 pub fn sample_failed_systemd_units_now() -> Vec<String> {

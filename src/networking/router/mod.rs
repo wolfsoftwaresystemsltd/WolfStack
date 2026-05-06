@@ -36,8 +36,46 @@ pub mod health;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{error, warn, info};
 
-const ROUTER_DIR: &str = "/etc/wolfstack/router";
+pub const ROUTER_DIR: &str = "/etc/wolfstack/router";
+
+/// Maximum number of rolling backup snapshots kept in `ROUTER_DIR`.
+/// Each save() before atomic-rename copies the previous config.json
+/// to `config.json.bak.<unix-seconds>` so a regression that mangles
+/// the file leaves a clean rollback target. Ten is enough to span
+/// "the last few days of edits" without ballooning the dir.
+const MAX_BACKUPS: usize = 10;
+
+/// Process-wide latch flipped by `load_with_status` whenever the
+/// on-disk config fails to parse (or fails to read for any reason
+/// other than "file not found"). Every `RouterConfig::save()`
+/// consults it and refuses to write when set, so a fallback
+/// `Default::default()` config can never atomic-rename over the
+/// user's last-known-good file.
+///
+/// This is the load-bearing safety net: every existing endpoint
+/// calls `RouterConfig::save()` directly, so gating inside save()
+/// itself protects them all without per-endpoint churn. The latch
+/// is cleared by `clear_load_failed()` after a successful recovery
+/// rollback.
+static LOAD_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Returns true when the most recent `load_with_status` produced a
+/// `ParseError` and the user has not yet recovered. While true,
+/// every `save()` call returns an error without touching the file.
+pub fn save_blocked_by_load_failure() -> bool {
+    LOAD_FAILED.load(Ordering::SeqCst)
+}
+
+/// Clear the process-wide save-block latch. Called from the
+/// recovery API after a successful snapshot restore (the disk file
+/// is now known-good) and from unit tests.
+pub fn clear_load_failed() {
+    LOAD_FAILED.store(false, Ordering::SeqCst);
+}
 
 /// Named policy group. Interfaces and bridges belong to a zone; firewall
 /// rules are written in terms of zones so admins don't have to remember
@@ -416,28 +454,373 @@ pub struct RouterConfig {
 
 fn default_safe_mode_seconds() -> u32 { 30 }
 
+/// Outcome of `RouterConfig::load_with_status`. Distinguishes the
+/// three real-world cases so callers can decide whether it's safe to
+/// re-save the in-memory config back to disk:
+///
+/// * `Loaded` — file existed and parsed cleanly. Safe to save.
+/// * `Fresh` — file did not exist (first run, fresh install). Safe
+///   to save once the user actually edits something.
+/// * `ParseError` — file existed but failed to deserialize. The
+///   on-disk JSON is preserved (via quarantine) and the in-memory
+///   config falls back to `Default`. **Must NOT save** — doing so
+///   would atomic-rename the empty default over the user's last
+///   known-good config and lose it forever. The original silent
+///   `unwrap_or_default()` did exactly that on every update where a
+///   field/enum representation drifted, wiping WolfRouter configs
+///   (PapaSchlumpf 2026-05-06).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadOutcome {
+    Loaded,
+    Fresh,
+    ParseError {
+        /// Absolute path the original (broken) file was copied to so
+        /// the user can recover it. Empty on quarantine failure.
+        quarantine_path: String,
+        /// Serde's error string — surfaced in logs and via the
+        /// recovery API so the operator can see exactly which field
+        /// or enum variant tripped the parser.
+        error: String,
+    },
+}
+
 impl RouterConfig {
     pub fn path() -> String { format!("{}/config.json", ROUTER_DIR) }
 
+    /// Backwards-compatible loader. Use `load_with_status` instead
+    /// when you need to know whether the load was clean — every new
+    /// caller does, but a couple of legacy unit-test paths still rely
+    /// on the swallow-and-default shape so we keep this stub.
     pub fn load() -> Self {
-        std::fs::read_to_string(Self::path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        Self::load_with_status().0
     }
 
+    /// Load the persisted config and report what happened. The
+    /// caller is responsible for setting `RouterState::loaded_clean`
+    /// to `false` whenever the outcome is `ParseError` so every
+    /// downstream `save()` refuses to run until the user explicitly
+    /// resolves the error (rollback to a backup or re-edit the file).
+    pub fn load_with_status() -> (Self, LoadOutcome) {
+        let path = Self::path();
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => {
+                // File exists and is readable — clear any prior
+                // failure latch (e.g. set during a previous start).
+                LOAD_FAILED.store(false, Ordering::SeqCst);
+                s
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                LOAD_FAILED.store(false, Ordering::SeqCst);
+                return (Self::default(), LoadOutcome::Fresh);
+            }
+            Err(e) => {
+                // Permission denied / I/O error: refuse to silently
+                // wipe by treating it the same as a parse error —
+                // we have no proof the file is gone, only that we
+                // couldn't read it. Saving over it would be reckless.
+                error!(
+                    "WolfRouter: cannot read {} ({}). Refusing to start with \
+                     a default config — this would overwrite the existing \
+                     file the moment anything calls save(). Resolve the I/O \
+                     error and restart, or use `--wolfrouter-recover` to \
+                     pick a backup.",
+                    path, e,
+                );
+                LOAD_FAILED.store(true, Ordering::SeqCst);
+                return (
+                    Self::default(),
+                    LoadOutcome::ParseError {
+                        quarantine_path: String::new(),
+                        error: format!("read failed: {}", e),
+                    },
+                );
+            }
+        };
+
+        match serde_json::from_str::<Self>(&raw) {
+            Ok(cfg) => {
+                LOAD_FAILED.store(false, Ordering::SeqCst);
+                (cfg, LoadOutcome::Loaded)
+            }
+            Err(e) => {
+                let ts = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let quarantine = format!("{}/config.json.broken-{}", ROUTER_DIR, ts);
+                LOAD_FAILED.store(true, Ordering::SeqCst);
+                let quarantine_path = match std::fs::write(&quarantine, &raw) {
+                    Ok(()) => {
+                        error!(
+                            "WolfRouter: {} failed to deserialize ({}). \
+                             Original file copied to {} for recovery. \
+                             Refusing to apply, save, or auto-rewrite — use \
+                             `--wolfrouter-recover` (CLI) or the rollback \
+                             banner in the WolfRouter UI to pick a known-good \
+                             snapshot.",
+                            path, e, quarantine,
+                        );
+                        quarantine
+                    }
+                    Err(qe) => {
+                        error!(
+                            "WolfRouter: {} failed to deserialize ({}). \
+                             COULD NOT QUARANTINE the original file ({}). \
+                             The on-disk file is left untouched — DO NOT \
+                             trigger any save() until you've copied {} to \
+                             a safe location manually.",
+                            path, e, qe, path,
+                        );
+                        String::new()
+                    }
+                };
+                (
+                    Self::default(),
+                    LoadOutcome::ParseError {
+                        quarantine_path,
+                        error: e.to_string(),
+                    },
+                )
+            }
+        }
+    }
+
+    /// Atomic-rename save with rolling backup.
+    ///
+    /// Before writing the new file we copy the existing
+    /// `config.json` to `config.json.bak.<unix-seconds>`. Old
+    /// backups beyond `MAX_BACKUPS` are pruned oldest-first so the
+    /// directory stays bounded. The backup is best-effort — a
+    /// failure to create it does NOT block the save (we'd rather
+    /// lose a backup than refuse a legitimate config write), but it
+    /// IS logged at warn so cluster-validation can surface it.
     pub fn save(&self) -> Result<(), String> {
+        // Hard gate: refuse to write when the most recent load
+        // failed. This is the single point that prevents a default
+        // fallback config from overwriting the user's last-known-
+        // good file. The latch is cleared by `clear_load_failed()`
+        // after a successful recovery rollback.
+        if save_blocked_by_load_failure() {
+            return Err(
+                "WolfRouter config not persisted: startup load failed and the \
+                 process is in recovery mode. Pick a backup or quarantined \
+                 snapshot from the rollback panel (or `--wolfrouter-recover`) \
+                 before edits will persist.".to_string()
+            );
+        }
         std::fs::create_dir_all(ROUTER_DIR)
             .map_err(|e| format!("Failed to create router dir: {}", e))?;
-        let tmp = format!("{}.tmp", Self::path());
+
+        // Best-effort rolling backup of the previous file. Skipped
+        // when the file doesn't exist yet (first save on a fresh
+        // install).
+        let path = Self::path();
+        if std::path::Path::new(&path).exists() {
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let bak = format!("{}.bak.{}", path, ts);
+            if let Err(e) = std::fs::copy(&path, &bak) {
+                warn!(
+                    "WolfRouter: rolling backup to {} failed ({}). Save \
+                     proceeding without a backup — recovery options will \
+                     be reduced if the new write is bad.",
+                    bak, e,
+                );
+            } else {
+                prune_old_backups(MAX_BACKUPS);
+            }
+        }
+
+        let tmp = format!("{}.tmp", path);
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Serialize failed: {}", e))?;
         std::fs::write(&tmp, json)
             .map_err(|e| format!("Write failed: {}", e))?;
-        std::fs::rename(&tmp, Self::path())
+        std::fs::rename(&tmp, &path)
             .map_err(|e| format!("Atomic rename failed: {}", e))?;
         Ok(())
     }
+}
+
+/// Keep at most `keep` `config.json.bak.*` snapshots in
+/// `ROUTER_DIR`, deleting the oldest first by the unix-second
+/// suffix in the filename. `config.json.broken-*` quarantine files
+/// are NEVER pruned — they're how the user recovers from a parse
+/// error and may need to outlive routine backup rotation.
+fn prune_old_backups(keep: usize) {
+    let dir = match std::fs::read_dir(ROUTER_DIR) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let mut backups: Vec<(u64, std::path::PathBuf)> = Vec::new();
+    for entry in dir.flatten() {
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if let Some(ts_str) = name.strip_prefix("config.json.bak.") {
+            if let Ok(ts) = ts_str.parse::<u64>() {
+                backups.push((ts, entry.path()));
+            }
+        }
+    }
+    if backups.len() <= keep { return; }
+    backups.sort_by_key(|(ts, _)| *ts);
+    let drop_count = backups.len() - keep;
+    for (_, path) in backups.into_iter().take(drop_count) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Return every recovery target currently available on disk —
+/// `.bak.<ts>` rolling backups and `.broken-<ts>` quarantine
+/// snapshots — newest first. Surfaced via the recovery API so the
+/// frontend can render a per-snapshot "Rollback to..." button.
+pub fn list_recovery_snapshots() -> Vec<RecoverySnapshot> {
+    let dir = match std::fs::read_dir(ROUTER_DIR) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let mut snaps: Vec<RecoverySnapshot> = Vec::new();
+    for entry in dir.flatten() {
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let (kind, ts_str) = if let Some(s) = name.strip_prefix("config.json.bak.") {
+            ("backup", s)
+        } else if let Some(s) = name.strip_prefix("config.json.broken-") {
+            ("broken", s)
+        } else {
+            continue;
+        };
+        let ts: u64 = ts_str.parse().unwrap_or(0);
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        // Cheap sanity check: is the snapshot actually parseable?
+        // Not authoritative (it's just a hint for the UI to flag
+        // "this one's broken too"), so we tolerate failures silently.
+        let parses = std::fs::read_to_string(entry.path())
+            .ok()
+            .and_then(|s| serde_json::from_str::<RouterConfig>(&s).ok())
+            .is_some();
+        snaps.push(RecoverySnapshot {
+            kind: kind.to_string(),
+            timestamp: ts,
+            path: entry.path().to_string_lossy().to_string(),
+            size_bytes: size,
+            parses,
+        });
+    }
+    snaps.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    snaps
+}
+
+/// One recovery target: either a rolling `.bak.<ts>` from a normal
+/// save or a `.broken-<ts>` quarantined unparseable file.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecoverySnapshot {
+    /// "backup" (rolling save backup) or "broken" (quarantined parse
+    /// failure). The frontend uses this to label the chip.
+    pub kind: String,
+    /// Unix seconds when the snapshot was created.
+    pub timestamp: u64,
+    /// Absolute path on disk. Used as the opaque token the frontend
+    /// passes back to `restore_recovery_snapshot`.
+    pub path: String,
+    pub size_bytes: u64,
+    /// True when the snapshot deserializes cleanly with the current
+    /// binary — flagged in the UI so users don't restore a known-bad
+    /// snapshot and fall straight back into the parse-error state.
+    pub parses: bool,
+}
+
+/// Restore a recovery snapshot to be the live `config.json`. Path
+/// is validated to live inside `ROUTER_DIR` (no `..` escapes) and to
+/// match one of the two snapshot prefixes — anything else is
+/// rejected as an injection attempt.
+///
+/// The currently-live `config.json` is rotated to a new
+/// `.bak.<ts>` before the restore so a bad rollback is itself
+/// rollback-able.
+pub fn restore_recovery_snapshot(snapshot_path: &str) -> Result<(), String> {
+    let canon = std::path::Path::new(snapshot_path);
+    let file_name = canon.file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "snapshot path has no filename component".to_string())?;
+    let parent = canon.parent()
+        .and_then(|p| p.to_str())
+        .ok_or_else(|| "snapshot path has no parent directory".to_string())?;
+    if parent != ROUTER_DIR {
+        return Err(format!(
+            "snapshot path is outside {} — refusing to restore",
+            ROUTER_DIR
+        ));
+    }
+    if !file_name.starts_with("config.json.bak.")
+        && !file_name.starts_with("config.json.broken-")
+    {
+        return Err(format!(
+            "snapshot {} is not a recognised backup or quarantine file",
+            file_name
+        ));
+    }
+    if !canon.exists() {
+        return Err(format!("snapshot {} no longer exists", snapshot_path));
+    }
+    // Sanity-check the snapshot parses before swapping it in. A
+    // quarantined `broken-*` file may not — fine, the user can
+    // explicitly opt to restore it anyway, but we surface the error
+    // either way.
+    let raw = std::fs::read_to_string(snapshot_path)
+        .map_err(|e| format!("could not read snapshot {}: {}", snapshot_path, e))?;
+    let parses = serde_json::from_str::<RouterConfig>(&raw).is_ok();
+
+    // Rotate the live file so the rollback is itself reversible.
+    let live = RouterConfig::path();
+    if std::path::Path::new(&live).exists() {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let bak = format!("{}.bak.{}", live, ts);
+        if let Err(e) = std::fs::copy(&live, &bak) {
+            warn!(
+                "WolfRouter recovery: pre-rollback backup of {} to {} \
+                 failed ({}) — proceeding anyway because the user \
+                 explicitly chose to restore. The previous live file is \
+                 about to be replaced and won't be recoverable.",
+                live, bak, e,
+            );
+        }
+    }
+    // Restoration goes through the lower-level write rather than
+    // RouterConfig::save() because the save() latch is currently
+    // *blocking* persistence — that's the whole reason we're in
+    // the recovery flow. We bypass deliberately, write the verified
+    // snapshot, then clear the latch so subsequent normal saves
+    // are accepted again.
+    std::fs::write(&live, &raw)
+        .map_err(|e| format!("could not write live config {}: {}", live, e))?;
+    if parses {
+        clear_load_failed();
+    } else {
+        warn!(
+            "WolfRouter recovery: restored {} to live but the snapshot did \
+             NOT parse with the current binary. Save-block remains set; the \
+             user must edit and re-restore (or fix the file) before edits \
+             will persist again.",
+            snapshot_path,
+        );
+    }
+    info!(
+        "WolfRouter recovery: restored {} to {} (parses={}). Restart the \
+         service or POST /api/router/apply-startup to bring the rolled-back \
+         config into the running ruleset.",
+        snapshot_path, live, parses,
+    );
+    Ok(())
 }
 
 /// In-memory state, wrapped in AppState. RwLock because topology reads
@@ -458,6 +841,34 @@ pub struct RouterState {
     /// Surfaced via /api/router/validation so operators see what was
     /// flagged at the most recent boot/scan.
     pub last_validation: RwLock<Option<ValidationReport>>,
+    /// `true` when the on-disk config loaded cleanly (or didn't exist
+    /// yet on a fresh install). `false` when load() hit a parse or
+    /// I/O error. Used by the recovery API and the UI banner to
+    /// drive the rollback flow; the actual save-block enforcement
+    /// is the process-wide `LOAD_FAILED` latch consulted inside
+    /// `RouterConfig::save()`. Saving a default-fallback config
+    /// over the user's last-known-good file is exactly how
+    /// WolfRouter configs got wiped on update before 2026-05-06.
+    pub loaded_clean: AtomicBool,
+    /// Populated when `load_with_status` returns a `ParseError`.
+    /// Exposed via `/api/router/recovery` so the UI can render a
+    /// banner with the serde error and a list of rollback targets.
+    pub load_error: RwLock<Option<LoadError>>,
+}
+
+/// Persisted-on-load failure detail — mirror of `LoadOutcome::ParseError`
+/// minus the variant wrapper, ready for the recovery API to serialise.
+#[derive(Debug, Clone, Serialize)]
+pub struct LoadError {
+    /// Where the unparseable original was copied (empty if quarantine
+    /// also failed — in that case the original was left untouched).
+    pub quarantine_path: String,
+    /// Serde error text — e.g. `"missing field 'foo' at line 3 column 1"`.
+    /// Verbatim so support can paste it into a bug report.
+    pub error: String,
+    /// Unix seconds when the failure was observed (process start
+    /// time, since `load_with_status` runs once per process).
+    pub observed_at: u64,
 }
 
 /// Snapshot of a per-node config-validation pass. One row per
@@ -495,18 +906,421 @@ pub struct ValidationFinding {
 
 impl RouterState {
     pub fn new() -> Self {
+        let (cfg, outcome) = RouterConfig::load_with_status();
+        let (clean, load_err) = match outcome {
+            LoadOutcome::Loaded => (true, None),
+            LoadOutcome::Fresh => (true, None), // First run — saves are fine.
+            LoadOutcome::ParseError { quarantine_path, error } => (
+                false,
+                Some(LoadError {
+                    quarantine_path,
+                    error,
+                    observed_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                }),
+            ),
+        };
         RouterState {
-            config: RwLock::new(RouterConfig::load()),
+            config: RwLock::new(cfg),
             last_applied_rules: RwLock::new(None),
             rollback_deadline: RwLock::new(None),
             remote_topologies: RwLock::new(HashMap::new()),
             last_validation: RwLock::new(None),
+            loaded_clean: AtomicBool::new(clean),
+            load_error: RwLock::new(load_err),
         }
+    }
+
+    /// Mark this state as freshly clean — used after a successful
+    /// recovery rollback or after the user has explicitly resolved
+    /// the parse-error condition through the recovery UI. Also
+    /// clears the process-wide save-block latch so subsequent
+    /// `RouterConfig::save()` calls are accepted again.
+    pub fn mark_clean(&self) {
+        self.loaded_clean.store(true, Ordering::SeqCst);
+        if let Ok(mut e) = self.load_error.write() {
+            *e = None;
+        }
+        clear_load_failed();
+    }
+
+    /// Returns true when callers may legitimately persist the
+    /// in-memory config back to disk. The actual gate lives inside
+    /// `RouterConfig::save()` so existing call sites get the
+    /// protection automatically; this helper is here for callers
+    /// (currently `topology::ensure_default_zones`) that want to
+    /// short-circuit BEFORE building a save snapshot, since failing
+    /// inside save() would still log a refusal even when the caller
+    /// already knows the latch is set.
+    pub fn may_save(&self) -> bool {
+        self.loaded_clean.load(Ordering::SeqCst)
     }
 }
 
 impl Default for RouterState {
     fn default() -> Self { Self::new() }
+}
+
+/// Reconstruct a best-effort RouterConfig from on-disk artefacts
+/// that survive independently of `config.json` — the dnsmasq
+/// per-LAN config snippets in `<ROUTER_DIR>/dnsmasq.d/`, PPPoE
+/// peer files in `/etc/ppp/peers/wolfrouter-*`, and the current
+/// in-kernel iptables state. Used when the user has lost
+/// `config.json` entirely (e.g. wiped by the pre-fix silent-default
+/// regression) and there are no `.bak.*` snapshots to roll back to.
+///
+/// This is explicit recovery, not auto-recovery: it never writes
+/// anything on its own. The reconstructed config is returned to
+/// the caller, who renders it in the UI for the user to review
+/// (since artefacts may be partial or stale) and explicitly
+/// commit. The committed config goes through the normal
+/// `RouterConfig::save()` path so it benefits from the rolling-backup
+/// safety net going forward.
+///
+/// What we can recover:
+///   * **LANs** — from `dnsmasq.d/lan-<id>.conf`. Each file is
+///     written with deterministic key=value lines, so we parse
+///     `interface=`, `dhcp-range=`, `dhcp-option=3,…`,
+///     `dhcp-option=6,…` and reconstruct the LanSegment.
+///   * **WAN/PPPoE** — from `/etc/ppp/peers/wolfrouter-<id>`.
+///     `plugin rp-pppoe.so <iface>`, `user "<name>"`, MTU/MRU,
+///     LCP echo settings. Password lives in chap-secrets at 0600,
+///     readable as root — we copy it verbatim, never log it.
+///   * **Firewall rules** — NOT reconstructable from iptables-save
+///     in a useful way (the engine generates iptables from rules,
+///     not the other way around — chain ordering, ipset names,
+///     comment metadata can't be reversed). We surface this gap to
+///     the user explicitly so they don't think it succeeded.
+///   * **Zones, proxies, subnet-routes, etc.** — only persisted in
+///     `config.json`. Lost is lost; we leave the defaults.
+pub fn reconstruct_from_artifacts() -> ArtifactReconstruction {
+    use std::fs;
+
+    let mut cfg = RouterConfig::default();
+    let mut notes: Vec<String> = Vec::new();
+    let mut recovered: Vec<String> = Vec::new();
+
+    // ── LANs from dnsmasq snippets ──
+    let dnsmasq_dir = format!("{}/dnsmasq.d", ROUTER_DIR);
+    match fs::read_dir(&dnsmasq_dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let name = match entry.file_name().into_string() {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                let id = match name.strip_prefix("lan-").and_then(|s| s.strip_suffix(".conf")) {
+                    Some(s) if !s.is_empty() => s.to_string(),
+                    _ => continue,
+                };
+                let body = match fs::read_to_string(entry.path()) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        notes.push(format!(
+                            "could not read dnsmasq snippet {}: {}",
+                            entry.path().display(), e
+                        ));
+                        continue;
+                    }
+                };
+                if let Some(seg) = parse_lan_from_dnsmasq(&id, &body) {
+                    recovered.push(format!("LAN '{}' (interface {})", seg.name, seg.interface));
+                    cfg.lans.push(seg);
+                } else {
+                    notes.push(format!(
+                        "dnsmasq snippet {} did not contain enough fields to \
+                         reconstruct a LAN (need at least interface= and \
+                         dhcp-range=) — skipped",
+                        entry.path().display()
+                    ));
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            notes.push(format!(
+                "no dnsmasq snippets at {} — no LANs were recovered \
+                 (this is expected on a host that never had WolfRouter \
+                 LANs configured; if you DID have LANs, the snippet \
+                 directory was wiped along with config.json)",
+                dnsmasq_dir
+            ));
+        }
+        Err(e) => {
+            notes.push(format!(
+                "could not read {}: {} — no LANs recovered",
+                dnsmasq_dir, e
+            ));
+        }
+    }
+
+    // ── WAN/PPPoE from /etc/ppp/peers ──
+    match fs::read_dir("/etc/ppp/peers") {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let name = match entry.file_name().into_string() {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                let id = match name.strip_prefix("wolfrouter-") {
+                    Some(s) if !s.is_empty() => s.to_string(),
+                    _ => continue,
+                };
+                let body = match fs::read_to_string(entry.path()) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        notes.push(format!(
+                            "could not read peer file {}: {}",
+                            entry.path().display(), e
+                        ));
+                        continue;
+                    }
+                };
+                if let Some(conn) = parse_pppoe_from_peer(&id, &body) {
+                    recovered.push(format!(
+                        "WAN PPPoE '{}' on interface {}",
+                        conn.name, conn.interface
+                    ));
+                    cfg.wan_connections.push(conn);
+                } else {
+                    notes.push(format!(
+                        "peer file {} did not parse as a PPPoE config \
+                         (missing plugin rp-pppoe.so or user line) — skipped",
+                        entry.path().display()
+                    ));
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            notes.push("no /etc/ppp/peers directory — no PPPoE WANs were recovered".to_string());
+        }
+        Err(e) => {
+            notes.push(format!(
+                "could not read /etc/ppp/peers: {} — no PPPoE WANs recovered",
+                e
+            ));
+        }
+    }
+
+    notes.push(
+        "Firewall rules cannot be reconstructed from iptables — the engine \
+         generates iptables from rules, not the other way around. Any custom \
+         rules you had will need to be re-entered manually.".to_string()
+    );
+    notes.push(
+        "Zones, reverse proxies, and subnet routes only live in config.json \
+         and were not recoverable. Default zone assignments (Wan / Wolfnet \
+         based on interface name) will be re-derived on the next topology \
+         poll AFTER you commit the recovered config.".to_string()
+    );
+
+    ArtifactReconstruction {
+        config: cfg,
+        recovered_items: recovered,
+        notes,
+    }
+}
+
+/// Parse the WolfRouter dnsmasq.d snippet for one LAN. Returns
+/// `None` if the snippet is missing the bare-minimum fields we
+/// need to identify the LAN — caller logs a note rather than
+/// fabricating values from thin air. We deliberately read ONLY
+/// the fields that the WolfRouter dnsmasq writer emits — anything
+/// the user added by hand into the snippet is preserved on disk
+/// (the writer doesn't overwrite hand-edits) but not roundtripped
+/// into the in-memory config.
+fn parse_lan_from_dnsmasq(id: &str, body: &str) -> Option<LanSegment> {
+    let mut interface: Option<String> = None;
+    let mut dhcp_start: Option<String> = None;
+    let mut dhcp_end: Option<String> = None;
+    let mut dhcp_lease: Option<String> = None;
+    let mut router_ip: Option<String> = None;
+    let mut dns_servers: Vec<String> = Vec::new();
+
+    for raw_line in body.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        if let Some(v) = line.strip_prefix("interface=") {
+            interface = Some(v.trim().to_string());
+        } else if let Some(v) = line.strip_prefix("dhcp-range=") {
+            // dhcp-range=<start>,<end>,<lease>
+            let parts: Vec<&str> = v.split(',').map(|s| s.trim()).collect();
+            if parts.len() >= 2 {
+                dhcp_start = Some(parts[0].to_string());
+                dhcp_end = Some(parts[1].to_string());
+            }
+            if parts.len() >= 3 {
+                dhcp_lease = Some(parts[2].to_string());
+            }
+        } else if let Some(v) = line.strip_prefix("dhcp-option=") {
+            // option 3 = router (gateway IP); option 6 = DNS
+            let parts: Vec<&str> = v.splitn(2, ',').map(|s| s.trim()).collect();
+            if parts.len() == 2 {
+                match parts[0] {
+                    "3" => router_ip = Some(parts[1].to_string()),
+                    "6" => {
+                        for ip in parts[1].split(',') {
+                            let ip = ip.trim();
+                            if !ip.is_empty() {
+                                dns_servers.push(ip.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let iface = interface?;
+    let pool_start = dhcp_start.unwrap_or_default();
+    let pool_end = dhcp_end.unwrap_or_default();
+    if pool_start.is_empty() || pool_end.is_empty() {
+        return None;
+    }
+    let lease_time = dhcp_lease.unwrap_or_else(|| "12h".to_string());
+    let router = router_ip.clone().unwrap_or_default();
+
+    let dns_cfg = DnsServerConfig {
+        forwarders: dns_servers,
+        ..DnsServerConfig::default()
+    };
+    Some(LanSegment {
+        id: id.to_string(),
+        name: format!("LAN {} (recovered)", id),
+        node_id: String::new(), // operator must set this in the UI before commit
+        interface: iface,
+        zone: Zone::Lan(id.parse::<u32>().unwrap_or(0)),
+        subnet_cidr: derive_subnet_cidr(&router, &pool_start),
+        router_ip: router,
+        dhcp: DhcpConfig {
+            pool_start,
+            pool_end,
+            lease_time,
+            reservations: Vec::new(),
+            extra_options: Vec::new(),
+            enabled: true,
+        },
+        dns: dns_cfg,
+        description: "Reconstructed from dnsmasq.d snippet — review before committing".into(),
+    })
+}
+
+/// Best-effort /24 derivation. We don't have the original CIDR in
+/// the dnsmasq snippet — only the gateway IP and DHCP pool — so we
+/// fall back to /24 when the gateway and pool start agree on the
+/// first three octets. The user is expected to verify and adjust
+/// in the UI before committing the recovered config.
+fn derive_subnet_cidr(router_ip: &str, pool_start: &str) -> String {
+    let r: Vec<&str> = router_ip.split('.').collect();
+    let p: Vec<&str> = pool_start.split('.').collect();
+    if r.len() == 4 && p.len() == 4 && r[..3] == p[..3] {
+        format!("{}.{}.{}.0/24", r[0], r[1], r[2])
+    } else {
+        String::new()
+    }
+}
+
+/// Parse a `/etc/ppp/peers/wolfrouter-<id>` peer file back into a
+/// WanConnection. Returns `None` when the file isn't actually a
+/// PPPoE peer (no `plugin rp-pppoe.so`) or doesn't have a username
+/// — those are required fields and we will not invent them.
+///
+/// The chap-secrets password is intentionally NOT read here: that
+/// file is mode 0600 root-only and we keep the password out of any
+/// reconstruction artefact the recovery API surfaces. The user
+/// re-enters it during commit. Until they do, the WAN is created
+/// disabled so it doesn't try to dial with an empty password.
+fn parse_pppoe_from_peer(id: &str, body: &str) -> Option<wan::WanConnection> {
+    let mut interface: Option<String> = None;
+    let mut username: Option<String> = None;
+    let mut mtu: u32 = 1492;
+    let mut mru: u32 = 1492;
+    let mut lcp_interval: u32 = 30;
+    let mut lcp_failure: u32 = 4;
+    let mut use_default_route = false;
+    let mut use_peer_dns = false;
+    let mut persist = true;
+    let mut is_pppoe = false;
+    let mut service_name = String::new();
+
+    for raw_line in body.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        if let Some(v) = line.strip_prefix("plugin rp-pppoe.so") {
+            is_pppoe = true;
+            let iface = v.trim();
+            if !iface.is_empty() {
+                interface = Some(iface.to_string());
+            }
+        } else if let Some(v) = line.strip_prefix("user ") {
+            // `user "name"` or `user name`
+            let unquoted = v.trim().trim_matches('"');
+            if !unquoted.is_empty() {
+                username = Some(unquoted.to_string());
+            }
+        } else if let Some(v) = line.strip_prefix("mtu ") {
+            if let Ok(n) = v.trim().parse::<u32>() { mtu = n; }
+        } else if let Some(v) = line.strip_prefix("mru ") {
+            if let Ok(n) = v.trim().parse::<u32>() { mru = n; }
+        } else if let Some(v) = line.strip_prefix("lcp-echo-interval ") {
+            if let Ok(n) = v.trim().parse::<u32>() { lcp_interval = n; }
+        } else if let Some(v) = line.strip_prefix("lcp-echo-failure ") {
+            if let Ok(n) = v.trim().parse::<u32>() { lcp_failure = n; }
+        } else if line == "defaultroute" {
+            use_default_route = true;
+        } else if line == "usepeerdns" {
+            use_peer_dns = true;
+        } else if line == "nopersist" {
+            persist = false;
+        } else if let Some(v) = line.strip_prefix("rp_pppoe_service ") {
+            service_name = v.trim().trim_matches('"').to_string();
+        }
+    }
+
+    if !is_pppoe { return None; }
+    let user = username?;
+    let iface = interface.unwrap_or_default();
+
+    Some(wan::WanConnection {
+        id: id.to_string(),
+        name: format!("WAN {} (recovered)", id),
+        node_id: String::new(), // operator sets in UI
+        interface: iface,
+        mode: wan::WanMode::Pppoe(wan::PppoeConfig {
+            username: user,
+            password: String::new(), // re-enter in UI; stored in chap-secrets
+            service_name,
+            mtu,
+            mru,
+            persist,
+            lcp_echo_interval: lcp_interval,
+            lcp_echo_failure: lcp_failure,
+            use_default_route,
+            use_peer_dns,
+        }),
+        enabled: false, // disabled until user re-enters password
+        description: "Reconstructed from /etc/ppp/peers — review and re-enter password before enabling".into(),
+    })
+}
+
+/// Result of `reconstruct_from_artifacts`. The frontend renders
+/// `recovered_items` and `notes` in the rollback panel so the user
+/// can see exactly what we found and what's still missing.
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtifactReconstruction {
+    pub config: RouterConfig,
+    /// Human-readable list of items we successfully reconstructed
+    /// (e.g. "LAN 'home' (interface br0)"). Empty when nothing was
+    /// recoverable — the frontend uses the empty case to show the
+    /// "nothing to recover" message instead of a misleading
+    /// "recovery succeeded".
+    pub recovered_items: Vec<String>,
+    /// Caveats and gaps the user must read before committing —
+    /// missing rules/zones/proxies, partial fields, password
+    /// re-entry needed.
+    pub notes: Vec<String>,
 }
 
 /// Apply the persisted router config on startup. Before this existed,

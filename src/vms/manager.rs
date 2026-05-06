@@ -2307,40 +2307,37 @@ impl VmManager {
 
         // ── DHCP server on the TAP so VMs get their WolfNet IP automatically ──
         //
-        // Historically every TAP was given the SAME gateway IP
-        // (`subnet.254`) and dnsmasq was launched with
-        // `--bind-interfaces`. That broke as soon as a second VM
-        // started: the second dnsmasq could not bind 10.10.10.254:53
-        // because the first one already owned it (`Address already in
-        // use` → DHCP never starts → second VM never gets an IP).
-        // Reported by PapaSchlumpf 2026-05-06.
+        // The original two-VM-DHCP collision (two dnsmasq instances
+        // racing on the same gateway IP+port) is fixed by a single
+        // change: `--bind-dynamic` (SO_BINDTODEVICE) below. That lets
+        // two dnsmasq instances coexist on the same IP as long as
+        // they're each scoped to their own TAP.
         //
-        // The fix is two-pronged:
-        //   1. Pick a unique gateway IP per TAP, derived from the
-        //      VM's WolfNet IP. As long as no two VMs share a WolfNet
-        //      IP (the next-IP allocator already guarantees that),
-        //      no two TAPs share a gateway.
-        //   2. Use `--bind-dynamic` instead of `--bind-interfaces`.
-        //      That's the Linux-only mode that uses SO_BINDTODEVICE
-        //      under the hood, letting two dnsmasq instances coexist
-        //      even when they happen to share an IP. Belt-and-braces
-        //      against TAPs that wind up with overlapping gateways.
+        // v22.9.26 also tried to pick a per-TAP unique gateway IP
+        // (mirroring `subnet.X` → `subnet.(255-X)`) AND switched the
+        // TAP from `/24` to `/32`. Both changes broke real-world VMs:
+        //   * Pre-existing VMs (especially WolfRouter) had `subnet.254`
+        //     baked into their static configs as the default gateway.
+        //     The mirror change moved the gateway to a different IP so
+        //     those VMs lost their uplink the moment they started after
+        //     the upgrade — no PPPoE, no DHCP, no LAN. Reported by
+        //     PapaSchlumpf 2026-05-06.
+        //   * `/32` on the TAP causes dnsmasq to derive a `/32` netmask
+        //     for the offered DHCP lease (since `dhcp-range` doesn't
+        //     specify one), so every VM that DHCP'd got an IP it could
+        //     not route from — gateway not on-link.
+        //
+        // Reverted to the historic `subnet.254` gateway and `/24`
+        // address, which restores backward compatibility and is
+        // sufficient because `--bind-dynamic` already handles the
+        // multi-VM coexistence the mirror was meant to address.
         let parts: Vec<&str> = wolfnet_ip.split('.').collect();
         if parts.len() == 4 {
-            let gateway_ip = compute_tap_gateway_ip(wolfnet_ip);
-            // Assign gateway IP to the TAP interface. Use a /32 so
-            // the kernel doesn't try to add the duplicate /24
-            // connected route on every TAP — the explicit /32 route
-            // for `wolfnet_ip` (added a few lines up) plus proxy ARP
-            // is what actually carries traffic.
+            let gateway_ip = format!("{}.{}.{}.254", parts[0], parts[1], parts[2]);
             let _ = Command::new("ip").args(["addr", "flush", "dev", tap]).output();
             let _ = Command::new("ip")
-                .args(["addr", "add", &format!("{}/32", gateway_ip), "dev", tap])
+                .args(["addr", "add", &format!("{}/24", gateway_ip), "dev", tap])
                 .output();
-            // Add a /32 route TO the VM's WolfNet IP via this TAP so
-            // dnsmasq's reply packets find their way back. The earlier
-            // `ip route add wolfnet_ip/32 dev tap` covered this; we
-            // keep it for the same reason.
             info!("TAP gateway: {} on {}", gateway_ip, tap);
 
             // Kill any existing dnsmasq on this TAP
@@ -5471,7 +5468,16 @@ impl WolfnetTapHealth {
 /// Pure inspection: never starts or kills processes, never
 /// reconfigures interfaces. Safe to call many times per second.
 pub fn probe_wolfnet_tap_health(tap: &str, wolfnet_ip: &str) -> WolfnetTapHealth {
-    let gateway_ip = compute_tap_gateway_ip(wolfnet_ip);
+    // Historic gateway derivation: <subnet>.254. The v22.9.26
+    // mirror-across-the-/24-midpoint scheme was reverted because it
+    // broke pre-existing VMs that had `subnet.254` baked into their
+    // static configs as the default gateway.
+    let parts: Vec<&str> = wolfnet_ip.split('.').collect();
+    let gateway_ip = if parts.len() == 4 {
+        format!("{}.{}.{}.254", parts[0], parts[1], parts[2])
+    } else {
+        wolfnet_ip.to_string()
+    };
     let mut h = WolfnetTapHealth {
         tap: tap.to_string(),
         gateway_ip: gateway_ip.clone(),
@@ -5625,96 +5631,36 @@ fn verify_dnsmasq_running(tap: &str, gateway_ip: &str) -> Result<(), String> {
     })
 }
 
-/// Pick a unique gateway IP for the host side of a VM TAP.
-///
-/// Old behaviour was to hand every TAP `subnet.254` as its gateway,
-/// which collided as soon as a second VM started — both dnsmasq
-/// instances tried to bind the same IP+port and the second one died
-/// with `Address already in use`. (PapaSchlumpf bug, 2026-05-06.)
-///
-/// New behaviour: we mirror the VM's WolfNet IP across the
-/// midpoint of the /24. The VM's `subnet.X` becomes gateway
-/// `subnet.(255 - X)`. So:
-///
-///   * VM `10.10.10.5` → gateway `10.10.10.250`
-///   * VM `10.10.10.10` → gateway `10.10.10.245`
-///   * VM `10.10.10.50` → gateway `10.10.10.205`
-///
-/// Two VMs only collide if their last octets sum to 255 — e.g. `.5`
-/// and `.250`. The next-IP allocator hands out from the low end
-/// (`.1`, `.2`, …) so in normal use the high half stays free for
-/// gateways. If an operator manually pins a VM into the high half
-/// and another VM lands on the mirror, dnsmasq's new `--bind-dynamic`
-/// flag still keeps both DHCP servers alive (they bind to the IP
-/// only on their own TAP via SO_BINDTODEVICE), so the worst case is
-/// "two TAPs share an IP, no failure" rather than the old "second
-/// VM never starts".
-///
-/// Returns `subnet.254` as a sane fallback when the input doesn't
-/// look like a v4 address — the old bug-for-bug behaviour, which is
-/// fine because the only single-VM case can't collide with itself.
-fn compute_tap_gateway_ip(wolfnet_ip: &str) -> String {
-    let parts: Vec<&str> = wolfnet_ip.split('.').collect();
-    if parts.len() != 4 {
-        return wolfnet_ip.to_string();
-    }
-    let last: u8 = match parts[3].parse() {
-        Ok(n) => n,
-        Err(_) => return format!("{}.{}.{}.254", parts[0], parts[1], parts[2]),
-    };
-    // Mirror across .128 — keep the gateway out of the typical
-    // "low end" allocation pool so it doesn't trip over existing VM
-    // IPs. Reserve .0 and .255 (network + broadcast) by skipping
-    // them: an input of .0 or .255 is malformed; for everything else
-    // the mirror falls in 1..=254.
-    let gw = 255u16.saturating_sub(last as u16) as u8;
-    let gw = if gw == 0 { 254 } else if gw == 255 { 1 } else { gw };
-    format!("{}.{}.{}.{}", parts[0], parts[1], parts[2], gw)
-}
-
 #[cfg(test)]
 mod tap_gateway_tests {
-    use super::compute_tap_gateway_ip;
-
-    #[test]
-    fn mirrors_low_octet_to_high() {
-        assert_eq!(compute_tap_gateway_ip("10.10.10.5"),  "10.10.10.250");
-        assert_eq!(compute_tap_gateway_ip("10.10.10.10"), "10.10.10.245");
-        assert_eq!(compute_tap_gateway_ip("10.10.10.50"), "10.10.10.205");
+    /// Mirrors the historic gateway derivation used in
+    /// `setup_wolfnet_routing` and `probe_wolfnet_tap_health`. Kept
+    /// in tests as documentation of the contract: every VM in the
+    /// same /24 gets the same `<subnet>.254` gateway, and dnsmasq's
+    /// `--bind-dynamic` (SO_BINDTODEVICE) is what keeps multiple
+    /// VMs from racing on the same IP+port. The v22.9.26 attempt
+    /// to give each TAP a unique mirrored gateway is gone because
+    /// it broke pre-existing VMs that hardcoded `.254`.
+    fn historic_gateway(ip: &str) -> String {
+        let parts: Vec<&str> = ip.split('.').collect();
+        if parts.len() == 4 {
+            format!("{}.{}.{}.254", parts[0], parts[1], parts[2])
+        } else {
+            ip.to_string()
+        }
     }
 
     #[test]
-    fn distinct_vms_get_distinct_gateways() {
-        // The PapaSchlumpf scenario: PBS at .5, HA at .10.
-        // Old code assigned both to .254 → dnsmasq EADDRINUSE.
-        // New code must produce different gateways for these.
-        let pbs = compute_tap_gateway_ip("10.10.10.5");
-        let ha  = compute_tap_gateway_ip("10.10.10.10");
-        assert_ne!(pbs, ha, "two distinct VMs must NOT share a gateway IP");
-    }
-
-    #[test]
-    fn high_octet_mirrors_to_low_safely() {
-        // A VM manually pinned at .200 mirrors to .55 — still
-        // valid, still in range, still distinct from the typical
-        // low-allocation .1/.2/… pool.
-        assert_eq!(compute_tap_gateway_ip("10.10.10.200"), "10.10.10.55");
-    }
-
-    #[test]
-    fn unparseable_input_falls_back_to_dot254() {
-        // Garbage in → don't crash. Returns the legacy default
-        // gateway so a single VM still works the way it used to.
-        assert_eq!(compute_tap_gateway_ip("10.10.10.zzz"), "10.10.10.254");
+    fn gateway_is_subnet_dot254() {
+        assert_eq!(historic_gateway("10.10.10.5"),  "10.10.10.254");
+        assert_eq!(historic_gateway("10.10.10.50"), "10.10.10.254");
+        assert_eq!(historic_gateway("192.168.1.7"), "192.168.1.254");
     }
 
     #[test]
     fn malformed_input_passes_through() {
-        // Not a v4 address — we return it untouched. Caller's parts
-        // check (parts.len() == 4) gates this branch in production
-        // so the function won't be invoked here, but defending the
-        // helper itself keeps it honest.
-        assert_eq!(compute_tap_gateway_ip(""), "");
+        assert_eq!(historic_gateway(""), "");
+        assert_eq!(historic_gateway("not-an-ip"), "not-an-ip");
     }
 }
 
