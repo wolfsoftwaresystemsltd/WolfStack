@@ -1189,11 +1189,59 @@ net0: virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0
 /// would steal the host's default-route interface. `None` when the
 /// VM is safe to start (or when we couldn't determine the host's
 /// default route — fail open rather than block legitimate starts).
+///
+/// IMPORTANT: only **PCI passthrough** (`vm.pci_devices`, true VFIO)
+/// is checked. The original v22.7.3 implementation also blocked
+/// `nic.passthrough_interface`, but that was a false positive —
+/// `passthrough_interface` is **bridge mode**: WolfStack auto-creates
+/// `br-pt-<iface>` (see `manager::create_linux_passthrough_bridge`)
+/// and moves the host's IP onto the bridge, so the host KEEPS
+/// connectivity through the same physical NIC. Blocking it cost
+/// PapaSchlumpf his only passthrough workaround on 2026-05-06 —
+/// his HA VM uses bridge-mode passthrough on the same NIC the host
+/// uses for its uplink, which is a perfectly safe config.
+///
+/// True VFIO PCI passthrough is the only case where the host loses
+/// the device entirely — the kernel hands it to the guest via VFIO
+/// and `ip link` can't get it back without re-binding from `vfio-pci`,
+/// usually requiring a host reboot. That's the case we still block.
 pub fn check_passthrough_steals_host_net(vm: &VmConfig) -> Option<String> {
     let host_default_iface = host_default_route_interface()?;
+    check_pci_steals_host_iface(&vm.pci_devices, &host_default_iface, &pci_bdf_to_net_iface)
+}
 
-    // Per-NIC `passthrough_interface` (MACVTAP-style direct bind
-    // to a host interface). Lives on each `extra_nics[i]`.
+/// Pure logic for the VFIO check. Separated from the I/O-bound
+/// `check_passthrough_steals_host_net` so unit tests can drive both
+/// the positive and negative paths with synthetic resolvers — the
+/// real `pci_bdf_to_net_iface` only resolves real sysfs entries on
+/// the test runner's host, which makes positive-path tests for the
+/// "this BDF maps to the default-route NIC" case impossible
+/// otherwise.
+fn check_pci_steals_host_iface(
+    pci_devices: &[crate::vms::manager::PciDevice],
+    host_default_iface: &str,
+    bdf_resolver: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    for dev in pci_devices {
+        if let Some(net_iface) = bdf_resolver(&dev.bdf) {
+            if net_iface == host_default_iface {
+                return Some(host_default_iface.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Returns `Some(iface_name)` when a `nic.passthrough_interface` (i.e.
+/// bridge-mode passthrough) names the host's default-route iface.
+/// This is **not** a fatal condition — bridge mode keeps the host
+/// connected via the auto-created `br-pt-<iface>` — but the brief
+/// window during the IP-move can blip ongoing connections (SSH
+/// usually survives via TCP keepalive; long-running TCP flows may
+/// reset). Callers can surface this as a non-blocking advisory so
+/// the operator knows what to expect.
+pub fn bridge_passthrough_uses_default_route_iface(vm: &VmConfig) -> Option<String> {
+    let host_default_iface = host_default_route_interface()?;
     for nic in &vm.extra_nics {
         if let Some(iface) = &nic.passthrough_interface {
             if iface == &host_default_iface {
@@ -1201,17 +1249,6 @@ pub fn check_passthrough_steals_host_net(vm: &VmConfig) -> Option<String> {
             }
         }
     }
-
-    // PCI passthrough: walk each BDF, ask sysfs which net interface
-    // (if any) is backed by that device, and compare.
-    for dev in &vm.pci_devices {
-        if let Some(net_iface) = pci_bdf_to_net_iface(&dev.bdf) {
-            if net_iface == host_default_iface {
-                return Some(host_default_iface);
-            }
-        }
-    }
-
     None
 }
 
@@ -1288,20 +1325,103 @@ mod network_preflight_tests {
     }
 
     #[test]
-    fn passthrough_iface_matching_default_route_blocks() {
-        // We don't have a way to inject a fake default route, so
-        // pick whatever the host's actual default-route iface is
-        // (if any) and assert that a VM claiming that exact iface
-        // is flagged. Skips on hosts with no default route — those
-        // exist in CI environments without network.
+    fn bridge_passthrough_iface_matching_default_route_does_NOT_block_start() {
+        // PapaSchlumpf scenario, 2026-05-06: HA VM uses
+        // `passthrough_interface` (bridge mode — host's IP gets moved
+        // onto br-pt-X). The original v22.7.3 preflight rejected this
+        // because the comment author confused bridge-mode with VFIO
+        // PCI passthrough. The fix: bridge mode is safe, must not
+        // refuse the start.
         let Some(host_iface) = host_default_route_interface() else { return; };
         let mut vm = empty_vm();
         vm.extra_nics.push(nic_with_passthrough(&host_iface));
-        assert_eq!(
-            check_passthrough_steals_host_net(&vm).as_deref(),
-            Some(host_iface.as_str()),
-            "passthrough_interface == default-route iface must be blocked",
+        assert!(
+            check_passthrough_steals_host_net(&vm).is_none(),
+            "passthrough_interface (bridge mode) must NOT block VM start — \
+             host keeps connectivity via br-pt-<iface>",
         );
+        // It DOES still get reported by the advisory variant so the
+        // operator can be told "expect a brief blip during IP move".
+        assert_eq!(
+            bridge_passthrough_uses_default_route_iface(&vm).as_deref(),
+            Some(host_iface.as_str()),
+            "advisory must still flag bridge-mode passthrough on the default route",
+        );
+    }
+
+    fn pci(bdf: &str) -> crate::vms::manager::PciDevice {
+        crate::vms::manager::PciDevice {
+            bdf: bdf.into(),
+            pcie: true,
+            primary_gpu: false,
+            label: None,
+        }
+    }
+
+    #[test]
+    fn pci_passthrough_of_default_route_nic_blocks() {
+        // Positive-path: a `pci_devices` entry whose BDF resolves to
+        // the host's default-route NIC must trigger the block. We
+        // drive the pure helper with a synthetic resolver because
+        // the real `pci_bdf_to_net_iface` only resolves devices that
+        // actually exist on the test runner.
+        let devs = vec![pci("0000:01:00.0")];
+        let resolver = |bdf: &str| -> Option<String> {
+            if bdf == "0000:01:00.0" { Some("eth0".into()) } else { None }
+        };
+        assert_eq!(
+            check_pci_steals_host_iface(&devs, "eth0", &resolver).as_deref(),
+            Some("eth0"),
+            "PCI BDF resolving to the default-route NIC MUST block",
+        );
+    }
+
+    #[test]
+    fn pci_passthrough_of_other_nic_allows() {
+        // The PCI device resolves to a NIC, just not the host's
+        // default-route one. Safe to start.
+        let devs = vec![pci("0000:02:00.0")];
+        let resolver = |_: &str| Some("eth1".to_string());
+        assert!(check_pci_steals_host_iface(&devs, "eth0", &resolver).is_none());
+    }
+
+    #[test]
+    fn pci_passthrough_unresolvable_bdf_allows() {
+        // BDF that isn't a NIC at all (GPU passthrough, fake BDF,
+        // device bound to vfio-pci already, etc). Must not false-
+        // positive on the safe path.
+        let devs = vec![pci("0000:0a:00.0")];
+        let resolver = |_: &str| None;
+        assert!(check_pci_steals_host_iface(&devs, "eth0", &resolver).is_none());
+    }
+
+    #[test]
+    fn pci_passthrough_first_match_wins_deterministically() {
+        // A VM with multiple PCI passthroughs where ONE of them is
+        // the host's NIC: still blocks. Documents that we don't
+        // require the bad device to be first in the list.
+        let devs = vec![pci("0000:01:00.0"), pci("0000:02:00.0"), pci("0000:03:00.0")];
+        let resolver = |bdf: &str| -> Option<String> {
+            match bdf {
+                "0000:02:00.0" => Some("eth0".into()),
+                _ => None,
+            }
+        };
+        assert_eq!(
+            check_pci_steals_host_iface(&devs, "eth0", &resolver).as_deref(),
+            Some("eth0"),
+        );
+    }
+
+    #[test]
+    fn pci_passthrough_sysfs_smoke_test_no_panic() {
+        // The wrapping function (which uses the real sysfs resolver)
+        // must not panic on a fake BDF when the host has no default
+        // route or the BDF doesn't resolve. Guards against the
+        // refactor accidentally breaking the production path.
+        let mut vm = empty_vm();
+        vm.pci_devices.push(pci("ff:ff.7"));
+        let _ = check_passthrough_steals_host_net(&vm);
     }
 
     #[test]
@@ -1312,6 +1432,7 @@ mod network_preflight_tests {
         // future false-positive bug is caught.
         vm.extra_nics.push(nic_with_passthrough("does-not-exist-9999"));
         assert!(check_passthrough_steals_host_net(&vm).is_none());
+        assert!(bridge_passthrough_uses_default_route_iface(&vm).is_none());
     }
 
     #[test]

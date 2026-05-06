@@ -108,6 +108,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api/vms")
             .route("", web::get().to(list_vms))
+            .route("/wolfnet/health", web::get().to(wolfnet_health))
             .route("/create", web::post().to(create_vm))
             .route("/storage", web::get().to(list_storage))
             .route("/host-devices", web::get().to(host_devices))
@@ -149,6 +150,52 @@ async fn list_vms(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse 
     let manager = state.vms.lock().unwrap();
     let vms = manager.list_vms();
     HttpResponse::Ok().json(vms)
+}
+
+/// GET /api/vms/wolfnet/health — per-VM WolfNet plumbing status.
+///
+/// Returns one entry per running VM that has a WolfNet IP, with the
+/// outcome of every check the predictive analyzer runs (TAP up,
+/// gateway IP assigned, dnsmasq alive bound to the right interface,
+/// DHCP lease present). Operators get a one-call answer to "is the
+/// VM's network actually working?" without grepping `ss -tlnp` or
+/// guessing at pid files.
+///
+/// Lives next to `list_vms` because the data is per-VM and the
+/// frontend's VM table can fold the health state into a status pill.
+async fn wolfnet_health(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let vms = {
+        let manager = state.vms.lock().unwrap();
+        manager.list_vms()
+    };
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for vm in vms {
+        let wolfnet_ip = match vm.wolfnet_ip.as_deref() {
+            Some(ip) if !ip.is_empty() => ip.to_string(),
+            _ => continue, // skip VMs without WolfNet
+        };
+        // Pure inspection — safe to call from a request handler.
+        let tap = crate::vms::manager::VmManager::tap_name(&vm.name);
+        let health = crate::vms::manager::probe_wolfnet_tap_health(&tap, &wolfnet_ip);
+        out.push(serde_json::json!({
+            "vm": vm.name,
+            "running": vm.running,
+            "ok": health.ok(),
+            "tap": health.tap,
+            "gateway_ip": health.gateway_ip,
+            "wolfnet_ip": health.wolfnet_ip,
+            "tap_exists": health.tap_exists,
+            "tap_up": health.tap_up,
+            "gateway_assigned": health.gateway_assigned,
+            "dnsmasq_pid": health.dnsmasq_pid,
+            "dnsmasq_alive": health.dnsmasq_alive,
+            "dnsmasq_owns_tap": health.dnsmasq_owns_tap,
+            "lease_present": health.lease_present,
+            "failures": health.failures,
+        }));
+    }
+    HttpResponse::Ok().json(out)
 }
 
 /// List available storage locations on the host

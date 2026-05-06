@@ -60,6 +60,7 @@ pub mod security_posture;
 pub mod vulnerability;
 pub mod osv;
 pub mod port_conflict;
+pub mod wolfnet_dhcp;
 pub mod notify;
 pub mod cluster;
 pub mod orchestrator;

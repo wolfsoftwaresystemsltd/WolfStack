@@ -29,7 +29,7 @@ use crate::predictive::{
     AckStore, Context, MetricsHistory, ProposalStore,
     disk_fill, container_disk, container_restart, container_memory,
     threshold, cert_expiry, backup_freshness, vm_disk, security_posture,
-    vulnerability, osv, port_conflict, notify,
+    vulnerability, osv, port_conflict, wolfnet_dhcp, notify,
 };
 
 /// Cadence between ticks once the loop is running.
@@ -119,7 +119,7 @@ pub async fn tick(
     // 1. Sample data sources concurrently with hard timeouts. Each
     //    sampler kills its child process on timeout — stuck NFS or
     //    a wedged docker daemon can no longer hang the orchestrator.
-    let (host_facts, container_facts, restart_facts, failed_units, cert_facts, mem_facts, backup_facts, vm_facts, sshd_cfg, vuln_facts, osv_facts, port_facts) = tokio::join!(
+    let (host_facts, container_facts, restart_facts, failed_units, cert_facts, mem_facts, backup_facts, vm_facts, sshd_cfg, vuln_facts, osv_facts, port_facts, wolfnet_dhcp_facts) = tokio::join!(
         disk_fill::sample_disks_now_async(DF_TIMEOUT),
         container_disk::sample_containers_now_async(CONTAINER_SAMPLE_TIMEOUT),
         container_restart::sample_docker_restarts_now_async(CONTAINER_SAMPLE_TIMEOUT),
@@ -132,6 +132,7 @@ pub async fn tick(
         vulnerability::sample_now_async(VULN_SAMPLE_TIMEOUT),
         osv::sample_now_async(OSV_SAMPLE_TIMEOUT),
         port_conflict::sample_now_async(CONTAINER_SAMPLE_TIMEOUT),
+        wolfnet_dhcp::sample_now_async(SYSTEMD_TIMEOUT),
     );
     // Sample current SystemMetrics off the shared monitor — same
     // sysinfo source as the live UI, so threshold findings line up
@@ -284,6 +285,9 @@ pub async fn tick(
     new_proposals.extend(port_conflict::analyze(
         &ctx, &port_facts, &acks_snap, &proposals_snap,
     ));
+    new_proposals.extend(wolfnet_dhcp::analyze(
+        &ctx, &wolfnet_dhcp_facts, &acks_snap, &proposals_snap,
+    ));
 
     // 5b. Build the "covered" set — every (finding_type, scope) the
     //     analyzers had data for this tick. Auto-resolve uses this
@@ -302,6 +306,7 @@ pub async fn tick(
     covered.extend(security_posture::covered_scopes(&ctx, &sshd_cfg));
     covered.extend(vulnerability::covered_scopes(&ctx, &vuln_facts));
     covered.extend(port_conflict::covered_scopes(&ctx, &port_facts));
+    covered.extend(wolfnet_dhcp::covered_scopes(&ctx, &wolfnet_dhcp_facts));
     covered.extend(osv::covered_scopes(&ctx, &osv_facts));
     // Mark every PRIOR pending OSV proposal whose target was scanned
     // this tick as covered, even if its CVE didn't re-emit. That's

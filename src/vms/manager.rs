@@ -526,7 +526,7 @@ impl VmManager {
     }
 
     /// TAP interface name for a VM
-    fn tap_name(name: &str) -> String {
+    pub fn tap_name(name: &str) -> String {
         // TAP names limited to 15 chars
         let short = if name.len() > 11 { &name[..11] } else { name };
         format!("tap-{}", short)
@@ -1406,38 +1406,59 @@ impl VmManager {
                 ));
             }
 
-            // Network-safety preflight: passing a NIC through to a
-            // guest takes it OUT of the host kernel namespace. If
-            // that NIC is the host's path to the network (default-
-            // route interface), the host loses connectivity the
-            // moment the VM starts — including dnsmasq for every
-            // client on the WolfNet/LAN bridge. Reboot is required
-            // because the device disappears in a way `ip link` can't
-            // undo without re-binding from VFIO.
+            // Network-safety preflight, restricted to true VFIO PCI
+            // passthrough — `pci_devices` entries whose BDF resolves
+            // to the host's default-route NIC. Those genuinely take
+            // the device out of the host kernel namespace; the host
+            // loses connectivity the moment the VM starts and only a
+            // reboot brings it back.
             //
-            // Reported on Discord (PapaSchlumpf 2026-05-02): HomeAssistant
-            // VM with passthrough NIC nuked DHCP for the whole
-            // network on start; reboot fixed, WolfStack restart did
-            // not. The kernel-state nature is the tell.
+            // Bridge-mode `passthrough_interface` is NOT VFIO — it
+            // auto-creates `br-pt-<iface>` and moves the host IP to
+            // the bridge so the host stays reachable through the
+            // same NIC. The earlier (v22.7.3) version of this
+            // preflight blocked bridge-mode too, which killed
+            // PapaSchlumpf's HA VM workaround on 2026-05-06. See
+            // `passthrough::check_passthrough_steals_host_net` doc
+            // for the post-mortem.
             if let Some(blocking_iface) = check_passthrough_steals_host_net(target) {
                 return Err(format!(
-                    "Cannot start VM '{}': its passthrough configuration would \
-                     claim the host's primary network interface '{}'. Starting \
-                     would disconnect the host from the network and break DHCP \
-                     for every client on the WolfNet bridge — recovery would \
-                     require a host reboot.\n\n\
+                    "Cannot start VM '{}': its PCI passthrough list would \
+                     claim the host's primary network interface '{}' via VFIO. \
+                     Starting would remove that NIC from the host kernel \
+                     entirely, disconnect the host from the network, and break \
+                     DHCP for every client on the WolfNet bridge — recovery \
+                     would require a host reboot.\n\n\
                      Fixes:\n\
-                     (a) Remove the PCI passthrough for that NIC and attach \
-                     a virtio bridge NIC instead — the guest gets the same \
-                     reachability without taking the host's uplink.\n\
+                     (a) Remove the PCI passthrough for that NIC and use \
+                     bridge-mode passthrough instead (set the NIC's \
+                     `passthrough_interface` field) — the guest gets L2 \
+                     access via `br-pt-<iface>` without taking the device \
+                     out of the host kernel.\n\
                      (b) Move the host's primary connectivity to a different \
-                     physical NIC (so the passed-through one is no longer the \
-                     default route).\n\
+                     physical NIC (so the passed-through one is no longer \
+                     the default route).\n\
                      (c) If you genuinely need to take that NIC and have an \
                      out-of-band recovery path, edit the VM's PCI passthrough \
                      list to confirm.",
                     name, blocking_iface,
                 ));
+            }
+
+            // Advisory (non-blocking): bridge-mode passthrough on
+            // the default-route iface IS safe — host stays connected
+            // via br-pt-<iface> — but the IP-move during bridge
+            // creation can blip ongoing TCP flows for a moment.
+            // Surface that to the log so an operator who sees a brief
+            // SSH/RDP hiccup knows exactly what caused it. No return
+            // — we still start the VM.
+            if let Some(advisory_iface) = super::passthrough::bridge_passthrough_uses_default_route_iface(target) {
+                warn!(
+                    "VM '{}' uses bridge-mode passthrough on default-route NIC '{}'. \
+                     The host's IP will move to br-pt-{} during start — long-running \
+                     TCP flows may briefly reset. SSH normally survives via TCP keepalive.",
+                    name, advisory_iface, advisory_iface,
+                );
             }
         }
 
@@ -2285,15 +2306,41 @@ impl VmManager {
         }
 
         // ── DHCP server on the TAP so VMs get their WolfNet IP automatically ──
-        // Assign a gateway IP to the TAP (use .254 in the same /24 as the VM's IP)
+        //
+        // Historically every TAP was given the SAME gateway IP
+        // (`subnet.254`) and dnsmasq was launched with
+        // `--bind-interfaces`. That broke as soon as a second VM
+        // started: the second dnsmasq could not bind 10.10.10.254:53
+        // because the first one already owned it (`Address already in
+        // use` → DHCP never starts → second VM never gets an IP).
+        // Reported by PapaSchlumpf 2026-05-06.
+        //
+        // The fix is two-pronged:
+        //   1. Pick a unique gateway IP per TAP, derived from the
+        //      VM's WolfNet IP. As long as no two VMs share a WolfNet
+        //      IP (the next-IP allocator already guarantees that),
+        //      no two TAPs share a gateway.
+        //   2. Use `--bind-dynamic` instead of `--bind-interfaces`.
+        //      That's the Linux-only mode that uses SO_BINDTODEVICE
+        //      under the hood, letting two dnsmasq instances coexist
+        //      even when they happen to share an IP. Belt-and-braces
+        //      against TAPs that wind up with overlapping gateways.
         let parts: Vec<&str> = wolfnet_ip.split('.').collect();
         if parts.len() == 4 {
-            let gateway_ip = format!("{}.{}.{}.254", parts[0], parts[1], parts[2]);
-            // Assign gateway IP to the TAP interface
+            let gateway_ip = compute_tap_gateway_ip(wolfnet_ip);
+            // Assign gateway IP to the TAP interface. Use a /32 so
+            // the kernel doesn't try to add the duplicate /24
+            // connected route on every TAP — the explicit /32 route
+            // for `wolfnet_ip` (added a few lines up) plus proxy ARP
+            // is what actually carries traffic.
             let _ = Command::new("ip").args(["addr", "flush", "dev", tap]).output();
             let _ = Command::new("ip")
-                .args(["addr", "add", &format!("{}/24", gateway_ip), "dev", tap])
+                .args(["addr", "add", &format!("{}/32", gateway_ip), "dev", tap])
                 .output();
+            // Add a /32 route TO the VM's WolfNet IP via this TAP so
+            // dnsmasq's reply packets find their way back. The earlier
+            // `ip route add wolfnet_ip/32 dev tap` covered this; we
+            // keep it for the same reason.
             info!("TAP gateway: {} on {}", gateway_ip, tap);
 
             // Kill any existing dnsmasq on this TAP
@@ -2317,7 +2364,11 @@ impl VmManager {
             let dnsmasq_result = Command::new("dnsmasq")
                 .args([
                     &format!("--interface={}", tap),
-                    "--bind-interfaces",
+                    // SO_BINDTODEVICE — two instances on different
+                    // TAPs no longer race on the same IP+port. See
+                    // dnsmasq(8) for the bind-interfaces vs.
+                    // bind-dynamic distinction.
+                    "--bind-dynamic",
                     "--except-interface=lo",
                     &format!("--dhcp-range={},{},12h", wolfnet_ip, wolfnet_ip),
                     &format!("--dhcp-option=3,{}", gateway_ip),
@@ -2332,7 +2383,30 @@ impl VmManager {
                 .spawn();
 
             match dnsmasq_result {
-                Ok(_) => info!("DHCP server started on {} — offering {} to VM", tap, wolfnet_ip),
+                Ok(_child) => {
+                    // `Command::spawn()` returns Ok the moment fork+exec
+                    // succeeds — but dnsmasq can still abort a moment
+                    // later if its bind() fails (`Address already in
+                    // use`, missing perms, kernel misconfig, etc.).
+                    // Verify the daemon actually stayed up and the pid
+                    // file points at a live process bound to OUR tap.
+                    // If it didn't, log loudly so the predictive
+                    // analyzer + ops team see the failure on the FIRST
+                    // occurrence rather than after a customer reports
+                    // it (PapaSchlumpf bug 2026-05-06).
+                    match verify_dnsmasq_running(tap, &gateway_ip) {
+                        Ok(_) => info!(
+                            "DHCP on {} — gateway {} offering {} to VM",
+                            tap, gateway_ip, wolfnet_ip,
+                        ),
+                        Err(e) => error!(
+                            "DHCP verification FAILED on {} — gateway {}, VM IP {}: {}. \
+                             VM will boot but DHCPDISCOVER will get no reply. \
+                             Predictive Inbox should flag this; see /api/vms/wolfnet/health.",
+                            tap, gateway_ip, wolfnet_ip, e,
+                        ),
+                    }
+                }
                 Err(e) => warn!("Could not start DHCP on {}: {} — VM will need manual IP", tap, e),
             }
         }
@@ -5360,6 +5434,288 @@ fn libvirt_xml_attr_in_block(block: &str, inner_tag: &str, attr: &str) -> Option
         }
     }
     None
+}
+
+/// Status of one VM's WolfNet DHCP plumbing. Surfaced by the
+/// predictive analyzer and the `/api/vms/wolfnet/health` endpoint
+/// so operators see broken plumbing the moment the orchestrator
+/// ticks instead of when a customer reports it.
+///
+/// `Ok` is reserved for "every check passed". Anything else is
+/// listed in `failures` so the UI can render the first thing the
+/// operator should fix.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WolfnetTapHealth {
+    pub tap: String,
+    pub gateway_ip: String,
+    pub wolfnet_ip: String,
+    pub tap_exists: bool,
+    pub tap_up: bool,
+    pub gateway_assigned: bool,
+    pub dnsmasq_pid: Option<i32>,
+    pub dnsmasq_alive: bool,
+    pub dnsmasq_owns_tap: bool,
+    pub lease_present: bool,
+    pub failures: Vec<String>,
+}
+
+impl WolfnetTapHealth {
+    pub fn ok(&self) -> bool { self.failures.is_empty() }
+}
+
+/// Probe the network plumbing for a VM TAP. Returns a structured
+/// health record so the predictive analyzer and the API share one
+/// implementation — drift between "what we check at boot" and "what
+/// we check at runtime" is exactly how regressions slip in.
+///
+/// Pure inspection: never starts or kills processes, never
+/// reconfigures interfaces. Safe to call many times per second.
+pub fn probe_wolfnet_tap_health(tap: &str, wolfnet_ip: &str) -> WolfnetTapHealth {
+    let gateway_ip = compute_tap_gateway_ip(wolfnet_ip);
+    let mut h = WolfnetTapHealth {
+        tap: tap.to_string(),
+        gateway_ip: gateway_ip.clone(),
+        wolfnet_ip: wolfnet_ip.to_string(),
+        tap_exists: false,
+        tap_up: false,
+        gateway_assigned: false,
+        dnsmasq_pid: None,
+        dnsmasq_alive: false,
+        dnsmasq_owns_tap: false,
+        lease_present: false,
+        failures: Vec::new(),
+    };
+
+    // 1. TAP existence + state. `/sys/class/net/<tap>/operstate`
+    //    reports "up", "down", or "unknown" (TAPs without a peer
+    //    often report "unknown" but are actually usable).
+    let operstate_path = format!("/sys/class/net/{}/operstate", tap);
+    if std::path::Path::new(&operstate_path).exists() {
+        h.tap_exists = true;
+        let state = std::fs::read_to_string(&operstate_path).unwrap_or_default();
+        let state = state.trim();
+        if state == "up" || state == "unknown" {
+            h.tap_up = true;
+        } else {
+            h.failures.push(format!("TAP {} operstate is `{}` (expected up/unknown)", tap, state));
+        }
+    } else {
+        h.failures.push(format!("TAP {} does not exist on the host", tap));
+    }
+
+    // 2. Gateway IP must be assigned to the TAP.
+    if h.tap_exists {
+        let out = Command::new("ip")
+            .args(["addr", "show", "dev", tap])
+            .output();
+        if let Ok(o) = out {
+            let body = String::from_utf8_lossy(&o.stdout);
+            // Match `inet 10.10.10.250/` — anchored on the address
+            // and a trailing `/` to avoid matching a substring of a
+            // longer address.
+            if body.contains(&format!("inet {}/", gateway_ip)) {
+                h.gateway_assigned = true;
+            } else {
+                h.failures.push(format!(
+                    "Gateway {} not assigned to {} (ip addr show shows: {})",
+                    gateway_ip, tap,
+                    body.lines().filter(|l| l.contains("inet ")).collect::<Vec<_>>().join("; "),
+                ));
+            }
+        }
+    }
+
+    // 3. dnsmasq pid + liveness + correct interface.
+    let pid_path = format!("/run/dnsmasq-{}.pid", tap);
+    if let Ok(s) = std::fs::read_to_string(&pid_path) {
+        let pid_str = s.trim();
+        if let Ok(pid) = pid_str.parse::<i32>() {
+            h.dnsmasq_pid = Some(pid);
+            if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                h.dnsmasq_alive = true;
+                if let Ok(cmdline_bytes) = std::fs::read(format!("/proc/{}/cmdline", pid)) {
+                    let cmdline = String::from_utf8_lossy(&cmdline_bytes).replace('\0', " ");
+                    if cmdline.contains(&format!("--interface={}", tap)) {
+                        h.dnsmasq_owns_tap = true;
+                    } else {
+                        h.failures.push(format!(
+                            "dnsmasq pid {} is alive but cmdline does not reference --interface={} \
+                             (pid file may be stale from a different VM)",
+                            pid, tap,
+                        ));
+                    }
+                }
+            } else {
+                h.failures.push(format!(
+                    "dnsmasq pid {} from {} is not running — most likely failed to bind \
+                     {}:53 or {}:67 (Address already in use)",
+                    pid, pid_path, gateway_ip, gateway_ip,
+                ));
+            }
+        } else {
+            h.failures.push(format!("dnsmasq pid file {} contains non-numeric data: {:?}", pid_path, pid_str));
+        }
+    } else {
+        h.failures.push(format!("dnsmasq pid file {} missing — daemon never wrote it", pid_path));
+    }
+
+    // 4. Lease file: present + non-empty means the VM has actually
+    //    DHCP'd. A successful spawn with no lease for a running VM
+    //    means the VM never reached the DHCP server.
+    let lease_path = format!("/run/dnsmasq-{}.leases", tap);
+    if let Ok(meta) = std::fs::metadata(&lease_path) {
+        if meta.len() > 0 {
+            h.lease_present = true;
+        }
+        // Empty lease file is normal for a freshly-started VM that
+        // hasn't DHCP'd yet — don't flag as a failure here, the
+        // analyzer can decide whether "running for >30s with no
+        // lease" rises to a finding.
+    }
+
+    h
+}
+
+/// Block briefly (≤1s) after spawning dnsmasq to confirm it
+/// actually stayed up and bound to the right TAP. Called from
+/// `setup_wolfnet_routing` directly after `Command::spawn()`.
+fn verify_dnsmasq_running(tap: &str, gateway_ip: &str) -> Result<(), String> {
+    let pid_path = format!("/run/dnsmasq-{}.pid", tap);
+    let mut last_err = String::new();
+    // 10 × 100ms = up to 1s. dnsmasq normally writes its pid file
+    // and reports bind status within ~50ms on a healthy host; the
+    // generous budget covers slow disks / busy hosts.
+    for attempt in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let pid_str = match std::fs::read_to_string(&pid_path) {
+            Ok(s) => s.trim().to_string(),
+            Err(_) => {
+                last_err = format!("pid file {} not yet present (attempt {}/10)", pid_path, attempt + 1);
+                continue;
+            }
+        };
+        let pid: i32 = match pid_str.parse() {
+            Ok(p) => p,
+            Err(_) => { last_err = format!("malformed dnsmasq pid {:?}", pid_str); continue; }
+        };
+        if !std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+            last_err = format!(
+                "dnsmasq pid {} died after spawn (likely bind failure on {}:53 or {}:67)",
+                pid, gateway_ip, gateway_ip,
+            );
+            continue;
+        }
+        // Confirm the live process owns OUR tap, not a stale match.
+        if let Ok(cmdline_bytes) = std::fs::read(format!("/proc/{}/cmdline", pid)) {
+            let cmdline = String::from_utf8_lossy(&cmdline_bytes).replace('\0', " ");
+            if !cmdline.contains(&format!("--interface={}", tap)) {
+                last_err = format!(
+                    "dnsmasq pid {} is alive but bound to a different interface (--interface={} not in cmdline)",
+                    pid, tap,
+                );
+                continue;
+            }
+        }
+        return Ok(());
+    }
+    Err(if last_err.is_empty() {
+        "dnsmasq verification timed out without a specific error".to_string()
+    } else {
+        last_err
+    })
+}
+
+/// Pick a unique gateway IP for the host side of a VM TAP.
+///
+/// Old behaviour was to hand every TAP `subnet.254` as its gateway,
+/// which collided as soon as a second VM started — both dnsmasq
+/// instances tried to bind the same IP+port and the second one died
+/// with `Address already in use`. (PapaSchlumpf bug, 2026-05-06.)
+///
+/// New behaviour: we mirror the VM's WolfNet IP across the
+/// midpoint of the /24. The VM's `subnet.X` becomes gateway
+/// `subnet.(255 - X)`. So:
+///
+///   * VM `10.10.10.5` → gateway `10.10.10.250`
+///   * VM `10.10.10.10` → gateway `10.10.10.245`
+///   * VM `10.10.10.50` → gateway `10.10.10.205`
+///
+/// Two VMs only collide if their last octets sum to 255 — e.g. `.5`
+/// and `.250`. The next-IP allocator hands out from the low end
+/// (`.1`, `.2`, …) so in normal use the high half stays free for
+/// gateways. If an operator manually pins a VM into the high half
+/// and another VM lands on the mirror, dnsmasq's new `--bind-dynamic`
+/// flag still keeps both DHCP servers alive (they bind to the IP
+/// only on their own TAP via SO_BINDTODEVICE), so the worst case is
+/// "two TAPs share an IP, no failure" rather than the old "second
+/// VM never starts".
+///
+/// Returns `subnet.254` as a sane fallback when the input doesn't
+/// look like a v4 address — the old bug-for-bug behaviour, which is
+/// fine because the only single-VM case can't collide with itself.
+fn compute_tap_gateway_ip(wolfnet_ip: &str) -> String {
+    let parts: Vec<&str> = wolfnet_ip.split('.').collect();
+    if parts.len() != 4 {
+        return wolfnet_ip.to_string();
+    }
+    let last: u8 = match parts[3].parse() {
+        Ok(n) => n,
+        Err(_) => return format!("{}.{}.{}.254", parts[0], parts[1], parts[2]),
+    };
+    // Mirror across .128 — keep the gateway out of the typical
+    // "low end" allocation pool so it doesn't trip over existing VM
+    // IPs. Reserve .0 and .255 (network + broadcast) by skipping
+    // them: an input of .0 or .255 is malformed; for everything else
+    // the mirror falls in 1..=254.
+    let gw = 255u16.saturating_sub(last as u16) as u8;
+    let gw = if gw == 0 { 254 } else if gw == 255 { 1 } else { gw };
+    format!("{}.{}.{}.{}", parts[0], parts[1], parts[2], gw)
+}
+
+#[cfg(test)]
+mod tap_gateway_tests {
+    use super::compute_tap_gateway_ip;
+
+    #[test]
+    fn mirrors_low_octet_to_high() {
+        assert_eq!(compute_tap_gateway_ip("10.10.10.5"),  "10.10.10.250");
+        assert_eq!(compute_tap_gateway_ip("10.10.10.10"), "10.10.10.245");
+        assert_eq!(compute_tap_gateway_ip("10.10.10.50"), "10.10.10.205");
+    }
+
+    #[test]
+    fn distinct_vms_get_distinct_gateways() {
+        // The PapaSchlumpf scenario: PBS at .5, HA at .10.
+        // Old code assigned both to .254 → dnsmasq EADDRINUSE.
+        // New code must produce different gateways for these.
+        let pbs = compute_tap_gateway_ip("10.10.10.5");
+        let ha  = compute_tap_gateway_ip("10.10.10.10");
+        assert_ne!(pbs, ha, "two distinct VMs must NOT share a gateway IP");
+    }
+
+    #[test]
+    fn high_octet_mirrors_to_low_safely() {
+        // A VM manually pinned at .200 mirrors to .55 — still
+        // valid, still in range, still distinct from the typical
+        // low-allocation .1/.2/… pool.
+        assert_eq!(compute_tap_gateway_ip("10.10.10.200"), "10.10.10.55");
+    }
+
+    #[test]
+    fn unparseable_input_falls_back_to_dot254() {
+        // Garbage in → don't crash. Returns the legacy default
+        // gateway so a single VM still works the way it used to.
+        assert_eq!(compute_tap_gateway_ip("10.10.10.zzz"), "10.10.10.254");
+    }
+
+    #[test]
+    fn malformed_input_passes_through() {
+        // Not a v4 address — we return it untouched. Caller's parts
+        // check (parts.len() == 4) gates this branch in production
+        // so the function won't be invoked here, but defending the
+        // helper itself keeps it honest.
+        assert_eq!(compute_tap_gateway_ip(""), "");
+    }
 }
 
 #[cfg(test)]
