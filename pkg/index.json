@@ -7,7 +7,7 @@
     "author": "Wolf Software Systems Ltd",
     "icon": "🌐",
     "enterprise_only": true,
-    "download_url": "https://github.com/wolfsoftwaresystemsltd/WolfStack/releases/download/plugins/wolfhost.tar.gz",
+    "download_url": "https://wolfstack.org/pkg/wolfhost.tar.gz",
     "category": "hosting",
     "tags": ["hosting", "billing", "domains", "email", "ssl", "ftp", "directadmin"]
   },
@@ -19,7 +19,7 @@
     "author": "Wolf Software Systems Ltd",
     "icon": "🎨",
     "enterprise_only": true,
-    "download_url": "https://github.com/wolfsoftwaresystemsltd/WolfStack/releases/download/plugins/wolfcustom.tar.gz",
+    "download_url": "https://wolfstack.org/pkg/wolfcustom.tar.gz",
     "category": "branding",
     "tags": ["branding", "white-label", "customisation"]
   }
