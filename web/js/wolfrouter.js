@@ -720,6 +720,7 @@
             { key: 'managed',   url: '/api/router/managed-overview', label: 'Managed overview',   stateKey: 'managed',  fallback: null },
             { key: 'snapshot',  url: '/api/router/host-snapshot',    label: 'Host snapshot',      stateKey: 'snapshot', fallback: null },
             { key: 'wan',       url: '/api/router/wan',              label: 'WAN connections',    stateKey: 'wan',      fallback: [] },
+            { key: 'wan_status',url: '/api/router/wan-status',       label: 'WAN live status',    stateKey: 'wanStatus',fallback: [] },
             { key: 'proxies',   url: '/api/router/proxies',          label: 'Reverse proxies',    stateKey: 'proxies',  fallback: [] },
             { key: 'subnet_routes', url: '/api/router/subnet-routes', label: 'Subnet routes',     stateKey: 'subnet_routes', fallback: [] },
         ];
@@ -3169,8 +3170,56 @@
                 label: label || '',
             });
         };
-        // Internet ↔ WAN (classic uplink).
-        implicitEdge('internet', 'zone:wan', 'uplink');
+        // Internet ↔ WAN (classic uplink). Color + label reflect
+        // live WAN state from /api/router/wan-status: green when at
+        // least one configured WAN is actually up (PPPoE dialed,
+        // ppp0 has an IP), red when configured but every link is
+        // down, grey when nothing's configured (the user is relying
+        // on the host's pre-existing DHCP and WolfRouter has no
+        // managed dialer to report on).
+        if (nodes.has('internet') && nodes.has('zone:wan')) {
+            const wans = wrState.wan || [];
+            const wanStatus = wrState.wanStatus || [];
+            const statusById = Object.fromEntries(wanStatus.map(s => [s.id, s]));
+            const enabledWans = wans.filter(w => w.enabled);
+            const liveWans = enabledWans.filter(w => statusById[w.id]?.live_iface);
+            let colour = '#64748b'; // grey — nothing managed
+            let label = 'uplink';
+            let dashed = false;
+            if (enabledWans.length > 0) {
+                if (liveWans.length > 0) {
+                    colour = '#22c55e'; // green — at least one up
+                    const w = liveWans[0];
+                    const live = statusById[w.id];
+                    const mode = (w.mode?.mode || '').toUpperCase();
+                    label = liveWans.length === 1
+                        ? `${mode || 'WAN'} UP · ${live.live_iface}${live.live_ip ? ' · ' + live.live_ip : ''}`
+                        : `${liveWans.length}/${enabledWans.length} WANs UP`;
+                } else {
+                    colour = '#ef4444'; // red — configured but nothing up
+                    const w = enabledWans[0];
+                    const mode = (w.mode?.mode || '').toUpperCase();
+                    label = enabledWans.length === 1
+                        ? `${mode || 'WAN'} DOWN · ${w.interface}`
+                        : `${enabledWans.length} WANs DOWN`;
+                    dashed = true;
+                }
+            } else if (wans.length > 0) {
+                // Only disabled entries — show that explicitly so the
+                // user doesn't think nothing is configured.
+                label = 'uplink (disabled)';
+                dashed = true;
+            }
+            edges.push({
+                id: 'implicit:internet|zone:wan',
+                from: 'internet', to: 'zone:wan',
+                kind: 'implicit',
+                action: 'implicit',
+                colour,
+                enabled: !dashed,
+                label,
+            });
+        }
         // Each LAN segment belongs to its zone.
         for (const lan of (wrState.lans || [])) {
             const zId = lan.zone?.kind === 'lan'
@@ -3452,6 +3501,25 @@
                     add(cid, 'danger', 'container is restart-looping');
                 } else if (ct.state === 'exited' || ct.state === 'dead') {
                     add(cid, 'warn', `container is ${ct.state}`);
+                }
+            }
+        }
+        // WAN node + uplink edge: flag the zone:wan node when every
+        // configured/enabled WAN is down. This drives the danger
+        // glow on the WAN zone in the policy graph so a dropped
+        // PPPoE link is impossible to miss. Skipped when nothing is
+        // configured (the user is on the host's pre-existing DHCP
+        // and WolfRouter has nothing to report).
+        {
+            const wans = (wrState.wan || []).filter(w => w.enabled);
+            const wanStatus = wrState.wanStatus || [];
+            const liveById = new Set(wanStatus.filter(s => s.live_iface).map(s => s.id));
+            if (wans.length > 0 && wans.every(w => !liveById.has(w.id))) {
+                const detail = wans.length === 1
+                    ? `${(wans[0].mode?.mode || 'WAN').toUpperCase()} on ${wans[0].interface} is not connected`
+                    : `${wans.length} WAN connections configured, none are up`;
+                if (fullGraph.nodes.some(x => x.id === 'zone:wan')) {
+                    add('zone:wan', 'danger', detail);
                 }
             }
         }
