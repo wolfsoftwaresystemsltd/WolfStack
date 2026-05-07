@@ -25,6 +25,7 @@ mod networking;
 mod backup;
 mod vms;
 mod proxmox;
+mod xo;
 mod mysql_editor;
 mod appstore;
 mod alerting;
@@ -518,6 +519,7 @@ async fn main() -> std::io::Result<()> {
             federations: Arc::new(std::sync::RwLock::new(federation::FederationStore::load())),
             gateway_cluster_cache: Arc::new(std::sync::Mutex::new(None)),
             array_cluster_cache: Arc::new(std::sync::Mutex::new(None)),
+            xo: Arc::new(std::sync::RwLock::new(xo::XoStore::load())),
         });
 
         // Storage-array health watcher — every 60s, scan /proc/mdstat

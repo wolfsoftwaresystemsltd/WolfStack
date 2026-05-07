@@ -1851,7 +1851,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array' };
+    const titles = { datacenter: 'Datacenter', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -2051,7 +2051,301 @@ function selectServerView(nodeId, view) {
     if (view === 'wolfkube') loadNodeWolfKube().finally(() => hidePageLoadingOverlay(el));
     if (view === 'wolfram') loadWolframStatus().finally(() => hidePageLoadingOverlay(el));
     if (view === 'wolfusb') loadWolfUsbPage().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'xopools') renderXoPools().finally(() => hidePageLoadingOverlay(el));
 }
+
+// ─── XCP-ng / Xen Orchestra Pools ────────────────────────────────
+//
+// The page lives entirely under #xopools-content and is fully
+// rendered client-side. Backend exposes:
+//   GET  /api/xo/pools                          → list registered
+//   POST /api/xo/pools                          → register one
+//   DELETE /api/xo/pools/{id}                   → unregister
+//   POST /api/xo/pools/{id}/test                → re-probe
+//   GET  /api/xo/pools/{id}/inventory           → pools/hosts/VMs
+//
+// The token is never returned by the backend — it stays server-side
+// after registration, obfuscated on disk.
+
+async function renderXoPools() {
+    const host = document.getElementById('xopools-content');
+    if (!host) return;
+    host.innerHTML = `
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-body" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+                <div>
+                    <h2 style="margin:0;display:flex;align-items:center;gap:10px;"><span style="font-size:28px;">🦊</span>XCP-ng / Xen Orchestra Pools</h2>
+                    <p style="margin:6px 0 0;color:var(--text-muted);font-size:13px;max-width:780px;line-height:1.5;">
+                        Drive XCP-ng pools through Xen Orchestra's REST API. Register an XO instance once with a token from
+                        <em>Settings → Tokens</em>; WolfStack reads pools, hosts, and VMs from there. Same shape as the Proxmox
+                        integration — XCP-ng is a Type-1 hypervisor, so VMs are the workloads (no host-level LXC).
+                    </p>
+                </div>
+                <div style="display:flex;gap:8px;">
+                    <button class="btn btn-primary" onclick="xoRegisterModal()">+ Register XO instance</button>
+                </div>
+            </div>
+        </div>
+        <div id="xopools-list">
+            <div style="color:var(--text-muted);padding:20px;text-align:center;">Loading…</div>
+        </div>
+    `;
+    await xoLoadList();
+}
+
+async function xoLoadList() {
+    const list = document.getElementById('xopools-list');
+    if (!list) return;
+    let pools = [];
+    try {
+        const r = await fetch(apiUrl('/api/xo/pools'));
+        if (!r.ok) throw new Error(await r.text());
+        pools = await r.json();
+    } catch (e) {
+        list.innerHTML = `<div class="card"><div class="card-body" style="color:var(--danger);">Couldn't load XO pools: ${escapeHtml(String(e.message || e))}</div></div>`;
+        return;
+    }
+    if (!pools.length) {
+        list.innerHTML = `<div class="card"><div class="card-body" style="text-align:center;padding:40px;color:var(--text-muted);">
+            <div style="font-size:36px;margin-bottom:10px;">🦊</div>
+            <div style="font-size:15px;margin-bottom:6px;">No XO instances registered yet.</div>
+            <div style="font-size:12px;">Click <strong>Register XO instance</strong> above to add the first one.</div>
+        </div></div>`;
+        return;
+    }
+    list.innerHTML = pools.map(xoPoolCardHtml).join('');
+    // After the cards render, kick off an inventory fetch per pool.
+    // Each card has its own slot so we can show stale data + a
+    // refresh spinner without blocking the others.
+    pools.forEach(p => xoFetchInventory(p.id));
+}
+
+function xoPoolCardHtml(p) {
+    const status = p.status || 'unknown';
+    const statusColour = status === 'ok' ? 'var(--success)'
+        : status === 'auth_failed' ? 'var(--warning,#f59e0b)'
+        : status === 'unreachable' ? 'var(--danger)'
+        : 'var(--text-muted)';
+    const statusLabel = ({
+        ok: 'Reachable',
+        auth_failed: 'Token rejected',
+        unreachable: 'Unreachable',
+        unknown: 'Not yet probed',
+    })[status] || status;
+    return `<div class="card" style="margin-bottom:14px;" id="xopool-card-${escapeAttr(p.id)}">
+        <div class="card-body">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
+                <div style="min-width:0;flex:1;">
+                    <h3 style="margin:0 0 4px;display:flex;align-items:center;gap:10px;">
+                        <span style="font-size:22px;">🦊</span>
+                        ${escapeHtml(p.name)}
+                        <span style="font-size:11px;color:${statusColour};font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">● ${escapeHtml(statusLabel)}</span>
+                    </h3>
+                    <div style="font-size:12px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;word-break:break-all;">${escapeHtml(p.url)}</div>
+                </div>
+                <div style="display:flex;gap:6px;">
+                    <button class="btn btn-sm" onclick="xoTestPool('${escapeAttr(p.id)}')">🔌 Test</button>
+                    <button class="btn btn-sm" onclick="xoRefreshPool('${escapeAttr(p.id)}')">🔄 Refresh</button>
+                    <button class="btn btn-sm btn-danger" onclick="xoDeletePool('${escapeAttr(p.id)}','${escapeAttr(p.name)}')">Remove</button>
+                </div>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(120px, 1fr));gap:10px;margin-top:14px;">
+                <div class="info-pill" style="background:var(--bg-tertiary,#2a3660);padding:10px 14px;border-radius:8px;">
+                    <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">Pools</div>
+                    <div style="font-size:20px;font-weight:700;">${p.pool_count || 0}</div>
+                </div>
+                <div class="info-pill" style="background:var(--bg-tertiary,#2a3660);padding:10px 14px;border-radius:8px;">
+                    <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">Hosts</div>
+                    <div style="font-size:20px;font-weight:700;">${p.host_count || 0}</div>
+                </div>
+                <div class="info-pill" style="background:var(--bg-tertiary,#2a3660);padding:10px 14px;border-radius:8px;">
+                    <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">VMs</div>
+                    <div style="font-size:20px;font-weight:700;">${p.vm_count || 0}</div>
+                </div>
+                <div class="info-pill" style="background:var(--bg-tertiary,#2a3660);padding:10px 14px;border-radius:8px;">
+                    <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">Last seen</div>
+                    <div style="font-size:13px;font-weight:600;">${p.last_seen ? new Date(p.last_seen).toLocaleString() : '—'}</div>
+                </div>
+            </div>
+            <div id="xopool-inv-${escapeAttr(p.id)}" style="margin-top:16px;color:var(--text-muted);font-size:12px;">Loading inventory…</div>
+        </div>
+    </div>`;
+}
+
+async function xoFetchInventory(id) {
+    const slot = document.getElementById(`xopool-inv-${id}`);
+    if (!slot) return;
+    try {
+        const r = await fetch(apiUrl(`/api/xo/pools/${encodeURIComponent(id)}/inventory`));
+        if (!r.ok) {
+            const body = await r.text().catch(() => '');
+            slot.innerHTML = `<div style="color:var(--danger);">Inventory failed: ${escapeHtml(body || 'HTTP ' + r.status)}</div>`;
+            return;
+        }
+        const inv = await r.json();
+        slot.innerHTML = xoInventoryHtml(inv);
+    } catch (e) {
+        slot.innerHTML = `<div style="color:var(--danger);">Inventory failed: ${escapeHtml(String(e.message || e))}</div>`;
+    }
+}
+
+function xoInventoryHtml(inv) {
+    const pools = inv.pools || [];
+    const hosts = inv.hosts || [];
+    const vms = inv.vms || [];
+    if (pools.length === 0 && hosts.length === 0 && vms.length === 0) {
+        return '<div style="color:var(--text-muted);">XO returned no pools / hosts / VMs. Either the instance is empty or the token can\'t see them.</div>';
+    }
+    // Group VMs by host so the tree reads top-down: pool → host → VMs.
+    const sectionStyle = 'margin-top:10px;font-size:12px;';
+    return pools.map(pool => {
+        const poolHosts = hosts.filter(h => h.pool_uuid === pool.uuid);
+        const hostsHtml = poolHosts.map(h => {
+            const hostVms = vms.filter(v => v.host_uuid === h.uuid);
+            const memPct = h.memory_total > 0 ? Math.round((h.memory_used / h.memory_total) * 100) : 0;
+            const upDays = Math.floor((h.uptime_seconds || 0) / 86400);
+            const vmsHtml = hostVms.length === 0
+                ? '<div style="color:var(--text-muted);font-style:italic;padding:6px 0 0 22px;">No VMs on this host.</div>'
+                : `<table class="data-table" style="margin-top:6px;font-size:12px;width:100%;">
+                    <thead><tr><th style="width:24px;"></th><th>Name</th><th style="width:90px;">State</th><th style="width:60px;">CPUs</th><th style="width:120px;">Memory</th><th>IP</th></tr></thead>
+                    <tbody>${hostVms.map(v => {
+                        const vmMem = v.memory_total > 0 ? `${Math.round(v.memory_used / 1048576)} / ${Math.round(v.memory_total / 1048576)} MB` : '—';
+                        const vmStateColour = v.power_state === 'Running' ? 'var(--success)'
+                            : v.power_state === 'Halted' ? 'var(--text-muted)'
+                            : 'var(--warning,#f59e0b)';
+                        return `<tr>
+                            <td>${v.power_state === 'Running' ? '🟢' : '⚫'}</td>
+                            <td><strong>${escapeHtml(v.name)}</strong>${v.tags && v.tags.length ? `<div style="font-size:10px;color:var(--text-muted);">${v.tags.map(t => escapeHtml(t)).join(', ')}</div>` : ''}</td>
+                            <td><span style="color:${vmStateColour};font-weight:600;">${escapeHtml(v.power_state)}</span></td>
+                            <td>${v.cpus || 0}</td>
+                            <td>${vmMem}</td>
+                            <td><code style="font-size:11px;">${v.ip_addresses && v.ip_addresses.length ? escapeHtml(v.ip_addresses.join(', ')) : '—'}</code></td>
+                        </tr>`;
+                    }).join('')}</tbody>
+                </table>`;
+            return `<div style="margin-top:10px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-secondary);">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+                    <div>
+                        <strong>${escapeHtml(h.name)}</strong>
+                        <span style="margin-left:6px;font-size:11px;color:${h.power_state === 'running' ? 'var(--success)' : 'var(--text-muted)'};">● ${escapeHtml(h.power_state)}</span>
+                    </div>
+                    <div style="font-size:11px;color:var(--text-muted);">
+                        ${h.cpus || 0} CPUs · ${memPct}% RAM · uptime ${upDays}d · v${escapeHtml(h.version || '?')}
+                    </div>
+                </div>
+                ${vmsHtml}
+            </div>`;
+        }).join('');
+        return `<div style="${sectionStyle}">
+            <div style="font-weight:700;font-size:13px;margin-bottom:6px;">📦 ${escapeHtml(pool.name)} <span style="font-size:11px;color:var(--text-muted);font-weight:400;">${pool.host_count} hosts${pool.ha_enabled ? ' · HA' : ''}</span></div>
+            ${hostsHtml || '<div style="color:var(--text-muted);font-style:italic;">No hosts in this pool.</div>'}
+        </div>`;
+    }).join('');
+}
+
+window.xoRegisterModal = function() {
+    // Build a self-contained registration modal — wolfstack's
+    // `showModal` is OK-only, no form / confirm-cancel pattern, so
+    // we wire one inline. Same z-index + colour-vars as the
+    // existing modal so it matches the rest of the UI.
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;';
+    overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+    overlay.innerHTML = `
+        <div style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:560px;width:90%;max-height:90vh;overflow-y:auto;color:var(--text-primary,#e4e4e7);font-family:inherit;">
+            <div style="font-size:16px;font-weight:600;margin-bottom:14px;display:flex;align-items:center;gap:10px;">
+                <span style="font-size:22px;">🦊</span>Register Xen Orchestra instance
+            </div>
+            <div style="font-size:13px;color:var(--text-secondary,#a1a1aa);margin-bottom:14px;line-height:1.5;">
+                WolfStack drives XCP-ng through XO's REST API.
+                Mint an authentication token in your XO instance under
+                <code>Settings → Tokens</code> (Admin role required), then paste it here.
+                The token stays on this server — it's never sent to the browser.
+            </div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+                <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">Display name</label>
+                <input id="xo-reg-name" placeholder="prod-xo or customer-A" style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
+                <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">XO base URL</label>
+                <input id="xo-reg-url" placeholder="https://xo.example.com" type="url" style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
+                <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">API token</label>
+                <input id="xo-reg-token" placeholder="paste the token from Settings → Tokens" type="password" style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:10px;line-height:1.5;">A connection test runs before the token is stored. Bad URL or rejected token → registration is rejected and nothing is saved.</div>
+            <div id="xo-reg-error" style="display:none;color:var(--danger);font-size:12px;margin-top:10px;"></div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;">
+                <button class="btn" id="xo-reg-cancel">Cancel</button>
+                <button class="btn btn-primary" id="xo-reg-submit">🔌 Test &amp; register</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    document.getElementById('xo-reg-name').focus();
+    document.getElementById('xo-reg-cancel').onclick = () => overlay.remove();
+    document.getElementById('xo-reg-submit').onclick = async () => {
+        const errEl = document.getElementById('xo-reg-error');
+        errEl.style.display = 'none';
+        const name = document.getElementById('xo-reg-name').value.trim();
+        const url = document.getElementById('xo-reg-url').value.trim();
+        const token = document.getElementById('xo-reg-token').value.trim();
+        if (!name || !url || !token) {
+            errEl.textContent = 'Name, URL, and token are all required.';
+            errEl.style.display = '';
+            return;
+        }
+        const submitBtn = document.getElementById('xo-reg-submit');
+        submitBtn.disabled = true;
+        submitBtn.textContent = '🔌 Testing…';
+        try {
+            const r = await fetch(apiUrl('/api/xo/pools'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, url, token }),
+            });
+            if (!r.ok) {
+                const body = await r.text().catch(() => '');
+                errEl.textContent = 'Registration failed: ' + body;
+                errEl.style.display = '';
+                submitBtn.disabled = false;
+                submitBtn.textContent = '🔌 Test & register';
+                return;
+            }
+            overlay.remove();
+            await xoLoadList();
+        } catch (e) {
+            errEl.textContent = 'Network error: ' + (e.message || e);
+            errEl.style.display = '';
+            submitBtn.disabled = false;
+            submitBtn.textContent = '🔌 Test & register';
+        }
+    };
+};
+
+window.xoTestPool = async function(id) {
+    try {
+        const r = await fetch(apiUrl(`/api/xo/pools/${encodeURIComponent(id)}/test`), { method: 'POST' });
+        if (!r.ok) {
+            const body = await r.text().catch(() => '');
+            alert('Test failed: ' + body);
+        }
+    } catch (e) {
+        alert('Test errored: ' + (e.message || e));
+    }
+    await xoLoadList();
+};
+
+window.xoRefreshPool = function(id) {
+    xoFetchInventory(id);
+};
+
+window.xoDeletePool = async function(id, name) {
+    if (!confirm(`Unregister "${name}"?\n\nThe XO instance itself isn't touched — this only removes the registration on WolfStack's side.`)) return;
+    const r = await fetch(apiUrl(`/api/xo/pools/${encodeURIComponent(id)}`), { method: 'DELETE' });
+    if (!r.ok) {
+        const body = await r.text().catch(() => '');
+        alert('Delete failed: ' + body);
+        return;
+    }
+    await xoLoadList();
+};
 
 // ─── Server Tree ───
 function buildServerTree(nodes) {
@@ -50328,6 +50622,10 @@ const APP_DRAWER_TILES = [
     {
         id: 'cluster-browser', icon: '🔗', name: 'Cluster Browser',
         desc: 'Open cluster web apps without a VPN.',
+    },
+    {
+        id: 'xopools', icon: '🦊', name: 'XO Pools',
+        desc: 'Drive XCP-ng pools through Xen Orchestra — pools, hosts, VMs, templates.',
     },
     {
         id: 'databases', icon: '🗄️', name: 'Databases',

@@ -276,6 +276,10 @@ pub struct AppState {
     /// every state-changing array endpoint (start, stop, parity,
     /// parity-cancel, schedule save) plus federation save/delete.
     pub array_cluster_cache: Arc<std::sync::Mutex<Option<(serde_json::Value, std::time::Instant)>>>,
+    /// Registered Xen Orchestra (XCP-ng) instances. WolfStack drives
+    /// XO via its REST API, the same way it drives Proxmox via PVE
+    /// API. Each entry stores a base URL + an obfuscated API token.
+    pub xo: Arc<std::sync::RwLock<crate::xo::XoStore>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -23931,6 +23935,153 @@ async fn push_to_peers(state: &web::Data<AppState>) {
     });
 }
 
+// ─── Xen Orchestra / XCP-ng integration (P1: read-only inventory) ─
+
+#[derive(Deserialize)]
+pub struct XoPoolRegisterRequest {
+    pub name: String,
+    pub url: String,
+    pub token: String,
+}
+
+/// GET /api/xo/pools — list registered XO instances. Token is
+/// never returned to the frontend; only the masked status fields.
+pub async fn xo_pools_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let pools = state.xo.read().unwrap().list();
+    // Strip the encrypted token so it never leaves the backend.
+    let safe: Vec<serde_json::Value> = pools.into_iter().map(|p| serde_json::json!({
+        "id": p.id,
+        "name": p.name,
+        "url": p.url,
+        "status": p.status,
+        "last_seen": p.last_seen,
+        "pool_count": p.pool_count,
+        "host_count": p.host_count,
+        "vm_count": p.vm_count,
+    })).collect();
+    HttpResponse::Ok().json(safe)
+}
+
+/// POST /api/xo/pools — register a new XO instance. Validates by
+/// running a Test Connection before persisting; bad token / wrong
+/// URL never makes it into the store.
+pub async fn xo_pools_register(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<XoPoolRegisterRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let r = body.into_inner();
+    if r.name.trim().is_empty() || r.url.trim().is_empty() || r.token.trim().is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "name, url and token are all required"
+        }));
+    }
+    let client = crate::xo::XoClient::new(&r.url, &r.token);
+    if let Err(e) = client.test_connection().await {
+        return HttpResponse::BadGateway().json(serde_json::json!({
+            "error": format!("Couldn't reach the XO REST API: {}", e)
+        }));
+    }
+    let pool = crate::xo::XoPool {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: r.name.trim().to_string(),
+        url: r.url.trim().trim_end_matches('/').to_string(),
+        token_enc: crate::xo::obfuscate_token(r.token.trim()),
+        last_seen: chrono::Utc::now().to_rfc3339(),
+        status: "ok".into(),
+        pool_count: 0,
+        host_count: 0,
+        vm_count: 0,
+    };
+    let id = pool.id.clone();
+    let mut store = state.xo.write().unwrap();
+    if let Err(e) = store.add(pool) {
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": e}));
+    }
+    HttpResponse::Created().json(serde_json::json!({"id": id, "status": "ok"}))
+}
+
+/// DELETE /api/xo/pools/{id} — unregister an XO instance.
+pub async fn xo_pools_delete(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let mut store = state.xo.write().unwrap();
+    match store.remove(&id) {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({"status": "removed"})),
+        Err(e) => HttpResponse::NotFound().json(serde_json::json!({"error": e})),
+    }
+}
+
+/// POST /api/xo/pools/{id}/test — re-probe a registered instance.
+/// Updates the cached status field so the UI shows fresh state
+/// without waiting for the next inventory poll.
+pub async fn xo_pools_test(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let pool = match state.xo.read().unwrap().get(&id) {
+        Some(p) => p,
+        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "pool not found"})),
+    };
+    let token = crate::xo::deobfuscate_token(&pool.token_enc);
+    let client = crate::xo::XoClient::new(&pool.url, &token);
+    match client.test_connection().await {
+        Ok(_) => {
+            state.xo.write().unwrap().update_status(&id, "ok", pool.pool_count, pool.host_count, pool.vm_count);
+            HttpResponse::Ok().json(serde_json::json!({"status": "ok"}))
+        }
+        Err(e) => {
+            // Don't update last_seen on failure — preserve the
+            // last successful probe time for diagnostics.
+            let status = if e.contains("401") || e.to_ascii_lowercase().contains("token") { "auth_failed" } else { "unreachable" };
+            if let Some(p) = state.xo.read().unwrap().get(&id) {
+                state.xo.write().unwrap().update_status(&id, status, p.pool_count, p.host_count, p.vm_count);
+            }
+            HttpResponse::BadGateway().json(serde_json::json!({"status": status, "error": e}))
+        }
+    }
+}
+
+/// GET /api/xo/pools/{id}/inventory — pools, hosts, VMs in one
+/// payload. Three parallel XO calls, fanned out by `XoClient`.
+pub async fn xo_pools_inventory(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let pool = match state.xo.read().unwrap().get(&id) {
+        Some(p) => p,
+        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "pool not found"})),
+    };
+    let token = crate::xo::deobfuscate_token(&pool.token_enc);
+    let client = crate::xo::XoClient::new(&pool.url, &token);
+    match client.full_inventory().await {
+        Ok(inv) => {
+            // Refresh cached counters so the listing card is
+            // accurate without a second poll.
+            let pool_count = inv.pools.len() as u32;
+            let host_count = inv.hosts.len() as u32;
+            let vm_count = inv.vms.len() as u32;
+            state.xo.write().unwrap().update_status(&id, "ok", pool_count, host_count, vm_count);
+            HttpResponse::Ok().json(inv)
+        }
+        Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
+            "error": format!("XO inventory fetch failed: {}", e)
+        })),
+    }
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -24634,6 +24785,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/plugins/{id}/api/{path:.*}", web::post().to(plugins_proxy))
         .route("/api/plugins/{id}/api/{path:.*}", web::put().to(plugins_proxy))
         .route("/api/plugins/{id}/api/{path:.*}", web::delete().to(plugins_proxy))
+        // Xen Orchestra / XCP-ng integration (P1: read-only).
+        // Mirrors the proxmox surface — operator registers an XO
+        // instance with a token, WolfStack drives it via REST.
+        .route("/api/xo/pools", web::get().to(xo_pools_list))
+        .route("/api/xo/pools", web::post().to(xo_pools_register))
+        .route("/api/xo/pools/{id}", web::delete().to(xo_pools_delete))
+        .route("/api/xo/pools/{id}/test", web::post().to(xo_pools_test))
+        .route("/api/xo/pools/{id}/inventory", web::get().to(xo_pools_inventory))
         // Platform calibration & access tokens
         .route("/api/platform/status", web::get().to(platform_status))
         .route("/api/platform/apply", web::post().to(platform_apply))
