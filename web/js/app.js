@@ -27816,8 +27816,16 @@ function addPluginNavItem(manifest) {
     // Skip if already added
     if (document.querySelector(`[data-page="${viewId}"]`)) return;
 
-    // Create the page container for this plugin
-    if (!document.getElementById(`page-${viewId}`)) {
+    // Create the page container for this plugin — but ONLY when the
+    // plugin doesn't live inside the Settings page. For settings-section
+    // plugins the canonical surface is the settings tab created below,
+    // and creating a standalone page as well puts a *second* div with
+    // id `${viewId}-content` into the document. `getElementById` then
+    // returns the standalone-page div (inserted first) instead of the
+    // settings-tab div, so plugin renderers that key off that id end up
+    // writing to a hidden page while the visible settings tab keeps
+    // showing "Loading plugin..." forever (wolfcustom hit this).
+    if (menu.section !== 'settings' && !document.getElementById(`page-${viewId}`)) {
         const page = document.createElement('div');
         page.id = `page-${viewId}`;
         page.className = 'page-view';
@@ -50377,15 +50385,24 @@ async function loadAppDrawerPluginTiles() {
         return all
             .filter(p => p && p.manifest && p.manifest.enabled !== false)
             .filter(p => p.manifest.menu && p.manifest.menu.view)
-            .map(p => ({
-                // Plugin pages live under `page-plugin-{view}` per
-                // `addPluginNavItem` — match that convention so the
-                // drawer click navigates to the correct DOM container.
-                id:   `plugin-${p.manifest.menu.view}`,
-                icon: p.manifest.icon || '🧩',
-                name: p.manifest.menu.label || p.manifest.name || p.manifest.id,
-                desc: p.manifest.description || '',
-            }));
+            .map(p => {
+                const m = p.manifest;
+                // Datacenter-section plugins navigate to the standalone
+                // page `page-plugin-{view}` created by `addPluginNavItem`.
+                // Settings-section plugins have NO standalone page (it
+                // would collide on the `${viewId}-content` id with the
+                // tab panel) — route the drawer click to the Settings
+                // page and let it switch to the right tab instead.
+                const id = m.menu.section === 'settings'
+                    ? `settings-tab:plugin-${m.menu.view}`
+                    : `plugin-${m.menu.view}`;
+                return {
+                    id,
+                    icon: m.icon || '🧩',
+                    name: m.menu.label || m.name || m.id,
+                    desc: m.description || '',
+                };
+            });
     } catch (_) { return []; }
 }
 
@@ -50448,7 +50465,19 @@ function appDrawerNav(pageId) {
     // Tiny delay so the drawer's slide-out animation starts before
     // selectView re-renders the underlying view — feels less jarring
     // than the two transitions racing.
-    setTimeout(() => selectView(pageId), 60);
+    setTimeout(() => {
+        // Settings-section plugin tiles encode their route as
+        // `settings-tab:<tabId>` — `loadAppDrawerPluginTiles` builds
+        // them that way because those plugins have no standalone page.
+        // Land on Settings and switch to the right tab.
+        if (typeof pageId === 'string' && pageId.startsWith('settings-tab:')) {
+            const tabName = pageId.slice('settings-tab:'.length);
+            selectView('settings');
+            if (typeof switchSettingsTab === 'function') switchSettingsTab(tabName);
+            return;
+        }
+        selectView(pageId);
+    }, 60);
 }
 
 window.openAppDrawer = openAppDrawer;
