@@ -19,7 +19,6 @@
 //!
 //! Endpoint reference: <https://docs.xen-orchestra.com/restapi>
 
-#![allow(dead_code)]
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -34,8 +33,12 @@ static XO_CLIENT: std::sync::LazyLock<reqwest::Client> =
     });
 
 // ─── Connection record persisted on disk ──────────────────────────
-
-const POOLS_FILE_DEFAULT: &str = "/etc/wolfstack/xo_pools.json";
+//
+// The actual on-disk path is resolved via
+// `crate::paths::get().xo_pools_config` (default
+// `/etc/wolfstack/xo_pools.json`, overridable via paths.json) —
+// no hard-coded constant here, since `XoStore::load` reads the
+// path through the paths module like every other config file.
 
 /// One XO instance the operator has registered. Multiple pools
 /// belonging to the same XO instance are exposed through a single
@@ -397,29 +400,67 @@ impl XoClient {
             return Err(format!("XO HTTP {} on create_vm: {}", status,
                 body.chars().take(400).collect::<String>()));
         }
-        // XO sometimes returns the new UUID as a JSON string,
-        // sometimes as `{ "uuid": "..." }`, sometimes as a redirect
-        // URL. Handle each.
+        // XO returns the new UUID in one of three shapes
+        // depending on version: a bare JSON string, an object
+        // with a `uuid` (or `id`) field, or — for async creates —
+        // a task URL like `/rest/v0/tasks/<task-id>`. We must
+        // distinguish "this is a UUID" from "this is a task path"
+        // because returning the task path to the operator would
+        // mislead them into thinking they have a VM when they
+        // really have a still-running create job.
+        fn looks_like_uuid(s: &str) -> bool {
+            // 36 chars, hyphens at 8, 13, 18, 23, rest hex.
+            let s = s.trim();
+            let bytes = s.as_bytes();
+            if bytes.len() != 36 { return false; }
+            for (i, &b) in bytes.iter().enumerate() {
+                let want_hyphen = matches!(i, 8 | 13 | 18 | 23);
+                let is_hex = b.is_ascii_hexdigit();
+                if want_hyphen && b != b'-' { return false; }
+                if !want_hyphen && !is_hex { return false; }
+            }
+            true
+        }
         let body_text = resp.text().await.map_err(|e| format!("XO read: {}", e))?;
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body_text) {
             if let Some(s) = v.as_str() {
-                // bare string UUID
-                return Ok(s.trim_matches('"').to_string());
+                let candidate = s.trim().trim_matches('"');
+                if looks_like_uuid(candidate) {
+                    return Ok(candidate.to_string());
+                }
+                // Could be a task URL — surface that instead of
+                // pretending it's the VM we asked for.
+                if candidate.contains("/tasks/") {
+                    return Err(format!(
+                        "XO accepted the create as an async task ({}). \
+                         WolfStack doesn't track XO tasks yet — provision \
+                         from XO directly and refresh inventory.",
+                        candidate
+                    ));
+                }
+                return Err(format!("XO returned an unexpected create_vm body: {}", candidate));
             }
             if let Some(s) = v.get("uuid").and_then(|x| x.as_str()) {
-                return Ok(s.to_string());
+                if looks_like_uuid(s) { return Ok(s.to_string()); }
             }
             if let Some(s) = v.get("id").and_then(|x| x.as_str()) {
-                return Ok(s.to_string());
+                if looks_like_uuid(s) { return Ok(s.to_string()); }
             }
+            return Err(format!(
+                "XO returned a JSON body without a UUID-shaped uuid/id field: {}",
+                body_text.chars().take(300).collect::<String>(),
+            ));
         }
-        // Fallback: treat the trimmed body as the UUID — a few XO
-        // builds return a raw UUID string outside JSON.
+        // Fallback: a few XO builds return a raw UUID string
+        // outside JSON. Validate before accepting.
         let trimmed = body_text.trim().trim_matches('"').to_string();
-        if !trimmed.is_empty() {
+        if looks_like_uuid(&trimmed) {
             Ok(trimmed)
-        } else {
+        } else if trimmed.is_empty() {
             Err("XO returned empty body on create_vm".into())
+        } else {
+            Err(format!("XO returned non-UUID body on create_vm: {}",
+                trimmed.chars().take(200).collect::<String>()))
         }
     }
 
@@ -471,6 +512,17 @@ impl XoStore {
         let tmp = format!("{}.tmp", self.path);
         std::fs::write(&tmp, &s).map_err(|e| format!("write: {}", e))?;
         std::fs::rename(&tmp, &self.path).map_err(|e| format!("rename: {}", e))?;
+        // Defence in depth: file holds obfuscated XO tokens.
+        // /etc/wolfstack/ is already 700 from setup.sh, but we
+        // chmod the file 600 too in case the parent has been
+        // relaxed (custom paths, debugging). Best-effort —
+        // failures here don't fail the save.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.path,
+                std::fs::Permissions::from_mode(0o600));
+        }
         Ok(())
     }
 
@@ -518,9 +570,6 @@ impl XoStore {
     }
 }
 
-#[allow(dead_code)]
-pub const POOLS_FILE: &str = POOLS_FILE_DEFAULT;
-
 #[derive(Debug, Clone)]
 pub struct CreateVmRequest {
     pub template_uuid: String,
@@ -542,95 +591,124 @@ pub struct CreateVmRequest {
 // auditable — every line should be defensible.
 
 pub mod cloud_init {
+    /// Bootstrap parameters passed into the cloud-init template.
+    /// Honest scope: this template installs WolfStack on a fresh
+    /// VM and brings up the daemon. It does NOT form a multi-VM
+    /// cluster on its own — cluster formation requires the SP /
+    /// operator to call `POST /api/nodes` on the chosen master
+    /// AFTER each VM is reachable, which is the same flow the
+    /// existing dashboard "Add Node" UI uses. A future
+    /// orchestration wizard (P5) will automate that; for now
+    /// it's a manual step documented in the post-provision
+    /// instructions.
     pub struct WolfStackBootstrap {
         /// Hostname to set on the new VM.
         pub hostname: String,
-        /// If empty: this VM becomes a fresh cluster leader and
-        /// generates its own secret. If set: VM joins an existing
-        /// cluster using this secret.
-        pub cluster_secret: String,
-        /// `host:port` of an existing cluster member to bootstrap
-        /// from. Required when joining; ignored when leading.
-        pub cluster_leader_endpoint: String,
-        /// SP's federation URL (e.g. `https://sp.example.com:8553`).
-        /// When set together with `federation_token`, the new
-        /// cluster registers itself back with the SP for the
-        /// aggregator dashboard.
-        pub federation_url: String,
-        /// Federation token previously minted on the SP side.
-        pub federation_token: String,
+        /// SP's WolfStack URL — used as the install proxy origin
+        /// (Path B). When set, cloud-init pulls setup.sh from
+        /// `<sp_url>/api/install/setup.sh` first, falling back to
+        /// the canonical GitHub raw URL if the SP is unreachable.
+        /// Empty → cloud-init uses GitHub directly.
+        pub sp_url: String,
+        /// Whether to install in --agent mode (no management UI,
+        /// just the cluster API listening). Useful for the
+        /// non-leader VMs in a multi-VM cluster — the leader
+        /// runs the full UI, agents are headless.
+        pub agent_mode: bool,
     }
 
     /// Generate a cloud-config (YAML) that:
-    ///   1. Sets hostname
-    ///   2. Installs WolfStack via the published setup.sh
-    ///   3. Configures WolfNet with MTU 1380 (room for nested LXC
-    ///      WolfNet inside) and joins the cluster
-    ///   4. Registers federation if creds were supplied
+    ///   1. Sets the hostname
+    ///   2. Installs WolfStack — preferring the SP's install
+    ///      proxy when given, falling back to the canonical
+    ///      GitHub raw URL
+    ///   3. Brings up the systemd unit
+    ///
+    /// The setup.sh script handles its own dependency install,
+    /// WolfNet bootstrap, cluster-secret generation, and
+    /// systemd service creation — we don't second-guess any of
+    /// that here. WolfNet MTU tuning (e.g. 1380 for nested
+    /// wireguard inside the VM) is a post-install operator
+    /// adjustment in `/etc/wolfnet/config.toml`; we don't touch
+    /// it from cloud-init because writing a partial TOML file
+    /// would break the schema.
     pub fn build_wolfstack_user_data(b: WolfStackBootstrap) -> String {
-        let hostname = b.hostname.replace('"', "");
-        // YAML-safe field interpolation. None of these can contain
-        // newlines (form validation upstream), but we still escape
-        // quotes defensively — a token with an accidental quote
-        // would otherwise corrupt the YAML.
-        let esc = |s: &str| s.replace('"', "\\\"");
-        let cluster_secret = esc(&b.cluster_secret);
-        let cluster_leader = esc(&b.cluster_leader_endpoint);
-        let federation_url = esc(&b.federation_url);
-        let federation_token = esc(&b.federation_token);
+        // The hostname has already been validated upstream as
+        // RFC 1123 (alphanumeric or hyphen, 1-63 chars). We
+        // belt-and-braces strip anything outside that set as a
+        // last-resort defence — a hostname ending up in YAML or
+        // a shell command must not contain `:`, `#`, `'`, `"`,
+        // newlines, `/`, `;`, `$`, `` ` ``, etc.
+        let hostname: String = b.hostname.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .take(63)
+            .collect();
+        // If something completely upstream of the validator slips
+        // an empty hostname through, fall back to a stable
+        // placeholder rather than emitting `hostname: ""`.
+        let hostname = if hostname.is_empty() { "wolfstack-vm".to_string() } else { hostname };
 
-        // The runcmd block runs in order. setup.sh idempotently
-        // installs the wolfstack binary and starts the systemd
-        // unit. Cluster + federation setup happens after via the
-        // wolfstack CLI.
-        let mut runcmds: Vec<String> = vec![
-            format!("hostnamectl set-hostname {}", hostname),
-            "curl -fsSL https://wolfstack.org/setup.sh | sudo bash -s -- --quiet".into(),
-            "systemctl enable --now wolfstack || true".into(),
-            // WolfNet MTU 1380 — leaves headroom for nested
-            // wireguard inside any LXC the customer runs later.
-            "mkdir -p /etc/wolfnet".into(),
-            "[ -f /etc/wolfnet/config.toml ] || echo 'mtu = 1380' > /etc/wolfnet/config.toml".into(),
+        // Canonical install URL — confirmed in setup.sh comments
+        // (`curl -sSL https://raw.githubusercontent.com/...master/setup.sh`).
+        let github_url = "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh";
+
+        // Path B: try SP first, fall back to GitHub. The whole
+        // download-then-execute chain uses `&&` so we never run
+        // bash on an empty/missing /tmp/wolfstack-setup.sh, and
+        // we explicitly check the file exists + is non-empty
+        // before sudo'ing it as root. If both curls fail, exit
+        // non-zero so cloud-init logs the failure clearly
+        // instead of silently no-op'ing.
+        let setup_flags = if b.agent_mode { "--yes --agent" } else { "--yes" };
+        let install_cmd = if !b.sp_url.is_empty() {
+            let sp_setup = format!("{}/api/install/setup.sh", b.sp_url.trim_end_matches('/'));
+            format!(
+                "rm -f /tmp/wolfstack-setup.sh && \
+                 (curl -fsSL --max-time 30 \"{sp}\" -o /tmp/wolfstack-setup.sh \
+                  || curl -fsSL --max-time 60 \"{gh}\" -o /tmp/wolfstack-setup.sh) && \
+                 [ -s /tmp/wolfstack-setup.sh ] && \
+                 sudo bash /tmp/wolfstack-setup.sh {flags}",
+                sp = sp_setup, gh = github_url, flags = setup_flags,
+            )
+        } else {
+            format!(
+                "rm -f /tmp/wolfstack-setup.sh && \
+                 curl -fsSL --max-time 60 \"{gh}\" -o /tmp/wolfstack-setup.sh && \
+                 [ -s /tmp/wolfstack-setup.sh ] && \
+                 sudo bash /tmp/wolfstack-setup.sh {flags}",
+                gh = github_url, flags = setup_flags,
+            )
+        };
+
+        let runcmds = vec![
+            format!("hostnamectl set-hostname '{}'", hostname),
+            install_cmd,
+            "systemctl enable wolfstack || true".to_string(),
+            "systemctl restart wolfstack || true".to_string(),
         ];
-        if !cluster_secret.is_empty() && !cluster_leader.is_empty() {
-            runcmds.push(format!(
-                "wolfstack cluster join --leader '{}' --secret '{}' || true",
-                cluster_leader, cluster_secret,
-            ));
-        } else if !cluster_secret.is_empty() {
-            runcmds.push(format!(
-                "wolfstack cluster init --secret '{}' || true",
-                cluster_secret,
-            ));
-        }
-        if !federation_url.is_empty() && !federation_token.is_empty() {
-            // Have the new cluster register itself back with the
-            // SP. We POST our public URL to the SP's tenant
-            // register endpoint with the federation token in the
-            // body — admin-side validation will accept it because
-            // the token was minted by the SP a moment ago.
-            runcmds.push(format!(
-                "curl -fsSL --max-time 10 -X POST '{}/api/tenants' \
-                 -H 'Authorization: Bearer {}' \
-                 -H 'Content-Type: application/json' \
-                 -d \"{{\\\"name\\\":\\\"$(hostname)\\\",\\\"url\\\":\\\"https://$(hostname -I | awk '{{print $1}}'):8553\\\",\\\"token\\\":\\\"{}\\\"}}\" || true",
-                federation_url, federation_token, federation_token,
-            ));
-        }
         let runcmd_yaml = runcmds.iter()
-            .map(|c| format!("  - {}", c.replace('\n', " ").replace('\\', "\\\\")))
+            .map(|c| format!("  - bash -lc '{}'", c.replace('\'', "'\\''")))
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Hostname is YAML-quoted to defend against any value
+        // that would otherwise be interpreted as a YAML mapping
+        // (`:` triggers map-value), comment (`#`), or anchor
+        // (`&`/`*`). The validator above already strips those,
+        // but the quoting is free defence in depth.
         format!(
             "#cloud-config\n\
-             # WolfStack auto-bootstrap — generated by SP via XO Provision wizard\n\
-             hostname: {hostname}\n\
+             # WolfStack auto-bootstrap — generated by SP via XO Provision wizard.\n\
+             # After first-boot, the new VM runs WolfStack as a single-node cluster.\n\
+             # Multi-VM cluster formation is an operator step: from the chosen master,\n\
+             # use the dashboard \"Add Node\" flow (or POST /api/nodes) with this VM's\n\
+             # IP + the contents of /etc/wolfstack/join-token on this VM.\n\
+             hostname: \"{hostname}\"\n\
              package_update: false\n\
              package_upgrade: false\n\
              runcmd:\n\
              {runcmd}\n\
-             final_message: \"WolfStack auto-install finished — first-boot took $UPTIME seconds\"\n",
+             final_message: \"WolfStack first-boot finished. Daemon should be reachable on this VM's IP at port 8553.\"\n",
             hostname = hostname,
             runcmd = runcmd_yaml,
         )

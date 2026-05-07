@@ -2558,23 +2558,19 @@ window.xoProvisionModal = async function(poolId, _poolUuid, poolName) {
                     <input type="checkbox" id="xo-prov-autoinstall" checked>
                     <strong>Auto-install WolfStack on first boot</strong>
                 </label>
-                <div style="font-size:11px;color:var(--text-muted);margin-top:4px;margin-left:24px;">Generates a cloud-init payload that runs <code>setup.sh</code>, sets WolfNet MTU 1380, and (optionally) joins a cluster + registers federation.</div>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:4px;margin-left:24px;">Generates a cloud-init payload that sets the hostname, runs the canonical <code>setup.sh</code>, and starts the daemon. The new VM is a standalone single-node cluster after first boot. Multi-VM cluster formation is an operator step — use the dashboard "Add Node" flow against the chosen master, with this VM's IP and the contents of <code>/etc/wolfstack/join-token</code>.</div>
                 <div id="xo-prov-bootstrap-fields" style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;">
                     <div style="grid-column:1 / -1;">
-                        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">Cluster secret <span style="text-transform:none;color:var(--text-muted);">(empty = create a fresh cluster)</span></label>
-                        <input id="xo-prov-cluster-secret" placeholder="paste from existing cluster, or leave empty" style="width:100%;background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:8px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:12px;">
+                        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">SP install URL <span style="text-transform:none;color:var(--text-muted);">(blank = use this WolfStack)</span></label>
+                        <input id="xo-prov-sp-url" placeholder="https://sp.example.com:8553" style="width:100%;background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:8px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:12px;">
+                        <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">Cloud-init pulls <code>setup.sh</code> from <code>&lt;url&gt;/api/install/setup.sh</code> first, falls back to GitHub if unreachable. Pinning the SP URL guarantees customer VMs install the same version this WolfStack is running.</div>
                     </div>
                     <div style="grid-column:1 / -1;">
-                        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">Cluster leader endpoint <span style="text-transform:none;color:var(--text-muted);">(host:port — required when joining)</span></label>
-                        <input id="xo-prov-cluster-leader" placeholder="customer-A-leader:8553" style="width:100%;background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:8px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:12px;">
-                    </div>
-                    <div>
-                        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">SP federation URL <span style="text-transform:none;color:var(--text-muted);">(optional)</span></label>
-                        <input id="xo-prov-federation-url" placeholder="https://sp.example.com:8553" style="width:100%;background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:8px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:12px;">
-                    </div>
-                    <div>
-                        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">Federation token <span style="text-transform:none;color:var(--text-muted);">(optional)</span></label>
-                        <input id="xo-prov-federation-token" type="password" placeholder="from /api/federation/tokens" style="width:100%;background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:8px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:12px;">
+                        <label style="font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal;">
+                            <input type="checkbox" id="xo-prov-agent-mode">
+                            Install in agent mode <span style="color:var(--text-muted);font-size:11px;">(no management UI, just the cluster API)</span>
+                        </label>
+                        <div style="font-size:10px;color:var(--text-muted);margin-top:4px;margin-left:24px;">Recommended for non-leader VMs in a multi-VM cluster. The leader runs the full UI; agents are headless.</div>
                     </div>
                 </div>
             </div>
@@ -2596,16 +2592,20 @@ window.xoProvisionModal = async function(poolId, _poolUuid, poolName) {
         const template_uuid = document.getElementById('xo-prov-template').value;
         const vm_name = document.getElementById('xo-prov-name').value.trim();
         if (!vm_name) { errEl.textContent = 'VM name is required.'; errEl.style.display = ''; return; }
+        // sp_url defaults to this WolfStack's origin so the new
+        // VM pulls the install bundle from us. Operator can clear
+        // it to fall back to GitHub directly, or override to a
+        // different SP-side WolfStack.
+        const spUrlInput = document.getElementById('xo-prov-sp-url').value.trim();
+        const sp_url = ai.checked ? (spUrlInput || window.location.origin) : '';
         const payload = {
             template_uuid,
             vm_name,
             cpus: parseInt(document.getElementById('xo-prov-cpus').value) || 0,
             memory_mb: parseInt(document.getElementById('xo-prov-mem').value) || 0,
             auto_install_wolfstack: ai.checked,
-            cluster_secret: ai.checked ? document.getElementById('xo-prov-cluster-secret').value.trim() : '',
-            cluster_leader_endpoint: ai.checked ? document.getElementById('xo-prov-cluster-leader').value.trim() : '',
-            federation_url: ai.checked ? document.getElementById('xo-prov-federation-url').value.trim() : '',
-            federation_token: ai.checked ? document.getElementById('xo-prov-federation-token').value.trim() : '',
+            sp_url,
+            agent_mode: ai.checked && document.getElementById('xo-prov-agent-mode').checked,
         };
         const submitBtn = document.getElementById('xo-prov-submit');
         submitBtn.disabled = true;

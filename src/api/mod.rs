@@ -23937,6 +23937,49 @@ async fn push_to_peers(state: &web::Data<AppState>) {
 
 // ─── Xen Orchestra / XCP-ng integration (P1: read-only inventory) ─
 
+/// Validate a hostname / VM name as RFC 1123: 1–63 chars,
+/// alphanumeric or hyphen, must start and end with alphanumeric.
+/// Used everywhere we interpolate user input into shell or YAML
+/// downstream (cloud-init, hostnamectl, XO `name_label`).
+fn is_valid_hostname(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 63 { return false; }
+    let bytes = s.as_bytes();
+    let alnum = |b: u8| b.is_ascii_alphanumeric();
+    if !alnum(bytes[0]) || !alnum(bytes[bytes.len() - 1]) { return false; }
+    bytes.iter().all(|&b| alnum(b) || b == b'-')
+}
+
+/// Validate that a URL is HTTP(S) and resolves to a host that's
+/// not loopback / link-local / metadata. Used as the SSRF gate
+/// on every operator-supplied URL we make outbound calls to
+/// (tenant federation, XO registration, install proxy upstream).
+/// Returns the parsed host on success.
+fn validate_outbound_url(url: &str) -> Result<String, String> {
+    let url = url.trim();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("URL must start with http:// or https://".into());
+    }
+    // Reuse the existing SSRF blocker — it already handles
+    // 127.0.0.1, ::1, link-local 169.254.x.x, and the AWS / GCP
+    // metadata endpoints.
+    let host = match reqwest::Url::parse(url) {
+        Ok(u) => u.host_str().unwrap_or("").to_string(),
+        Err(e) => return Err(format!("invalid URL: {}", e)),
+    };
+    if host.is_empty() {
+        return Err("URL has no host".into());
+    }
+    if is_ssrf_blocked_address(&host) {
+        return Err(format!(
+            "Host `{}` is blocked (loopback / link-local / metadata IP). \
+             Operator URLs must point at a real public or LAN address.",
+            host
+        ));
+    }
+    Ok(host)
+}
+
 #[derive(Deserialize)]
 pub struct XoPoolRegisterRequest {
     pub name: String,
@@ -23948,7 +23991,7 @@ pub struct XoPoolRegisterRequest {
 /// never returned to the frontend; only the masked status fields.
 pub async fn xo_pools_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let pools = state.xo.read().unwrap().list();
+    let pools = state.xo.read().unwrap_or_else(|e| e.into_inner()).list();
     // Strip the encrypted token so it never leaves the backend.
     let safe: Vec<serde_json::Value> = pools.into_iter().map(|p| serde_json::json!({
         "id": p.id,
@@ -23978,6 +24021,11 @@ pub async fn xo_pools_register(
             "error": "name, url and token are all required"
         }));
     }
+    // SSRF gate: reject loopback / link-local / metadata before
+    // we make any outbound call.
+    if let Err(e) = validate_outbound_url(&r.url) {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": e}));
+    }
     let client = crate::xo::XoClient::new(&r.url, &r.token);
     if let Err(e) = client.test_connection().await {
         return HttpResponse::BadGateway().json(serde_json::json!({
@@ -23996,7 +24044,7 @@ pub async fn xo_pools_register(
         vm_count: 0,
     };
     let id = pool.id.clone();
-    let mut store = state.xo.write().unwrap();
+    let mut store = state.xo.write().unwrap_or_else(|e| e.into_inner());
     if let Err(e) = store.add(pool) {
         return HttpResponse::InternalServerError().json(serde_json::json!({"error": e}));
     }
@@ -24011,7 +24059,7 @@ pub async fn xo_pools_delete(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
-    let mut store = state.xo.write().unwrap();
+    let mut store = state.xo.write().unwrap_or_else(|e| e.into_inner());
     match store.remove(&id) {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({"status": "removed"})),
         Err(e) => HttpResponse::NotFound().json(serde_json::json!({"error": e})),
@@ -24028,7 +24076,7 @@ pub async fn xo_pools_test(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
-    let pool = match state.xo.read().unwrap().get(&id) {
+    let pool = match state.xo.read().unwrap_or_else(|e| e.into_inner()).get(&id) {
         Some(p) => p,
         None => return HttpResponse::NotFound().json(serde_json::json!({"error": "pool not found"})),
     };
@@ -24036,16 +24084,18 @@ pub async fn xo_pools_test(
     let client = crate::xo::XoClient::new(&pool.url, &token);
     match client.test_connection().await {
         Ok(_) => {
-            state.xo.write().unwrap().update_status(&id, "ok", pool.pool_count, pool.host_count, pool.vm_count);
+            state.xo.write().unwrap_or_else(|e| e.into_inner()).update_status(&id, "ok", pool.pool_count, pool.host_count, pool.vm_count);
             HttpResponse::Ok().json(serde_json::json!({"status": "ok"}))
         }
         Err(e) => {
-            // Don't update last_seen on failure — preserve the
-            // last successful probe time for diagnostics.
-            let status = if e.contains("401") || e.to_ascii_lowercase().contains("token") { "auth_failed" } else { "unreachable" };
-            if let Some(p) = state.xo.read().unwrap().get(&id) {
-                state.xo.write().unwrap().update_status(&id, status, p.pool_count, p.host_count, p.vm_count);
-            }
+            // Single write transaction — the snapshot we took
+            // before the test gives us the count fields, no need
+            // for a second read that could race against a
+            // concurrent inventory poll.
+            let status = if e.contains("401") || e.to_ascii_lowercase().contains("token")
+                { "auth_failed" } else { "unreachable" };
+            state.xo.write().unwrap_or_else(|e| e.into_inner())
+                .update_status(&id, status, pool.pool_count, pool.host_count, pool.vm_count);
             HttpResponse::BadGateway().json(serde_json::json!({"status": status, "error": e}))
         }
     }
@@ -24060,7 +24110,7 @@ pub async fn xo_pools_inventory(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
-    let pool = match state.xo.read().unwrap().get(&id) {
+    let pool = match state.xo.read().unwrap_or_else(|e| e.into_inner()).get(&id) {
         Some(p) => p,
         None => return HttpResponse::NotFound().json(serde_json::json!({"error": "pool not found"})),
     };
@@ -24073,7 +24123,7 @@ pub async fn xo_pools_inventory(
             let pool_count = inv.pools.len() as u32;
             let host_count = inv.hosts.len() as u32;
             let vm_count = inv.vms.len() as u32;
-            state.xo.write().unwrap().update_status(&id, "ok", pool_count, host_count, vm_count);
+            state.xo.write().unwrap_or_else(|e| e.into_inner()).update_status(&id, "ok", pool_count, host_count, vm_count);
             HttpResponse::Ok().json(inv)
         }
         Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
@@ -24099,7 +24149,7 @@ pub async fn xo_vm_action(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let (pool_id, vm_uuid) = path.into_inner();
-    let pool = match state.xo.read().unwrap().get(&pool_id) {
+    let pool = match state.xo.read().unwrap_or_else(|e| e.into_inner()).get(&pool_id) {
         Some(p) => p,
         None => return HttpResponse::NotFound().json(serde_json::json!({"error": "pool not found"})),
     };
@@ -24120,7 +24170,7 @@ pub async fn xo_templates_list(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
-    let pool = match state.xo.read().unwrap().get(&id) {
+    let pool = match state.xo.read().unwrap_or_else(|e| e.into_inner()).get(&id) {
         Some(p) => p,
         None => return HttpResponse::NotFound().json(serde_json::json!({"error": "pool not found"})),
     };
@@ -24142,30 +24192,30 @@ pub struct XoProvisionRequest {
     /// Number of CPUs. Optional.
     #[serde(default)]
     pub cpus: u32,
-    /// Optional cloud-init `user_data`. Empty string → caller does
-    /// not want WolfStack auto-installed; we only generate the
-    /// auto-install payload when `auto_install_wolfstack` is true.
+    /// Optional caller-supplied cloud-init `user_data`. Empty +
+    /// `auto_install_wolfstack` false → no cloud-init at all
+    /// (a vanilla VM clone). Empty + `auto_install_wolfstack`
+    /// true → we generate the canonical install payload.
     #[serde(default)]
     pub user_data: String,
-    /// Auto-generate a cloud-init payload that installs WolfStack
-    /// on first boot, joins it to the supplied `cluster_secret`
-    /// (creates a fresh cluster if empty), and configures WolfNet
-    /// with the right MTU + endpoint settings for an XCP-ng VM.
-    /// This is the headline P3 feature.
+    /// Generate a cloud-init payload that installs WolfStack on
+    /// first boot. Single-VM scope — the new VM ends up as a
+    /// standalone WolfStack daemon. Multi-VM cluster formation
+    /// is an operator step (existing dashboard "Add Node" flow,
+    /// or POST /api/nodes from the chosen master).
     #[serde(default)]
     pub auto_install_wolfstack: bool,
+    /// SP's WolfStack URL — passed to the cloud-init template so
+    /// the new VM pulls setup.sh from `<sp_url>/api/install/
+    /// setup.sh` first, falling back to GitHub. Lets the SP pin
+    /// the install version + work in semi-air-gapped networks.
+    /// Optional; empty → cloud-init goes straight to GitHub.
     #[serde(default)]
-    pub cluster_secret: String,
+    pub sp_url: String,
+    /// Install in agent-only mode (no management UI). Useful for
+    /// the non-leader VMs of a multi-VM cluster.
     #[serde(default)]
-    pub cluster_leader_endpoint: String,
-    /// Tenant federation token to register with on first boot.
-    /// When set, the new cluster automatically calls back to the
-    /// SP's WolfStack to register itself. Useful for the
-    /// "provision tenant" flow.
-    #[serde(default)]
-    pub federation_url: String,
-    #[serde(default)]
-    pub federation_token: String,
+    pub agent_mode: bool,
 }
 
 /// POST /api/xo/pools/{id}/vms — create a VM from a template,
@@ -24185,7 +24235,17 @@ pub async fn xo_vm_provision(
             "error": "template_uuid and vm_name are required"
         }));
     }
-    let pool = match state.xo.read().unwrap().get(&id) {
+    // RFC 1123 hostname-shape validation. We use vm_name as the
+    // VM's `name_label` in XO AND as `hostnamectl set-hostname`
+    // input in the cloud-init payload. Anything outside
+    // [a-zA-Z0-9-] is either rejected by hostnamectl or risks
+    // breaking out of YAML / shell quoting downstream.
+    if !is_valid_hostname(&r.vm_name) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "vm_name must be 1-63 characters, alphanumeric or hyphen, starting with a letter or digit (RFC 1123)."
+        }));
+    }
+    let pool = match state.xo.read().unwrap_or_else(|e| e.into_inner()).get(&id) {
         Some(p) => p,
         None => return HttpResponse::NotFound().json(serde_json::json!({"error": "pool not found"})),
     };
@@ -24200,10 +24260,8 @@ pub async fn xo_vm_provision(
     } else if r.auto_install_wolfstack {
         crate::xo::cloud_init::build_wolfstack_user_data(crate::xo::cloud_init::WolfStackBootstrap {
             hostname: r.vm_name.clone(),
-            cluster_secret: r.cluster_secret.clone(),
-            cluster_leader_endpoint: r.cluster_leader_endpoint.clone(),
-            federation_url: r.federation_url.clone(),
-            federation_token: r.federation_token.clone(),
+            sp_url: r.sp_url.clone(),
+            agent_mode: r.agent_mode,
         })
     } else {
         String::new()
@@ -24269,6 +24327,14 @@ pub struct Tenant {
 
 const TENANTS_FILE: &str = "/etc/wolfstack/tenants.json";
 
+/// Process-wide locks for file-backed stores. Without these, two
+/// concurrent register/refresh requests both load the same
+/// snapshot, push their own row, and the second save overwrites
+/// the first — silently losing a tenant. Same for federation
+/// tokens. The mutex serialises load/modify/save sequences.
+static TENANTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static FEDERATION_TOKENS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn load_tenants() -> Vec<Tenant> {
     match std::fs::read_to_string(TENANTS_FILE) {
         Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
@@ -24282,6 +24348,12 @@ fn save_tenants(tenants: &[Tenant]) -> Result<(), String> {
     let tmp = format!("{}.tmp", TENANTS_FILE);
     std::fs::write(&tmp, &s).map_err(|e| format!("write: {}", e))?;
     std::fs::rename(&tmp, TENANTS_FILE).map_err(|e| format!("rename: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(TENANTS_FILE,
+            std::fs::Permissions::from_mode(0o600));
+    }
     Ok(())
 }
 
@@ -24323,6 +24395,11 @@ pub async fn tenants_register(
             "error": "name, url and token are all required"
         }));
     }
+    // SSRF gate: tenant URL must be a real public/LAN address,
+    // not loopback / link-local / metadata. Same check XO uses.
+    if let Err(e) = validate_outbound_url(&r.url) {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": e}));
+    }
     // Probe before persist — avoids storing tokens that don't
     // actually authenticate.
     match probe_federation_status(&r.url, &r.token).await {
@@ -24331,6 +24408,9 @@ pub async fn tenants_register(
             "error": format!("Couldn't reach the tenant federation endpoint: {}", e)
         })),
     }
+    // Lock the load+push+save so a concurrent register can't
+    // race us into silently dropping one of the tenants.
+    let _guard = TENANTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut tenants = load_tenants();
     let t = Tenant {
         id: uuid::Uuid::new_v4().to_string(),
@@ -24358,6 +24438,7 @@ pub async fn tenants_delete(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
+    let _guard = TENANTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut tenants = load_tenants();
     let before = tenants.len();
     tenants.retain(|t| t.id != id);
@@ -24378,13 +24459,28 @@ pub async fn tenants_refresh(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
+    // Read the tenant row WITHOUT holding TENANTS_LOCK across
+    // the network probe — holding a mutex through an `.await`
+    // would serialise every refresh (potentially seconds each)
+    // behind every other refresh.
+    let (url, token) = {
+        let tenants = load_tenants();
+        match tenants.iter().find(|t| t.id == id) {
+            Some(x) => (x.url.clone(), crate::xo::deobfuscate_token(&x.token_enc)),
+            None => return HttpResponse::NotFound().json(serde_json::json!({"error": "tenant not found"})),
+        }
+    };
+    let probe = probe_federation_status(&url, &token).await;
+    // Now take the lock to write the updated row.
+    let _guard = TENANTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut tenants = load_tenants();
     let t = match tenants.iter_mut().find(|t| t.id == id) {
         Some(x) => x,
-        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "tenant not found"})),
+        // Tenant was removed between our read and our write —
+        // accept that, return 404.
+        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "tenant removed during refresh"})),
     };
-    let token = crate::xo::deobfuscate_token(&t.token_enc);
-    match probe_federation_status(&t.url, &token).await {
+    match probe {
         Ok(snap) => {
             t.last_status = "ok".into();
             t.last_seen = chrono::Utc::now().to_rfc3339();
@@ -24458,8 +24554,14 @@ pub async fn federation_status(req: HttpRequest, state: web::Data<AppState>) -> 
     if token.is_empty() {
         return HttpResponse::Unauthorized().json(serde_json::json!({"error": "missing bearer token"}));
     }
+    // Constant-time comparison defends against the (admittedly
+    // weak over WAN) timing-attack vector where an attacker
+    // probes federation status with crafted tokens. At minimum,
+    // any short-circuit on first-byte mismatch is avoided.
     let valid_tokens = load_federation_tokens();
-    if !valid_tokens.iter().any(|t| t == token) {
+    let supplied = token.as_bytes();
+    let authorised = valid_tokens.iter().any(|t| constant_time_eq(t.as_bytes(), supplied));
+    if !authorised {
         return HttpResponse::Unauthorized().json(serde_json::json!({"error": "token not authorised"}));
     }
 
@@ -24510,6 +24612,17 @@ pub async fn federation_status(req: HttpRequest, state: web::Data<AppState>) -> 
     HttpResponse::Ok().json(snap)
 }
 
+/// Constant-time byte-slice equality. Returns false on length
+/// mismatch (the length itself isn't a secret in our case).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() { return false; }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 const FEDERATION_TOKENS_FILE: &str = "/etc/wolfstack/federation_tokens.json";
 
 fn load_federation_tokens() -> Vec<String> {
@@ -24525,6 +24638,12 @@ fn save_federation_tokens(tokens: &[String]) -> Result<(), String> {
     let tmp = format!("{}.tmp", FEDERATION_TOKENS_FILE);
     std::fs::write(&tmp, &s).map_err(|e| format!("write: {}", e))?;
     std::fs::rename(&tmp, FEDERATION_TOKENS_FILE).map_err(|e| format!("rename: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(FEDERATION_TOKENS_FILE,
+            std::fs::Permissions::from_mode(0o600));
+    }
     Ok(())
 }
 
@@ -24534,8 +24653,13 @@ fn save_federation_tokens(tokens: &[String]) -> Result<(), String> {
 pub async fn federation_tokens_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let tokens = load_federation_tokens();
+    // Always truncate so a corrupted/short token can't leak in
+    // full via the list endpoint.
     let masked: Vec<String> = tokens.into_iter()
-        .map(|t| if t.len() <= 8 { t } else { format!("{}…", &t[..8]) })
+        .map(|t| {
+            let head = &t[..8.min(t.len())];
+            format!("{}…", head)
+        })
         .collect();
     HttpResponse::Ok().json(masked)
 }
@@ -24545,18 +24669,18 @@ pub async fn federation_tokens_list(req: HttpRequest, state: web::Data<AppState>
 /// "Add tenant" form.
 pub async fn federation_tokens_create(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let token: String = (0..48)
-        .map(|_| {
-            let n: u8 = rng.gen_range(0..62);
-            match n {
-                0..=9 => (b'0' + n) as char,
-                10..=35 => (b'a' + (n - 10)) as char,
-                _ => (b'A' + (n - 36)) as char,
-            }
-        })
+    // OsRng is the OS CSPRNG; thread_rng is documented as
+    // "not suitable for cryptographic use". Federation tokens
+    // ARE security secrets — they authenticate the SP's read
+    // access to a customer's cluster — so we use OsRng.
+    use rand::RngCore;
+    let mut bytes = [0u8; 48];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let alphabet = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let token: String = bytes.iter()
+        .map(|b| alphabet[(*b as usize) % alphabet.len()] as char)
         .collect();
+    let _guard = FEDERATION_TOKENS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut tokens = load_federation_tokens();
     tokens.push(token.clone());
     if let Err(e) = save_federation_tokens(&tokens) {
@@ -24568,6 +24692,78 @@ pub async fn federation_tokens_create(req: HttpRequest, state: web::Data<AppStat
     }))
 }
 
+// ─── Path B install proxy ─────────────────────────────────────────
+//
+// When the SP provisions a customer VM through the XO wizard,
+// the cloud-init payload pulls setup.sh from the SP's WolfStack
+// rather than going straight to GitHub. Reasons:
+//
+//   * The SP pins the install version (whatever they're running)
+//     instead of "whatever master happens to be at first-boot
+//     time".
+//   * Customer VMs that can reach the SP can install even when
+//     they can't reach raw.githubusercontent.com (corporate
+//     egress rules, slow DNS, GitHub blip).
+//   * If the SP's proxy is unreachable, cloud-init falls back to
+//     GitHub directly — the proxy is a preference, not a hard
+//     dependency.
+//
+// The handler streams from raw.githubusercontent with a 5-min
+// in-memory cache so a wave of provisioning runs doesn't hammer
+// GitHub. No auth — the upstream artefact is public anyway, and
+// requiring auth would defeat the point of cloud-init pulling
+// without credentials.
+
+const SETUP_SH_UPSTREAM: &str = "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh";
+
+static SETUP_SH_CACHE: std::sync::LazyLock<std::sync::Mutex<Option<(String, std::time::Instant)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// GET /api/install/setup.sh — proxies the canonical install
+/// script with a 5-min cache. Public endpoint by design (see
+/// above for rationale).
+pub async fn install_setup_sh(_req: HttpRequest) -> HttpResponse {
+    // Serve from cache when fresh.
+    if let Ok(guard) = SETUP_SH_CACHE.lock() {
+        if let Some((body, fetched)) = guard.as_ref() {
+            if fetched.elapsed() < std::time::Duration::from_secs(300) {
+                return HttpResponse::Ok()
+                    .content_type("text/x-shellscript; charset=utf-8")
+                    .insert_header(("X-WolfStack-Install-Cache", "hit"))
+                    .body(body.clone());
+            }
+        }
+    }
+    let client = &*API_HTTP_CLIENT;
+    let resp = match client.get(SETUP_SH_UPSTREAM)
+        .timeout(std::time::Duration::from_secs(20))
+        .send().await
+    {
+        Ok(r) => r,
+        Err(e) => return HttpResponse::BadGateway()
+            .insert_header(("X-WolfStack-Install-Cache", "upstream-error"))
+            .body(format!("# Upstream fetch failed: {}\n# Cloud-init's GitHub fallback should now run.\nexit 1\n", e)),
+    };
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return HttpResponse::BadGateway()
+            .insert_header(("X-WolfStack-Install-Cache", "upstream-error"))
+            .body(format!("# Upstream returned HTTP {}.\n# Cloud-init's GitHub fallback should now run.\nexit 1\n", status));
+    }
+    let body = match resp.text().await {
+        Ok(b) => b,
+        Err(e) => return HttpResponse::BadGateway()
+            .body(format!("# Upstream body read failed: {}\nexit 1\n", e)),
+    };
+    if let Ok(mut guard) = SETUP_SH_CACHE.lock() {
+        *guard = Some((body.clone(), std::time::Instant::now()));
+    }
+    HttpResponse::Ok()
+        .content_type("text/x-shellscript; charset=utf-8")
+        .insert_header(("X-WolfStack-Install-Cache", "miss"))
+        .body(body)
+}
+
 /// DELETE /api/federation/tokens/{prefix} — revoke a token by its
 /// first-8-char prefix (the visible part in the list).
 pub async fn federation_tokens_revoke(
@@ -24577,6 +24773,16 @@ pub async fn federation_tokens_revoke(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let prefix = path.into_inner();
+    // Require exactly 8 characters — the prefix length we
+    // expose in the masked list endpoint. A 1-char prefix
+    // would otherwise revoke many tokens at once, an empty
+    // prefix would revoke everything.
+    if prefix.len() != 8 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "prefix must be exactly 8 characters (the masked head shown by GET /api/federation/tokens)"
+        }));
+    }
+    let _guard = FEDERATION_TOKENS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut tokens = load_federation_tokens();
     let before = tokens.len();
     tokens.retain(|t| !t.starts_with(&prefix));
@@ -25317,6 +25523,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/federation/tokens", web::get().to(federation_tokens_list))
         .route("/api/federation/tokens", web::post().to(federation_tokens_create))
         .route("/api/federation/tokens/{prefix}", web::delete().to(federation_tokens_revoke))
+        // Path B install proxy — XO provisioning cloud-init
+        // pulls setup.sh from here so the SP pins the install
+        // version. Public endpoint (no require_auth) because
+        // cloud-init has no session cookie and the upstream
+        // artefact is public anyway. 5-min cache.
+        .route("/api/install/setup.sh", web::get().to(install_setup_sh))
         // Platform calibration & access tokens
         .route("/api/platform/status", web::get().to(platform_status))
         .route("/api/platform/apply", web::post().to(platform_apply))
