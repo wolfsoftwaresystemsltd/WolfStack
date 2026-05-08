@@ -5878,6 +5878,19 @@
 
         <!-- ═══ Storage Manager ═══ -->
         <div id="page-storage" class="page-view" style="display:none;">
+            <!-- Cross-link to the cluster-wide mdadm / NoNRAID array
+                 view. Operators expect "Array" near "Storage" but the
+                 Array page is cluster-wide (aggregates every node), so
+                 we surface it as a one-click jump from here rather than
+                 duplicate it as a per-node tab. -->
+            <div style="background:rgba(96,165,250,0.06);border:1px solid rgba(96,165,250,0.25);border-radius:8px;padding:10px 14px;margin-bottom:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                <span style="font-size:20px;">💽</span>
+                <div style="flex:1;min-width:200px;font-size:12px;color:var(--text-secondary);line-height:1.45;">
+                    <strong style="color:var(--text-primary);">Looking for mdadm / NoNRAID arrays?</strong>
+                    The <em>Storage Array</em> page aggregates every parity array across the cluster — open it for status, parity checks, and drive alerts.
+                </div>
+                <button class="btn btn-sm" onclick="selectView('array')" style="flex-shrink:0;">💽 Open Storage Array →</button>
+            </div>
             <!-- Installed Storage Providers -->
             <div class="card" style="margin-bottom:20px;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">

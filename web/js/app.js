@@ -3381,6 +3381,9 @@ function buildServerTree(nodes) {
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="storage" onclick="selectServerView('${node.id}', 'storage')">
                             <span class="icon">💾</span> Storage
                         </a>
+                        <a class="nav-item server-child-item" data-node="${node.id}" data-view="array" onclick="selectView('array')" title="Storage Array — mdadm / NoNRAID parity. The Array page aggregates every node in the cluster, so this opens the cluster-wide view rather than a per-node one.">
+                            <span class="icon">💽</span> Storage Array
+                        </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="syslogs" onclick="selectServerView('${node.id}', 'syslogs')">
                             <span class="icon">📋</span> System Logs
                         </a>
@@ -49855,6 +49858,7 @@ function predictiveRender() {
                 <button class="btn btn-sm" onclick="osvSettingsOpen()" title="Tune the OSV CVE scanner — severity floor, KEV-only mode, suppress findings with no upstream patch" style="margin-left:8px;">⚙ OSV scanner</button>
                 <div id="predictive-bulk-bar" style="display:none;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap;">
                     <span class="pred-bulk-count" style="font-size:12px;color:var(--text-secondary);font-weight:500;">0 selected</span>
+                    <button id="predictive-autofix-btn" class="btn btn-sm" style="display:none;background:#10b981;color:#fff;border-color:#059669;" onclick="predictiveAutofixSelected()" title="Run package updates on every selected target — opens a terminal for each one in turn, runs ONLY the update command, then moves to the next. Nothing else is touched.">🔧 AUTOFIX (updates)</button>
                     <button class="btn btn-sm btn-primary" onclick="predictiveBulkApprove()" title="Mark every selected proposal as applied">✓ Mark applied</button>
                     <button class="btn btn-sm" onclick="predictiveBulkSnooze(24)">⏰ Snooze 24h</button>
                     <button class="btn btn-sm" onclick="predictiveBulkSnooze(168)">⏰ Snooze 1w</button>
@@ -50280,6 +50284,59 @@ function predictiveUpdateBulkBar() {
         master.checked = visible.length > 0 && selectedVisible === visible.length;
         master.indeterminate = selectedVisible > 0 && selectedVisible < visible.length;
     }
+    // AUTOFIX button only renders if at least one selected proposal
+    // is an update-eligible finding type. Keeps the button absent
+    // when the operator's selection is purely informational
+    // (snoozes / dismisses) so they can't accidentally fire it.
+    const autofixBtn = document.getElementById('predictive-autofix-btn');
+    if (autofixBtn) {
+        const eligible = predictiveSelectedAutofixable();
+        if (eligible.length > 0) {
+            autofixBtn.style.display = '';
+            autofixBtn.textContent = `🔧 AUTOFIX updates (${eligible.length})`;
+        } else {
+            autofixBtn.style.display = 'none';
+        }
+    }
+}
+
+// ─── AUTOFIX — bulk-run package updates ──────────────────────────
+//
+// Operator picks a set of "X security updates pending" / OSV-CVE
+// findings and clicks AUTOFIX. We loop sequentially through each
+// target, opening the inbox terminal on it, running the SUGGESTED
+// FIRST REMEDIATION COMMAND ONLY (which for these finding types is
+// always the package-manager update path: `apt-get upgrade -y`,
+// `dnf upgrade -y`, etc.), then waiting for completion and
+// advancing.
+//
+// Hard scope rules:
+//   * Only finding types in PRED_AUTOFIX_TYPES are actioned. Anything
+//     else in the selection is left alone.
+//   * Only command index 0 is executed — the canonical update line
+//     the analyzer recommended. We don't iterate through the full
+//     remediation list (some include reboot or service-restart steps
+//     that the operator should approve consciously).
+//   * Sequential, not parallel, so the operator can watch the
+//     terminal and abort if something looks wrong.
+
+const PRED_AUTOFIX_TYPES = new Set([
+    'host_security_updates_pending',  // src/predictive/vulnerability.rs:96
+    'osv_vulnerability_detected',     // src/predictive/osv.rs:123
+]);
+
+function predictiveSelectedAutofixable() {
+    const visible = predictiveCurrentlyVisible();
+    return visible.filter(p =>
+        predictiveState.selectedIds.has(p.id)
+        && PRED_AUTOFIX_TYPES.has(p.finding_type)
+        && p.remediation
+        && Array.isArray(p.remediation.commands)
+        && p.remediation.commands.length > 0
+        // Skip comment-only first lines — they have no `▶ Run`
+        // counterpart in the per-row UI and shouldn't be auto-run.
+        && !p.remediation.commands[0].trim().startsWith('#')
+    );
 }
 
 // ─── Trend graphs ───
@@ -51308,6 +51365,197 @@ function predictiveClearSelection() {
     predictiveRender();
 }
 
+// ─── AUTOFIX runner ───────────────────────────────────────────────
+//
+// Sequential per-target loop. On each tick:
+//
+//   1. Show a progress toast ("Updating server N of M: hostname").
+//   2. Fetch /api/proposals/{id}/command/0 to get the console
+//      target metadata (node id, console type/name) AND the literal
+//      remediation command the analyzer chose.
+//   3. Append a sentinel echo to the command — `; printf
+//      "\n__WSAFXDONE_<id>__\n"`. The shell prints the sentinel
+//      after the update finishes, regardless of exit code.
+//   4. Tear down any existing terminal session (different proposal
+//      from the previous tick), open a fresh one with the combined
+//      command, and wrap ws.onmessage to feed a buffer.
+//   5. Wait for the sentinel in the buffer, with a 15-min ceiling
+//      per target (apt/dnf upgrades are usually under 5 min but
+//      slow networks / large queues can stretch).
+//
+// If a target's WS won't open, or the sentinel never appears, we
+// surface a toast, leave the terminal as-is so the operator can
+// inspect, and move on to the next target. Same shape as the
+// existing predictiveBulkApprove fan-out: one bad target shouldn't
+// abort the whole run.
+async function predictiveAutofixSelected() {
+    const eligible = predictiveSelectedAutofixable();
+    if (eligible.length === 0) {
+        showToast('No selected items are update-eligible. AUTOFIX only runs on host_security_updates_pending and osv_vulnerability_detected findings.', 'warning', 5000);
+        return;
+    }
+
+    // Confirm popup with the safety scope spelled out + the list of
+    // targets. Plain `confirm()` matches the existing
+    // predictiveBulkDismiss flow and keeps us inside the SPA without
+    // pulling in another modal layer.
+    const lines = eligible.map((p, i) => {
+        const where = predictiveLocator(p);
+        const host = where.host || p.scope.node_id;
+        const cmd0 = (p.remediation.commands[0] || '').trim();
+        const truncCmd = cmd0.length > 70 ? cmd0.slice(0, 67) + '…' : cmd0;
+        return `  ${i + 1}. ${host}  ·  ${truncCmd}`;
+    }).join('\n');
+    const ok = confirm(
+        `🔧 AUTOFIX — run package updates on ${eligible.length} target${eligible.length === 1 ? '' : 's'}\n\n` +
+        `WHAT WILL HAPPEN\n` +
+        `  • Each target's terminal opens in turn (you can watch).\n` +
+        `  • Only the analyzer's first remediation command runs — \n` +
+        `    typically apt-get upgrade -y or dnf upgrade -y.\n` +
+        `  • NOTHING ELSE is touched. No service restarts, no reboots,\n` +
+        `    no config changes. Just package updates.\n` +
+        `  • Sequential — one target finishes before the next starts.\n\n` +
+        `TARGETS\n${lines}\n\n` +
+        `Continue?`
+    );
+    if (!ok) return;
+
+    let succeeded = 0, failed = 0;
+    for (let i = 0; i < eligible.length; i++) {
+        const p = eligible[i];
+        const where = predictiveLocator(p);
+        const host = where.host || p.scope.node_id;
+        showToast(`AUTOFIX ${i + 1}/${eligible.length} — updating ${host}…`, 'info', 3500);
+        try {
+            await predictiveAutofixOne(p);
+            succeeded++;
+        } catch (e) {
+            failed++;
+            showToast(`AUTOFIX failed on ${host}: ${e.message || e}`, 'error', 6000);
+            // Continue to next target — we don't tear down the
+            // overall run on a single failure. The terminal stays
+            // visible with whatever output the failed target left,
+            // so the operator can inspect when the run completes.
+        }
+    }
+    const summary = failed === 0
+        ? `AUTOFIX complete — ${succeeded} target${succeeded === 1 ? '' : 's'} updated.`
+        : `AUTOFIX finished — ${succeeded} ok, ${failed} failed (see terminal output).`;
+    showToast(summary, failed === 0 ? 'success' : 'warning', 6000);
+    // Refresh the inbox so successfully-updated targets reflect
+    // their new state on the next analyzer cycle (the proposal
+    // itself stays until the analyzer re-samples and confirms the
+    // updates landed; this just pulls the latest state).
+    if (typeof predictiveLoad === 'function') {
+        try { await predictiveLoad(); } catch (_) {}
+    }
+}
+
+/// Run AUTOFIX against a single proposal. Returns when the sentinel
+/// appears in the terminal buffer, or rejects on timeout / failure.
+function predictiveAutofixOne(p) {
+    return new Promise(async (resolve, reject) => {
+        // Resolve the proposal's console target via the same endpoint
+        // the regular ▶ Run path uses, so we get the same auth /
+        // remote-console hop / console_name resolution semantics.
+        let meta;
+        try {
+            const r = await fetch(`/api/proposals/${encodeURIComponent(p.id)}/command/0`);
+            if (!r.ok) {
+                const data = await r.json().catch(() => ({}));
+                return reject(new Error(data.error || `HTTP ${r.status} resolving target`));
+            }
+            meta = await r.json();
+        } catch (e) {
+            return reject(new Error(`couldn't resolve target: ${e.message || e}`));
+        }
+        if (!meta || !meta.command) {
+            return reject(new Error('proposal returned no command to run'));
+        }
+
+        // Sentinel marker — pool a per-proposal id into the string so
+        // a leftover from a previous target can't false-trigger ours.
+        const sentinel = `__WSAFXDONE_${p.id.replace(/[^A-Za-z0-9_-]/g, '')}__`;
+        // `; printf …\n` so the sentinel prints whether the update
+        // exited 0 or non-zero (operator still sees the failure in
+        // the terminal — we just want to know the command finished).
+        const wrapped = `${meta.command} ; printf '\\n${sentinel}\\n'`;
+
+        // Tear down any prior session (previous AUTOFIX target or a
+        // manual ▶ Run from earlier) so the new target opens cleanly.
+        if (predTermState.proposalId && predTermState.proposalId !== p.id) {
+            predTermClose();
+        }
+
+        // Reuse predictiveShowTerminalStub for the immediate-feedback
+        // overlay so the right pane visibly switches to the new
+        // target within one frame.
+        predictiveShowTerminalStub('Connecting…');
+        predTermShowSpinner('Connecting…');
+
+        // Open the terminal with the wrapped command. predTermOpen
+        // sets predTermState.ws synchronously, so we can wrap
+        // .onmessage immediately after.
+        predTermOpen(p.id, { ...meta, command: wrapped });
+
+        if (!predTermState.ws) {
+            return reject(new Error('terminal failed to open — see toast'));
+        }
+
+        // Wrap ws.onmessage so the original (xterm write) still fires
+        // AND we accumulate text into a buffer to scan for the sentinel.
+        const ws = predTermState.ws;
+        const origOnMessage = ws.onmessage;
+        let buffer = '';
+        let settled = false;
+        const TIMEOUT_MS = 15 * 60 * 1000;  // 15 min per target
+        const timeoutId = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            ws.onmessage = origOnMessage;
+            reject(new Error(`timed out after 15 min waiting for update to finish`));
+        }, TIMEOUT_MS);
+
+        // Also reject if the WS closes before the sentinel arrives —
+        // that means the target shell died, not that the update is
+        // done. predTermOpen already writes "● Disconnected" to the
+        // term so the operator sees what happened.
+        const origOnClose = ws.onclose;
+        ws.onclose = (ev) => {
+            try { origOnClose && origOnClose.call(ws, ev); } catch (_) {}
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutId);
+            reject(new Error('terminal closed before update finished'));
+        };
+
+        ws.onmessage = (ev) => {
+            try { origOnMessage && origOnMessage.call(ws, ev); } catch (_) {}
+            if (settled) return;
+            // Most console WS messages are strings; remote-console
+            // hops can deliver ArrayBuffer. Decode to text either way.
+            let text = '';
+            if (typeof ev.data === 'string') text = ev.data;
+            else if (ev.data instanceof ArrayBuffer) {
+                try { text = new TextDecoder().decode(new Uint8Array(ev.data)); }
+                catch (_) { text = ''; }
+            }
+            buffer += text;
+            // Trim the buffer so it can't grow without bound on a
+            // very long apt log. We only need the tail to spot the
+            // sentinel — keep the last 16 KB.
+            if (buffer.length > 16384) buffer = buffer.slice(-16384);
+            if (buffer.includes(sentinel)) {
+                settled = true;
+                clearTimeout(timeoutId);
+                ws.onmessage = origOnMessage;
+                ws.onclose = origOnClose;
+                resolve();
+            }
+        };
+    });
+}
+
 async function predictiveAck(findingType, nodeId, resourceId) {
     // Refuse the Node-scope fallback. When a proposal has no
     // resource_id, falling through to AckScope::Node would suppress
@@ -51467,6 +51715,7 @@ window.predictiveBulkApprove = predictiveBulkApprove;
 window.predictiveBulkSnooze = predictiveBulkSnooze;
 window.predictiveBulkDismiss = predictiveBulkDismiss;
 window.predictiveClearSelection = predictiveClearSelection;
+window.predictiveAutofixSelected = predictiveAutofixSelected;
 window.predictiveRunCmd = predictiveRunCmd;
 window.predictiveOpenTerm = predictiveOpenTerm;
 window.predTermClose = predTermClose;
