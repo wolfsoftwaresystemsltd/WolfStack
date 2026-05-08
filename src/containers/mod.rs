@@ -2788,8 +2788,27 @@ fn docker_batched_inspect(ids: &[String])
 /// has the single `0.0.0.0` request, so we treat any `::` published
 /// entry whose port matches as a confirmation. Avoids false positives
 /// where the requested IP is `0.0.0.0` and the published IP is `::`.
+///
+/// Host-mode / shared-namespace note: when `HostConfig.NetworkMode` is
+/// `host` or `container:<id>`, Docker keeps the operator's stated
+/// `PortBindings` but never populates `NetworkSettings.Ports` because
+/// there's no NAT mapping to record — the container shares another
+/// network namespace and listens directly on its host stack. Diffing
+/// the two would flag every requested port as unpublished even though
+/// the service is fully reachable (e.g. AdGuard Home in `network_mode:
+/// host` binding :53 on the LAN). We short-circuit and return an empty
+/// vec so the silent-publish-failure detector and the strikethrough UI
+/// stay quiet on these containers.
 pub fn parse_port_mappings(inspect: &serde_json::Value) -> Vec<PortMapping> {
     use std::collections::HashSet;
+
+    // Host / shared-namespace short-circuit (see doc comment).
+    let network_mode = inspect.pointer("/HostConfig/NetworkMode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if network_mode == "host" || network_mode.starts_with("container:") {
+        return Vec::new();
+    }
 
     // Step 2: actual published bindings. Tuple is (host_ip, host_port,
     // container_port, proto). `host_ip == ""` means the published
@@ -9041,6 +9060,78 @@ mod port_mapping_tests {
             "NetworkSettings": { "Ports": {} }
         }"#).unwrap();
         assert!(parse_port_mappings(&inspect).is_empty());
+    }
+
+    #[test]
+    fn parse_host_network_mode_skips_publish_check() {
+        // AdGuard Home running in `network_mode: host` (PapaSchlumpf's
+        // case): compose declares ports so Docker keeps PortBindings,
+        // but NetworkSettings.Ports is empty because there's no NAT
+        // mapping — the container is on the host's network namespace.
+        // The diff would flag every port as unpublished even though
+        // AdGuard is binding :53 directly on the LAN. We must short-
+        // circuit and return an empty vec.
+        let inspect: serde_json::Value = serde_json::from_str(r#"{
+            "HostConfig": {
+                "NetworkMode": "host",
+                "PortBindings": {
+                    "53/tcp":  [{ "HostIp": "", "HostPort": "53" }],
+                    "53/udp":  [{ "HostIp": "", "HostPort": "53" }],
+                    "80/tcp":  [{ "HostIp": "", "HostPort": "80" }],
+                    "443/tcp": [{ "HostIp": "", "HostPort": "443" }]
+                }
+            },
+            "NetworkSettings": {
+                "Ports": {}
+            }
+        }"#).unwrap();
+        assert!(parse_port_mappings(&inspect).is_empty(),
+            "host-mode containers must not produce port mappings — \
+             NetworkSettings.Ports is empty by design and the diff is meaningless");
+    }
+
+    #[test]
+    fn parse_container_namespace_mode_skips_publish_check() {
+        // `network_mode: container:<id>` shares another container's
+        // network namespace — same property as host mode: PortBindings
+        // may exist but NetworkSettings.Ports never records a binding.
+        let inspect: serde_json::Value = serde_json::from_str(r#"{
+            "HostConfig": {
+                "NetworkMode": "container:abcdef0123",
+                "PortBindings": {
+                    "8080/tcp": [{ "HostIp": "", "HostPort": "8080" }]
+                }
+            },
+            "NetworkSettings": {
+                "Ports": {}
+            }
+        }"#).unwrap();
+        assert!(parse_port_mappings(&inspect).is_empty(),
+            "shared-namespace containers must not produce port mappings");
+    }
+
+    #[test]
+    fn parse_bridge_network_mode_still_runs_publish_check() {
+        // Sanity guard: only `host` and `container:` short-circuit.
+        // Bridge / default / custom networks must still produce the
+        // PortBindings vs NetworkSettings.Ports diff (otherwise we'd
+        // mask the silent-publish-failure detector entirely).
+        let inspect: serde_json::Value = serde_json::from_str(r#"{
+            "HostConfig": {
+                "NetworkMode": "bridge",
+                "PortBindings": {
+                    "80/tcp": [{ "HostIp": "", "HostPort": "8080" }]
+                }
+            },
+            "NetworkSettings": {
+                "Ports": {
+                    "80/tcp": [{ "HostIp": "0.0.0.0", "HostPort": "8080" }]
+                }
+            }
+        }"#).unwrap();
+        let mappings = parse_port_mappings(&inspect);
+        assert_eq!(mappings.len(), 1);
+        assert!(mappings[0].published);
     }
 
     #[test]
