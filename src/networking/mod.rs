@@ -2686,19 +2686,42 @@ fn generate_client_config(bridge: &WireGuardBridge, client: &WireGuardClient) ->
     // Detect the server's public/reachable IP for the Endpoint field
     let server_endpoint = detect_server_endpoint(bridge.listen_port);
 
-    // AllowedIPs: only the bridge subnet — users always use 10.20.X.x addresses.
-    // NETMAP on the server translates bridge IPs to WolfNet IPs transparently.
-    // We intentionally exclude the raw WolfNet subnet so that multiple clusters
-    // (which may share the same WolfNet subnet) don't cause routing conflicts.
-    let allowed_ips = bridge.bridge_subnet();
+    // AllowedIPs covers BOTH the bridge subnet (used by NETMAP-style
+    // 1:1 translation — `ping 10.20.X.5` reaches wolfnet `.5`) AND
+    // the raw WolfNet subnet so the operator can also address
+    // wolfnet IPs directly (`ping 10.0.10.5`). Without the wolfnet
+    // entry the phone OS doesn't route those addresses through the
+    // tunnel at all, leaving the operator wondering why it doesn't
+    // work — which is exactly the bug Klas hit (2026-05-08).
+    //
+    // Trade-off: if an operator runs MULTIPLE WolfStack clusters
+    // whose wolfnet subnets overlap (default 10.0.10.0/24 is the
+    // same on every fresh install) and adds peers on the SAME phone
+    // for each one, the second tunnel's AllowedIPs would conflict
+    // with the first. Multi-cluster road-warrior is rare; document
+    // it in the .conf comments so anyone hitting it can switch to
+    // bridge-only by hand.
+    let bridge_sub = bridge.bridge_subnet();
+    let wn_sub = format!("{}.0/24", bridge.wolfnet_subnet);
+    let allowed_ips = if !bridge.wolfnet_subnet.is_empty() {
+        format!("{}, {}", bridge_sub, wn_sub)
+    } else {
+        bridge_sub.clone()
+    };
 
     Ok(format!(
         "# WolfStack WireGuard Bridge — Cluster: {cluster}\n\
          # Client: {name}\n\
          # Generated: {date}\n\
          #\n\
-         # Bridge subnet {bridge_sub} maps to WolfNet {wn_sub}.0/24\n\
-         # e.g. ping {bridge_prefix}.5 reaches WolfNet {wn_sub}.5\n\
+         # Bridge subnet {bridge_sub} maps to WolfNet {wn_sub}.\n\
+         # Either form reaches the same host:\n\
+         #   ping {bridge_prefix}.5      (NETMAP-translated to wolfnet)\n\
+         #   ping {wn_prefix}.5      (direct wolfnet routing)\n\
+         #\n\
+         # If you peer THIS phone to multiple WolfStack clusters and\n\
+         # they share the wolfnet subnet, remove the wolfnet entry\n\
+         # from AllowedIPs below to avoid routing conflicts.\n\
          \n\
          [Interface]\n\
          PrivateKey = {priv_key}\n\
@@ -2712,9 +2735,10 @@ fn generate_client_config(bridge: &WireGuardBridge, client: &WireGuardClient) ->
         cluster = bridge.cluster,
         name = client.name,
         date = &chrono_now()[..10],
-        bridge_sub = bridge.bridge_subnet(),
+        bridge_sub = bridge_sub,
         bridge_prefix = format!("10.20.{}", bridge.bridge_octet),
-        wn_sub = bridge.wolfnet_subnet,
+        wn_sub = wn_sub,
+        wn_prefix = bridge.wolfnet_subnet,
         priv_key = client.private_key,
         addr = client.assigned_ip,
         pub_key = bridge.public_key,
