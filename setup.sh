@@ -861,6 +861,50 @@ if ! command -v docker >/dev/null 2>&1; then
     echo "Installing Docker..."
     DOCKER_INSTALLED=false
 
+    # Rocky/Alma/RHEL ship Podman/Buildah by default; they conflict with Docker CE from Docker's repo.
+    # Remove them before get.docker.com or the manual repo path, after an explicit warning (and
+    # optional confirmation unless --yes / upgrade unattended mode).
+    _WS_DOCKER_DISTRO_ID=$(. /etc/os-release 2>/dev/null && echo "$ID")
+    _WS_DOCKER_DISTRO_LIKE=$(. /etc/os-release 2>/dev/null && echo "$ID_LIKE")
+    if echo "$_WS_DOCKER_DISTRO_ID $_WS_DOCKER_DISTRO_LIKE" | grep -qiE "rhel|centos" && \
+        { rpm -q podman >/dev/null 2>&1 || rpm -q buildah >/dev/null 2>&1; }; then
+        echo ""
+        echo "  ⚠ This system has Podman and/or Buildah installed (typical on RHEL-family distros)."
+        echo "    Docker Engine from Docker's packages conflicts with those stacks; the 'podman' and"
+        echo "    'buildah' packages should be removed before Docker CE can be installed."
+        echo ""
+        WS_REMOVE_PODMAN=false
+        if [ "$ASSUME_YES" = true ]; then
+            WS_REMOVE_PODMAN=true
+        elif [ -t 0 ] || [ -r /dev/tty ]; then
+            printf "  Remove the 'podman' and 'buildah' packages and continue? [y/N] "
+            WS_PM_REPLY=""
+            if [ -t 0 ]; then
+                read -r WS_PM_REPLY || WS_PM_REPLY=""
+            else
+                read -r WS_PM_REPLY < /dev/tty 2>/dev/null || WS_PM_REPLY=""
+            fi
+            case "$WS_PM_REPLY" in
+                y|Y|yes|YES) WS_REMOVE_PODMAN=true ;;
+            esac
+        else
+            echo "  No terminal to confirm — skipping Podman/Buildah removal (Docker install may fail)."
+            echo "    Re-run with --yes for unattended removal, or remove them manually first, e.g.:"
+            echo "      sudo dnf remove -y podman buildah"
+        fi
+        if [ "$WS_REMOVE_PODMAN" = true ]; then
+            echo "  Removing podman and buildah (each only if installed)..."
+            if rpm -q podman >/dev/null 2>&1; then
+                dnf remove -y podman 2>/dev/null || yum remove -y podman 2>/dev/null || true
+            fi
+            if rpm -q buildah >/dev/null 2>&1; then
+                dnf remove -y buildah 2>/dev/null || yum remove -y buildah 2>/dev/null || true
+            fi
+        fi
+        echo ""
+    fi
+    unset _WS_DOCKER_DISTRO_ID _WS_DOCKER_DISTRO_LIKE WS_REMOVE_PODMAN WS_PM_REPLY
+
     # Try the official convenience script first (works for Ubuntu, Debian, Fedora, CentOS, RHEL)
     if curl -fsSL https://get.docker.com | sh 2>/dev/null; then
         DOCKER_INSTALLED=true
