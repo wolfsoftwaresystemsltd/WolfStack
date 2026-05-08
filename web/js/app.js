@@ -49952,7 +49952,10 @@ async function osvSettingsOpen() {
     // Pool wizard and tenant-register modal; keeps the form properly
     // sized and styled.
     const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
+    // Don't add the `modal-overlay` class — the matching CSS rule sets
+    // `opacity:0; pointer-events:none` and the fadeIn animation has no
+    // `forwards` fill-mode, so the modal flashes for 150ms then snaps
+    // back to invisible. The inline style below fully covers the look.
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease;';
     overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
 
