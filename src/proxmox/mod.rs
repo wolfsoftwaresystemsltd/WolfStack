@@ -381,6 +381,13 @@ impl PveClient {
         self.get(&path).await
     }
 
+    /// Read a QEMU VM's config. Used by the pool driver to verify
+    /// a clone task has settled before pushing further config.
+    pub async fn qemu_config(&self, vmid: u64) -> Result<serde_json::Value, String> {
+        let path = format!("/nodes/{}/qemu/{}/config", self.node_name, vmid);
+        self.get(&path).await
+    }
+
     /// Get a termproxy ticket for interactive terminal access to a guest
     /// Returns (port, ticket, user) — port is on the PVE host where the WS is served
     pub async fn termproxy(&self, vmid: u64, guest_type: &str) -> Result<(u16, String, String), String> {
@@ -553,6 +560,263 @@ impl PveClient {
         }
         Ok("standalone".to_string())
     }
+
+    // ─── Pool-driver support: VM clone, cloud-init, lifecycle ──
+    //
+    // The methods below back `pools::proxmox_driver`. They mirror
+    // PVE's documented REST endpoints under
+    // `/nodes/{node}/qemu/...`. Source for each call is cited
+    // inline.
+
+    /// List QEMU VMs that are templates (template=1). Used to
+    /// populate the Pool wizard's template dropdown.
+    /// Source: GET /nodes/{node}/qemu — returns array; each row
+    /// has `template` = 0/1, `name`, `vmid`.
+    pub async fn list_qemu_templates(&self) -> Result<Vec<PveTemplate>, String> {
+        let data = self.get(&format!("/nodes/{}/qemu", self.node_name)).await?;
+        let arr = data.as_array().ok_or("Expected array from /qemu")?;
+        let mut out = Vec::new();
+        for v in arr {
+            // PVE returns template as 0/1 (number). Some older
+            // builds use a stringified "1". Accept both.
+            let is_template = v.get("template")
+                .and_then(|x| x.as_u64()).map(|n| n == 1).unwrap_or_else(|| {
+                    v.get("template").and_then(|x| x.as_str())
+                        .map(|s| s == "1").unwrap_or(false)
+                });
+            if !is_template { continue; }
+            let vmid = v.get("vmid").and_then(|x| x.as_u64()).unwrap_or(0);
+            let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            out.push(PveTemplate {
+                vmid,
+                name,
+                node: self.node_name.clone(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Allocate the next available VMID across the cluster.
+    /// Source: GET /cluster/nextid — returns a stringified integer.
+    pub async fn next_vmid(&self) -> Result<u64, String> {
+        let data = self.get("/cluster/nextid").await?;
+        if let Some(s) = data.as_str() {
+            s.trim_matches('"').parse::<u64>()
+                .map_err(|e| format!("bad VMID '{}': {}", s, e))
+        } else if let Some(n) = data.as_u64() {
+            Ok(n)
+        } else {
+            Err(format!("unexpected /cluster/nextid response: {}", data))
+        }
+    }
+
+    /// Clone a template VM into a new VM. Returns the UPID — caller
+    /// can poll task status for completion (we don't here; subsequent
+    /// config calls retry on 4xx until the clone settles).
+    /// Source: POST /nodes/{node}/qemu/{templateid}/clone with form
+    /// fields newid, name, full=1.
+    pub async fn clone_template(&self, template_vmid: u64, new_vmid: u64, new_name: &str)
+        -> Result<String, String>
+    {
+        let path = format!("/nodes/{}/qemu/{}/clone", self.node_name, template_vmid);
+        let new_vmid_s = new_vmid.to_string();
+        let data = self.post_form(&path, &[
+            ("newid", new_vmid_s.as_str()),
+            ("name", new_name),
+            ("full", "1"),
+        ]).await?;
+        Ok(data.as_str().unwrap_or("ok").to_string())
+    }
+
+    /// Find a storage on this node that has `snippets` in its
+    /// content list. We need one to host the cicustom user-data
+    /// file. Returns the storage id (e.g. "local") or an error
+    /// describing how to enable snippets.
+    /// Source: GET /nodes/{node}/storage — each row has a
+    /// comma-separated `content` field.
+    pub async fn find_snippets_storage(&self) -> Result<String, String> {
+        let storages = self.list_storages().await?;
+        for s in &storages {
+            let content = s.get("content").and_then(|x| x.as_str()).unwrap_or("");
+            // PVE returns "iso,vztmpl,backup,snippets" etc.
+            if content.split(',').any(|t| t.trim() == "snippets") {
+                if let Some(id) = s.get("storage").and_then(|x| x.as_str()) {
+                    return Ok(id.to_string());
+                }
+            }
+        }
+        Err("No PVE storage on this node has snippets enabled. \
+            Enable it via Datacenter → Storage → <select> → Edit → \
+            Content (tick \"Snippets\"), or run \
+            `pvesm set local --content snippets,vztmpl,backup,iso,images`."
+            .into())
+    }
+
+    /// Upload a cloud-init user-data file to the chosen snippets
+    /// storage. Returns the storage:snippets/<filename> volume id
+    /// the cicustom field expects.
+    /// Source: POST /nodes/{node}/storage/{storage}/upload —
+    /// multipart with `content=snippets` + `filename` part.
+    pub async fn upload_snippet(&self, storage: &str, filename: &str, body: &str)
+        -> Result<String, String>
+    {
+        // Filename must be safe — caller passes "userdata-<vmid>.yaml"
+        // which we control. Defence in depth: reject anything with
+        // path separators or non-printable bytes.
+        if filename.contains('/') || filename.contains('\\')
+            || filename.chars().any(|c| !c.is_ascii_graphic())
+        {
+            return Err(format!("unsafe snippet filename: {}", filename));
+        }
+        let url = format!("{}/api2/json/nodes/{}/storage/{}/upload",
+            self.base_url, self.node_name, storage);
+        let part = reqwest::multipart::Part::bytes(body.as_bytes().to_vec())
+            .file_name(filename.to_string())
+            .mime_str("text/plain")
+            .map_err(|e| format!("MIME: {}", e))?;
+        let form = reqwest::multipart::Form::new()
+            .text("content", "snippets")
+            .part("filename", part);
+        let resp = self.client.post(&url)
+            .header("Authorization", self.auth_header())
+            .timeout(Duration::from_secs(60))
+            .multipart(form)
+            .send().await
+            .map_err(|e| format!("PVE snippet upload: {}", e))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("PVE upload {} {}: {}", status.as_u16(), filename, body));
+        }
+        let _ = resp.bytes().await;
+        // Volume id format PVE expects in cicustom: "<storage>:snippets/<filename>"
+        Ok(format!("{}:snippets/{}", storage, filename))
+    }
+
+    /// Delete a single snippet file from PVE storage. Used during
+    /// pool destroy to clean up the cloud-init user-data files —
+    /// they contain plaintext bootstrap_token / federation_token /
+    /// pool_secret and must not outlive the pool.
+    /// Source: DELETE /nodes/{node}/storage/{storage}/content/{volid}
+    /// where volid is `<storage>:snippets/<filename>`.
+    pub async fn delete_snippet(&self, storage: &str, filename: &str) -> Result<(), String> {
+        if filename.contains('/') || filename.contains('\\') {
+            return Err(format!("unsafe snippet filename: {}", filename));
+        }
+        let volid = format!("{}:snippets/{}", storage, filename);
+        // urlencode the volid because it contains a colon and slash.
+        let encoded = volid.replace(':', "%3A").replace('/', "%2F");
+        let path = format!("/nodes/{}/storage/{}/content/{}",
+            self.node_name, storage, encoded);
+        let url = format!("{}/api2/json{}", self.base_url, path);
+        let resp = self.client.delete(&url)
+            .header("Authorization", self.auth_header())
+            .send().await
+            .map_err(|e| format!("PVE delete snippet: {}", e))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            // 404 is fine — file already gone.
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Ok(());
+            }
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("PVE delete snippet {} {}: {}", status.as_u16(), filename, body));
+        }
+        let _ = resp.bytes().await;
+        Ok(())
+    }
+
+    /// Push config keys onto a VM (cores, memory, cicustom,
+    /// ipconfig0, agent, scsihw, etc). Caller assembles the pairs.
+    /// Source: PUT /nodes/{node}/qemu/{vmid}/config — form fields.
+    /// Note PVE accepts both PUT and POST for this endpoint; we
+    /// use PUT to match the documented "set" shape.
+    pub async fn set_vm_config(&self, vmid: u64, kv: &[(&str, &str)])
+        -> Result<(), String>
+    {
+        let path = format!("/nodes/{}/qemu/{}/config", self.node_name, vmid);
+        // The config endpoint's response is null (no data) on
+        // success; put_form already handles non-success.
+        self.put_form(&path, kv).await?;
+        Ok(())
+    }
+
+    /// Start a VM.
+    /// Source: POST /nodes/{node}/qemu/{vmid}/status/start.
+    pub async fn start_vm(&self, vmid: u64) -> Result<String, String> {
+        let path = format!("/nodes/{}/qemu/{}/status/start", self.node_name, vmid);
+        let data = self.post(&path).await?;
+        Ok(data.as_str().unwrap_or("ok").to_string())
+    }
+
+    /// Stop + delete a VM. PVE accepts `purge=1` to also remove
+    /// disk volumes.
+    /// Source: DELETE /nodes/{node}/qemu/{vmid}?purge=1.
+    pub async fn delete_vm(&self, vmid: u64) -> Result<String, String> {
+        let path = format!("/nodes/{}/qemu/{}?purge=1&destroy-unreferenced-disks=1",
+            self.node_name, vmid);
+        let url = format!("{}/api2/json{}", self.base_url, path);
+        let resp = self.client.delete(&url)
+            .header("Authorization", self.auth_header())
+            .send().await
+            .map_err(|e| format!("PVE delete: {}", e))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("PVE delete {} {}: {}", status.as_u16(), vmid, body));
+        }
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| format!("PVE delete JSON: {}", e))?;
+        Ok(json.get("data").and_then(|d| d.as_str()).unwrap_or("ok").to_string())
+    }
+
+    /// Get a VM's IPv4 address via the guest agent. Requires the
+    /// VM image to have qemu-guest-agent installed + the VM
+    /// configured with `agent: 1`.
+    /// Source: GET /nodes/{node}/qemu/{vmid}/agent/network-get-interfaces
+    /// returns { result: [ { name, hardware-address, ip-addresses: [{ip-address, ip-address-type}] } ] }.
+    pub async fn vm_guest_ipv4(&self, vmid: u64) -> Result<Option<String>, String> {
+        let path = format!("/nodes/{}/qemu/{}/agent/network-get-interfaces",
+            self.node_name, vmid);
+        // The agent call may return 5xx if the agent isn't yet
+        // running — caller treats that as "not ready", not a fault.
+        let data = match self.get(&path).await {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        };
+        let result = match data.get("result").and_then(|x| x.as_array()) {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        for iface in result {
+            // Skip loopback interface — name starts with "lo".
+            if iface.get("name").and_then(|x| x.as_str())
+                .map(|s| s.starts_with("lo")).unwrap_or(false) {
+                continue;
+            }
+            if let Some(ips) = iface.get("ip-addresses").and_then(|x| x.as_array()) {
+                for ip in ips {
+                    let kind = ip.get("ip-address-type").and_then(|x| x.as_str()).unwrap_or("");
+                    if kind != "ipv4" { continue; }
+                    let addr = ip.get("ip-address").and_then(|x| x.as_str()).unwrap_or("");
+                    if addr.starts_with("127.") || addr.starts_with("169.254.")
+                        || addr.starts_with("10.42.") || addr.is_empty() {
+                        continue;
+                    }
+                    return Ok(Some(addr.to_string()));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Lightweight template descriptor returned by `list_qemu_templates`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PveTemplate {
+    pub vmid: u64,
+    pub name: String,
+    pub node: String,
 }
 
 /// Poll a Proxmox node and return metrics mapped to WolfStack format

@@ -26,6 +26,7 @@ mod backup;
 mod vms;
 mod proxmox;
 mod xo;
+mod pools;
 mod mysql_editor;
 mod appstore;
 mod alerting;
@@ -770,6 +771,13 @@ async fn main() -> std::io::Result<()> {
             let n = node_id.clone();
             tokio::spawn(predictive::orchestrator::run_loop(p, a, m, mon, n));
         }
+
+        // WolfStack Pools orchestrator — drives in-flight pools
+        // (`provisioning` → `leader_up` → `live`) by polling backend
+        // VM IPs and joining followers to the leader's cluster.
+        // 30 s tick. No state shared with the rest of the daemon —
+        // it operates entirely off /etc/wolfstack/pools.json.
+        tokio::spawn(crate::pools::orchestrator::run_loop());
 
         // Start the WolfRouter safe-mode watcher — auto-reverts firewall
         // changes if the user doesn't confirm within the safe-mode window.

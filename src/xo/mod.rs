@@ -331,6 +331,31 @@ impl XoClient {
         Ok(())
     }
 
+    /// Delete a VM (record + disks). XO REST: DELETE /rest/v0/vms/{uuid}.
+    /// VM must be halted first — caller should hard_shutdown then
+    /// poll until power_state=Halted, then call this. We do the
+    /// stop+poll+delete sequence inside `pools::xo_driver::destroy`.
+    pub async fn delete_vm(&self, vm_uuid: &str) -> Result<(), String> {
+        let url = format!("{}/rest/v0/vms/{}", self.base_url, vm_uuid);
+        let resp = XO_CLIENT.delete(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/json")
+            .send().await
+            .map_err(|e| format!("XO delete request failed: {}", e))?;
+        let status = resp.status();
+        // 404 means already gone — treat as success (idempotent).
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("XO HTTP {} on delete_vm: {}", status,
+                body.chars().take(300).collect::<String>()));
+        }
+        let _ = resp.bytes().await;
+        Ok(())
+    }
+
     /// List VM templates available for cloning. P3 uses this to
     /// populate the "Provision new VM" form. Returns lightweight
     /// rows; full details come from `/rest/v0/vm-templates/{uuid}`

@@ -2076,27 +2076,104 @@ async function renderTenants() {
     if (!host) return;
     host.innerHTML = `
         <div class="card" style="margin-bottom:16px;">
-            <div class="card-body" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
-                <div>
+            <div class="card-body" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+                <div style="flex:1;min-width:280px;">
                     <h2 style="margin:0;display:flex;align-items:center;gap:10px;"><span style="font-size:28px;">🏢</span>Tenants</h2>
-                    <p style="margin:6px 0 0;color:var(--text-muted);font-size:13px;max-width:780px;line-height:1.5;">
-                        One pane of glass over every customer cluster you federate to. Each tenant registered here
-                        polls its <code>/api/federation/status</code> endpoint with a per-tenant token.
-                        The customer mints the token under <em>Settings → Federation Tokens</em> on their cluster.
+                    <p style="margin:6px 0 0;color:var(--text-muted);font-size:13px;max-width:780px;line-height:1.55;">
+                        A <strong>tenant</strong> is a separate WolfStack cluster — typically a customer's — that this WolfStack
+                        watches over a signed bearer token. Each tenant runs independently (its own users, hosts, VMs and config);
+                        this page rolls up read-only health from all of them so you can see capacity, reachability, and
+                        utilisation across every customer at once.
                     </p>
+                    <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+                        <button class="btn btn-xs" onclick="document.getElementById('tenants-help').open=!document.getElementById('tenants-help').open;">📖 How this works</button>
+                        <button class="btn btn-xs" onclick="document.getElementById('tenants-pools-help').open=!document.getElementById('tenants-pools-help').open;" title="Provision a new tenant cluster from a host pool — roadmap">🧰 WolfStack Pools (roadmap)</button>
+                    </div>
                 </div>
-                <div style="display:flex;gap:8px;">
+                <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap;">
                     <button class="btn" onclick="renderTenants()">🔄 Refresh all</button>
+                    <button class="btn" onclick="poolWizardOpen()" title="Provision a new tenant cluster (WolfStack Pool)">🧰 + New Pool</button>
                     <button class="btn btn-primary" onclick="tenantRegisterModal()">+ Register tenant</button>
                 </div>
             </div>
+            <details id="tenants-help" style="border-top:1px solid var(--border-color,#2d2f3a);">
+                <summary style="cursor:pointer;padding:12px 18px;font-size:13px;font-weight:600;color:var(--text-secondary,#a1a1aa);user-select:none;">
+                    📖 How tenant federation works
+                </summary>
+                <div style="padding:0 18px 18px;font-size:13px;color:var(--text-secondary,#a1a1aa);line-height:1.6;max-width:880px;">
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px;">
+                        <div style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:8px;padding:12px 14px;">
+                            <div style="font-size:11px;text-transform:uppercase;color:var(--text-muted);letter-spacing:0.05em;margin-bottom:6px;">What you get</div>
+                            <ul style="margin:0;padding-left:18px;">
+                                <li>Host / VM / container counts per tenant</li>
+                                <li>Memory utilisation roll-up</li>
+                                <li>Reachability + token health</li>
+                                <li>One-click open into the tenant's UI</li>
+                            </ul>
+                        </div>
+                        <div style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:8px;padding:12px 14px;">
+                            <div style="font-size:11px;text-transform:uppercase;color:var(--text-muted);letter-spacing:0.05em;margin-bottom:6px;">What this is <em>not</em></div>
+                            <ul style="margin:0;padding-left:18px;">
+                                <li>Not multi-tenancy on a single cluster</li>
+                                <li>Not user impersonation — auth stays in each tenant</li>
+                                <li>Not lifecycle control — read-only metrics only</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.05em;">Setup &mdash; 3 steps</div>
+                    <ol style="margin:0 0 14px;padding-left:20px;">
+                        <li style="margin-bottom:10px;">
+                            <strong>Customer mints a token on their cluster.</strong>
+                            On the tenant's WolfStack (logged in as admin):
+                            <pre style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;font-size:12px;margin:6px 0 0;overflow-x:auto;"><code>curl -X POST -u admin:PASSWORD \
+  https://their-cluster:8553/api/federation/tokens</code></pre>
+                            <div style="font-size:12px;color:var(--text-muted);margin-top:4px;">Returns a <code>wsk_…</code> bearer. Anyone holding it can read this cluster's federation status, so treat it like a password.</div>
+                        </li>
+                        <li style="margin-bottom:10px;">
+                            <strong>Customer hands you the token + their cluster URL.</strong>
+                            URL must be reachable from this WolfStack on the cluster's HTTPS port (8553 by default).
+                        </li>
+                        <li>
+                            <strong>Click <em>+ Register tenant</em>.</strong>
+                            WolfStack probes <code>/api/federation/status</code> with the token before saving — bad URL or
+                            rejected token → registration is refused, nothing is stored.
+                        </li>
+                    </ol>
+                    <div style="font-size:12px;color:var(--text-muted);">Tokens are stored XOR-obfuscated on disk at <code>/etc/wolfstack/tenants.json</code> and never returned by the API. Revoke a tenant's access from their cluster's <code>DELETE /api/federation/tokens/{prefix}</code>.</div>
+                </div>
+            </details>
+            <details id="tenants-pools-help" style="border-top:1px solid var(--border-color,#2d2f3a);">
+                <summary style="cursor:pointer;padding:12px 18px;font-size:13px;font-weight:600;color:var(--text-secondary,#a1a1aa);user-select:none;">
+                    🧰 WolfStack Pools &mdash; provision tenant clusters (roadmap)
+                </summary>
+                <div style="padding:0 18px 18px;font-size:13px;color:var(--text-secondary,#a1a1aa);line-height:1.6;max-width:880px;">
+                    <p style="margin:0 0 10px;">
+                        Today you register a tenant <em>after</em> the customer has stood up their own WolfStack. The next step is
+                        provisioning that cluster from here:
+                    </p>
+                    <div style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:8px;padding:12px 14px;font-size:12px;margin-bottom:10px;">
+                        <strong>Sell <em>N</em> VMs → cluster-of-N delivered.</strong> Pick a backend (Proxmox / XCP-ng / WolfStack
+                        native), pick a host or pool, pick a template + size, set the VM count and tenant name.
+                        WolfStack provisions the VMs, cloud-inits WolfStack onto each, joins them into a private cluster behind their
+                        own WolfNet overlay, and registers the result here as a tenant — all in one action.
+                    </div>
+                    <ul style="margin:0 0 10px;padding-left:18px;">
+                        <li>Backends: Proxmox VE pools, XCP-ng / XO resource sets, WolfStack-native libvirt/qemu</li>
+                        <li>Per-tenant WolfNet overlay (own wireguard keys, MTU 1380) so customers never share L2</li>
+                        <li>Cloud-init runs <code>setup.sh</code> + cluster-init on VM 1, cluster-join on VMs 2..N</li>
+                        <li>Tenant auto-mints a federation token on first boot and posts back to this SP</li>
+                    </ul>
+                    <p style="margin:0;font-size:12px;color:var(--text-muted);">Status: parked design from 2026-05-07, picked back up. Coming as a phased build — register flow stays as-is, provision flow lands alongside.</p>
+                </div>
+            </details>
         </div>
+        <div id="pools-section" style="margin-bottom:16px;"></div>
         <div id="tenants-rollup" style="margin-bottom:16px;"></div>
         <div id="tenants-list">
             <div style="color:var(--text-muted);padding:20px;text-align:center;">Loading…</div>
         </div>
     `;
-    await tenantLoadList();
+    await Promise.all([tenantLoadList(), poolsLoadList()]);
 }
 
 async function tenantLoadList() {
@@ -2114,10 +2191,25 @@ async function tenantLoadList() {
     }
     if (!tenants.length) {
         rollup.innerHTML = '';
-        list.innerHTML = `<div class="card"><div class="card-body" style="text-align:center;padding:40px;color:var(--text-muted);">
-            <div style="font-size:36px;margin-bottom:10px;">🏢</div>
-            <div style="font-size:15px;margin-bottom:6px;">No tenants registered yet.</div>
-            <div style="font-size:12px;">Click <strong>Register tenant</strong> above. Each customer cluster mints its own federation token to give you.</div>
+        list.innerHTML = `<div class="card"><div class="card-body" style="padding:32px;color:var(--text-secondary,#a1a1aa);max-width:680px;margin:0 auto;">
+            <div style="text-align:center;">
+                <div style="font-size:42px;margin-bottom:8px;">🏢</div>
+                <div style="font-size:16px;font-weight:600;color:var(--text-primary,#e4e4e7);margin-bottom:4px;">No tenants registered yet</div>
+                <div style="font-size:13px;color:var(--text-muted);margin-bottom:20px;">Federate to your first customer's WolfStack cluster.</div>
+            </div>
+            <div style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:8px;padding:14px 16px;font-size:13px;line-height:1.55;">
+                <div style="font-weight:600;color:var(--text-primary,#e4e4e7);margin-bottom:8px;">Quick start</div>
+                <ol style="margin:0;padding-left:20px;">
+                    <li style="margin-bottom:6px;">On the customer's WolfStack, mint a federation token:
+                        <code style="display:block;background:var(--bg-card,#1e2028);padding:6px 8px;border-radius:4px;font-size:11px;margin-top:4px;overflow-x:auto;">curl -X POST -u admin:PWD https://their-cluster:8553/api/federation/tokens</code>
+                    </li>
+                    <li style="margin-bottom:6px;">Copy the <code>wsk_…</code> token and the cluster's URL.</li>
+                    <li>Click <strong>+ Register tenant</strong> above and paste both — WolfStack probes the cluster before saving.</li>
+                </ol>
+            </div>
+            <div style="text-align:center;margin-top:18px;">
+                <button class="btn btn-primary" onclick="tenantRegisterModal()">+ Register tenant</button>
+            </div>
         </div></div>`;
         return;
     }
@@ -2202,26 +2294,35 @@ window.tenantRegisterModal = function() {
     const overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;';
     overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+    const curlSnippet = 'curl -X POST -u admin:PASSWORD https://their-cluster:8553/api/federation/tokens';
     overlay.innerHTML = `
-        <div style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:560px;width:90%;color:var(--text-primary,#e4e4e7);font-family:inherit;">
-            <div style="font-size:16px;font-weight:600;margin-bottom:14px;display:flex;align-items:center;gap:10px;">
+        <div style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:600px;width:92%;color:var(--text-primary,#e4e4e7);font-family:inherit;max-height:90vh;overflow-y:auto;">
+            <div style="font-size:16px;font-weight:600;margin-bottom:6px;display:flex;align-items:center;gap:10px;">
                 <span style="font-size:22px;">🏢</span>Register tenant cluster
             </div>
-            <div style="font-size:13px;color:var(--text-secondary,#a1a1aa);margin-bottom:14px;line-height:1.5;">
-                Tell the customer to mint a token on their WolfStack via
-                <code>POST /api/federation/tokens</code> (or the future Settings → Federation Tokens UI),
-                then paste it here along with their cluster's public URL.
-                The token is sent on every poll as <code>Authorization: Bearer</code>.
+            <div style="font-size:13px;color:var(--text-secondary,#a1a1aa);margin-bottom:14px;line-height:1.55;">
+                You'll need the customer's cluster URL and a federation token they minted on their side.
+                On submit, WolfStack probes <code>/api/federation/status</code> with the token; if anything fails, nothing is saved.
             </div>
+            <details style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:8px 12px;margin-bottom:14px;font-size:12px;">
+                <summary style="cursor:pointer;color:var(--text-secondary,#a1a1aa);user-select:none;">How does the customer mint a token?</summary>
+                <div style="margin-top:8px;color:var(--text-muted);line-height:1.5;">
+                    On their WolfStack, logged in as admin:
+                    <div style="display:flex;align-items:flex-start;gap:6px;margin-top:6px;">
+                        <pre style="flex:1;background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:4px;padding:8px 10px;font-size:11px;margin:0;overflow-x:auto;"><code>${escapeHtml(curlSnippet)}</code></pre>
+                        <button class="btn btn-xs" onclick="navigator.clipboard.writeText('${escapeAttr(curlSnippet)}').then(()=>showToast('Copied','success',1200))" title="Copy">📋</button>
+                    </div>
+                    <div style="margin-top:6px;">Returns a <code>wsk_…</code> bearer. They paste it into the field below.</div>
+                </div>
+            </details>
             <div style="display:flex;flex-direction:column;gap:10px;">
                 <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">Display name</label>
                 <input id="tenant-reg-name" placeholder="Customer A" style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
                 <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">Cluster URL</label>
                 <input id="tenant-reg-url" placeholder="https://customer-a.example.com:8553" type="url" style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
                 <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">Federation token</label>
-                <input id="tenant-reg-token" type="password" placeholder="paste from the tenant cluster" style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
+                <input id="tenant-reg-token" type="password" placeholder="wsk_… (paste from the tenant cluster)" style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
             </div>
-            <div style="font-size:11px;color:var(--text-muted);margin-top:10px;line-height:1.5;">A federation status probe runs before the token is stored. Bad URL or rejected token → registration is rejected and nothing is saved.</div>
             <div id="tenant-reg-error" style="display:none;color:var(--danger);font-size:12px;margin-top:10px;"></div>
             <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;">
                 <button class="btn" id="tenant-reg-cancel">Cancel</button>
@@ -2269,6 +2370,386 @@ window.tenantRegisterModal = function() {
         }
     };
 };
+
+// ─── WolfStack Pools (provision a tenant cluster) ────────────────
+//
+// A "pool" is an order to provision N WolfStack-running VMs as a
+// federated tenant cluster. Backend at /api/pools, three drivers:
+// XO (live), Proxmox + native (next sessions, returned as
+// not_yet_implemented errors today). The pool tile shows lifecycle
+// state (provisioning → leader_up → live) and links the federated
+// tenant once self-register completes.
+
+async function poolsLoadList() {
+    const host = document.getElementById('pools-section');
+    if (!host) return;
+    let pools = [];
+    try {
+        const r = await fetch(apiUrl('/api/pools'));
+        if (!r.ok) throw new Error(await r.text());
+        pools = await r.json();
+    } catch (e) {
+        host.innerHTML = `<div class="card"><div class="card-body" style="color:var(--danger);">Couldn't load pools: ${escapeHtml(String(e.message || e))}</div></div>`;
+        return;
+    }
+    if (!pools.length) { host.innerHTML = ''; return; }
+    const inflight = pools.filter(p => !['live', 'destroyed'].includes(p.status));
+    host.innerHTML = `
+        <div class="card" style="margin-bottom:0;">
+            <div class="card-body">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px;">
+                    <h3 style="margin:0;display:flex;align-items:center;gap:8px;font-size:15px;">
+                        <span style="font-size:20px;">🧰</span>WolfStack Pools (${pools.length})${inflight.length ? ` — ${inflight.length} in flight` : ''}
+                    </h3>
+                    <button class="btn btn-xs" onclick="poolsLoadList()">🔄</button>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(360px, 1fr));gap:12px;">
+                    ${pools.map(poolTile).join('')}
+                </div>
+            </div>
+        </div>`;
+}
+
+function poolStatusColour(status) {
+    return ({
+        creating: 'var(--text-muted)',
+        provisioning: 'var(--warning,#f59e0b)',
+        leader_up: '#3b82f6',
+        live: 'var(--success)',
+        failed: 'var(--danger)',
+        destroyed: 'var(--text-muted)',
+    })[status] || 'var(--text-muted)';
+}
+
+function poolStatusLabel(status) {
+    return ({
+        creating: 'Creating',
+        provisioning: 'Provisioning VMs',
+        leader_up: 'Leader up — joining followers',
+        live: 'Live',
+        failed: 'Failed',
+        destroyed: 'Destroyed',
+    })[status] || status;
+}
+
+function poolTile(p) {
+    const colour = poolStatusColour(p.status);
+    const label = poolStatusLabel(p.status);
+    const vms = (p.vms || []).map((vm, i) => {
+        const ip = vm.ipv4 ? escapeHtml(vm.ipv4) : '<span style="color:var(--text-muted);">awaiting IP…</span>';
+        const role = vm.is_leader ? '👑' : (vm.joined ? '✅' : '⏳');
+        return `<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;">
+            <span><span title="${vm.is_leader ? 'leader' : (vm.joined ? 'joined' : 'pending')}">${role}</span> ${escapeHtml(vm.hostname)}</span>
+            <span style="font-family:'JetBrains Mono',monospace;">${ip}</span>
+        </div>`;
+    }).join('');
+    const leaderLink = p.leader_url
+        ? `<a href="${escapeAttr(p.leader_url)}" target="_blank" rel="noopener" style="font-size:11px;color:var(--info,#3b82f6);font-family:'JetBrains Mono',monospace;word-break:break-all;">${escapeHtml(p.leader_url)} ↗</a>`
+        : '<span style="font-size:11px;color:var(--text-muted);">leader URL pending self-register</span>';
+    const errBlock = p.last_error
+        ? `<div style="margin-top:8px;padding:6px 8px;background:rgba(239,68,68,0.08);border-left:3px solid var(--danger);font-size:11px;color:var(--danger);">⚠ ${escapeHtml(p.last_error)}</div>`
+        : '';
+    return `<div class="card" style="border-left:3px solid ${colour};margin:0;">
+        <div class="card-body" style="padding:12px 14px;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px;">
+                <div style="min-width:0;flex:1;">
+                    <h4 style="margin:0 0 2px;font-size:14px;display:flex;align-items:center;gap:6px;">
+                        <span style="font-size:16px;">🧰</span>${escapeHtml(p.tenant_name)}
+                    </h4>
+                    <div style="font-size:11px;color:${colour};font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">● ${escapeHtml(label)}</div>
+                </div>
+                <div style="display:flex;gap:4px;flex-shrink:0;">
+                    <button class="btn btn-xs" onclick="poolsLoadList()" title="Refresh">🔄</button>
+                    <button class="btn btn-xs btn-danger" onclick="poolDestroy('${escapeAttr(p.id)}','${escapeAttr(p.tenant_name)}','${escapeAttr(p.backend)}')" title="Destroy pool VMs">×</button>
+                </div>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">
+                ${escapeHtml(p.backend.toUpperCase())} · ${p.vm_count} VM${p.vm_count===1?'':'s'} · ${p.vcpu} vCPU · ${p.memory_mb} MB RAM
+            </div>
+            <div style="background:var(--bg-input,#0d1225);border-radius:6px;padding:6px 10px;margin:8px 0;">
+                ${vms || '<div style="font-size:11px;color:var(--text-muted);">no VMs recorded</div>'}
+            </div>
+            <div style="margin-top:6px;">${leaderLink}</div>
+            ${errBlock}
+        </div>
+    </div>`;
+}
+
+window.poolDestroy = async function(id, name, backend) {
+    const detail = ({
+        xo: 'On XCP-ng/XO: VMs are halted, then deleted (record + disks).',
+        proxmox: 'On Proxmox: VMs are stopped, then deleted with disks purged. Cloud-init snippet files are removed from PVE storage.',
+        native: 'On native libvirt/QEMU: VMs are stopped and deleted (config + disks). Cloud-init seed ISOs and user-data files (which contain plaintext bootstrap secrets) are scrubbed.',
+    })[backend] || 'VMs in the backend are stopped and deleted.';
+    if (!confirm(`Destroy pool "${name}"?\n\n${detail}\n\nThe federated tenant registration is also removed.\n\nAre you sure?`)) return;
+    try {
+        const r = await fetch(apiUrl(`/api/pools/${encodeURIComponent(id)}`), { method: 'DELETE' });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            showToast('Destroy failed: ' + (data.error || r.status), 'error', 4000);
+            return;
+        }
+        if (data.backend_warning) {
+            showToast('Pool removed. Backend warning: ' + data.backend_warning, 'warning', 6000);
+        } else {
+            showToast('Pool destroyed.', 'success', 2000);
+        }
+    } catch (e) {
+        showToast('Destroy errored: ' + (e.message || e), 'error', 4000);
+    }
+    await Promise.all([poolsLoadList(), tenantLoadList()]);
+};
+
+window.poolWizardOpen = async function() {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;';
+    overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+    overlay.innerHTML = `
+        <div style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:640px;width:94%;color:var(--text-primary,#e4e4e7);font-family:inherit;max-height:92vh;overflow-y:auto;">
+            <div style="font-size:16px;font-weight:600;margin-bottom:6px;display:flex;align-items:center;gap:10px;">
+                <span style="font-size:22px;">🧰</span>New WolfStack Pool
+            </div>
+            <div style="font-size:13px;color:var(--text-secondary,#a1a1aa);margin-bottom:14px;line-height:1.55;">
+                Provision <em>N</em> VMs on a backend, auto-install WolfStack on each,
+                form them into a private cluster, and federate the result back here as a tenant.
+            </div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+                <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">Tenant name</label>
+                <input id="pool-tenant-name" placeholder="Customer A" style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
+
+                <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">Backend</label>
+                <select id="pool-backend" style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
+                    <option value="xo">XCP-ng / Xen Orchestra</option>
+                    <option value="proxmox">Proxmox VE</option>
+                    <option value="native">WolfStack-native (libvirt / QEMU)</option>
+                </select>
+
+                <label id="pool-backend-ref-label" style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">XO instance</label>
+                <select id="pool-backend-ref" style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
+                    <option value="">Loading…</option>
+                </select>
+
+                <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">VM template</label>
+                <select id="pool-template" onchange="poolWizardOnTemplateChange()" style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
+                    <option value="">— pick a backend instance first —</option>
+                </select>
+                <input id="pool-template-manual" placeholder="/var/lib/wolfstack/templates/ubuntu-22.qcow2" style="display:none;background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
+
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+                    <div>
+                        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">VMs</label>
+                        <input id="pool-vm-count" type="number" min="1" max="10" value="3" style="width:100%;background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
+                    </div>
+                    <div>
+                        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">vCPU each</label>
+                        <input id="pool-vcpu" type="number" min="1" max="64" value="2" style="width:100%;background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
+                    </div>
+                    <div>
+                        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">RAM (MB)</label>
+                        <input id="pool-memory-mb" type="number" min="512" max="524288" step="512" value="2048" style="width:100%;background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px 12px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:13px;">
+                    </div>
+                </div>
+
+                <details style="background:var(--bg-input,#0d1225);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:8px 12px;font-size:12px;">
+                    <summary style="cursor:pointer;color:var(--text-secondary,#a1a1aa);user-select:none;">Advanced</summary>
+                    <div style="margin-top:8px;display:flex;flex-direction:column;gap:8px;">
+                        <label style="font-size:11px;color:var(--text-muted);">Hostname prefix (default: tenant name)</label>
+                        <input id="pool-hostname-prefix" placeholder="e.g. customer-a" style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:8px 10px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:12px;">
+                        <label style="font-size:11px;color:var(--text-muted);">SP URL the VMs call back to (default: auto-detect from this host's primary IPv4)</label>
+                        <input id="pool-sp-url" placeholder="https://sp.example.com:8553" style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:8px 10px;color:var(--text-primary,#e4e4e7);font-family:inherit;font-size:12px;">
+                        <div style="font-size:11px;color:var(--text-muted);">The leader VM POSTs to <code>{sp_url}/api/tenants/self-register</code> and pulls <code>setup.sh</code> from <code>{sp_url}/api/install/setup.sh</code>. Must be reachable from the new VMs.</div>
+                    </div>
+                </details>
+            </div>
+            <div id="pool-wiz-error" style="display:none;color:var(--danger);font-size:12px;margin-top:10px;line-height:1.5;"></div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;">
+                <button class="btn" id="pool-wiz-cancel">Cancel</button>
+                <button class="btn btn-primary" id="pool-wiz-submit">🚀 Provision pool</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+
+    document.getElementById('pool-wiz-cancel').onclick = () => overlay.remove();
+
+    const backendSel = document.getElementById('pool-backend');
+    const refSel = document.getElementById('pool-backend-ref');
+    const errEl = document.getElementById('pool-wiz-error');
+    backendSel.onchange = () => poolWizardLoadBackendRef(errEl);
+    refSel.onchange = poolWizardLoadTemplates;
+    await poolWizardLoadBackendRef(errEl);
+
+    document.getElementById('pool-tenant-name').focus();
+    document.getElementById('pool-wiz-submit').onclick = async () => {
+        errEl.style.display = 'none';
+        const tenantName = document.getElementById('pool-tenant-name').value.trim();
+        const backend = document.getElementById('pool-backend').value;
+        const backendRef = document.getElementById('pool-backend-ref').value;
+        let template = document.getElementById('pool-template').value;
+        if (template === '__manual__') {
+            template = document.getElementById('pool-template-manual').value.trim();
+        }
+        const vmCount = parseInt(document.getElementById('pool-vm-count').value, 10);
+        const vcpu = parseInt(document.getElementById('pool-vcpu').value, 10);
+        const memoryMb = parseInt(document.getElementById('pool-memory-mb').value, 10);
+        const hostnamePrefix = document.getElementById('pool-hostname-prefix').value.trim();
+        const spUrl = document.getElementById('pool-sp-url').value.trim();
+        if (!tenantName || !backendRef || !template) {
+            errEl.textContent = 'Tenant name, XO instance, and template are required.';
+            errEl.style.display = '';
+            return;
+        }
+        if (!(vmCount >= 1 && vmCount <= 10)) {
+            errEl.textContent = 'VM count must be between 1 and 10.';
+            errEl.style.display = '';
+            return;
+        }
+        const submitBtn = document.getElementById('pool-wiz-submit');
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Provisioning…';
+        try {
+            const r = await fetch(apiUrl('/api/pools'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    backend,
+                    tenant_name: tenantName,
+                    backend_ref: backendRef,
+                    template,
+                    vm_count: vmCount,
+                    vcpu, memory_mb: memoryMb,
+                    hostname_prefix: hostnamePrefix,
+                    sp_url: spUrl,
+                }),
+            });
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok) {
+                errEl.textContent = 'Provision failed: ' + (data.error || r.status);
+                errEl.style.display = '';
+                submitBtn.disabled = false;
+                submitBtn.textContent = '🚀 Provision pool';
+                return;
+            }
+            overlay.remove();
+            showToast(`Pool created — ${vmCount} VM${vmCount===1?'':'s'} provisioning. Check tile for progress.`, 'success', 4000);
+            await poolsLoadList();
+        } catch (e) {
+            errEl.textContent = 'Network error: ' + (e.message || e);
+            errEl.style.display = '';
+            submitBtn.disabled = false;
+            submitBtn.textContent = '🚀 Provision pool';
+        }
+    };
+};
+
+window.poolWizardOnTemplateChange = function() {
+    const tmplSel = document.getElementById('pool-template');
+    const manual = document.getElementById('pool-template-manual');
+    if (!tmplSel || !manual) return;
+    if (tmplSel.value === '__manual__') {
+        manual.style.display = '';
+        manual.focus();
+    } else {
+        manual.style.display = 'none';
+        manual.value = '';
+    }
+};
+
+async function poolWizardLoadBackendRef(errEl) {
+    const backend = document.getElementById('pool-backend').value;
+    const refSel = document.getElementById('pool-backend-ref');
+    const refLabel = document.getElementById('pool-backend-ref-label');
+    if (!refSel) return;
+    if (errEl) errEl.style.display = 'none';
+    refSel.innerHTML = '<option value="">Loading…</option>';
+    try {
+        if (backend === 'xo') {
+            if (refLabel) refLabel.textContent = 'XO instance';
+            const r = await fetch(apiUrl('/api/xo/pools'));
+            const list = r.ok ? await r.json() : [];
+            if (!list.length) {
+                refSel.innerHTML = '<option value="">No XO instances registered</option>';
+                if (errEl) {
+                    errEl.textContent = 'No XO instances registered. Add one under XO Pools first.';
+                    errEl.style.display = '';
+                }
+                return;
+            }
+            refSel.innerHTML = list.map(p =>
+                `<option value="${escapeAttr(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.url)})</option>`
+            ).join('');
+        } else if (backend === 'proxmox') {
+            if (refLabel) refLabel.textContent = 'Proxmox node (WolfStack cluster member)';
+            // Filter cluster nodes to only ones with PVE creds.
+            const r = await fetch(apiUrl('/api/nodes'));
+            const list = r.ok ? await r.json() : [];
+            const pve = list.filter(n => n.pve_token && n.pve_node_name);
+            if (!pve.length) {
+                refSel.innerHTML = '<option value="">No PVE-capable nodes in this cluster</option>';
+                if (errEl) {
+                    errEl.textContent = 'No cluster node has a PVE API token configured. Add one via Settings → Cluster → <node> → PVE Token first.';
+                    errEl.style.display = '';
+                }
+                return;
+            }
+            refSel.innerHTML = pve.map(n =>
+                `<option value="${escapeAttr(n.id)}">${escapeHtml(n.hostname || n.address)} (${escapeHtml(n.pve_node_name)})</option>`
+            ).join('');
+        } else if (backend === 'native') {
+            if (refLabel) refLabel.textContent = 'Target host';
+            // Native runs on this WolfStack host (the SP). One option:
+            // "this host". The backend_ref is informational on native.
+            refSel.innerHTML = `<option value="self">This WolfStack host (libvirt/QEMU)</option>`;
+        }
+        await poolWizardLoadTemplates();
+    } catch (e) {
+        refSel.innerHTML = '<option value="">Failed to load</option>';
+        if (errEl) {
+            errEl.textContent = 'Couldn\'t load backend instances: ' + (e.message || e);
+            errEl.style.display = '';
+        }
+    }
+}
+
+async function poolWizardLoadTemplates() {
+    const backend = document.getElementById('pool-backend').value;
+    const tmplSel = document.getElementById('pool-template');
+    const refSel = document.getElementById('pool-backend-ref');
+    if (!tmplSel || !refSel) return;
+    const ref = refSel.value;
+    if (!ref) {
+        tmplSel.innerHTML = '<option value="">— pick a backend instance first —</option>';
+        return;
+    }
+    tmplSel.innerHTML = '<option value="">Loading templates…</option>';
+    try {
+        const r = await fetch(apiUrl(`/api/pools/templates?backend=${encodeURIComponent(backend)}&ref=${encodeURIComponent(ref)}`));
+        if (!r.ok) {
+            const body = await r.text().catch(() => '');
+            tmplSel.innerHTML = `<option value="">Failed: ${escapeHtml(body)}</option>`;
+            return;
+        }
+        const tmpls = await r.json();
+        if (!tmpls.length) {
+            const hint = backend === 'native'
+                ? 'No qcow2 / img / raw files found in /var/lib/wolfstack/templates/. Drop a base image there or paste a full path manually.'
+                : (backend === 'proxmox' ? 'No QEMU templates on this node. Convert a VM to a template in PVE first.' : 'No templates found.');
+            tmplSel.innerHTML = `<option value="">${escapeHtml(hint)}</option>`;
+            // For native, allow free-form path entry by appending a manual option.
+            if (backend === 'native') {
+                tmplSel.innerHTML += `<option value="__manual__">— Enter path manually —</option>`;
+            }
+            return;
+        }
+        tmplSel.innerHTML = tmpls.map(t =>
+            `<option value="${escapeAttr(t.uuid)}">${escapeHtml(t.name)}${t.os ? ' — ' + escapeHtml(t.os) : ''}</option>`
+        ).join('');
+        if (backend === 'native') {
+            tmplSel.innerHTML += `<option value="__manual__">— Enter path manually —</option>`;
+        }
+    } catch (e) {
+        tmplSel.innerHTML = `<option value="">Error: ${escapeHtml(String(e.message || e))}</option>`;
+    }
+}
 
 // ─── XCP-ng / Xen Orchestra Pools ────────────────────────────────
 //

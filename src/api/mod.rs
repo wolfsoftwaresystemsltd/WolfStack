@@ -24795,6 +24795,628 @@ pub async fn federation_tokens_revoke(
     HttpResponse::Ok().json(serde_json::json!({"status": "revoked", "removed": before - tokens.len()}))
 }
 
+// ─── WolfStack Pools — provision tenant clusters ──────────────────
+//
+// A "pool" = an order to provision N WolfStack-running VMs as a
+// federated tenant cluster on a chosen backend (XO today, Proxmox
+// + native in following sessions). The handlers below cover:
+//
+//   * CRUD: list / create / get / delete pools
+//   * Templates: backend-specific list (currently XO only)
+//   * Self-register: tenant-side cloud-init posts back when the
+//     leader VM is up. Authenticated by bootstrap_token, not
+//     admin auth — the new VM has no admin session.
+//   * Bootstrap-add: follower VM joins the leader using the
+//     shared cluster_secret as X-WolfStack-Secret. Skips admin
+//     auth for the same reason.
+
+#[derive(Deserialize)]
+pub struct PoolCreateRequest {
+    pub backend: String,             // "xo" / "proxmox" / "native"
+    pub tenant_name: String,
+    pub backend_ref: String,         // e.g. registered XO instance id
+    pub template: String,
+    pub vm_count: u32,
+    pub vcpu: u32,
+    pub memory_mb: u32,
+    #[serde(default)] pub disk_gb: u32,
+    #[serde(default)] pub sp_url: String,
+    #[serde(default)] pub hostname_prefix: String,
+}
+
+fn pool_safe_view(p: &crate::pools::Pool) -> serde_json::Value {
+    // Strip every secret before returning to the frontend. Tokens
+    // stay server-side; the UI only needs status + counts.
+    serde_json::json!({
+        "id": p.id,
+        "tenant_name": p.spec.tenant_name,
+        "backend": p.spec.backend.as_str(),
+        "backend_ref": p.spec.backend_ref,
+        "template": p.spec.template,
+        "vm_count": p.spec.vm_count,
+        "vcpu": p.spec.vcpu,
+        "memory_mb": p.spec.memory_mb,
+        "disk_gb": p.spec.disk_gb,
+        "status": p.status,
+        "leader_url": p.leader_url,
+        "tenant_id": p.tenant_id,
+        "vms": p.vms.iter().map(|v| serde_json::json!({
+            "backend_id": v.backend_id,
+            "hostname": v.hostname,
+            "is_leader": v.is_leader,
+            "ipv4": v.ipv4,
+        })).collect::<Vec<_>>(),
+        "created_at": p.created_at,
+        "leader_up_at": p.leader_up_at,
+        "live_at": p.live_at,
+        "last_error": p.last_error,
+    })
+}
+
+fn parse_backend(s: &str) -> Result<crate::pools::Backend, String> {
+    match s {
+        "xo" => Ok(crate::pools::Backend::Xo),
+        "proxmox" => Ok(crate::pools::Backend::Proxmox),
+        "native" => Ok(crate::pools::Backend::Native),
+        other => Err(format!("unknown backend '{}' (want xo|proxmox|native)", other)),
+    }
+}
+
+/// Pick a sensible SP URL for cloud-init callbacks. Operator can
+/// override per-pool via `sp_url` in the request; otherwise we use
+/// the host's primary IPv4 + TLS port (8553). Never returns a
+/// loopback / link-local — those break cloud-init from the VMs.
+fn derive_sp_url(override_url: &str) -> Result<String, String> {
+    if !override_url.trim().is_empty() {
+        // Validate the operator-supplied URL the same way we
+        // validate tenant URLs — must be reachable, not loopback.
+        let _ = validate_outbound_url(override_url.trim())?;
+        return Ok(override_url.trim().trim_end_matches('/').to_string());
+    }
+    // Fall back to primary IPv4. The local-IP discovery already
+    // exists in containers::wolfnet_used_ips() but that's WolfNet-
+    // only. Use std net heuristic: pick the first non-loopback v4
+    // off the host's interfaces via `hostname -I`.
+    let out = std::process::Command::new("hostname")
+        .arg("-I")
+        .output()
+        .map_err(|e| format!("hostname -I: {}", e))?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let ip = s.split_whitespace()
+        .find(|ip| !ip.starts_with("127.")
+              && !ip.starts_with("169.254.")
+              && !ip.starts_with("10.42.")  // WolfNet
+              && ip.contains('.'))
+        .ok_or_else(|| "couldn't auto-detect a primary IPv4 — set sp_url explicitly".to_string())?;
+    Ok(format!("https://{}:8553", ip))
+}
+
+/// GET /api/pools — list pools (secrets stripped).
+pub async fn pools_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let store = crate::pools::PoolStore::load();
+    let view: Vec<serde_json::Value> = store.list().iter().map(pool_safe_view).collect();
+    HttpResponse::Ok().json(view)
+}
+
+/// GET /api/pools/{id} — single pool detail.
+pub async fn pools_get(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let store = crate::pools::PoolStore::load();
+    match store.get(&id) {
+        Some(p) => HttpResponse::Ok().json(pool_safe_view(&p)),
+        None => HttpResponse::NotFound().json(serde_json::json!({"error": "pool not found"})),
+    }
+}
+
+/// POST /api/pools — create + provision.
+pub async fn pools_create(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<PoolCreateRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let r = body.into_inner();
+    let backend = match parse_backend(&r.backend) {
+        Ok(b) => b,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    };
+    if r.tenant_name.trim().is_empty()
+        || r.backend_ref.trim().is_empty()
+        || r.template.trim().is_empty()
+    {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "tenant_name, backend_ref and template are required"
+        }));
+    }
+    if r.vm_count == 0 || r.vm_count > 10 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "vm_count must be between 1 and 10"
+        }));
+    }
+    if r.vcpu == 0 || r.vcpu > 64 || r.memory_mb < 512 || r.memory_mb > 524_288 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "vcpu (1..=64) and memory_mb (512..=524288) must be in range"
+        }));
+    }
+    let sp_url = match derive_sp_url(&r.sp_url) {
+        Ok(u) => u,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    };
+    let spec = crate::pools::PoolSpec {
+        backend,
+        tenant_name: r.tenant_name.trim().to_string(),
+        backend_ref: r.backend_ref.trim().to_string(),
+        template: r.template.trim().to_string(),
+        vm_count: r.vm_count,
+        vcpu: r.vcpu,
+        memory_mb: r.memory_mb,
+        disk_gb: r.disk_gb,
+        sp_url,
+        hostname_prefix: r.hostname_prefix.trim().to_string(),
+    };
+    let (mut pool, mat) = crate::pools::new_pool(spec.clone());
+    pool.status = "provisioning".into();
+
+    // Persist BEFORE driving the backend — if the operator's call
+    // races a daemon restart, we want the pool record on disk so
+    // the orchestrator can pick it up.
+    {
+        let mut store = crate::pools::PoolStore::load();
+        if let Err(e) = store.add(pool.clone()) {
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": e}));
+        }
+    }
+
+    // Kick off provisioning in the foreground so the operator
+    // sees create_vm errors right away. Once VMs are submitted,
+    // background polling handles the rest.
+    let prov_result = crate::pools::driver_provision(spec.backend, &spec, &mat).await;
+    match prov_result {
+        Ok(handles) => {
+            pool.vms = handles;
+            pool.status = "provisioning".into();
+            let mut store = crate::pools::PoolStore::load();
+            if let Err(e) = store.update(pool.clone()) {
+                tracing::warn!("pool {}: failed to persist VM handles: {}", pool.id, e);
+            }
+            HttpResponse::Created().json(pool_safe_view(&pool))
+        }
+        Err(e) => {
+            pool.status = "failed".into();
+            pool.last_error = e.clone();
+            let mut store = crate::pools::PoolStore::load();
+            let _ = store.update(pool.clone());
+            HttpResponse::BadGateway().json(serde_json::json!({"error": e, "pool": pool_safe_view(&pool)}))
+        }
+    }
+}
+
+/// DELETE /api/pools/{id} — destroy + remove. Best-effort tear-down
+/// of VMs in the backend; the pool record is removed regardless so
+/// the operator can re-run if XO/Proxmox is unreachable.
+pub async fn pools_delete(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let pool = {
+        let store = crate::pools::PoolStore::load();
+        match store.get(&id) {
+            Some(p) => p,
+            None => return HttpResponse::NotFound().json(serde_json::json!({"error": "pool not found"})),
+        }
+    };
+    let backend_err = crate::pools::driver_destroy(&pool).await.err();
+
+    // Also unregister the federated tenant if we created one.
+    if !pool.tenant_id.is_empty() {
+        let _guard = TENANTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tenants = load_tenants();
+        tenants.retain(|t| t.id != pool.tenant_id);
+        let _ = save_tenants(&tenants);
+    }
+
+    let mut store = crate::pools::PoolStore::load();
+    if let Err(e) = store.remove(&id) {
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": e}));
+    }
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "removed",
+        "backend_warning": backend_err,
+    }))
+}
+
+/// GET /api/pools/templates?backend=xo&ref=<id> — list available
+/// VM templates for the chosen backend so the wizard can populate
+/// the template dropdown.
+pub async fn pools_templates(
+    req: HttpRequest, state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let backend_str = query.get("backend").map(|s| s.as_str()).unwrap_or("");
+    let backend_ref = query.get("ref").map(|s| s.as_str()).unwrap_or("");
+    let backend = match parse_backend(backend_str) {
+        Ok(b) => b,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    };
+    if backend_ref.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "?ref=<backend instance id> is required"
+        }));
+    }
+    match backend {
+        crate::pools::Backend::Xo => {
+            let store = crate::xo::XoStore::load();
+            let inst = match store.get(backend_ref) {
+                Some(i) => i,
+                None => return HttpResponse::NotFound().json(serde_json::json!({
+                    "error": format!("XO instance '{}' not registered", backend_ref)
+                })),
+            };
+            let token = crate::xo::deobfuscate_token(&inst.token_enc);
+            let cli = crate::xo::XoClient::new(&inst.url, &token);
+            match cli.list_templates().await {
+                Ok(ts) => HttpResponse::Ok().json(ts),
+                Err(e) => HttpResponse::BadGateway().json(serde_json::json!({"error": e})),
+            }
+        }
+        crate::pools::Backend::Proxmox => {
+            // backend_ref is a WolfStack cluster Node id with PVE
+            // creds. Build a PveClient from its stored token + node
+            // name and call list_qemu_templates.
+            let nodes = state.cluster.get_all_nodes();
+            let n = match nodes.into_iter().find(|n| n.id == backend_ref) {
+                Some(n) => n,
+                None => return HttpResponse::NotFound().json(serde_json::json!({
+                    "error": format!("WolfStack node '{}' not in cluster", backend_ref)
+                })),
+            };
+            let token = match n.pve_token.clone() {
+                Some(t) => t,
+                None => return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Node '{}' has no PVE token configured.", n.hostname)
+                })),
+            };
+            let pve_node_name = match n.pve_node_name.clone() {
+                Some(name) => name,
+                None => return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Node '{}' has no PVE node name configured.", n.hostname)
+                })),
+            };
+            let pve_port = if n.port == 8553 { 8006 } else { n.port };
+            let cli = crate::proxmox::PveClient::new(
+                &n.address, pve_port, &token,
+                n.pve_fingerprint.as_deref(), &pve_node_name,
+            );
+            match cli.list_qemu_templates().await {
+                Ok(ts) => {
+                    // Reshape PveTemplate to look like XoTemplate so
+                    // the same wizard dropdown handles both: { uuid,
+                    // name, os }. PVE doesn't expose OS in the list
+                    // call so it stays empty.
+                    let view: Vec<serde_json::Value> = ts.into_iter().map(|t| serde_json::json!({
+                        "uuid": t.vmid.to_string(),
+                        "name": t.name,
+                        "os": "",
+                    })).collect();
+                    HttpResponse::Ok().json(view)
+                }
+                Err(e) => HttpResponse::BadGateway().json(serde_json::json!({"error": e})),
+            }
+        }
+        crate::pools::Backend::Native => {
+            // Native templates are absolute paths to qcow2 files —
+            // we list anything in /var/lib/wolfstack/templates/.
+            // The wizard's template field accepts any path, so this
+            // is a convenience hint, not a hard requirement.
+            let dir = std::path::Path::new("/var/lib/wolfstack/templates");
+            let mut out: Vec<serde_json::Value> = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for ent in rd.flatten() {
+                    let path = ent.path();
+                    let lower = path.to_string_lossy().to_lowercase();
+                    if !(lower.ends_with(".qcow2") || lower.ends_with(".img") || lower.ends_with(".raw")) {
+                        continue;
+                    }
+                    let path_str = path.to_string_lossy().to_string();
+                    let name = path.file_stem().map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path_str.clone());
+                    out.push(serde_json::json!({
+                        "uuid": path_str, // wizard treats this as the template id
+                        "name": name,
+                        "os": "",
+                    }));
+                }
+            }
+            HttpResponse::Ok().json(out)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct TenantSelfRegisterRequest {
+    pub bootstrap_token: String,
+    pub name: String,
+    pub url: String,
+    pub federation_token: String,
+}
+
+/// POST /api/tenants/self-register — TENANT-SIDE cloud-init callback.
+///
+/// The leader VM's cloud-init POSTs here once the daemon is up.
+/// Authentication is layered:
+///
+///   1. `bootstrap_token` must match a pending (un-consumed) pool.
+///   2. `federation_token` in the body must match the one the SP
+///      generated for that pool.
+///   3. The supplied `url` must respond to GET /api/federation/status
+///      with that same `federation_token` as Bearer — proves the
+///      URL points at the actual leader VM (cloud-init planted the
+///      token on the leader's disk in `write_files`).
+///
+/// Probe-then-consume: the bootstrap_token is only marked
+/// `consumed` AFTER the network probe succeeds, so transient
+/// probe failures don't burn a still-valid token (cloud-init
+/// retries up to ~2 minutes). The atomic consume step is
+/// race-safe — two concurrent posts that both pass the probe
+/// race for the consume; only one wins.
+pub async fn tenants_self_register(
+    body: web::Json<TenantSelfRegisterRequest>,
+) -> HttpResponse {
+    let r = body.into_inner();
+    if r.bootstrap_token.trim().is_empty()
+        || r.url.trim().is_empty()
+        || r.federation_token.trim().is_empty()
+    {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "bootstrap_token, url and federation_token are required"
+        }));
+    }
+    // Cheap URL validation BEFORE consuming the bootstrap_token.
+    // A malformed URL is a permanent client bug, not a retry case;
+    // we don't want to burn a still-pending bootstrap_token if the
+    // first post happens to malformed. (validate_outbound_url
+    // checks scheme, parses host, and runs SSRF blocker.)
+    let url_obj = match reqwest::Url::parse(r.url.trim()) {
+        Ok(u) => u,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("bad url: {}", e)})),
+    };
+    if let Err(e) = validate_outbound_url(r.url.trim()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": e}));
+    }
+
+    // Look up the pool by bootstrap_token (NON-atomic read). We
+    // do the network probe FIRST so transient probe failures don't
+    // burn the bootstrap_token — the actual atomic consume happens
+    // only after the probe succeeds. Concurrent posts both probe
+    // successfully, then race for the consume; only one wins.
+    let store_snapshot = crate::pools::PoolStore::load();
+    let pending = store_snapshot.list().into_iter().find(|p| {
+        !p.bootstrap_consumed
+            && crate::xo::deobfuscate_token(&p.bootstrap_token_enc) == r.bootstrap_token.trim()
+    });
+    let pending_pool = match pending {
+        Some(p) => p,
+        None => return HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "bootstrap_token not recognised or already consumed"
+        })),
+    };
+
+    // Cross-check the federation token against what we generated
+    // for this pool. If the leader's cloud-init was tampered with,
+    // the federation_token it sends back won't match our record.
+    let expected_fed = crate::xo::deobfuscate_token(&pending_pool.federation_token_enc);
+    if r.federation_token.trim() != expected_fed {
+        return HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "federation_token mismatch"
+        }));
+    }
+
+    // SSRF defence: probe the URL's /api/federation/status with
+    // the federation_token bearer. If the URL really points at the
+    // leader VM (which has the token planted in cloud-init's
+    // write_files), the call returns 200 + a FederationStatus.
+    // Any other host (a SP-LAN bystander the leader tried to point
+    // us at) won't have that token, so the probe returns 401/timeout
+    // and we reject. NO bootstrap consumption yet — transient probe
+    // failure should let the leader's cloud-init retry.
+    if let Err(e) = probe_federation_status(r.url.trim(), r.federation_token.trim()).await {
+        return HttpResponse::BadGateway().json(serde_json::json!({
+            "error": format!("leader URL didn't authenticate with the federation token: {}", e),
+        }));
+    }
+    let _ = url_obj; // captured above for early validation
+
+    // Atomic consume — race-safe single-use. Now that we've proven
+    // the URL is the actual leader, burn the bootstrap_token. Two
+    // concurrent posts that both pass the probe race here; only
+    // one wins (sees the row as un-consumed), the other gets 401.
+    let mut pool = match crate::pools::PoolStore::consume_bootstrap_atomic(r.bootstrap_token.trim()) {
+        Ok(Some(p)) => p,
+        Ok(None) => return HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "bootstrap_token consumed by a concurrent registration"
+        })),
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("couldn't persist bootstrap consumption: {}", e),
+        })),
+    };
+
+    // Persist as a tenant. Use the same Tenant shape the manual
+    // register flow does so the existing UI rolls it up.
+    let tenant_id = uuid::Uuid::new_v4().to_string();
+    {
+        let _guard = TENANTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tenants = load_tenants();
+        tenants.push(Tenant {
+            id: tenant_id.clone(),
+            name: if !r.name.trim().is_empty() { r.name.trim().to_string() } else { pool.spec.tenant_name.clone() },
+            url: r.url.trim().trim_end_matches('/').to_string(),
+            token_enc: crate::xo::obfuscate_token(r.federation_token.trim()),
+            last_status: "ok".into(),
+            last_seen: chrono::Utc::now().to_rfc3339(),
+            host_count: 0, vm_count: 0, container_count: 0,
+            mem_total_mb: 0, mem_used_mb: 0, cpu_pct: 0.0,
+        });
+        if let Err(e) = save_tenants(&tenants) {
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": e}));
+        }
+    }
+
+    // Record leader URL + tenant id + status. bootstrap_consumed is
+    // already true (set by consume_bootstrap_atomic above). From
+    // here the orchestrator drives follower-join via bootstrap-add.
+    pool.leader_url = r.url.trim().trim_end_matches('/').to_string();
+    pool.tenant_id = tenant_id.clone();
+    pool.status = "leader_up".into();
+    pool.leader_up_at = chrono::Utc::now().to_rfc3339();
+    let mut store = crate::pools::PoolStore::load();
+    if let Err(e) = store.update(pool.clone()) {
+        tracing::warn!("self-register: failed to update pool {}: {}", pool.id, e);
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "registered",
+        "tenant_id": tenant_id,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ClusterBootstrapAddRequest {
+    pub address: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+    pub join_token: String,
+    /// Optional cluster name to label the new node with — useful so
+    /// the leader's UI groups followers under the tenant cluster
+    /// name. Orchestrator passes the pool's tenant_name.
+    #[serde(default)]
+    pub cluster_name: Option<String>,
+}
+
+/// POST /api/cluster/bootstrap-add — used during pool bootstrap to
+/// add a follower VM to the leader's cluster without admin auth.
+///
+/// **This handler runs on the LEADER VM (a freshly provisioned
+/// tenant node), not on the SP.** The SP's pools.json doesn't exist
+/// on the leader, so we authenticate against the leader's own
+/// `cluster_secret` instead — which cloud-init pre-wrote to
+/// `/etc/wolfstack/custom-cluster-secret` with the value the SP
+/// generated as `pool_secret`. The SP and the leader therefore
+/// share the secret by construction.
+///
+/// Same shape as the existing admin POST /api/nodes flow
+/// (api/mod.rs:2275): verifies the follower's join_token via
+/// /api/cluster/verify-token (which the follower's own daemon
+/// answers from /etc/wolfstack/join-token), then add_server.
+///
+/// Why a separate endpoint instead of relaxing add_node's auth:
+/// add_node is admin-gated by design. bootstrap-add is purpose-
+/// built for the pool flow — same security model as every other
+/// inter-node operation (cluster_secret), constrained to "join
+/// one node" with a verify-token round-trip on top.
+///
+/// We deliberately do NOT accept the default cluster_secret here.
+/// The default secret is publicly known (it ships with every
+/// WolfStack install before custom-secret rotation), so accepting
+/// it would let anyone on the network drag arbitrary hosts into
+/// the cluster. bootstrap-add only accepts the leader's *custom*
+/// secret, which is the per-pool secret the SP generated.
+pub async fn cluster_bootstrap_add(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<ClusterBootstrapAddRequest>,
+) -> HttpResponse {
+    let provided = req.headers().get("x-wolfstack-secret")
+        .and_then(|h| h.to_str().ok()).unwrap_or("").trim();
+    if provided.is_empty() {
+        return HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "X-WolfStack-Secret header required"
+        }));
+    }
+    let active = crate::auth::load_cluster_secret();
+    let default = crate::auth::default_cluster_secret();
+    if active == default {
+        // No custom secret has been set — the cluster is still on
+        // the public default. Refuse rather than accept the default
+        // (anyone could call this).
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "this WolfStack still uses the default cluster secret \
+                      and is not configured for pool bootstrap"
+        }));
+    }
+    let secret_ok =
+        crate::auth::validate_cluster_secret(provided, &state.cluster_secret)
+        || crate::auth::validate_cluster_secret(provided, &active);
+    if !secret_ok {
+        return HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "X-WolfStack-Secret does not match this cluster's secret"
+        }));
+    }
+
+    let r = body.into_inner();
+    if r.address.trim().is_empty() || r.join_token.trim().is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "address and join_token are required"
+        }));
+    }
+    if is_ssrf_blocked_address(r.address.trim()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "address blocked (loopback / link-local)"
+        }));
+    }
+    let port = r.port.unwrap_or(8553);
+
+    // Verify against the follower's daemon, mirroring add_node:2339.
+    let verify_path = format!("/api/cluster/verify-token?token={}", r.join_token.trim());
+    let urls = vec![
+        format!("https://{}:{}{}", r.address.trim(), port, verify_path),
+        format!("http://{}:{}{}", r.address.trim(), port + 1, verify_path),
+        format!("http://{}:{}{}", r.address.trim(), port, verify_path),
+    ];
+    let client = &*API_HTTP_CLIENT;
+    let mut verified = false;
+    let mut last_error = String::new();
+    for url in &urls {
+        match client.get(url).timeout(std::time::Duration::from_secs(5)).send().await {
+            Ok(resp) => {
+                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                    if data.get("valid").and_then(|v| v.as_bool()) == Some(true) {
+                        verified = true;
+                        break;
+                    } else {
+                        let err = data.get("error").and_then(|v| v.as_str()).unwrap_or("token rejected");
+                        return HttpResponse::Forbidden().json(serde_json::json!({"error": err}));
+                    }
+                }
+                last_error = format!("unparseable response from {}", url);
+            }
+            Err(e) => last_error = format!("{}", e),
+        }
+    }
+    if !verified {
+        return HttpResponse::BadGateway().json(serde_json::json!({
+            "error": format!("can't reach follower at {}:{} — {}", r.address.trim(), port, last_error)
+        }));
+    }
+
+    // add_server_full (agent/mod.rs:362) does dedup atomically under
+    // its own write lock and returns the existing id if a node at
+    // address+port+type is already in the cluster. No outer check
+    // needed; idempotent retries from the orchestrator just hit the
+    // dedup path on second call.
+    let id = state.cluster.add_server(r.address.trim().to_string(), port,
+        r.cluster_name.clone());
+    HttpResponse::Ok().json(serde_json::json!({
+        "id": id,
+        "address": r.address.trim(),
+        "port": port,
+        "node_type": "wolfstack",
+    }))
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -25513,8 +26135,26 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // polls each registered tenant's /api/federation/status.
         .route("/api/tenants", web::get().to(tenants_list))
         .route("/api/tenants", web::post().to(tenants_register))
+        // /api/tenants/self-register — TENANT-SIDE callback during
+        // pool bootstrap. NO admin auth (the new VM has no session);
+        // authentication is by bootstrap_token matching a pending
+        // pool. Registered ABOVE the parameterised /{id} routes so
+        // the path matcher doesn't try to treat "self-register" as
+        // a tenant id.
+        .route("/api/tenants/self-register", web::post().to(tenants_self_register))
         .route("/api/tenants/{id}", web::delete().to(tenants_delete))
         .route("/api/tenants/{id}/refresh", web::post().to(tenants_refresh))
+        // WolfStack Pools — provision tenant clusters across XO
+        // (today) and Proxmox + native (next sessions).
+        .route("/api/pools", web::get().to(pools_list))
+        .route("/api/pools", web::post().to(pools_create))
+        .route("/api/pools/templates", web::get().to(pools_templates))
+        .route("/api/pools/{id}", web::get().to(pools_get))
+        .route("/api/pools/{id}", web::delete().to(pools_delete))
+        // /api/cluster/bootstrap-add — leader-side endpoint a
+        // follower VM calls during pool bootstrap. Auth via
+        // X-WolfStack-Secret matching the pool secret.
+        .route("/api/cluster/bootstrap-add", web::post().to(cluster_bootstrap_add))
         // Federation status — TENANT-SIDE endpoint. Bearer-token
         // auth, returns this cluster's snapshot. Same code on
         // both SP and customer wolfstack — only the customer
