@@ -2175,8 +2175,25 @@ fn run_iptables(base: &[&str], proto: &[String], port: &[String], tail: &[&str])
     Ok(())
 }
 
-/// Restore all IP mappings on startup (called once from main.rs)
-pub fn apply_ip_mappings() {
+/// Restore all IP mappings on startup, *and* re-run periodically from
+/// the reconciliation loop in main.rs.
+///
+/// Returns the count of *enabled* mappings whose iptables rules failed
+/// to apply on this pass. Non-zero means the reconciliation loop
+/// should keep retrying — the most common cause is
+/// `detect_wolfnet_gateway_ip()` returning None because wolfnet0
+/// hasn't come up yet (typical right after a reboot, before WireGuard
+/// finishes establishing the mesh and assigns the wolfnet0 address).
+/// Before the reconciliation loop existed, that case silently dropped
+/// every mapping on the floor and the operator only saw a `warn!` line
+/// in journalctl — PapaSchlumpf's Frigate / Home Assistant
+/// "mapped-but-unreachable" symptom.
+///
+/// Idempotent: `apply_mapping_rules` calls `purge_mapping_rules` first,
+/// so re-running this function is safe even when all rules are already
+/// in place. Steady-state cost is ~2 iptables ops per enabled mapping
+/// per reconcile tick.
+pub fn apply_ip_mappings() -> usize {
     // Enable IP forwarding
     let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
 
@@ -2191,15 +2208,15 @@ pub fn apply_ip_mappings() {
     }
 
     let config = load_ip_mapping_config();
-    let count = config.mappings.len();
+    let mut failed = 0usize;
     for mapping in &config.mappings {
+        if !mapping.enabled { continue; }
         if let Err(e) = apply_mapping_rules(mapping) {
-            warn!("Failed to restore IP mapping {} → {}: {}", mapping.public_ip, mapping.wolfnet_ip, e);
+            warn!("Failed to apply IP mapping {} → {}: {}", mapping.public_ip, mapping.wolfnet_ip, e);
+            failed += 1;
         }
     }
-    if count > 0 {
-
-    }
+    failed
 }
 
 /// Detect this node's WolfNet IP address (for SNAT source)

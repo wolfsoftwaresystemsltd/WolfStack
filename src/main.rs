@@ -1048,6 +1048,31 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
+        // Background: reconcile IP mappings (DNAT rules) until every
+        // enabled mapping has its iptables rules in place. The
+        // synchronous startup pass at boot fails silently when wolfnet0
+        // isn't ready yet — typical right after a reboot, before
+        // WireGuard establishes the mesh and assigns the wolfnet0
+        // address. Without this loop, a node that boots with WolfStack
+        // starting before WolfNet has no DNAT rules and the operator
+        // only sees a `warn!` line in journalctl that nobody reads
+        // (PapaSchlumpf's Frigate / Home Assistant
+        // mapped-but-unreachable symptom). The retry tick is 5s while
+        // any mapping is still failing, 30s once everything's settled.
+        // `apply_ip_mappings` is idempotent — `apply_mapping_rules`
+        // calls `purge_mapping_rules` first — so re-running over a
+        // healthy state is a safe ~2 iptables ops per mapping.
+        tokio::spawn(async move {
+            let mut interval_secs = 30u64;
+            loop {
+                tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+                let failed = tokio::task::spawn_blocking(networking::apply_ip_mappings)
+                    .await
+                    .unwrap_or(0);
+                interval_secs = if failed > 0 { 5 } else { 30 };
+            }
+        });
+
         // Background: re-apply hardware VLAN offload disable on passthrough
         // NICs (every 30s). `ethtool -K` is session-local — when a NIC link
         // bounces (NM refresh, hostname-network restart, cable flap, driver
