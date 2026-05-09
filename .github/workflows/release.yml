@@ -60,9 +60,15 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write       # gh release create
+      id-token: write       # cosign keyless OIDC + attest provenance
+      attestations: write   # actions/attest-build-provenance
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need full history so we can extract the release commit body
+          # for release notes, and regenerate CHANGELOG.md.
+          fetch-depth: 0
 
       - name: Get version
         id: version
@@ -74,6 +80,92 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Compute SHA-256 checksums
+        run: |
+          cd dist
+          sha256sum wolfstack-x86_64 wolfstack-aarch64 > SHA256SUMS
+
+      - name: Generate build-provenance attestation
+        # Run BEFORE cosign signing so subject-path matches just the
+        # binaries (not the .cosign.bundle files that signing produces).
+        # Provenance covers both x86_64 and aarch64 in one attestation.
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/wolfstack-x86_64
+            dist/wolfstack-aarch64
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Sign binaries with cosign (keyless)
+        # Keyless OIDC: no private key to manage. The signing identity
+        # is the workflow itself, anchored to the GitHub Actions OIDC
+        # token. Verifiers check the cert chain back to Sigstore's
+        # Fulcio CA + Rekor transparency log. Verification command is
+        # in the release notes.
+        run: |
+          cd dist
+          for f in wolfstack-x86_64 wolfstack-aarch64; do
+            cosign sign-blob --yes \
+              --bundle "${f}.cosign.bundle" \
+              "$f"
+          done
+
+      - name: Generate release notes from release-commit body
+        id: notes
+        run: |
+          # Find the most recent release commit (subject starts "v<version>:")
+          # — that's the commit being released. Its body is the release notes.
+          # Fallback to a generic note if no v* commit found in last 50.
+          BODY=$(git log -50 --grep='^v[0-9]' -1 --pretty=format:'%b' || echo "")
+          SUBJECT=$(git log -50 --grep='^v[0-9]' -1 --pretty=format:'%s' || echo "Release")
+
+          {
+            echo "## $SUBJECT"
+            echo
+            if [ -n "$BODY" ]; then
+              echo "$BODY"
+              echo
+            fi
+            cat <<'EOF'
+          ---
+
+          ## Verifying this release
+
+          Each binary is signed via [cosign](https://docs.sigstore.dev/) keyless OIDC (no key distribution — signing identity is the GitHub Actions workflow itself, anchored to the Sigstore Fulcio CA and the Rekor transparency log) and ships with a [SLSA build provenance](https://slsa.dev/spec/v1.0/provenance) attestation.
+
+          **Verify the cosign signature:**
+          ```
+          cosign verify-blob \
+            --bundle wolfstack-x86_64.cosign.bundle \
+            --certificate-identity-regexp 'https://github.com/wolfsoftwaresystemsltd/WolfStack/\.github/workflows/release\.yml@.*' \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            wolfstack-x86_64
+          ```
+
+          **Verify the build provenance:**
+          ```
+          gh attestation verify wolfstack-x86_64 --repo wolfsoftwaresystemsltd/WolfStack
+          ```
+
+          **Verify the SHA-256 checksum:**
+          ```
+          sha256sum -c SHA256SUMS
+          ```
+
+          ## Artifacts
+
+          - `wolfstack-x86_64` / `wolfstack-aarch64` — static musl binaries (Linux x86_64 and ARM64 / Raspberry Pi 4+).
+          - `wolfstack-<arch>.cosign.bundle` — cosign signature bundle (cert + signature + Rekor entry).
+          - `SHA256SUMS` — checksums for both binaries.
+
+          For per-version history see [CHANGELOG.md](https://github.com/wolfsoftwaresystemsltd/WolfStack/blob/master/CHANGELOG.md).
+          EOF
+          } > release-notes.md
+
       - name: Create or update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -84,9 +176,37 @@ jobs:
           gh release delete "$VERSION" --yes 2>/dev/null || true
           git push --delete origin "$VERSION" 2>/dev/null || true
 
-          # Create release with binaries
+          # Create release with binaries, signatures, and checksums
           gh release create "$VERSION" \
             --title "WolfStack $VERSION" \
-            --notes "Prebuilt static binaries for Linux x86_64 and aarch64 (ARM64/Raspberry Pi 4+)." \
+            --notes-file release-notes.md \
             dist/wolfstack-x86_64 \
-            dist/wolfstack-aarch64
+            dist/wolfstack-x86_64.cosign.bundle \
+            dist/wolfstack-aarch64 \
+            dist/wolfstack-aarch64.cosign.bundle \
+            dist/SHA256SUMS
+
+      - name: Regenerate CHANGELOG.md and push back to master
+        # Best-effort: CHANGELOG.md is regenerated from `git log` after
+        # each release so the file always reflects the latest tagged
+        # version. The workflow's path filter excludes CHANGELOG.md, so
+        # this push doesn't re-trigger the workflow (no loop).
+        # If push fails (branch protection, race) the release is still
+        # cut — operator runs `scripts/gen-changelog.sh` locally and
+        # commits manually.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/gen-changelog.sh CHANGELOG.md
+          if git diff --quiet CHANGELOG.md; then
+            echo "CHANGELOG.md already up to date"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add CHANGELOG.md
+          git commit -m "chore: regenerate CHANGELOG.md for v${{ steps.version.outputs.version }}"
+          git push origin master || {
+            echo "::warning::Failed to push CHANGELOG.md update — release was cut, but the file is now stale. Run scripts/gen-changelog.sh locally and commit." >&2
+            exit 0
+          }
