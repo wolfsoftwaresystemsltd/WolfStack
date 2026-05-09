@@ -275,14 +275,25 @@
 - AI can execute read-only commands on the server via [EXEC] tags
 - Health monitoring: periodic scans with AI-generated recommendations
 
+## Pricing & Tiers (v22.8.0+)
+Four-tier model on Stripe — replaces the old single £79/installation price.
+- **Community** (no licence) — core platform, no Pro/Enterprise gates
+- **Homelab** — explicit feature flags only; entry tier for hobbyists
+- **Pro** — bundles `plugins`, `api_keys`, `wolfhost`. Anything marketed as "Pro+"
+- **Enterprise** — every feature, including future ones. Pre-2026-05-06 Enterprise was unlimited; self-serve Enterprise sold from 2026-05-06 onward carries `max_nodes=100`. Custom-tier quotes carry whatever sales scoped (250/500/1000)
+- **Soft host cap**: over-cap nodes still join with a warning; never blocks usage. Legacy `max_nodes=0` continues to mean "unlimited" for grandfathered customers
+- License propagation: install on one node, all cluster nodes pick it up automatically
+- Tier resolution: `compat::resolve_tier` reads the signed `tier` field on newer licences, falls back to inferring from the `features` list for older ones
+- Dashboard header badge shows tier + current/max host count, paints amber when over cap, links to the Stripe billing portal
+- Endpoint: `GET /api/platform/status` returns tier, current_nodes, over_cap (no email — that used to leak before v22.8.0)
+- Plugin gates use `has_feature("plugins")` not "any valid licence" so Homelab can't unlock Pro features
+
 ## Enterprise Features
 - REST API keys (wsk_* tokens) with scoped permissions
 - Plugin system
 - OIDC/SSO
 - WolfHost (web hosting platform)
 - WolfCustom (white-label branding)
-- License: £79/$99 per installation per month +VAT (one "installation" = one WolfStack install on one host; e.g. 5 hosts running WolfStack = 5 installations = 5 × £79/month)
-- License propagation: install on one node, all cluster nodes pick it up automatically
 
 ## Plugin System
 - Plugins installed to /etc/wolfstack/plugins/{id}/
@@ -342,6 +353,11 @@ Most consumer NAS defaults to SMB 3.0 (WolfStack's default). Older firmware may 
 
 ### "MISSING_PACKAGE|mount.cifs|..." error
 cifs-utils (or nfs-common/nfs-utils/nfs-client) not installed on the host. WolfStack never auto-installs — accept the confirm prompt to run the install in a live terminal. If you dismissed the prompt, just retry the mount or save the backup destination again and click through.
+
+### Docker container ports show strikethrough + "host ports the daemon never bound" banner
+- The Predictive Inbox port-conflict detector compares `HostConfig.PortBindings` against `NetworkSettings.Ports`. If the container is in `network_mode: host` (or `container:<id>`), Docker never populates `NetworkSettings.Ports` even though the service is fully reachable on the host stack — the diff was a false positive
+- Fixed in v22.9.47: `parse_port_mappings` short-circuits and returns no mappings for host / container-namespace mode. Banner and strikethroughs disappear after upgrade. Bridge / default / custom networks still get the full diff so genuine silent-publish failures are still surfaced
+- If a host-mode container actually has a service problem, check the container logs and host firewall — the port-publish layer is bypassed entirely in this mode
 
 ### Home Assistant VM setup
 1. Import the HAOS QCOW2 image via "Import Disk Image" when creating VM
@@ -417,6 +433,52 @@ Expose host-plugged USB devices to containers/VMs on any node via USB/IP.
 - Click through to the service's UI — WolfStack reverse-proxies it so browser credentials aren't needed per-service
 - Discovery runs every 60 seconds via a reconciliation loop (main.rs background task)
 - Config: /etc/wolfstack/cluster-services-discovered.json
+
+## Predictive Inbox (v22.7.0+)
+
+Unified ops inbox that surfaces problems *before* they page someone. One queue across the cluster, with proposed remediations the operator approves with a click.
+
+- **9 analyzers** running on a tick: backup freshness, certificate expiry, cluster health, container disk fill, container memory, container restart-loop, host disk fill, host disk verdict, OSV/CVE scanner, port-conflict detector, security posture, threshold breaches, unused-package recommender, VM disk fill, vulnerability scan, WolfNet DHCP. Source files in `src/predictive/`
+- Each analyzer emits **Proposals** with severity, scope key, evidence list, and a `RemediationPlan`. Scope keys collapse duplicates across ticks so the inbox doesn't fill up
+- **Embedded terminal pane** (v22.9.10+) — every proposal can open a sandboxed shell on the affected host without leaving the page. One shell per proposal; manual-shell access for ad-hoc investigation
+- **AUTOFIX** (v22.9.42+) — proposals with a deterministic, reversible plan can be applied with one click. The plan runs through the deadman-switch framework so a bad fix auto-rolls back
+- **OSV.dev + CISA KEV scanner** (v22.9.21+) — CVE scanning across all OSV-indexed Linux distros (Debian/Ubuntu/RHEL/Arch/Alpine/etc.) for hosts AND LXC containers. Severity floor configurable; auto-suppresses no-fix-available CVEs; clickable CVE rows; per-host/LXC findings collapse to one card (v22.9.22)
+- **Port-conflict analyzer** (v22.9.25) — detects two failure modes: (1) silent publish failure where Docker accepted the start but never bound the host port, (2) host-port collision where multiple owners want the same `(host_ip, host_port, proto)` tuple. Owners include Docker containers (published / requested-but-unpublished) and host processes from `ss -tlnp/-ulnp`. Skips containers in `host` / `container:<id>` network mode where the diff is meaningless (v22.9.47)
+- **Pre-flight validator** — proposals that can be checked before applying are dry-run first. Failure surfaces in the card before the operator has to commit
+- **Multi-cluster** — Inbox aggregates findings from every reachable cluster; Run buttons fan out via `/api/nodes/{id}/proxy/...`. Snooze / dismiss / approve / ack actions also fan out so a clear-on-one-node propagates
+- **Optimistic UI** (v22.9.18) — dismiss/approve/snooze/ack updates immediately, reconciles with backend
+- **Mobile** (v22.9.24) — Inbox list fills the viewport; terminal appears on demand (vs always-visible on desktop)
+- Endpoints under `/api/predictive/...`; orchestrator at `src/predictive/orchestrator.rs` runs the analyzers on a schedule
+
+## WolfStack Gateway (v22.9.0+)
+
+Universal SMB/NFS share head with cross-cluster federation — turn any node into a NAS frontend regardless of where the actual storage lives.
+
+- Sources: local directory, S3, NFS upstream, SMB upstream, SSHFS, WolfDisk, RBD, mdadm/NoNRAID arrays
+- Re-exports as **SMB (Samba)** and/or **NFS** under one Gateway config
+- **Cross-cluster federation** — a Gateway on cluster A can proxy a share that lives on cluster B; no manual replication
+- Orchestrator at `src/gateway/orchestrator.rs` reconciles `/etc/samba/` + `/etc/exports` to match the declared config
+- UI: Datacenter → WolfStack Gateway
+
+## Storage Array (v22.9.0+)
+
+Disk-array management for vanilla **mdadm** and **NoNRAID** (Unraid-style) backends.
+
+- Create / assemble / start / stop / monitor RAID arrays from the UI; no shell required
+- Cluster-wide aggregation (v22.9.1) — Storage Array page shows arrays across every node + federation
+- Sidebar discoverability fix in v22.9.42 (Klas)
+- Backend lives in `src/array/`; renders as a first-class storage target alongside local / NFS / SMB / S3 / SSHFS / WolfDisk / RBD
+- Endpoints under `/api/array/...` — `GET /api/array`, `POST /api/array/{name}/start`, etc.
+
+## WolfStack Pools / XCP-ng + Xen Orchestra (v22.9.37-41)
+
+Sell N VMs → auto-deploy as a federated tenant cluster across **Proxmox / native QEMU / XCP-ng**.
+
+- **XCP-ng integration** drives Xen Orchestra's REST API (not raw XAPI). Mirrors `src/proxmox/` shape — read-only inventory in v22.9.37 (P1), lifecycle + provisioning + tenant federation in v22.9.38-41 (P2-P4)
+- XCP-ng is Type-1, so no host-level LXC; VMs are the workload unit
+- Tokens XOR-obfuscated in `/etc/wolfstack/xo_pools.json`; never returned to the frontend
+- Tenant Pools: provision a multi-VM cluster as one unit, federate the tenant across the underlying hypervisors (Proxmox host A + XCP-ng pool B + native QEMU on C)
+- UI: Datacenter → Tenants / Pools
 
 ## Ceph integration
 

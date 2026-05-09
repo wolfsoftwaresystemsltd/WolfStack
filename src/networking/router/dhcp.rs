@@ -196,6 +196,14 @@ pub enum ApplyResolution {
     /// netplan — operator should persist if they want it across reboots
     /// without the watchdog re-applying every tick.
     AssignedRouterIp { iface: String },
+    /// Configured interface is enslaved to a Linux bridge (typical
+    /// scenario: a VM bridge-mode passthrough auto-created `br-pt-<iface>`
+    /// and put the physical NIC into it). DHCP and other broadcast
+    /// frames arrive at the master, not the slave — `SO_BINDTODEVICE`
+    /// to the slave silently sees nothing. dnsmasq is bound to the
+    /// master bridge instead. Operator should either update the LAN's
+    /// saved interface to `master`, or detach the slave from the bridge.
+    BoundToBridgeMaster { slave: String, master: String },
 }
 
 impl ApplyResolution {
@@ -204,6 +212,7 @@ impl ApplyResolution {
             ApplyResolution::Healthy { iface } => iface,
             ApplyResolution::BoundToActualInterface { actual, .. } => actual,
             ApplyResolution::AssignedRouterIp { iface } => iface,
+            ApplyResolution::BoundToBridgeMaster { master, .. } => master,
         }
     }
 }
@@ -224,6 +233,20 @@ pub fn resolve_apply_interface(lan: &LanSegment) -> Result<ApplyResolution, Stri
     let configured_exists = std::path::Path::new(
         &format!("/sys/class/net/{}", configured)
     ).exists();
+
+    // Bridge-slave check: when the configured interface is enslaved to
+    // a Linux bridge — typical when a VM with bridge-mode passthrough
+    // auto-created `br-pt-<iface>` and put the physical NIC into it —
+    // DHCP/broadcast frames arrive at the MASTER, not the slave. dnsmasq
+    // bound to the slave via `SO_BINDTODEVICE` (what `bind-interfaces`
+    // uses) silently sees no client traffic. Redirect resolution to the
+    // master bridge before any other branch runs. PapaSchlumpf hit this
+    // when his HA VM's bridge-mode passthrough enslaved ens1.
+    if configured_exists {
+        if let Some(master) = bridge_master_of(&configured) {
+            return resolve_against_bridge_master(lan, &configured, &master);
+        }
+    }
 
     // Find ANY interface (not just the configured one) currently carrying
     // router_ip. The PapaSchlumpf case: router_ip was a secondary on ens1
@@ -260,9 +283,11 @@ pub fn resolve_apply_interface(lan: &LanSegment) -> Result<ApplyResolution, Stri
             // INTENDED `configured` and just hasn't moved the IP yet.
             // The health panel surfaces this with a one-click "use
             // <other> as the saved interface" action.
-            tracing::warn!(
-                "WolfRouter LAN '{}': router_ip {} is on '{}', not configured iface '{}'. \
-                 Binding dnsmasq to '{}' for this apply.",
+            // Operator-facing warning is logged by the caller's
+            // `ApplyResolution::BoundToActualInterface` arm — keep this
+            // as a developer breadcrumb only.
+            tracing::debug!(
+                "resolve_apply_interface: LAN '{}' router_ip {} is on '{}', not configured '{}' — binding to '{}'",
                 lan.name, lan.router_ip, other, configured, other
             );
             return Ok(ApplyResolution::BoundToActualInterface {
@@ -289,10 +314,14 @@ pub fn resolve_apply_interface(lan: &LanSegment) -> Result<ApplyResolution, Stri
                 ));
             }
         }
-        tracing::warn!(
-            "WolfRouter LAN '{}': assigned router_ip {} to '{}' live (was on no interface). \
-             Persist via your distro's network config if you want this across reboots.",
-            lan.name, cidr, configured
+        // The user-facing warning is logged by the caller's
+        // `ApplyResolution::AssignedRouterIp` arm in `start_all_for_node` /
+        // `start()` — keeps the operator from seeing the same self-heal
+        // narrated twice. Keep this debug-level breadcrumb so a developer
+        // tailing logs can still tell where the live `ip addr add` ran.
+        tracing::debug!(
+            "resolve_apply_interface: ran `ip addr add {} dev {}` for LAN '{}'",
+            cidr, configured, lan.name
         );
         return Ok(ApplyResolution::AssignedRouterIp { iface: configured });
     }
@@ -300,10 +329,11 @@ pub fn resolve_apply_interface(lan: &LanSegment) -> Result<ApplyResolution, Stri
     // Configured iface doesn't exist on this host at all.
     if let Some(other) = actual_carrier {
         // router_ip is on SOME iface — bind there, surface the mismatch.
-        tracing::warn!(
-            "WolfRouter LAN '{}': configured iface '{}' doesn't exist; \
-             router_ip {} is on '{}', binding there.",
-            lan.name, configured, lan.router_ip, other
+        // Operator-facing warning is logged by the caller's
+        // `ApplyResolution::BoundToActualInterface` arm.
+        tracing::debug!(
+            "resolve_apply_interface: LAN '{}' configured iface '{}' missing; router_ip {} on '{}' — binding to '{}'",
+            lan.name, configured, lan.router_ip, other, other
         );
         return Ok(ApplyResolution::BoundToActualInterface {
             configured, actual: other,
@@ -331,6 +361,128 @@ fn find_interface_with_ip(target_ip: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// If `iface` is enslaved to a Linux bridge, return the bridge name.
+/// `None` when the interface is standalone, when its master isn't a
+/// bridge (e.g. a bond), or when /sys lookup fails.
+///
+/// Bridge slaves can't deliver broadcast/multicast frames up the host's
+/// L3 stack — the kernel rewrites `skb->dev` to the master before
+/// dispatch, so a `SO_BINDTODEVICE`-bound socket on the slave never
+/// matches incoming packets. Callers that need to bind a listening
+/// socket (dnsmasq, in our case) must use the master.
+pub(super) fn bridge_master_of(iface: &str) -> Option<String> {
+    let master_link = format!("/sys/class/net/{}/master", iface);
+    let target = std::fs::read_link(&master_link).ok()?;
+    let bridge_name = target.file_name()?.to_str()?.to_string();
+    // Verify the master is actually a bridge (not a bond, team, etc.).
+    let bridge_check = format!("/sys/class/net/{}/bridge", bridge_name);
+    if std::path::Path::new(&bridge_check).exists() {
+        Some(bridge_name)
+    } else {
+        None
+    }
+}
+
+/// Resolve binding for the case where the LAN's configured iface is a
+/// bridge slave. Mirrors the standalone-iface logic but operates on the
+/// master bridge:
+///   • master carries router_ip                       → BoundToBridgeMaster
+///   • master doesn't, but another iface does          → BoundToActualInterface
+///   • no iface carries router_ip                      → ip addr add to master
+///
+/// Also defensively removes router_ip from the slave if a previous
+/// (broken) self-heal added it there — leaving it would create two
+/// interfaces with the same IP, which causes ARP responses from
+/// whichever wins the race. The IP belongs on the master only.
+fn resolve_against_bridge_master(
+    lan: &LanSegment,
+    slave: &str,
+    master: &str,
+) -> Result<ApplyResolution, String> {
+    // Master must be up for dnsmasq to bind to it. Bridges typically
+    // report `up` once they have at least one slave (we have one — the
+    // physical NIC), but bring it up explicitly if needed.
+    if !is_interface_up(master) {
+        let _ = Command::new("ip").args(["link", "set", master, "up"]).output();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        if !is_interface_up(master) {
+            return Err(format!(
+                "LAN '{}' configured iface '{}' is enslaved to bridge '{}', but the bridge \
+                 is DOWN. Bring '{}' up (`ip link set {} up`) or detach '{}' from the bridge \
+                 and update the LAN's configured interface.",
+                lan.name, slave, master, master, master, slave
+            ));
+        }
+    }
+
+    // Defensive cleanup: if a previous (broken) self-heal added
+    // router_ip to the slave, remove it. The IP belongs on the master.
+    if interface_addresses(slave).iter().any(|ip| ip == &lan.router_ip) {
+        let prefix = lan.subnet_cidr.split('/').nth(1).unwrap_or("24");
+        let cidr = format!("{}/{}", lan.router_ip, prefix);
+        let out = Command::new("ip").args(["addr", "del", &cidr, "dev", slave]).output();
+        if let Ok(o) = out {
+            if o.status.success() {
+                tracing::info!(
+                    "WolfRouter LAN '{}': removed stale router_ip {} from bridge slave '{}'; \
+                     IP belongs on master '{}'.",
+                    lan.name, cidr, slave, master
+                );
+            }
+        }
+    }
+
+    let master_addrs = interface_addresses(master);
+    if master_addrs.iter().any(|ip| ip == &lan.router_ip) {
+        return Ok(ApplyResolution::BoundToBridgeMaster {
+            slave: slave.to_string(),
+            master: master.to_string(),
+        });
+    }
+
+    // Master doesn't carry router_ip. If router_ip is on some OTHER
+    // interface entirely, bind dnsmasq there — the operator may have
+    // moved the LAN to a different NIC and the slave/bridge situation
+    // is incidental.
+    if let Some(other) = find_interface_with_ip(&lan.router_ip) {
+        if other != master && other != slave {
+            return Ok(ApplyResolution::BoundToActualInterface {
+                configured: slave.to_string(),
+                actual: other,
+            });
+        }
+    }
+
+    // No other interface carries router_ip. Assign it to the master
+    // bridge (NOT the slave — that bind would be invisible to clients).
+    let prefix = lan.subnet_cidr.split('/').nth(1).unwrap_or("24");
+    let cidr = format!("{}/{}", lan.router_ip, prefix);
+    let out = Command::new("ip")
+        .args(["addr", "add", &cidr, "dev", master])
+        .output()
+        .map_err(|e| format!("ip addr add: {}", e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // "File exists" = kernel got there first; benign.
+        if !stderr.contains("File exists") {
+            return Err(format!(
+                "Tried to assign LAN '{}' router_ip {} to master bridge '{}' (configured \
+                 iface '{}' is a bridge slave, so binding dnsmasq to the slave wouldn't see \
+                 client traffic), but `ip addr add {} dev {}` failed: {}.",
+                lan.name, lan.router_ip, master, slave, cidr, master, stderr.trim()
+            ));
+        }
+    }
+    tracing::debug!(
+        "resolve_apply_interface: ran `ip addr add {} dev {}` (master bridge of slave '{}') for LAN '{}'",
+        cidr, master, slave, lan.name
+    );
+    Ok(ApplyResolution::BoundToBridgeMaster {
+        slave: slave.to_string(),
+        master: master.to_string(),
+    })
 }
 
 /// Start (or restart) the dnsmasq instance for a LAN. Returns the
@@ -585,6 +737,17 @@ pub fn start_all_for_node(config: &RouterConfig, self_node_id: &str) {
                     lan.name, lan.router_ip, iface
                 );
             }
+            Ok(ApplyResolution::BoundToBridgeMaster { slave, master }) => {
+                warn!(
+                    "WolfRouter LAN '{}': self-healed at apply — configured iface '{}' is enslaved \
+                     to bridge '{}' (likely from a VM bridge-mode passthrough). Bound dnsmasq to \
+                     '{}' instead — bridge slaves can't deliver DHCP/broadcast traffic up the host \
+                     stack, so binding to '{}' would leave clients unable to get an IP. Update the \
+                     LAN's saved interface to '{}' from the UI, or detach '{}' from the bridge if \
+                     the passthrough was unintended.",
+                    lan.name, slave, master, master, slave, master, slave
+                );
+            }
             Err(e) => {
                 warn!("Failed to start LAN '{}': {}", lan.name, e);
             }
@@ -613,5 +776,84 @@ mod tests {
         assert_eq!(prefix_to_netmask(30), "255.255.255.252");
         assert_eq!(prefix_to_netmask(0), "0.0.0.0");
         assert_eq!(prefix_to_netmask(32), "255.255.255.255");
+    }
+
+    #[test]
+    fn apply_resolution_iface_includes_bridge_master() {
+        // Regression guard: every variant of ApplyResolution must report
+        // the interface dnsmasq is actually bound to via `iface()`. The
+        // watchdog and health probe rely on this to decide whether the
+        // bind looks alive — missing a variant here would silently make
+        // the watchdog think bridge-master self-heals are unhealthy and
+        // restart loop.
+        let h = ApplyResolution::Healthy { iface: "br0".into() };
+        assert_eq!(h.iface(), "br0");
+
+        let b = ApplyResolution::BoundToActualInterface {
+            configured: "br-lan".into(), actual: "ens0".into(),
+        };
+        assert_eq!(b.iface(), "ens0");
+
+        let a = ApplyResolution::AssignedRouterIp { iface: "ens1".into() };
+        assert_eq!(a.iface(), "ens1");
+
+        let m = ApplyResolution::BoundToBridgeMaster {
+            slave: "ens1".into(), master: "br-pt-ens1".into(),
+        };
+        assert_eq!(m.iface(), "br-pt-ens1",
+            "BoundToBridgeMaster::iface() must return the master — dnsmasq binds there \
+             because the slave can't deliver broadcast traffic up the host stack");
+    }
+
+    #[test]
+    fn bridge_master_of_returns_none_for_loopback() {
+        // Loopback is never a bridge slave on any sane host. This is the
+        // cheapest sanity check that bridge_master_of doesn't panic on
+        // real /sys paths and correctly distinguishes "no master link"
+        // from "master is a bridge".
+        assert!(bridge_master_of("lo").is_none());
+    }
+
+    #[test]
+    fn bridge_master_of_returns_none_for_nonexistent_iface() {
+        // Defensive: callers may pass an interface name that doesn't
+        // exist on this host. `read_link` returns Err in that case and
+        // we want None, not a panic.
+        assert!(bridge_master_of("does-not-exist-xyz123").is_none());
+    }
+
+    #[test]
+    fn bridge_master_of_resolves_real_bridge_slave_when_present() {
+        // Opt-in integration test: when the env vars are set, verify
+        // bridge_master_of resolves a known-real bridge-slave/master pair
+        // on the host. Used to validate the /sys read against a live
+        // kernel — the unit test suite normally skips this because it
+        // requires root to set up.
+        //
+        // Usage:
+        //   sudo ip link add SLAVE type veth peer name SLAVE-peer
+        //   sudo ip link add MASTER type bridge
+        //   sudo ip link set SLAVE master MASTER
+        //   WOLFSTACK_TEST_BRIDGE_SLAVE=SLAVE WOLFSTACK_TEST_BRIDGE_MASTER=MASTER \
+        //     cargo test bridge_master_of_resolves_real_bridge_slave
+        let slave = match std::env::var("WOLFSTACK_TEST_BRIDGE_SLAVE") {
+            Ok(s) => s, Err(_) => return,
+        };
+        let expected_master = std::env::var("WOLFSTACK_TEST_BRIDGE_MASTER")
+            .expect("set WOLFSTACK_TEST_BRIDGE_MASTER alongside WOLFSTACK_TEST_BRIDGE_SLAVE");
+
+        let resolved = bridge_master_of(&slave);
+        assert_eq!(
+            resolved.as_deref(), Some(expected_master.as_str()),
+            "bridge_master_of('{}') should return '{}' (the bridge it's enslaved to)",
+            slave, expected_master
+        );
+
+        // Bridge itself should have no master.
+        assert!(
+            bridge_master_of(&expected_master).is_none(),
+            "bridge_master_of('{}') should return None — the bridge is the master, not a slave",
+            expected_master
+        );
     }
 }

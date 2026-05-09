@@ -200,6 +200,29 @@ pub fn lan_health(lan: &LanSegment, self_node_id: &str) -> LanHealth {
                     action: None,
                 });
             }
+            super::dhcp::ApplyResolution::BoundToBridgeMaster { slave, master } => {
+                checks.push(HealthCheck {
+                    id: "iface_bridge_slave",
+                    name: "LAN interface enslaved to bridge",
+                    ok: false,
+                    severity: "warning",
+                    message: format!(
+                        "LAN is configured for '{}', but '{}' is enslaved to bridge '{}' \
+                         (typical when a VM uses bridge-mode passthrough on this NIC). Bridge \
+                         slaves can't deliver DHCP or other broadcast frames up the host stack, \
+                         so dnsmasq is bound to '{}' instead. Clients still get IPs, but the \
+                         saved LAN config is out of sync with the host.",
+                        slave, slave, master, master
+                    ),
+                    fix: Some(format!(
+                        "Either click 'Use {master}' to update the LAN's saved interface to the \
+                         bridge, or detach '{slave}' from '{master}' if the passthrough was \
+                         unintended (`ip link set {slave} nomaster`) and remove the bridge.",
+                        master = master, slave = slave,
+                    )),
+                    action: Some("set_lan_interface"),
+                });
+            }
         }
     }
 
