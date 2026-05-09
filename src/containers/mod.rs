@@ -2789,25 +2789,63 @@ fn docker_batched_inspect(ids: &[String])
 /// entry whose port matches as a confirmation. Avoids false positives
 /// where the requested IP is `0.0.0.0` and the published IP is `::`.
 ///
-/// Host-mode / shared-namespace note: when `HostConfig.NetworkMode` is
-/// `host` or `container:<id>`, Docker keeps the operator's stated
-/// `PortBindings` but never populates `NetworkSettings.Ports` because
-/// there's no NAT mapping to record — the container shares another
-/// network namespace and listens directly on its host stack. Diffing
-/// the two would flag every requested port as unpublished even though
-/// the service is fully reachable (e.g. AdGuard Home in `network_mode:
-/// host` binding :53 on the LAN). We short-circuit and return an empty
-/// vec so the silent-publish-failure detector and the strikethrough UI
-/// stay quiet on these containers.
+/// Host-mode / shared-namespace / direct-routing note: when Docker isn't
+/// doing host-port NAT for the container, `NetworkSettings.Ports` is
+/// empty even when the operator declared `ports:` in compose. Diffing
+/// the two would flag every declared port as unpublished even though
+/// the service is fully reachable on its container/LAN IP. We
+/// short-circuit in three cases:
+///
+///   * `NetworkMode == "host"` — container shares the host's network
+///     namespace, listens directly on its stack (e.g. AdGuard Home
+///     binding :53 on the LAN).
+///   * `NetworkMode == "container:<id>"` — container shares another
+///     container's namespace, same property as host mode.
+///   * `NetworkMode == "none"` — container has no network at all;
+///     port-mapping declarations are vestigial.
+///   * `NetworkMode` is a user-defined network name (anything other
+///     than the standard reserved values) AND `NetworkSettings.Ports`
+///     is empty/null — this catches **macvlan**, **ipvlan**, and
+///     custom IPAM bridge configurations where the container has its
+///     own LAN IP and Docker doesn't manage port forwarding (e.g.
+///     Frigate on a macvlan reachable at 10.0.10.4:5000 directly).
+///     User-defined bridges that DO use port mapping populate
+///     `NetworkSettings.Ports` properly, so the silent-publish detector
+///     still works for those — we only skip when there's no published
+///     evidence to diff against.
 pub fn parse_port_mappings(inspect: &serde_json::Value) -> Vec<PortMapping> {
     use std::collections::HashSet;
 
-    // Host / shared-namespace short-circuit (see doc comment).
+    // ─── Network-mode short-circuits (see doc comment) ─────────────────
     let network_mode = inspect.pointer("/HostConfig/NetworkMode")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if network_mode == "host" || network_mode.starts_with("container:") {
+    if network_mode == "host"
+        || network_mode == "none"
+        || network_mode.starts_with("container:")
+    {
         return Vec::new();
+    }
+
+    // User-defined network: NetworkMode is anything other than the
+    // reserved names. Could be a bridge (port mapping applies) OR a
+    // macvlan/ipvlan/etc (no port mapping). Distinguish by checking
+    // whether `NetworkSettings.Ports` is *truly* empty — Docker emits
+    // `{}` for macvlan/ipvlan (no NAT bindings to record) but emits
+    // `{"80/tcp": null}` for a bridge where the host-port bind failed
+    // silently (the original Klas case the detector was built for).
+    // We only skip on the empty-object case so the silent-publish
+    // detector still fires on user-defined bridges with failed binds.
+    let is_user_defined = !matches!(network_mode, "" | "default" | "bridge");
+    if is_user_defined {
+        let ports_truly_empty = match inspect.pointer("/NetworkSettings/Ports") {
+            None | Some(serde_json::Value::Null) => true,
+            Some(serde_json::Value::Object(o)) => o.is_empty(),
+            _ => false,
+        };
+        if ports_truly_empty {
+            return Vec::new();
+        }
     }
 
     // Step 2: actual published bindings. Tuple is (host_ip, host_port,
@@ -9132,6 +9170,107 @@ mod port_mapping_tests {
         let mappings = parse_port_mappings(&inspect);
         assert_eq!(mappings.len(), 1);
         assert!(mappings[0].published);
+    }
+
+    #[test]
+    fn parse_macvlan_network_skips_publish_check() {
+        // PapaSchlumpf's Frigate case: container on a user-defined
+        // macvlan with its own LAN IP. Compose declared `ports:` so
+        // PortBindings is non-empty, but Docker doesn't do host port
+        // forwarding for macvlan — NetworkSettings.Ports is empty {}.
+        // The diff would flag every port as unpublished even though the
+        // container is reachable directly at its LAN IP. Must short-
+        // circuit the same way host mode does.
+        let inspect: serde_json::Value = serde_json::from_str(r#"{
+            "HostConfig": {
+                "NetworkMode": "frigate_macvlan",
+                "PortBindings": {
+                    "5000/tcp": [{ "HostIp": "", "HostPort": "5000" }],
+                    "8554/tcp": [{ "HostIp": "", "HostPort": "8554" }],
+                    "8555/tcp": [{ "HostIp": "", "HostPort": "8555" }],
+                    "8555/udp": [{ "HostIp": "", "HostPort": "8555" }]
+                }
+            },
+            "NetworkSettings": {
+                "Ports": {}
+            }
+        }"#).unwrap();
+        assert!(parse_port_mappings(&inspect).is_empty(),
+            "user-defined network with empty Ports = macvlan/ipvlan/etc; \
+             port-mapping diff is meaningless");
+    }
+
+    #[test]
+    fn parse_user_defined_bridge_with_null_port_entries_still_detects_silent_publish() {
+        // Klas's original case (the bug the detector was built for) on a
+        // user-defined bridge instead of the default. PortBindings asks
+        // for a host port; NetworkSettings.Ports has the proto/cport key
+        // present but a null host-list — meaning Docker started the
+        // container but silently failed to bind the host port. Must NOT
+        // be confused with macvlan: macvlan is `Ports: {}` (truly
+        // empty), this case is `Ports: {"80/tcp": null}` (key present,
+        // bind failed). The detector must still flag this.
+        let inspect: serde_json::Value = serde_json::from_str(r#"{
+            "HostConfig": {
+                "NetworkMode": "myapp_default",
+                "PortBindings": {
+                    "5000/tcp": [{ "HostIp": "", "HostPort": "5000" }]
+                }
+            },
+            "NetworkSettings": {
+                "Ports": { "5000/tcp": null }
+            }
+        }"#).unwrap();
+        let mappings = parse_port_mappings(&inspect);
+        assert_eq!(mappings.len(), 1, "must still produce a mapping");
+        assert!(!mappings[0].published,
+            "null Ports entry on a user-defined bridge = silent-publish failure (Klas case); must be flagged unpublished");
+    }
+
+    #[test]
+    fn parse_user_defined_bridge_with_real_port_mapping_still_validates() {
+        // Counter-test: a user-defined BRIDGE (e.g. compose's auto-
+        // generated `<projectname>_default`) with port mapping must
+        // still run the publish check. Docker DOES manage port
+        // forwarding for these and populates NetworkSettings.Ports
+        // properly — the silent-publish detector is still useful here.
+        let inspect: serde_json::Value = serde_json::from_str(r#"{
+            "HostConfig": {
+                "NetworkMode": "myapp_default",
+                "PortBindings": {
+                    "8080/tcp": [{ "HostIp": "", "HostPort": "8080" }]
+                }
+            },
+            "NetworkSettings": {
+                "Ports": {
+                    "8080/tcp": [{ "HostIp": "0.0.0.0", "HostPort": "8080" }]
+                }
+            }
+        }"#).unwrap();
+        let mappings = parse_port_mappings(&inspect);
+        assert_eq!(mappings.len(), 1, "user-defined bridge with real port mapping must produce a mapping");
+        assert!(mappings[0].published, "the binding is genuinely published — must not be flagged unpublished");
+    }
+
+    #[test]
+    fn parse_none_network_mode_skips_publish_check() {
+        // `network_mode: none` containers have no networking at all.
+        // PortBindings declarations are vestigial and the diff would
+        // flag every one as unpublished — but there's nothing to publish
+        // against because there's no network.
+        let inspect: serde_json::Value = serde_json::from_str(r#"{
+            "HostConfig": {
+                "NetworkMode": "none",
+                "PortBindings": {
+                    "80/tcp": [{ "HostIp": "", "HostPort": "8080" }]
+                }
+            },
+            "NetworkSettings": {
+                "Ports": {}
+            }
+        }"#).unwrap();
+        assert!(parse_port_mappings(&inspect).is_empty(),
+            "`network_mode: none` containers have no networking; port mappings are meaningless");
     }
 
     #[test]
