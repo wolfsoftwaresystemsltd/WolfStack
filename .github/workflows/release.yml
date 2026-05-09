@@ -175,9 +175,16 @@ jobs:
           # Delete existing release if it exists (update scenario)
           gh release delete "$VERSION" --yes 2>/dev/null || true
           git push --delete origin "$VERSION" 2>/dev/null || true
+          # Drop local tag too — with fetch-depth: 0 the checkout pulls
+          # all tags, so a stale local v* tag disagrees with the just-
+          # deleted remote one. `gh release create` refuses in that
+          # state ("tag exists locally but has not been pushed"). The
+          # next step's `--target master` re-creates the tag fresh.
+          git tag -d "$VERSION" 2>/dev/null || true
 
           # Create release with binaries, signatures, and checksums
           gh release create "$VERSION" \
+            --target master \
             --title "WolfStack $VERSION" \
             --notes-file release-notes.md \
             dist/wolfstack-x86_64 \
