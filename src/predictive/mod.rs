@@ -61,6 +61,7 @@ pub mod vulnerability;
 pub mod osv;
 pub mod port_conflict;
 pub mod wolfnet_dhcp;
+pub mod wolfnet_reachability;
 pub mod unused_packages;
 pub mod notify;
 pub mod cluster;

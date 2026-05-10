@@ -1989,6 +1989,32 @@ pub fn spawn_dnsmasq_watchdog(state: std::sync::Arc<RouterState>, self_node_id: 
                     }
                 }
             }
+            // Subnet-route reconciliation — runs every tick (60s) so the
+            // forwarding plumbing required to ROUTE TRAFFIC THROUGH this
+            // node as a gateway (ip_forward, FORWARD ACCEPT for the
+            // subnet, MASQUERADE) gets re-applied on every cycle.
+            //
+            // Why it matters: `apply_on_startup` sets this up once at
+            // boot, but iptables and sysctls are routinely stomped on by
+            // unrelated tools — Docker daemon restart wipes FORWARD,
+            // NetworkManager flips rp_filter back to strict, an admin's
+            // `iptables -F FORWARD` for an unrelated debug. Without
+            // periodic reapply, a node that was a working transit
+            // gateway silently loses transit and stays broken until
+            // WolfStack itself restarts. klasSponsor 2026-05-10:
+            // "ping to other node vm wolfnet ip still doesnt work"
+            // after `systemctl restart wolfstack` on the consumer
+            // because the FAILURE was on the gateway peer's side, where
+            // nothing periodic was re-applying the rules.
+            //
+            // `apply_subnet_route` is idempotent end-to-end: skips the
+            // route entry if it already matches, and inside
+            // `enable_subnet_route_forwarding` every iptables rule is
+            // tested with `-C` before insertion. Steady-state cost is
+            // ~3 iptables-check + 2 sysfs-read invocations per route
+            // per minute — trivial.
+            reconcile_subnet_routes(&state, &self_node_id);
+
             // Every 5th tick (~5 min) re-run the full config validation
             // pass and refresh `state.last_validation`. The cluster-wide
             // health endpoint reads this so operators see "configs are
@@ -2272,6 +2298,41 @@ pub fn enable_subnet_route_forwarding(route: &SubnetRoute) -> Result<(), String>
         Ok(())
     } else {
         Err(errors.join("; "))
+    }
+}
+
+/// Reconcile every enabled subnet route on this node — idempotently
+/// re-applies the kernel route entry (consumer role) or the forwarding
+/// plumbing (gateway role) by walking `cfg.subnet_routes` and calling
+/// `apply_subnet_route` for each. Called on the dnsmasq-watchdog tick
+/// every 60s so that rules wiped by unrelated tools (Docker daemon
+/// restart trashing the FORWARD chain, NetworkManager flipping
+/// rp_filter, etc.) heal themselves before the operator notices.
+///
+/// `apply_subnet_route` is end-to-end idempotent — it short-circuits
+/// when the kernel state already matches, and the gateway-side
+/// `enable_subnet_route_forwarding` tests every iptables rule with
+/// `-C` before inserting. Steady-state cost is the order of one
+/// iptables-check per rule per minute per route.
+///
+/// Logs only on transitions: a successful no-op tick stays silent, a
+/// freshly-installed rule logs `info`, an error logs `warn`. Without
+/// transition-aware logging this would spam an "applied" line every
+/// 60s indefinitely.
+pub fn reconcile_subnet_routes(state: &RouterState, self_node_id: &str) {
+    let cfg = state.config.read().unwrap().clone();
+    for route in cfg.subnet_routes.iter()
+        .filter(|r| r.enabled && node_handles_route(r, self_node_id))
+    {
+        match apply_subnet_route(route, None) {
+            Ok(()) => {} // Idempotent — silent in steady state.
+            Err(e) => {
+                tracing::warn!(
+                    "WolfRouter watchdog: subnet route reconcile failed: {} via {}: {}",
+                    route.subnet_cidr, route.gateway, e
+                );
+            }
+        }
     }
 }
 

@@ -3706,8 +3706,13 @@ function renderDatacenterOverview() {
         container.innerHTML = html;
     }
 
-    // Initialize Map + Bookmarks
-    setTimeout(() => { updateMap(nodes); applyMapCollapse(); renderBookmarks(); }, 100);
+    // Initialize Map + Bookmarks. applyMapCollapse runs BEFORE updateMap
+    // so the wrap has its 220px height (or 0 if collapsed) before Leaflet
+    // measures the container — otherwise initMap creates a map with
+    // zero dimensions, tiles never load, and the user has to navigate
+    // away and back to trigger an invalidateSize that finally sees a
+    // real size.
+    setTimeout(() => { applyMapCollapse(); updateMap(nodes); renderBookmarks(); }, 100);
 
     // Surface freshness — sysadmins want to know if the dashboard is current.
     // attachLastUpdated paints "Updated 32s ago" in the corner and self-ticks
@@ -3827,8 +3832,14 @@ function updateMap(nodes) {
     if (!worldMap) initMap();
     if (!worldMap) return;
 
-    // Fix map size if it was hidden
+    // Fix map size if it was hidden. Belt-and-braces double call: the
+    // first invalidateSize runs synchronously against whatever layout
+    // the browser has computed so far, which on cold dashboard loads
+    // can still be 0×0 if the wrap's 220px hasn't been laid out yet.
+    // The rAF follow-up runs after the next layout pass, when the
+    // container's real size is known.
     worldMap.invalidateSize();
+    requestAnimationFrame(() => { if (worldMap) worldMap.invalidateSize(); });
 
     // Find the self node (local server) — its public_ip is the best geolocation reference
     const selfNode = nodes.find(n => n.is_self);
