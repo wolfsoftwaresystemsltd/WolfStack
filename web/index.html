@@ -388,7 +388,7 @@
                     <!-- World Map -->
                     <div class="card" id="map-card" style="overflow: hidden;">
                         <div class="card-header" style="cursor:pointer;" onclick="toggleMapCollapse()">
-                            <h3><span class="ws-icon-clean-wrap" data-icon="globe"></span> Infrastructure</h3>
+                            <h3>Infrastructure</h3>
                             <span id="map-toggle-icon" style="font-size:12px; color:var(--text-muted); transition:transform 0.3s ease;">▼</span>
                         </div>
                         <div id="world-map-wrap" style="height:0; overflow:hidden; transition:height 0.3s ease;">
@@ -399,7 +399,7 @@
                     <!-- Bookmarks -->
                     <div class="card" id="bookmarks-card" style="overflow: hidden;">
                         <div class="card-header">
-                            <h3><span class="ws-icon-clean-wrap" data-icon="bookmark"></span> Bookmarks</h3>
+                            <h3>Bookmarks</h3>
                             <div style="display:flex;gap:4px;">
                                 <button class="btn btn-sm" onclick="importBookmarks()" style="padding: 2px 8px; font-size: 11px;" title="Import bookmarks from JSON file">Import</button>
                                 <button class="btn btn-sm" onclick="exportBookmarks()" style="padding: 2px 8px; font-size: 11px;" title="Export bookmarks as JSON file">Export</button>
@@ -1106,7 +1106,7 @@
             <!-- Services Table -->
             <div class="card" style="margin-bottom:20px;">
                 <div class="card-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="runner"></span> Deployed Services</h3>
+                    <h3>Deployed Services</h3>
                 </div>
                 <div class="card-body" style="overflow-x:auto;">
                     <table class="data-table" id="wolfrun-services-table">
@@ -1136,7 +1136,7 @@
             <!-- Failover Events Log -->
             <div class="card" id="wolfrun-failover-card" style="margin-bottom:20px; display:none;">
                 <div class="card-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="shield"></span> Failover Events</h3>
+                    <h3>Failover Events</h3>
                 </div>
                 <div class="card-body" style="overflow-x:auto;">
                     <table class="data-table" id="wolfrun-failover-table">
@@ -1208,7 +1208,7 @@
                             </div>
                             <!-- Failover how-it-works -->
                             <div style="margin-top:20px; padding:16px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm);">
-                                <h4 style="margin:0 0 10px; font-size:14px; font-weight:700; color:var(--accent-light);"><span class="ws-icon-clean-wrap" data-icon="shield"></span> How Container Failover Works</h4>
+                                <h4 style="margin:0 0 10px; font-size:14px; font-weight:700; color:var(--accent-light);">How Container Failover Works</h4>
                                 <ol style="margin:0; padding-left:20px; font-size:12px; color:var(--text-secondary); line-height:1.8;">
                                     <li><strong>Enable failover</strong> on any WolfRun service (deploy modal or settings).</li>
                                     <li>WolfRun automatically <strong>pre-creates standby containers</strong> on other cluster nodes — stopped but fully configured with the same WolfNet IP allocation.</li>
@@ -1229,7 +1229,7 @@
             <div id="wolfrun-deploy-modal" class="modal-overlay">
                 <div class="modal" style="max-width:600px; width:90%;">
                     <div class="modal-header">
-                        <h3><span class="ws-icon-clean-wrap" data-icon="rocket"></span> Deploy New Service</h3>
+                        <h3>Deploy New Service</h3>
                         <button class="modal-close" onclick="closeWolfRunDeployModal()">&times;</button>
                     </div>
                     <div class="modal-body">
@@ -1361,7 +1361,7 @@
         <div id="wolfrun-adopt-modal" class="modal-overlay">
             <div class="modal" style="max-width:700px; width:90%;">
                 <div class="modal-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="package"></span> Select Source Container</h3>
+                    <h3>Select Source Container</h3>
                     <button class="modal-close" onclick="closeWolfRunAdoptModal()">&times;</button>
                 </div>
                 <div class="modal-body">
@@ -1395,7 +1395,7 @@
         <div id="wolfrun-pf-modal" class="modal-overlay">
             <div class="modal" style="max-width:600px; width:90%;">
                 <div class="modal-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="link"></span> Port Forward — <span id="wolfrun-pf-svc-name"></span></h3>
+                    <h3>Port Forward — <span id="wolfrun-pf-svc-name"></span></h3>
                     <button class="modal-close" onclick="closeWolfRunPFModal()">&times;</button>
                 </div>
                 <div class="modal-body">
@@ -1455,7 +1455,7 @@
         <div id="wolfrun-settings-modal" class="modal-overlay">
             <div class="modal" style="max-width:420px; width:90%;">
                 <div class="modal-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="settings"></span> Service Settings — <span id="wolfrun-settings-name"></span></h3>
+                    <h3>Service Settings — <span id="wolfrun-settings-name"></span></h3>
                     <button class="modal-close" onclick="closeWolfRunSettingsModal()">&times;</button>
                 </div>
                 <div class="modal-body">
@@ -1524,7 +1524,7 @@
         <div id="wolfrun-delete-modal" class="modal-overlay">
             <div class="modal" style="max-width:480px; width:90%;">
                 <div class="modal-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="trash"></span> Delete Service — <span id="wolfrun-delete-name"></span></h3>
+                    <h3>Delete Service — <span id="wolfrun-delete-name"></span></h3>
                     <button class="modal-close" onclick="closeWolfRunDeleteModal()">&times;</button>
                 </div>
                 <div class="modal-body">
@@ -1556,7 +1556,7 @@
         <div id="wolfrun-scale-modal" class="modal-overlay">
             <div class="modal" style="max-width:420px; width:90%;">
                 <div class="modal-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="lightning"></span> Scaling — <span id="wolfrun-scale-name"></span></h3>
+                    <h3>Scaling — <span id="wolfrun-scale-name"></span></h3>
                     <button class="modal-close" onclick="closeWolfRunScaleModal()">&times;</button>
                 </div>
                 <div class="modal-body" style="text-align:center;">
@@ -2256,7 +2256,7 @@
             <div id="issues-ai-section" style="display:none; margin-top:20px;">
                 <div class="card" style="border-color:rgba(99,102,241,0.3);">
                     <div class="card-header">
-                        <h3><span class="ws-icon-clean-wrap" data-icon="robot"></span> AI Analysis</h3>
+                        <h3>AI Analysis</h3>
                     </div>
                     <div class="card-body">
                         <div id="issues-ai-content" style="font-size:13px; line-height:1.7; color:var(--text);"></div>
@@ -2371,7 +2371,7 @@
             <!-- Install Scripts Section -->
             <div class="card" style="margin-top: 24px;">
                 <div class="card-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="download"></span> Install Scripts</h3>
+                    <h3>Install Scripts</h3>
                 </div>
                 <div class="card-body">
                     <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 16px;">
@@ -2972,7 +2972,7 @@
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header"
                     style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="save"></span> Backup Manager</h3>
+                    <h3>Backup Manager</h3>
                     <div style="display:flex; gap:8px; align-items:center;">
                         <select id="backup-storage-select" class="form-control"
                             onchange="onBackupStorageChange()"
@@ -3011,7 +3011,7 @@
             <!-- Schedules Card -->
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="calendar"></span> Backup Schedules</h3>
+                    <h3>Backup Schedules</h3>
                 </div>
                 <div class="card-body" style="overflow-x:auto;">
                     <table class="data-table" style="width:100%;">
@@ -3039,7 +3039,7 @@
             <!-- Backup History Card -->
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="clipboard"></span> Backup History</h3>
+                    <h3>Backup History</h3>
                 </div>
                 <div class="card-body" style="overflow-x:auto;">
                     <table class="data-table" style="width:100%;">
@@ -3067,7 +3067,7 @@
             <!-- PBS Configuration Card -->
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="package"></span> Proxmox Backup Server</h3>
+                    <h3>Proxmox Backup Server</h3>
                     <div style="display:flex; gap:8px; align-items:center;">
                         <span id="pbs-status-badge" style="font-size:12px; padding:3px 10px; border-radius:10px;
                             background:var(--bg-tertiary); color:var(--text-muted);">Checking…</span>
@@ -3148,7 +3148,7 @@
             <!-- PBS Snapshots Browser -->
             <div class="card" id="pbs-snapshots-card" style="display:none;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="folder"></span> PBS Snapshots</h3>
+                    <h3>PBS Snapshots</h3>
                     <button class="btn btn-sm"
                         style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"
                         onclick="loadPbsSnapshots()"><span class="ws-icon-clean-wrap" data-icon="refresh"></span> Refresh</button>
@@ -3238,7 +3238,7 @@
             <!-- Aggregated Backup History -->
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="clipboard"></span> Backup History (All Nodes)</h3>
+                    <h3>Backup History (All Nodes)</h3>
                 </div>
                 <div class="card-body" style="overflow-x:auto;">
                     <table class="data-table" style="width:100%;">
@@ -3265,7 +3265,7 @@
             <!-- Aggregated Schedules -->
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="calendar"></span> Schedules (All Nodes)</h3>
+                    <h3>Schedules (All Nodes)</h3>
                 </div>
                 <div class="card-body" style="overflow-x:auto;">
                     <table class="data-table" style="width:100%;">
@@ -3293,7 +3293,7 @@
             <!-- Create Schedule Across Nodes -->
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="calendar"></span> Create Cluster Schedule</h3>
+                    <h3>Create Cluster Schedule</h3>
                 </div>
                 <div class="card-body">
                     <p style="font-size:13px; color:var(--text-secondary); margin-bottom:16px;">
@@ -3366,7 +3366,7 @@
             <!-- PBS Configuration — Copy to All Nodes -->
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="package"></span> Proxmox Backup Server — Push Config</h3>
+                    <h3>Proxmox Backup Server — Push Config</h3>
                 </div>
                 <div class="card-body">
                     <p style="font-size:13px; color:var(--text-secondary); margin-bottom:16px;">
@@ -3437,7 +3437,7 @@
         <div id="create-schedule-modal" class="modal-overlay">
             <div class="modal" style="max-width:480px;">
                 <div class="modal-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="calendar"></span> Schedule Backup</h3>
+                    <h3>Schedule Backup</h3>
                     <button class="modal-close" onclick="closeModal()">&times;</button>
                 </div>
                 <div class="modal-body">
@@ -3629,7 +3629,7 @@
             <!-- Quick Add -->
             <div class="card">
                 <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="add"></span> Add Cron Job</h3>
+                    <h3>Add Cron Job</h3>
                 </div>
                 <div class="card-body">
                     <div style="display:grid; grid-template-columns:200px 1fr auto; gap:12px; align-items:end;">
@@ -3674,7 +3674,7 @@
             <!-- Premade Jobs -->
             <div class="card" style="margin-top:20px;">
                 <div class="card-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="lightning"></span> Quick Actions</h3>
+                    <h3>Quick Actions</h3>
                 </div>
                 <div class="card-body" style="display:flex; flex-wrap:wrap; gap:10px;">
                     <button class="btn" onclick="addPremadeCron('wolfstack-update')"
@@ -3703,7 +3703,7 @@
             <!-- Crontab Entries -->
             <div class="card" style="margin-top:20px;">
                 <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="clipboard"></span> Cron Entries</h3>
+                    <h3>Cron Entries</h3>
                     <button class="btn btn-sm" onclick="loadCronJobs()" title="Refresh"><span class="ws-icon-clean-wrap" data-icon="refresh"></span> Refresh</button>
                 </div>
                 <div class="card-body">
@@ -3731,7 +3731,7 @@
             <div class="card">
                 <div class="card-header"
                     style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="clipboard"></span> System Logs</h3>
+                    <h3>System Logs</h3>
                     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
                         <input type="text" class="form-control" id="syslog-search" placeholder="Search logs..."
                             style="width:200px; font-size:13px;" onkeydown="if(event.key==='Enter') loadSystemLogs()">
@@ -4077,7 +4077,7 @@
                 <div class="card-header"
                     style="display:flex; justify-content:space-between; align-items:center; flex-shrink:0;">
                     <div style="display:flex; align-items:center; gap:10px;">
-                        <h3><span class="ws-icon-clean-wrap" data-icon="laptop"></span> Terminal</h3>
+                        <h3>Terminal</h3>
                         <span id="inline-term-name" style="color:var(--text-muted); font-size:13px;"></span>
                     </div>
                     <div style="display:flex; align-items:center; gap:8px;">
@@ -4134,7 +4134,7 @@
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
                     <div style="display:flex; align-items:center; gap:12px;">
-                        <h3><span class="ws-icon-clean-wrap" data-icon="chart"></span> Status Pages</h3>
+                        <h3>Status Pages</h3>
                         <span style="font-size:12px; color:var(--text-muted);">Create public status pages for your
                             applications</span>
                     </div>
@@ -4379,7 +4379,7 @@
             <div class="card">
                 <div class="card-header" style="flex-direction:column; align-items:stretch; padding-bottom:0;">
                     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
-                        <h3><span class="ws-icon-clean-wrap" data-icon="settings"></span> Settings</h3>
+                        <h3>Settings</h3>
                         <div style="font-size: 12px; color: var(--text-muted);">WolfStack configuration</div>
                     </div>
                     <div class="settings-tabs">
@@ -4860,7 +4860,7 @@
                         <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">
                             <!-- Left: Channels -->
                             <div>
-                                <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);"><span class="ws-icon-clean-wrap" data-icon="satellite"></span> Notification
+                                <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);">Notification
                                     Channels</h4>
                                 <div class="form-group" style="margin-bottom:16px;">
                                     <label>Discord Webhook URL</label>
@@ -4907,7 +4907,7 @@
                                     <small style="color:var(--text-muted);">Different from the webhook above — a bot token lets agents receive and reply to messages. MESSAGE CONTENT intent must be enabled in the Discord dev portal.</small>
                                 </div>
 
-                                <h4 style="margin:16px 0 12px 0; font-size:14px; color:var(--accent-light);"><span class="ws-icon-clean-wrap" data-icon="chat"></span> WhatsApp (via Twilio)</h4>
+                                <h4 style="margin:16px 0 12px 0; font-size:14px; color:var(--accent-light);">WhatsApp (via Twilio)</h4>
                                 <div class="form-group" style="margin-bottom:12px;">
                                     <label>Twilio Account SID</label>
                                     <input type="text" id="alerting-twilio-sid" class="form-control"
@@ -4933,7 +4933,7 @@
 
                             <!-- Right: Thresholds & Events -->
                             <div>
-                                <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);"><span class="ws-icon-clean-wrap" data-icon="lightning"></span> Alert Rules
+                                <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);">Alert Rules
                                 </h4>
                                 <div
                                     style="background:var(--bg-input);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px;">
@@ -5005,7 +5005,7 @@
                                         from System Check still run instantly.</small>
                                 </div>
 
-                                <h4 style="margin:0 0 12px 0;font-size:14px;color:var(--accent-light);"><span class="ws-icon-clean-wrap" data-icon="bell"></span> Events</h4>
+                                <h4 style="margin:0 0 12px 0;font-size:14px;color:var(--accent-light);">Events</h4>
                                 <div style="display:grid;gap:10px;">
                                     <label
                                         style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
@@ -5067,7 +5067,7 @@
                         <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">
                             <!-- Left Column: Provider & Keys -->
                             <div>
-                                <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);"><span class="ws-icon-clean-wrap" data-icon="key"></span> LLM Provider
+                                <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);">LLM Provider
                                 </h4>
                                 <div class="form-group" style="margin-bottom:16px;">
                                     <label>Provider</label>
@@ -5166,7 +5166,7 @@
 
                             <!-- Right Column: Email & Alerts -->
                             <div>
-                                <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);"><span class="ws-icon-clean-wrap" data-icon="email"></span> Email Alerts
+                                <h4 style="margin:0 0 16px 0;font-size:14px;color:var(--accent-light);">Email Alerts
                                 </h4>
                                 <div class="form-group" style="margin-bottom:16px;">
                                     <label style="display:flex;align-items:center;gap:8px;">
@@ -5206,7 +5206,7 @@
                                     </div>
                                 </div>
 
-                                <h4 style="margin:20px 0 12px 0;font-size:14px;color:var(--accent-light);"><span class="ws-icon-clean-wrap" data-icon="chart"></span> Recent
+                                <h4 style="margin:20px 0 12px 0;font-size:14px;color:var(--accent-light);">Recent
                                     Alerts
                                 </h4>
                                 <div id="ai-alerts-list" style="max-height:200px;overflow-y:auto;font-size:12px;">
@@ -5228,7 +5228,7 @@
                             <!-- Export -->
                             <div
                                 style="background:var(--bg-input);border-radius:12px;padding:20px;border:1px solid var(--border);">
-                                <h4 style="margin:0 0 8px 0;font-size:15px;"><span class="ws-icon-clean-wrap" data-icon="upload"></span> Export Config</h4>
+                                <h4 style="margin:0 0 8px 0;font-size:15px;">Export Config</h4>
                                 <p style="font-size:13px;color:var(--text-muted);margin:0 0 16px 0;">
                                     Download all cluster nodes, AI settings, storage config, backup schedules,
                                     and IP mappings as a single JSON file.
@@ -5240,7 +5240,7 @@
                             <!-- Import -->
                             <div
                                 style="background:var(--bg-input);border-radius:12px;padding:20px;border:1px solid var(--border);">
-                                <h4 style="margin:0 0 8px 0;font-size:15px;"><span class="ws-icon-clean-wrap" data-icon="download"></span> Import Config</h4>
+                                <h4 style="margin:0 0 8px 0;font-size:15px;">Import Config</h4>
                                 <p style="font-size:13px;color:var(--text-muted);margin:0 0 16px 0;">
                                     Upload a previously exported config file to restore cluster links,
                                     settings, and schedules on this server.
@@ -5775,7 +5775,7 @@
                     <!-- ─── System Check Tab ─── -->
                     <div id="settings-tab-systemcheck" class="settings-tab-panel">
                         <div style="margin-bottom:12px;">
-                            <h4 style="margin:0 0 4px 0; font-size:16px; font-weight:600;"><span class="ws-icon-clean-wrap" data-icon="health"></span> System Dependency Audit</h4>
+                            <h4 style="margin:0 0 4px 0; font-size:16px; font-weight:600;">System Dependency Audit</h4>
                             <p style="font-size:13px; color:var(--text-muted); margin:0;">
                                 Scans any server in any cluster for every runtime dependency WolfStack touches — Docker, QEMU, networking, storage, kernel modules —
                                 and flags anything broken. Dependencies WolfStack installs automatically on demand show up blue.
@@ -5894,7 +5894,7 @@
             <!-- Installed Storage Providers -->
             <div class="card" style="margin-bottom:20px;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="package"></span> Installed Storage Providers</h3>
+                    <h3>Installed Storage Providers</h3>
                     <button class="btn btn-sm" onclick="loadStorageProviders()"
                         style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;">↻
                         Refresh</button>
@@ -5938,7 +5938,7 @@
             <div class="card">
                 <div class="card-header"
                     style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="save"></span> Storage Manager</h3>
+                    <h3>Storage Manager</h3>
                     <div style="display:flex; gap:8px;">
                         <button class="btn btn-sm"
                             style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"
@@ -5971,7 +5971,7 @@
             <!-- ZFS Pools (shown if ZFS available) -->
             <div id="zfs-section" class="card" style="margin-top:20px; display:none;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="database"></span> ZFS Pools</h3>
+                    <h3>ZFS Pools</h3>
                     <button class="btn btn-sm" onclick="loadZfsStatus()"
                         style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;">↻
                         Refresh</button>
@@ -6217,7 +6217,7 @@
         <div id="page-files" class="page-view" style="display:none;">
             <div class="card">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="folder-open"></span> File Manager</h3>
+                    <h3>File Manager</h3>
                     <div style="display:flex; gap:8px;">
                         <button class="btn btn-sm btn-primary" onclick="showNewFolderModal()"
                             style="font-size:12px; padding:4px 12px;">+ New Folder</button>
@@ -6351,7 +6351,7 @@
             <!-- Peers Table -->
             <div class="card" style="margin-bottom:20px;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="globe"></span> Peers</h3>
+                    <h3>Peers</h3>
                     <div style="display:flex; gap:8px;">
                         <button class="btn btn-sm" onclick="loadWolfNet()"
                             style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); font-size:11px;">↻
@@ -6385,7 +6385,7 @@
             <!-- Settings Cards -->
             <div class="card" style="margin-bottom:20px;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="settings"></span> Network Settings</h3>
+                    <h3>Network Settings</h3>
                     <button class="btn btn-primary btn-sm" onclick="saveWolfNetSettings()"><span class="ws-icon-clean-wrap" data-icon="save"></span> Save &amp;
                         Restart</button>
                 </div>
@@ -6437,7 +6437,7 @@
                     </div>
                     <div id="wn-node-identity"
                         style="margin-top:16px; padding:12px; background:var(--bg-primary); border:1px solid var(--border); border-radius:8px; display:none;">
-                        <h4 style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;"><span class="ws-icon-clean-wrap" data-icon="key"></span> This Node's
+                        <h4 style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">This Node's
                             Identity</h4>
                         <div style="display:grid; grid-template-columns: auto 1fr; gap:4px 12px; font-size:12px;">
                             <span style="color:var(--text-muted);">Hostname:</span>
@@ -6461,7 +6461,7 @@
         <div class="modal-overlay" id="add-peer-modal">
             <div class="modal" style="max-width: 580px; width: 95%;">
                 <div class="modal-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="link"></span> Add WolfNet Peer</h3>
+                    <h3>Add WolfNet Peer</h3>
                     <button class="modal-close" onclick="closeAddPeerModal()">&times;</button>
                 </div>
                 <div class="modal-body">
@@ -6579,7 +6579,7 @@
         <div class="modal-overlay" id="wolfnet-join-modal">
             <div class="modal" style="max-width: 640px; width: 95%;">
                 <div class="modal-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="check-circle"></span> Peer Added — Remote Setup</h3>
+                    <h3>Peer Added — Remote Setup</h3>
                     <button class="modal-close" onclick="closeJoinModal()">&times;</button>
                 </div>
                 <div class="modal-body">
@@ -6664,7 +6664,7 @@
                         <!-- Diagnostics panel below topology graphic -->
                         <div id="wr-diagnostics-panel" style="margin-top:24px; padding:16px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; display:none;">
                             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-                                <h4 style="margin:0; font-size:14px; font-weight:600; color:var(--text);"><span class="ws-icon-clean-wrap" data-icon="search"></span> Diagnostics</h4>
+                                <h4 style="margin:0; font-size:14px; font-weight:600; color:var(--text);">Diagnostics</h4>
                                 <button style="background:none; border:none; color:var(--text-muted); font-size:18px; cursor:pointer;" onclick="document.getElementById('wr-diagnostics-panel').style.display='none';">&times;</button>
                             </div>
                             <div id="wr-diagnostics-content" style="font-size:13px; color:var(--text); max-height:300px; overflow-y:auto;"></div>
@@ -6692,8 +6692,7 @@
                              Networking page but surfaced here so users
                              see ALL traffic policy in one view. -->
                         <div id="wr-managed-mappings" style="margin-top:24px; display:none;">
-                            <h4 style="font-size:13px; margin-bottom:8px; color:var(--text-muted);">
-                                <span class="ws-icon-clean-wrap" data-icon="link"></span> Port forwards (DNAT) — managed via the per-server Networking page
+                            <h4 style="font-size:13px; margin-bottom:8px; color:var(--text-muted);">Port forwards (DNAT) — managed via the per-server Networking page
                             </h4>
                             <table class="data-table" style="font-size:12px;">
                                 <thead><tr><th>Public IP</th><th>→ WolfNet IP</th><th>Ports</th><th>Proto</th><th>Label</th><th></th></tr></thead>
@@ -6956,7 +6955,7 @@
                         <div id="ti-status-row" style="display:flex; gap:12px; flex-wrap:wrap; align-items:stretch; margin-bottom:16px;">
                             <div style="flex:2 1 360px; min-width:300px; background:var(--bg-input); border:1px solid var(--border); border-radius:10px; padding:14px 16px;">
                                 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                                    <h4 style="margin:0; font-size:14px;"><span class="ws-icon-clean-wrap" data-icon="shield"></span> Threat Intelligence</h4>
+                                    <h4 style="margin:0; font-size:14px;">Threat Intelligence</h4>
                                     <span id="ti-status-badge" style="font-size:11px; padding:3px 8px; border-radius:4px; background:var(--bg-tertiary); color:var(--text-muted);">Loading…</span>
                                 </div>
                                 <div id="ti-status-summary" style="font-size:13px; color:var(--text-secondary); line-height:1.55;">Loading status…</div>
@@ -7131,7 +7130,7 @@
             <!-- WolfNet Card -->
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="link"></span> WolfNet Overlay</h3>
+                    <h3>WolfNet Overlay</h3>
                     <div id="wolfnet-actions"></div>
                 </div>
                 <div class="card-body" id="wolfnet-status-body">
@@ -7143,7 +7142,7 @@
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header"
                     style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="globe"></span> Public IP Mappings</h3>
+                    <h3>Public IP Mappings</h3>
                     <button class="btn btn-sm btn-primary" onclick="showCreateMappingModal()" style="font-size:12px;">+
                         Add Mapping</button>
                 </div>
@@ -7166,7 +7165,7 @@
             <!-- WireGuard Bridge Card -->
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="lock"></span> WireGuard Bridge</h3>
+                    <h3>WireGuard Bridge</h3>
                     <div id="wg-bridge-actions"></div>
                 </div>
                 <div class="card-body" id="wg-bridge-body">
@@ -7178,7 +7177,7 @@
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header"
                     style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="globe"></span> Network Interfaces</h3>
+                    <h3>Network Interfaces</h3>
                     <button class="btn btn-sm btn-primary" onclick="showCreateVlanModal()">+ Add VLAN</button>
                 </div>
                 <div class="card-body">
@@ -7215,7 +7214,7 @@
         <div id="page-docs" class="page-view" style="display:none;">
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="book"></span> WolfStack Documentation</h3>
+                    <h3>WolfStack Documentation</h3>
                     <div style="font-size: 12px; color: var(--text-muted);">Setup guides, troubleshooting, and reference
                     </div>
                 </div>
@@ -7226,7 +7225,7 @@
                         all from a single web interface.
                         It supports both standalone Linux servers and Proxmox VE clusters.</p>
 
-                    <h4 style="margin:24px 0 12px; color:var(--accent-light);"><span class="ws-icon-clean-wrap" data-icon="lightning"></span> Quick Start</h4>
+                    <h4 style="margin:24px 0 12px; color:var(--accent-light);">Quick Start</h4>
                     <p style="color:var(--text-secondary); margin-bottom:8px;">Get your cluster up and running in
                         minutes:</p>
                     <ol style="color:var(--text-secondary); padding-left:20px; margin-bottom:16px;">
@@ -7355,7 +7354,7 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
 
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="clipboard"></span> Container Cloning &amp; Migration</h3>
+                    <h3>Container Cloning &amp; Migration</h3>
                     <div style="font-size: 12px; color: var(--text-muted);">How to clone and migrate LXC containers
                         between nodes</div>
                 </div>
@@ -7470,7 +7469,7 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
 
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="wrench"></span> Troubleshooting</h3>
+                    <h3>Troubleshooting</h3>
                     <div style="font-size: 12px; color: var(--text-muted);">Common issues and solutions</div>
                 </div>
                 <div class="card-body" style="padding:24px; line-height:1.7;">
@@ -7548,7 +7547,7 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
 
             <div class="card">
                 <div class="card-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="link"></span> Useful Links</h3>
+                    <h3>Useful Links</h3>
                 </div>
                 <div class="card-body" style="padding:24px;">
                     <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:12px;">
@@ -7623,7 +7622,7 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
         <div class="modal-overlay" id="add-ip-modal">
             <div class="modal" style="max-width: 480px; width: 95%;">
                 <div class="modal-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="add"></span> Add IP Address</h3>
+                    <h3>Add IP Address</h3>
                     <button class="modal-close" onclick="closeAddIpModal()">&times;</button>
                 </div>
                 <div class="modal-body">
@@ -7651,7 +7650,7 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
         <div class="modal-overlay" id="create-mapping-modal">
             <div class="modal" style="max-width: 860px; width: 95%;">
                 <div class="modal-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="globe"></span> Create IP Mapping</h3>
+                    <h3>Create IP Mapping</h3>
                     <button class="modal-close" onclick="closeCreateMappingModal()">&times;</button>
                 </div>
                 <div class="modal-body"
@@ -7660,7 +7659,7 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                     <div>
                         <div
                             style="background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.2); border-radius:8px; padding:14px; margin-bottom:12px;">
-                            <h4 style="font-size:13px; color:var(--text-primary); margin-bottom:8px;"><span class="ws-icon-clean-wrap" data-icon="book"></span> What does this
+                            <h4 style="font-size:13px; color:var(--text-primary); margin-bottom:8px;">What does this
                                 do?</h4>
                             <p style="font-size:12px; color:var(--text-secondary); margin:0 0 10px 0; line-height:1.6;">
                                 IP Mapping creates <strong>iptables NAT rules</strong> that forward traffic from a
@@ -7760,7 +7759,7 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
         <div class="modal-overlay" id="mount-progress-modal">
             <div class="modal" style="max-width: 420px; width: 90%;">
                 <div class="modal-header">
-                    <h3 id="mount-progress-title"><span class="ws-icon-clean-wrap" data-icon="save"></span> Mounting Storage</h3>
+                    <h3 id="mount-progress-title">Mounting Storage</h3>
                 </div>
                 <div class="modal-body" style="text-align: center; padding: 32px 24px;">
                     <div id="mount-progress-spinner" style="font-size: 48px; margin-bottom: 16px;">⏳</div>
@@ -7928,7 +7927,7 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
         <div class="modal-overlay" id="import-rclone-modal">
             <div class="modal" style="max-width: 600px; width: 95%;">
                 <div class="modal-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="download"></span> Import rclone.conf</h3>
+                    <h3>Import rclone.conf</h3>
                     <button class="modal-close" onclick="closeImportRcloneModal()">&times;</button>
                 </div>
                 <div class="modal-body">
@@ -7955,7 +7954,7 @@ region = us-east-1"></textarea>
         <div class="modal-overlay" id="edit-mount-modal">
             <div class="modal" style="max-width: 640px; width: 95%;">
                 <div class="modal-header">
-                    <h3><span class="ws-icon-clean-wrap" data-icon="settings"></span> Edit Storage Mount</h3>
+                    <h3>Edit Storage Mount</h3>
                     <button class="modal-close" onclick="closeEditMountModal()">&times;</button>
                 </div>
                 <div class="modal-body">
@@ -8385,7 +8384,7 @@ region = us-east-1"></textarea>
                 style="width:90%;max-width:960px;height:80vh;display:flex;flex-direction:column;background:var(--bg-card,#1a1a2e);border:1px solid var(--border,#333);border-radius:12px;overflow:hidden;box-shadow:0 25px 50px rgba(0,0,0,0.5);">
                 <div
                     style="padding:12px 20px;border-bottom:1px solid var(--border,#333);display:flex;align-items:center;justify-content:space-between;background:var(--bg-secondary,#16162a);">
-                    <h3 id="console-title" style="margin:0;font-size:15px;"><span class="ws-icon-clean-wrap" data-icon="laptop"></span> Console</h3>
+                    <h3 id="console-title" style="margin:0;font-size:15px;">Console</h3>
                     <button onclick="closeConsole()"
                         style="background:none;border:none;color:var(--text-primary,#fff);font-size:24px;cursor:pointer;padding:0 8px;">&times;</button>
                 </div>
@@ -8416,6 +8415,7 @@ region = us-east-1"></textarea>
             </div>
         </div>
 
+        <script src="/js/vendor/lucide.min.js"></script>
         <script>document.write('<script src="/js/icons-clean.js?v=' + Date.now() + '"><\/script>');</script>
         <script>document.write('<script src="/js/app.js?v=' + Date.now() + '"><\/script>');</script>
         <script>document.write('<script src="/js/wolfrouter.js?v=' + Date.now() + '"><\/script>');</script>

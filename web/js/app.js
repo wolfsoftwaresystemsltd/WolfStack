@@ -3307,25 +3307,25 @@ function buildServerTree(nodes) {
             </div>
             <div class="server-node-children ${shouldExpandCluster ? 'expanded' : ''}" id="children-${clusterId}">
                 <a class="nav-item server-child-item statuspage-cluster-item" data-cluster="${escapedName}" data-view="statuspage" onclick="showStatusPagesForCluster('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
-                    <span class="icon" style="font-size:15px;"></span> <span style="font-weight:600;">Status Pages</span>
+                    <span class="icon ws-icon-clean-wrap" data-icon="health" style="font-size:15px;"></span> <span style="font-weight:600;">Status Pages</span>
                 </a>
                 <a class="nav-item server-child-item wolfrun-cluster-item" data-cluster="${escapedName}" data-view="wolfrun" onclick="showWolfRunPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
-                    <span class="icon" style="font-size:15px;"></span> <span style="font-weight:600;">WolfRun</span>
+                    <span class="icon ws-icon-clean-wrap" data-icon="rocket" style="font-size:15px;"></span> <span style="font-weight:600;">WolfRun</span>
                     <span class="wolfrun-svc-count" id="wolfrun-count-${clusterId}" style="margin-left:auto; font-size:10px; padding:1px 6px; background:var(--primary-color,#6366f1); color:#fff; border-radius:10px; display:none;"></span>
                 </a>
                 <a class="nav-item server-child-item cluster-backups-item" data-cluster="${escapedName}" data-view="cluster-backups" onclick="showClusterBackupsPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
-                    <span class="icon" style="font-size:15px;"></span> <span style="font-weight:600;">Backups</span>
+                    <span class="icon ws-icon-clean-wrap" data-icon="save" style="font-size:15px;"></span> <span style="font-weight:600;">Backups</span>
                 </a>
 
                 <a class="nav-item server-child-item k8s-cluster-item" data-cluster="${escapedName}" data-view="kubernetes" onclick="showK8sClusterPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
-                    <span class="icon" style="font-size:15px;">&#9784;</span> <span style="font-weight:600;">WolfKube</span>
+                    <span class="icon ws-icon-clean-wrap" data-icon="package" style="font-size:15px;"></span> <span style="font-weight:600;">WolfKube</span>
                     <span class="k8s-cluster-count" id="k8s-count-${clusterId}" style="margin-left:auto; font-size:10px; padding:1px 6px; background:#326ce5; color:#fff; border-radius:10px; display:none;"></span>
                 </a>
                 <a class="nav-item server-child-item wolfdisk-cluster-item" data-cluster="${escapedName}" data-view="wolfdisk-cluster" onclick="showWolfDiskPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
-                    <span class="icon" style="font-size:15px;"></span> <span style="font-weight:600;">WolfDisk</span>
+                    <span class="icon ws-icon-clean-wrap" data-icon="database" style="font-size:15px;"></span> <span style="font-weight:600;">WolfDisk</span>
                 </a>
                 <a class="nav-item server-child-item wolfrouter-cluster-item" data-cluster="${escapedName}" data-view="wolfrouter-cluster" onclick="showWolfRouterForCluster('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
-                    <span class="icon" style="font-size:15px;"></span> <span style="font-weight:600;">WolfRouter</span>
+                    <span class="icon ws-icon-clean-wrap" data-icon="compass" style="font-size:15px;"></span> <span style="font-weight:600;">WolfRouter</span>
                 </a>`;
 
         // Each node within the cluster
@@ -3342,82 +3342,82 @@ function buildServerTree(nodes) {
                     </div>
                     <div class="server-node-children ${shouldExpandNode ? 'expanded' : ''}" id="children-${node.id}">
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="dashboard" onclick="selectServerView('${node.id}', 'dashboard')">
-                            <span class="icon"></span> Dashboard
+                            <span class="icon ws-icon-clean-wrap" data-icon="home"></span> Dashboard
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="backups" onclick="selectServerView('${node.id}', 'backups')">
-                            <span class="icon"></span> Backups
+                            <span class="icon ws-icon-clean-wrap" data-icon="save"></span> Backups
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="ceph" onclick="selectServerView('${node.id}', 'ceph')">
-                            <span class="icon"></span> Ceph
+                            <span class="icon ws-icon-clean-wrap" data-icon="database"></span> Ceph
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="certificates" onclick="selectServerView('${node.id}', 'certificates')">
-                            <span class="icon"></span> Certificates
+                            <span class="icon ws-icon-clean-wrap" data-icon="shield"></span> Certificates
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="components" onclick="selectServerView('${node.id}', 'components')">
-                            <span class="icon"></span> Components
+                            <span class="icon ws-icon-clean-wrap" data-icon="package"></span> Components
                             <span class="badge" style="font-size:10px; padding:1px 6px;">${(node.components || []).filter(c => c.installed).length}</span>
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="compose" onclick="selectServerView('${node.id}', 'compose')">
-                            <span class="icon"></span> Compose
+                            <span class="icon ws-icon-clean-wrap" data-icon="folder"></span> Compose
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="cron" onclick="selectServerView('${node.id}', 'cron')">
-                            <span class="icon"></span> Cron Jobs
+                            <span class="icon ws-icon-clean-wrap" data-icon="calendar"></span> Cron Jobs
                         </a>
                         <!-- Per-node Database Manager retired — use the cluster-wide
                              Databases page in the main sidebar, which drives
                              predefined SQL connections and transparently proxies
                              queries to the owning node. -->
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="containers" onclick="selectServerView('${node.id}', 'containers')">
-                            <span class="icon"></span> Docker
+                            <span class="icon ws-icon-clean-wrap" data-icon="docker"></span> Docker
                             ${node.docker_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.docker_count}</span>` : ''}
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="files" onclick="selectServerView('${node.id}', 'files')">
-                            <span class="icon"></span> Files
+                            <span class="icon ws-icon-clean-wrap" data-icon="folder"></span> Files
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="lxc" onclick="selectServerView('${node.id}', 'lxc')">
-                            <span class="icon"></span> LXC
+                            <span class="icon ws-icon-clean-wrap" data-icon="package"></span> LXC
                             ${node.lxc_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.lxc_count}</span>` : ''}
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="networking" onclick="selectServerView('${node.id}', 'networking')">
-                            <span class="icon"></span> Networking
+                            <span class="icon ws-icon-clean-wrap" data-icon="globe"></span> Networking
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="security" onclick="selectServerView('${node.id}', 'security')">
-                            <span class="icon"></span> Security
+                            <span class="icon ws-icon-clean-wrap" data-icon="shield"></span> Security
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="services" onclick="selectServerView('${node.id}', 'services')">
-                            <span class="icon"></span> Services
+                            <span class="icon ws-icon-clean-wrap" data-icon="settings"></span> Services
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="shares" onclick="selectServerView('${node.id}', 'shares')">
-                            <span class="icon"></span> Shares
+                            <span class="icon ws-icon-clean-wrap" data-icon="folder-open"></span> Shares
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="storage" onclick="selectServerView('${node.id}', 'storage')">
-                            <span class="icon"></span> Storage
+                            <span class="icon ws-icon-clean-wrap" data-icon="database"></span> Storage
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="array" onclick="selectView('array')" title="Storage Array — mdadm / NoNRAID parity. The Array page aggregates every node in the cluster, so this opens the cluster-wide view rather than a per-node one.">
-                            <span class="icon"></span> Storage Array
+                            <span class="icon ws-icon-clean-wrap" data-icon="database"></span> Storage Array
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="syslogs" onclick="selectServerView('${node.id}', 'syslogs')">
-                            <span class="icon"></span> System Logs
+                            <span class="icon ws-icon-clean-wrap" data-icon="document"></span> System Logs
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
-                            <span class="icon"></span> Terminal
+                            <span class="icon ws-icon-clean-wrap" data-icon="laptop"></span> Terminal
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="vms" onclick="selectServerView('${node.id}', 'vms')">
-                            <span class="icon"></span> Virtual Machines
+                            <span class="icon ws-icon-clean-wrap" data-icon="computer"></span> Virtual Machines
                             ${node.vm_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.vm_count}</span>` : ''}
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="wolfkube" onclick="selectServerView('${node.id}', 'wolfkube')">
-                            <span class="icon">&#9784;</span> WolfKube
+                            <span class="icon ws-icon-clean-wrap" data-icon="package"></span> WolfKube
                             <span class="badge k8s-pod-badge" data-node="${node.id}" style="font-size:10px; padding:1px 6px; display:none;"></span>
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="wolfnet" onclick="selectServerView('${node.id}', 'wolfnet')">
-                            <span class="icon"></span> WolfNet
+                            <span class="icon ws-icon-clean-wrap" data-icon="satellite"></span> WolfNet
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="wolfusb" onclick="selectServerView('${node.id}', 'wolfusb')">
-                            <span class="icon"></span> WolfUSB
+                            <span class="icon ws-icon-clean-wrap" data-icon="plug"></span> WolfUSB
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="wolfram" onclick="selectServerView('${node.id}', 'wolfram')">
-                            <span class="icon"></span> Wolfram
+                            <span class="icon ws-icon-clean-wrap" data-icon="wrench"></span> Wolfram
                         </a>
                     </div>
                 </div>`;
