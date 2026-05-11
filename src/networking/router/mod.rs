@@ -2398,6 +2398,16 @@ pub fn auto_apply_missing_workload_routes(state: &RouterState, self_node_id: &st
         Err(_) => return,
     };
 
+    // Snapshot this node's own workload subnets — we MUST NOT auto-create
+    // a route for a CIDR that's also locally owned, or the new route
+    // would race with the kernel-auto-installed `proto kernel scope link`
+    // route for the local bridge. e.g. every WolfStack node has its own
+    // `docker0 / 172.17.0.0/16` — if a peer also has the default Docker
+    // subnet, auto-routing the peer's range over wolfnet0 would steal
+    // local Docker traffic and black-hole it.
+    let local_subnets: std::collections::HashSet<String> =
+        crate::networking::collect_workload_subnets().into_iter().collect();
+
     // Build the (subnet, gateway) target set from gossip.
     let mut wanted: Vec<(String, String, String)> = Vec::new(); // (cidr, gateway, peer_name)
     for node in &nodes {
@@ -2407,6 +2417,16 @@ pub fn auto_apply_missing_workload_routes(state: &RouterState, self_node_id: &st
         };
         for sub in &node.workload_subnets {
             if parse_cidr(sub).is_none() { continue; }
+            // Skip subnets that this node also owns locally — see
+            // local_subnets comment above.
+            if local_subnets.contains(sub) {
+                tracing::debug!(
+                    "WolfRouter auto-apply: skipping {} from peer '{}' — \
+                     this node also owns the subnet locally",
+                    sub, node.hostname,
+                );
+                continue;
+            }
             wanted.push((sub.clone(), gw.clone(), node.hostname.clone()));
         }
     }
