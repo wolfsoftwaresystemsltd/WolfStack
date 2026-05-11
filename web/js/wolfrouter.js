@@ -990,7 +990,7 @@
                 <td style="color:var(--text-muted); font-size:11px;">${escHtml(r.comment || '')}</td>
                 <td>
                     <button class="btn btn-sm" title="Toggle" onclick="wrToggleRule('${r.id}')">${r.enabled ? '' : '⬜'}</button>
-                    <button class="btn btn-sm" title="Delete" onclick="wrDeleteRule('${r.id}')"></button>
+                    <button class="btn btn-sm" title="Delete" onclick="wrDeleteRule('${r.id}')"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 </td>
             </tr>`;
         }).join('');
@@ -7556,8 +7556,8 @@
                 </div>
                 <div style="display:flex; gap:6px;">
                     <button class="btn btn-sm" onclick="wrToggleProxy('${escHtml(p.id)}')" title="${disabled ? 'Enable' : 'Disable'}">${disabled ? '▶' : ''}</button>
-                    <button class="btn btn-sm" onclick="wrShowProxyEditor('${escHtml(p.id)}')" title="Edit"></button>
-                    <button class="btn btn-sm" onclick="wrDeleteProxy('${escHtml(p.id)}')" title="Delete"></button>
+                    <button class="btn btn-sm" onclick="wrShowProxyEditor('${escHtml(p.id)}')" title="Edit"><span class="ws-icon-clean-wrap" data-icon="edit"></span></button>
+                    <button class="btn btn-sm" onclick="wrDeleteProxy('${escHtml(p.id)}')" title="Delete"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 </div>
             </div>
         </div>`;
@@ -7639,7 +7639,7 @@
                         Weight
                         <input type="number" class="form-control wr-proxy-weight" data-idx="${idx}" value="${weight}" min="1" max="100" style="width:64px; padding:2px 6px; font-size:12px;" />
                     </label>
-                    <button class="btn btn-sm" type="button" onclick="wrProxyRemoveBackend(${idx})" title="Remove this backend"></button>
+                    <button class="btn btn-sm" type="button" onclick="wrProxyRemoveBackend(${idx})" title="Remove this backend"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 </div>
             </div>
             <div class="wr-proxy-picker-row" data-idx="${idx}" style="${kindIsCustom ? 'display:none;' : ''}">

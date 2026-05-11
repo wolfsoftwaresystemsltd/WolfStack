@@ -1221,11 +1221,11 @@ function openFileBrowser(opts) {
       <div style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;width:680px;max-width:95%;max-height:85vh;display:flex;flex-direction:column;color:var(--text-primary,#e4e4e7);box-shadow:0 20px 60px rgba(0,0,0,0.5);">
         <div style="padding:14px 18px;border-bottom:1px solid var(--border-color,#2d2f3a);display:flex;align-items:center;gap:10px;">
           <h3 style="margin:0;flex:1;font-size:15px;color:var(--accent-light,#60a5fa);">${escapeHtml(title)}</h3>
-          <button class="btn btn-sm" id="fb-close" title="Close"></button>
+          <button class="btn btn-sm" id="fb-close" title="Close"><span class="ws-icon-clean-wrap" data-icon="close"></span></button>
         </div>
         <div style="padding:10px 14px;border-bottom:1px solid var(--border-color,#2d2f3a);display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <button class="btn btn-sm" id="fb-up" title="Parent directory">⬆️</button>
-          <button class="btn btn-sm" id="fb-home" title="Filesystem root"></button>
+          <button class="btn btn-sm" id="fb-home" title="Filesystem root"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span></button>
           <input id="fb-path" type="text" value="${escapeAttr(start)}" spellcheck="false" autocomplete="off"
                  style="flex:1;min-width:200px;font-family:var(--font-mono,monospace);font-size:12px;padding:6px 10px;border:1px solid var(--border-color,#3f4150);border-radius:6px;background:var(--bg-input,var(--bg-tertiary,#2d2f3a));color:var(--text-primary,#e4e4e7);">
           <button class="btn btn-sm" id="fb-go" title="Go to typed path (Enter)">Go</button>
@@ -2268,7 +2268,7 @@ function tenantTile(t) {
                 </div>
                 <div style="display:flex;gap:4px;flex-shrink:0;">
                     <button class="btn btn-xs" title="Open the tenant cluster in a new tab" onclick="window.open('${escapeAttr(t.url)}', '_blank', 'noopener')">↗</button>
-                    <button class="btn btn-xs" onclick="tenantRefresh('${escapeAttr(t.id)}')"></button>
+                    <button class="btn btn-xs" onclick="tenantRefresh('${escapeAttr(t.id)}')"><span class="ws-icon-clean-wrap" data-icon="refresh"></span></button>
                     <button class="btn btn-xs btn-danger" onclick="tenantDelete('${escapeAttr(t.id)}','${escapeAttr(t.name)}')">×</button>
                 </div>
             </div>
@@ -2418,7 +2418,7 @@ async function poolsLoadList() {
                     <h3 style="margin:0;display:flex;align-items:center;gap:8px;font-size:15px;">
                         <span style="font-size:20px;"></span>WolfStack Pools (${pools.length})${inflight.length ? ` — ${inflight.length} in flight` : ''}
                     </h3>
-                    <button class="btn btn-xs" onclick="poolsLoadList()"></button>
+                    <button class="btn btn-xs" onclick="poolsLoadList()"><span class="ws-icon-clean-wrap" data-icon="close"></span></button>
                 </div>
                 <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(360px, 1fr));gap:12px;">
                     ${pools.map(poolTile).join('')}
@@ -2476,7 +2476,7 @@ function poolTile(p) {
                     <div style="font-size:11px;color:${colour};font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">● ${escapeHtml(label)}</div>
                 </div>
                 <div style="display:flex;gap:4px;flex-shrink:0;">
-                    <button class="btn btn-xs" onclick="poolsLoadList()" title="Refresh"></button>
+                    <button class="btn btn-xs" onclick="poolsLoadList()" title="Refresh"><span class="ws-icon-clean-wrap" data-icon="refresh"></span></button>
                     <button class="btn btn-xs btn-danger" onclick="poolDestroy('${escapeAttr(p.id)}','${escapeAttr(p.tenant_name)}','${escapeAttr(p.backend)}')" title="Destroy pool VMs">×</button>
                 </div>
             </div>
@@ -4404,7 +4404,7 @@ function renderProcessTable(tableId, procs, type) {
                 </div>
             </td>
             <td>
-                <button onclick="killProcess(${p.pid}, '${p.name.replace(/'/g, "\\'")}')" class="btn btn-sm" style="font-size:10px; padding:2px 8px; color:#ef4444; border-color:rgba(239,68,68,0.3);" title="Kill process"></button>
+                <button onclick="killProcess(${p.pid}, '${p.name.replace(/'/g, "\\'")}')" class="btn btn-sm" style="font-size:10px; padding:2px 8px; color:#ef4444; border-color:rgba(239,68,68,0.3);" title="Kill process"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
             </td>
         </tr>`;
     }).join('');
@@ -5412,19 +5412,19 @@ function renderVms(vms) {
                 <td>${vncText}</td>
                 <td><input type="checkbox" ${autostart} onchange="toggleVmAutostart('${vm.name}', this.checked)"></td>
                 <td><div style="display:flex; flex-wrap:wrap; gap:2px; min-width:0;">
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="showVmLogs('${vm.name}')" title="Logs"></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="showVmLogs('${vm.name}')" title="Logs"><span class="ws-icon-clean-wrap" data-icon="logs"></span></button>
                     ${vm.running ?
                 `${vm.vmid
-                    ? `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openPveVmConsole('${vm.vmid}', '${vm.name}')" title="VNC Console"></button>`
-                    : ((vm.vnc_ws_port || vm.vnc_port) ? `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port || vm.vnc_port})" title="VNC Console"></button>` : '')}
-                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openVmConsole('${vm.name}')" title="Serial terminal (guest must have serial console enabled)"></button>
-                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="vmAction('${vm.name}', 'stop', this)" title="Stop (graceful ACPI shutdown)"></button>
-                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#b91c1c;" onclick="vmForceStopConfirm('${vm.name}', this)" title="Force Stop (power off immediately)"></button>` :
-                `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="showVmSettings('${vm.name}')" title="Settings"></button>
-                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#3b82f6;" onclick="migrateVm('${vm.name}')" title="Migrate to another node"></button>
-                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#8b5cf6;" onclick="migrateVmDiskStorage('${vm.name}')" title="Move disk to different storage (same node)"></button>
+                    ? `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openPveVmConsole('${vm.vmid}', '${vm.name}')" title="VNC Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>`
+                    : ((vm.vnc_ws_port || vm.vnc_port) ? `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port || vm.vnc_port})" title="VNC Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>` : '')}
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openVmConsole('${vm.name}')" title="Serial terminal (guest must have serial console enabled)"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="vmAction('${vm.name}', 'stop', this)" title="Stop (graceful ACPI shutdown)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#b91c1c;" onclick="vmForceStopConfirm('${vm.name}', this)" title="Force Stop (power off immediately)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>` :
+                `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="showVmSettings('${vm.name}')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#3b82f6;" onclick="migrateVm('${vm.name}')" title="Migrate to another node"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#8b5cf6;" onclick="migrateVmDiskStorage('${vm.name}')" title="Move disk to different storage (same node)"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>
                          <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#22c55e;" onclick="vmAction('${vm.name}', 'start', this)" title="Start">▶️</button>
-                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="deleteVm('${vm.name}')" title="Delete"></button>`
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="deleteVm('${vm.name}')" title="Delete"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>`
             }
                 </div></td>
             </tr>${storageSubRow}
@@ -6213,11 +6213,11 @@ function renderStorageMounts(mounts) {
             <td>${statusBadge}</td>
             <td>${globalBadge}${autoBadge}</td>
             <td style="white-space:nowrap;">
-                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="openEditMount('${m.id}')" title="Settings"></button>
-                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="duplicateStorageMount('${m.id}')" title="Duplicate"></button>
+                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="openEditMount('${m.id}')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>
+                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="duplicateStorageMount('${m.id}')" title="Duplicate"><span class="ws-icon-clean-wrap" data-icon="copy"></span></button>
                 ${mountBtn}
                 ${syncBtn}
-                <button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;" onclick="deleteStorageMount('${m.id}', '${m.name}')"></button>
+                <button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;" onclick="deleteStorageMount('${m.id}', '${m.name}')"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
             </td>
         </tr>`;
     }).join('');
@@ -6964,9 +6964,9 @@ function renderFilteredFileList(entries, isSearch) {
             <td style="font-family:var(--font-mono);font-size:13px;cursor:pointer;color:var(--accent);" onclick="changePermissions('${e.path.replace(/'/g, "\\'")}')" title="Click to change permissions">${escapeHtml(e.permissions)}</td>
             <td style="white-space:nowrap;">
                 ${!e.is_dir ? `<button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="downloadFile('${e.path.replace(/'/g, "\\'")}')">⬇️</button>` : ''}
-                ${!e.is_dir && e.size < 2097152 ? `<button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="editFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')"></button>` : ''}
-                <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="renameFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')"></button>
-                <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);" onclick="deleteFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')"></button>
+                ${!e.is_dir && e.size < 2097152 ? `<button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="editFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')"><span class="ws-icon-clean-wrap" data-icon="edit"></span></button>` : ''}
+                <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="renameFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')"><span class="ws-icon-clean-wrap" data-icon="edit"></span></button>
+                <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);" onclick="deleteFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
             </td>
         </tr>`;
     }).join('');
@@ -8192,7 +8192,7 @@ function addVmDiskRow() {
             <div style="display:flex; align-items:center; gap:8px;">
                 <span style="font-weight:600; font-size:13px; color:var(--text-primary);">Disk ${id}</span>
             </div>
-            <button class="btn btn-sm btn-danger" onclick="removeVmDiskRow(${id})" style="font-size:11px; padding:2px 8px;"></button>
+            <button class="btn btn-sm btn-danger" onclick="removeVmDiskRow(${id})" style="font-size:11px; padding:2px 8px;"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:6px;">
             <div>
@@ -8490,7 +8490,7 @@ function addExtraNicRow(containerId, nic) {
         </div>
         <span style="font-size:10px; color:var(--text-muted); white-space:nowrap;">net${idx + 1}</span>
         <button type="button" class="btn btn-sm" onclick="this.closest('.vm-extra-nic-row').remove()"
-            style="font-size:10px; padding:2px 6px; color:var(--danger); border-color:rgba(239,68,68,0.3);"></button>
+            style="font-size:10px; padding:2px 6px; color:var(--danger); border-color:rgba(239,68,68,0.3);"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
     `;
     container.appendChild(row);
 
@@ -8938,7 +8938,7 @@ async function loadCronJobs() {
                 '<td style="padding:10px 12px;color:var(--text-muted);font-size:12px;">' + escapeHtml(e.comment || '—') + '</td>' +
                 '<td style="padding:10px 12px;text-align:right;white-space:nowrap;">' +
                 '<button class="btn btn-sm" onclick="toggleCronJob(' + e.index + ', ' + e.enabled + ', \'' + escapeHtml(e.schedule).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.command).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.comment).replace(/'/g, "\\'") + '\')" title="' + (e.enabled ? 'Disable' : 'Enable') + '" style="margin-right:4px;">' + (e.enabled ? '' : '▶️') + '</button>' +
-                '<button class="btn btn-sm" onclick="deleteCronJob(' + e.index + ')" title="Delete" style="color:var(--danger,#ef4444);"></button>' +
+                '<button class="btn btn-sm" onclick="deleteCronJob(' + e.index + ')" title="Delete" style="color:var(--danger,#ef4444);"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>' +
                 '</td></tr>';
         });
         html += '</tbody></table></div>';
@@ -13057,13 +13057,13 @@ function renderNetInterfaces(interfaces) {
 
         // Actions
         const toggleBtn = iface.state === 'up'
-            ? `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--danger); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="toggleInterface('${iface.name}', false)" title="Bring down"></button>`
+            ? `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--danger); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="toggleInterface('${iface.name}', false)" title="Bring down"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>`
             : `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--success); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="toggleInterface('${iface.name}', true)" title="Bring up">▶️</button>`;
 
-        const addIpBtn = `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="showAddIpModal('${iface.name}')" title="Add IP"></button>`;
+        const addIpBtn = `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="showAddIpModal('${iface.name}')" title="Add IP"><span class="ws-icon-clean-wrap" data-icon="add"></span></button>`;
 
         const vlanDeleteBtn = iface.is_vlan
-            ? `<button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;" onclick="deleteVlan('${iface.name}')" title="Delete VLAN"></button>`
+            ? `<button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;" onclick="deleteVlan('${iface.name}')" title="Delete VLAN"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>`
             : '';
 
         return `<tr>
@@ -13150,7 +13150,7 @@ function renderDnsConfig(dns) {
         ? dns.nameservers.map((s, i) => `
             <div style="display:flex; align-items:center; gap:8px; font-family:var(--font-mono); font-size:13px; padding:4px 0;">
                 <span>${s}</span>
-                ${dns.editable ? `<button onclick="removeDnsNameserver(${i})" title="Remove" style="background:none; border:none; color:var(--danger); cursor:pointer; font-size:14px; padding:0 4px;"></button>` : ''}
+                ${dns.editable ? `<button onclick="removeDnsNameserver(${i})" title="Remove" style="background:none; border:none; color:var(--danger); cursor:pointer; font-size:14px; padding:0 4px;"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>` : ''}
             </div>`).join('')
         : '<span style="color:var(--text-muted);">No nameservers configured</span>';
 
@@ -13158,7 +13158,7 @@ function renderDnsConfig(dns) {
         ? dns.search_domains.map((d, i) => `
             <span class="badge" style="background:var(--bg-tertiary); color:var(--text-primary); font-size:11px; margin-right:4px; display:inline-flex; align-items:center; gap:4px;">
                 ${d}
-                ${dns.editable ? `<button onclick="removeDnsSearchDomain(${i})" style="background:none; border:none; color:var(--danger); cursor:pointer; font-size:12px; padding:0; line-height:1;"></button>` : ''}
+                ${dns.editable ? `<button onclick="removeDnsSearchDomain(${i})" style="background:none; border:none; color:var(--danger); cursor:pointer; font-size:12px; padding:0; line-height:1;"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>` : ''}
             </span>`).join('')
         : '<span style="color:var(--text-muted);">None</span>';
 
@@ -13418,7 +13418,7 @@ function renderIpMappings(mappings) {
             <td style="font-family:var(--font-mono);">${destPorts}</td>
             <td>${protoLabel}</td>
             <td>${statusBadge}</td>
-            <td><button class="btn btn-sm btn-danger" style="font-size:10px; padding:1px 6px;" onclick="removeIpMapping('${m.id}', '${m.public_ip}', '${m.wolfnet_ip}')" title="Remove"></button></td>
+            <td><button class="btn btn-sm btn-danger" style="font-size:10px; padding:1px 6px;" onclick="removeIpMapping('${m.id}', '${m.public_ip}', '${m.wolfnet_ip}')" title="Remove"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button></td>
         </tr>`;
     }
 
@@ -13717,7 +13717,7 @@ async function wgLoadBridgeDetails(cluster) {
                 <td>${c.created_at ? c.created_at.substring(0, 10) : ''}</td>
                 <td>
                     <button class="btn btn-sm" style="font-size:10px; padding:1px 6px;" onclick="wgDownloadConfig('${cluster}', '${c.id}', '${c.name}')" title="Download .conf">⬇️</button>
-                    <button class="btn btn-sm btn-danger" style="font-size:10px; padding:1px 6px;" onclick="wgRemoveClient('${cluster}', '${c.id}', '${c.name}')" title="Remove"></button>
+                    <button class="btn btn-sm btn-danger" style="font-size:10px; padding:1px 6px;" onclick="wgRemoveClient('${cluster}', '${c.id}', '${c.name}')" title="Remove"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 </td>
             </tr>`).join('');
 
@@ -14051,7 +14051,7 @@ function renderWolfNetPage(wn, config, localInfo, fullStatus) {
                     <td>${traffic}</td>
                     <td>
                         <div style="display:flex; gap:4px;">
-                            <button class="btn btn-sm btn-danger" onclick="removeWolfNetPeer('${escapeHtml(p.name)}')" style="font-size:11px; padding:3px 8px;" title="Remove peer"></button>
+                            <button class="btn btn-sm btn-danger" onclick="removeWolfNetPeer('${escapeHtml(p.name)}')" style="font-size:11px; padding:3px 8px;" title="Remove peer"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                         </div>
                     </td>
                 </tr>
@@ -14552,8 +14552,8 @@ function dockerCardHtml(c) {
 
     return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid ${borderColor};border-radius:10px;overflow:hidden;">
         <div style="display:flex;flex-wrap:wrap;padding:6px 8px;background:var(--bg-secondary);border-bottom:1px solid var(--border);gap:1px;">
-            ${isRunning ? `<button class="btn btn-sm" style="${bd}" disabled>▶️</button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','stop',this)" title="Stop"></button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','restart',this)" title="Restart"></button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','pause',this)" title="Pause"></button><button class="btn btn-sm" style="${bs}" onclick="openConsole('docker','${c.name}')" title="Console"></button>${_containerVncBtnHtml('docker', c.name, c.name, bs, true)}` : isPaused ? `<button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','unpause',this)">▶️</button>` : `<button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','start',this)">▶️</button><button class="btn btn-sm" style="${bd}" disabled></button><button class="btn btn-sm" style="${bd}" disabled></button>`}
-            <button class="btn btn-sm" style="${bs}" onclick="viewContainerLogs('docker','${c.name}')" title="Logs"></button><button class="btn btn-sm" style="${bs}" onclick="viewDockerVolumes('${c.name}')" title="Volumes"></button><button class="btn btn-sm" style="${bs}" onclick="browseContainerFiles('docker','${c.name}')" title="Files"></button><button class="btn btn-sm" style="${bs}" onclick="openDockerSettings('${c.name}')" title="Settings"></button><button class="btn btn-sm" style="${bs}" onclick="openContainerConfigurator('docker','${c.name}')" title="Configure"></button><button class="btn btn-sm" style="${bs}" onclick="openContainerUpdates('docker','${c.name}')" title="Updates"></button><button class="btn btn-sm" style="${bs}" onclick="openContainerCron('docker','${c.name}')" title="Cron"></button><button class="btn btn-sm" style="${bs}" onclick="cloneDockerContainer('${c.name}')" title="Clone"></button><button class="btn btn-sm" style="${bs}" onclick="migrateDockerContainer('${c.name}')" title="Migrate"></button>${!isRunning ? `<button class="btn btn-sm" style="${bs}color:#ef4444;" onclick="dockerAction('${c.name}','remove',this)" title="Remove"></button>` : ''}
+            ${isRunning ? `<button class="btn btn-sm" style="${bd}" disabled>▶️</button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','stop',this)" title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','restart',this)" title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','pause',this)" title="Pause"><span class="ws-icon-clean-wrap" data-icon="pause"></span></button><button class="btn btn-sm" style="${bs}" onclick="openConsole('docker','${c.name}')" title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>${_containerVncBtnHtml('docker', c.name, c.name, bs, true)}` : isPaused ? `<button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','unpause',this)">▶️</button>` : `<button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','start',this)">▶️</button><button class="btn btn-sm" style="${bd}" disabled></button><button class="btn btn-sm" style="${bd}" disabled></button>`}
+            <button class="btn btn-sm" style="${bs}" onclick="viewContainerLogs('docker','${c.name}')" title="Logs"><span class="ws-icon-clean-wrap" data-icon="logs"></span></button><button class="btn btn-sm" style="${bs}" onclick="viewDockerVolumes('${c.name}')" title="Volumes"><span class="ws-icon-clean-wrap" data-icon="database"></span></button><button class="btn btn-sm" style="${bs}" onclick="browseContainerFiles('docker','${c.name}')" title="Files"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span></button><button class="btn btn-sm" style="${bs}" onclick="openDockerSettings('${c.name}')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button><button class="btn btn-sm" style="${bs}" onclick="openContainerConfigurator('docker','${c.name}')" title="Configure"><span class="ws-icon-clean-wrap" data-icon="configure"></span></button><button class="btn btn-sm" style="${bs}" onclick="openContainerUpdates('docker','${c.name}')" title="Updates"><span class="ws-icon-clean-wrap" data-icon="updates"></span></button><button class="btn btn-sm" style="${bs}" onclick="openContainerCron('docker','${c.name}')" title="Cron"><span class="ws-icon-clean-wrap" data-icon="calendar"></span></button><button class="btn btn-sm" style="${bs}" onclick="cloneDockerContainer('${c.name}')" title="Clone"><span class="ws-icon-clean-wrap" data-icon="copy"></span></button><button class="btn btn-sm" style="${bs}" onclick="migrateDockerContainer('${c.name}')" title="Migrate"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>${!isRunning ? `<button class="btn btn-sm" style="${bs}color:#ef4444;" onclick="dockerAction('${c.name}','remove',this)" title="Remove"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>` : ''}
         </div>
         ${pies.length > 0 ? `<div style="display:flex;justify-content:space-evenly;padding:12px 8px;border-bottom:1px solid var(--border);">${pies.join('')}</div>` : ''}
         <div style="padding:10px 12px;">
@@ -14612,23 +14612,23 @@ function lxcCardHtml(c, s) {
         return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid ${borderColor};border-radius:10px;overflow:hidden;">
             <div style="display:flex;flex-wrap:wrap;padding:6px 8px;background:var(--bg-secondary);border-bottom:1px solid var(--border);gap:1px;">
                 <button class="btn btn-sm" style="${isRunning ? bd : bs}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}','start',this)"` : ''} title="Start">▶️</button>
-                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','stop',this)"` : ''} title="Stop"></button>
-                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','restart',this)"` : ''} title="Restart"></button>
-                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','freeze',this)"` : ''} title="Freeze"></button>
-                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}','${c.hostname || c.name}')"` : ''} title="Console"></button>
+                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','stop',this)"` : ''} title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
+                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','restart',this)"` : ''} title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>
+                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','freeze',this)"` : ''} title="Freeze"><span class="ws-icon-clean-wrap" data-icon="snowflake"></span></button>
+                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}','${c.hostname || c.name}')"` : ''} title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>
                 ${_containerVncBtnHtml('lxc', c.name, c.hostname || c.name, bs, isRunning)}
-                <button class="btn btn-sm" style="${isRunning ? bd : bs}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}','destroy',this)"` : ''} title="Destroy"></button>
-                <button class="btn btn-sm" style="${bs}" onclick="viewContainerLogs('lxc','${c.name}')" title="Logs"></button>
-                <button class="btn btn-sm" style="${bs}" onclick="browseContainerFiles('lxc','${c.name}','${(c.storage_path||'').replace(/'/g,"\\'")}')" title="Files"></button>
-                <button class="btn btn-sm" style="${bs}" onclick="editContainerConfigFile('lxc','${c.name}')" title="Edit Config File"></button>
-                <button class="btn btn-sm" style="${bs}" onclick="openLxcSettings('${c.name}')" title="Settings"></button>
-                <button class="btn btn-sm" style="${bs}" onclick="openContainerConfigurator('lxc','${c.name}')" title="Configure"></button>
-                <button class="btn btn-sm" style="${bs}" onclick="openContainerUpdates('lxc','${c.name}')" title="Updates"></button>
-                <button class="btn btn-sm" style="${bs}" onclick="openContainerCron('lxc','${c.name}')" title="Cron"></button>
-                <button class="btn btn-sm" style="${bs}" onclick="cloneLxcContainer('${c.name}')" title="Clone"></button>
-                <button class="btn btn-sm" style="${bs}" onclick="migrateLxcContainer('${c.name}')" title="Migrate"></button>
-                <button class="btn btn-sm" style="${bs}" onclick="openLxcStorage('${escapeHtml(c.name)}')" title="Storage (resize / move)"></button>
-                <button class="btn btn-sm" style="${bs}" onclick="exportLxcContainer('${c.name}')" title="Export"></button>
+                <button class="btn btn-sm" style="${isRunning ? bd : bs}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}','destroy',this)"` : ''} title="Destroy"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
+                <button class="btn btn-sm" style="${bs}" onclick="viewContainerLogs('lxc','${c.name}')" title="Logs"><span class="ws-icon-clean-wrap" data-icon="logs"></span></button>
+                <button class="btn btn-sm" style="${bs}" onclick="browseContainerFiles('lxc','${c.name}','${(c.storage_path||'').replace(/'/g,"\\'")}')" title="Files"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span></button>
+                <button class="btn btn-sm" style="${bs}" onclick="editContainerConfigFile('lxc','${c.name}')" title="Edit Config File"><span class="ws-icon-clean-wrap" data-icon="file-code"></span></button>
+                <button class="btn btn-sm" style="${bs}" onclick="openLxcSettings('${c.name}')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>
+                <button class="btn btn-sm" style="${bs}" onclick="openContainerConfigurator('lxc','${c.name}')" title="Configure"><span class="ws-icon-clean-wrap" data-icon="configure"></span></button>
+                <button class="btn btn-sm" style="${bs}" onclick="openContainerUpdates('lxc','${c.name}')" title="Updates"><span class="ws-icon-clean-wrap" data-icon="updates"></span></button>
+                <button class="btn btn-sm" style="${bs}" onclick="openContainerCron('lxc','${c.name}')" title="Cron"><span class="ws-icon-clean-wrap" data-icon="calendar"></span></button>
+                <button class="btn btn-sm" style="${bs}" onclick="cloneLxcContainer('${c.name}')" title="Clone"><span class="ws-icon-clean-wrap" data-icon="copy"></span></button>
+                <button class="btn btn-sm" style="${bs}" onclick="migrateLxcContainer('${c.name}')" title="Migrate"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>
+                <button class="btn btn-sm" style="${bs}" onclick="openLxcStorage('${escapeHtml(c.name)}')" title="Storage (resize / move)"><span class="ws-icon-clean-wrap" data-icon="hard-drive"></span></button>
+                <button class="btn btn-sm" style="${bs}" onclick="exportLxcContainer('${c.name}')" title="Export"><span class="ws-icon-clean-wrap" data-icon="export"></span></button>
             </div>
             ${pies.length > 0 ? `<div style="display:flex;justify-content:space-evenly;padding:12px 8px;border-bottom:1px solid var(--border);">${pies.join('')}</div>` : ''}
             <div style="padding:10px 12px;">
@@ -14675,15 +14675,15 @@ function vmCardHtml(vm) {
     return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid ${borderColor};border-radius:10px;overflow:hidden;">
         <div style="display:flex;flex-wrap:wrap;padding:6px 8px;background:var(--bg-secondary);border-bottom:1px solid var(--border);gap:1px;">
             <button class="btn btn-sm" style="${isRunning ? bd : bs}" ${isRunning ? 'disabled' : `onclick="vmAction('${vm.name}','start',this)"`} title="Start">▶️</button>
-            <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : `onclick="vmAction('${vm.name}','stop',this)"`} title="Stop (graceful ACPI shutdown)"></button>
-            <button class="btn btn-sm" style="${!isRunning ? bd : bs}color:#b91c1c;" ${!isRunning ? 'disabled' : `onclick="vmForceStopConfirm('${vm.name}', this)"`} title="Force Stop (power off immediately)"></button>
-            ${vncLink ? `<button class="btn btn-sm" style="${bs}" onclick="window.open('${vncLink}')" title="VNC"></button>` : ''}
-            <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : `onclick="openVmConsole('${vm.name}')"`} title="Serial terminal (guest must have serial console enabled)"></button>
-            <button class="btn btn-sm" style="${bs}" onclick="showVmSettings('${vm.name}')" title="Settings"></button>
-            <button class="btn btn-sm" style="${bs}" onclick="showVmLogs('${vm.name}')" title="Logs"></button>
-            <button class="btn btn-sm" style="${bs}" onclick="migrateVm('${vm.name}')" title="Migrate to another node"></button>
-            <button class="btn btn-sm" style="${bs}" onclick="migrateVmDiskStorage('${vm.name}')" title="Move disk to different storage (same node)"></button>
-            ${!isRunning ? `<button class="btn btn-sm" style="${bs}color:#ef4444;" onclick="deleteVm('${vm.name}')" title="Delete"></button>` : ''}
+            <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : `onclick="vmAction('${vm.name}','stop',this)"`} title="Stop (graceful ACPI shutdown)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
+            <button class="btn btn-sm" style="${!isRunning ? bd : bs}color:#b91c1c;" ${!isRunning ? 'disabled' : `onclick="vmForceStopConfirm('${vm.name}', this)"`} title="Force Stop (power off immediately)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
+            ${vncLink ? `<button class="btn btn-sm" style="${bs}" onclick="window.open('${vncLink}')" title="VNC"><span class="ws-icon-clean-wrap" data-icon="monitor"></span></button>` : ''}
+            <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : `onclick="openVmConsole('${vm.name}')"`} title="Serial terminal (guest must have serial console enabled)"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>
+            <button class="btn btn-sm" style="${bs}" onclick="showVmSettings('${vm.name}')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>
+            <button class="btn btn-sm" style="${bs}" onclick="showVmLogs('${vm.name}')" title="Logs"><span class="ws-icon-clean-wrap" data-icon="logs"></span></button>
+            <button class="btn btn-sm" style="${bs}" onclick="migrateVm('${vm.name}')" title="Migrate to another node"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>
+            <button class="btn btn-sm" style="${bs}" onclick="migrateVmDiskStorage('${vm.name}')" title="Move disk to different storage (same node)"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>
+            ${!isRunning ? `<button class="btn btn-sm" style="${bs}color:#ef4444;" onclick="deleteVm('${vm.name}')" title="Delete"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>` : ''}
         </div>
         <div style="padding:10px 12px;">
             <div style="display:flex;justify-content:space-between;align-items:start;">
@@ -14785,32 +14785,32 @@ function renderDockerContainers(containers) {
             <td><div style="display:flex; flex-wrap:wrap; gap:2px; min-width:0;">
                 ${isRunning ? `
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Start">▶️</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'stop', this)" title="Stop"></button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'restart', this)" title="Restart"></button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'pause', this)" title="Pause"></button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openConsole('docker', '${c.name}')" title="Console"></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'stop', this)" title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'restart', this)" title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'pause', this)" title="Pause"><span class="ws-icon-clean-wrap" data-icon="pause"></span></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openConsole('docker', '${c.name}')" title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>
                     ${_containerVncBtnHtml('docker', c.name, c.name, 'margin:2px;font-size:20px;line-height:1;padding:4px 6px;', true)}
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Remove"></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Remove"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 ` : isPaused ? `
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'unpause', this)" title="Unpause">▶️</button>
                 ` : `
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'start', this)" title="Start">▶️</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Stop"></button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Restart"></button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Freeze"></button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Console"></button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="dockerAction('${c.name}', 'remove', this)" title="Remove"></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Freeze"><span class="ws-icon-clean-wrap" data-icon="snowflake"></span></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="dockerAction('${c.name}', 'remove', this)" title="Remove"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 `}
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs"></button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewDockerVolumes('${c.name}')" title="Volumes"></button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="browseContainerFiles('docker', '${c.name}')" title="Browse Files"></button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="editContainerConfigFile('docker', '${c.name}')" title="Edit Config File"></button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openDockerSettings('${c.name}')" title="Settings"></button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerConfigurator('docker', '${c.name}')" title="Configure"></button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerUpdates('docker', '${c.name}')" title="Check Updates"></button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerCron('docker', '${c.name}')" title="Cron Jobs"></button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="cloneDockerContainer('${c.name}')" title="Clone"></button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate"></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs"><span class="ws-icon-clean-wrap" data-icon="logs"></span></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewDockerVolumes('${c.name}')" title="Volumes"><span class="ws-icon-clean-wrap" data-icon="database"></span></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="browseContainerFiles('docker', '${c.name}')" title="Browse Files"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="editContainerConfigFile('docker', '${c.name}')" title="Edit Config File"><span class="ws-icon-clean-wrap" data-icon="file-code"></span></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openDockerSettings('${c.name}')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerConfigurator('docker', '${c.name}')" title="Configure"><span class="ws-icon-clean-wrap" data-icon="configure"></span></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerUpdates('docker', '${c.name}')" title="Check Updates"><span class="ws-icon-clean-wrap" data-icon="updates"></span></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerCron('docker', '${c.name}')" title="Cron Jobs"><span class="ws-icon-clean-wrap" data-icon="calendar"></span></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="cloneDockerContainer('${c.name}')" title="Clone"><span class="ws-icon-clean-wrap" data-icon="copy"></span></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>
             </div></td>
         </tr>${statsSubRow}`;
     }).join('');
@@ -15587,24 +15587,24 @@ function renderLxcContainers(containers, stats) {
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}${c.gateway ? '<div style="font-size:10px;color:var(--text-muted);">GW: ' + escapeHtml(c.gateway) + '</div>' : ''}${c.mac_address ? '<div style="font-size:10px;color:var(--text-muted);">MAC: ' + escapeHtml(c.mac_address) + '</div>' : ''}</td>
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleLxcAutostart('${c.name}', this.checked)"></td>
             <td><div style="display:flex; flex-wrap:wrap; gap:2px; min-width:0;">
-                <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'start', this)"` : ''} title="Start">▶️</button>
-                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'stop', this)"` : ''} title="Stop"></button>
-                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'restart', this)"` : ''} title="Restart"></button>
-                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'freeze', this)"` : ''} title="Freeze"></button>
-                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}', '${c.hostname || c.name}')"` : ''} title="Console"></button>
+                <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'start', this)"` : ''} title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'stop', this)"` : ''} title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'restart', this)"` : ''} title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'freeze', this)"` : ''} title="Freeze"><span class="ws-icon-clean-wrap" data-icon="snowflake"></span></button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}', '${c.hostname || c.name}')"` : ''} title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>
                 ${_containerVncBtnHtml('lxc', c.name, c.hostname || c.name, btnStyle, isRunning)}
-                <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'destroy', this)"` : ''} title="Destroy"></button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs"></button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="browseContainerFiles('lxc', '${c.name}', '${(c.storage_path || '').replace(/'/g, "\\'")}')" title="Browse Files"></button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="editContainerConfigFile('lxc', '${c.name}')" title="Edit Config File"></button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcSettings('${c.name}')" title="Settings"></button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerConfigurator('lxc', '${c.name}')" title="Configure"></button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerUpdates('lxc', '${c.name}')" title="Check Updates"></button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerCron('lxc', '${c.name}')" title="Cron Jobs"></button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="cloneLxcContainer('${c.name}')" title="Clone"></button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="migrateLxcContainer('${c.name}')" title="Migrate"></button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcStorage('${escapeHtml(c.name)}')" title="Storage (resize / move)"></button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="exportLxcContainer('${c.name}')" title="Export"></button>
+                <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'destroy', this)"` : ''} title="Destroy"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs"><span class="ws-icon-clean-wrap" data-icon="logs"></span></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="browseContainerFiles('lxc', '${c.name}', '${(c.storage_path || '').replace(/'/g, "\\'")}')" title="Browse Files"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="editContainerConfigFile('lxc', '${c.name}')" title="Edit Config File"><span class="ws-icon-clean-wrap" data-icon="file-code"></span></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcSettings('${c.name}')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerConfigurator('lxc', '${c.name}')" title="Configure"><span class="ws-icon-clean-wrap" data-icon="configure"></span></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerUpdates('lxc', '${c.name}')" title="Check Updates"><span class="ws-icon-clean-wrap" data-icon="updates"></span></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerCron('lxc', '${c.name}')" title="Cron Jobs"><span class="ws-icon-clean-wrap" data-icon="calendar"></span></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="cloneLxcContainer('${c.name}')" title="Clone"><span class="ws-icon-clean-wrap" data-icon="copy"></span></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="migrateLxcContainer('${c.name}')" title="Migrate"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcStorage('${escapeHtml(c.name)}')" title="Storage (resize / move)"><span class="ws-icon-clean-wrap" data-icon="hard-drive"></span></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="exportLxcContainer('${c.name}')" title="Export"><span class="ws-icon-clean-wrap" data-icon="export"></span></button>
             </div></td>
         </tr>${statsSubRow}`;
     }).join('');
@@ -15848,7 +15848,7 @@ async function openContainerCron(runtime, container) {
                     '<td style="padding:8px 10px;color:var(--text-muted);font-size:11px;">' + escapeHtml(e.comment || '—') + '</td>' +
                     '<td style="padding:8px 10px;text-align:right;white-space:nowrap;">' +
                     '<button class="btn btn-sm" onclick="toggleContainerCronJob(' + e.index + ', ' + e.enabled + ', \'' + escapeHtml(e.schedule).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.command).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.comment).replace(/'/g, "\\'") + '\')" title="' + (e.enabled ? 'Disable' : 'Enable') + '" style="font-size:14px;">' + (e.enabled ? '' : '▶️') + '</button> ' +
-                    '<button class="btn btn-sm" onclick="deleteContainerCronJob(' + e.index + ')" title="Delete" style="color:var(--danger);font-size:14px;"></button>' +
+                    '<button class="btn btn-sm" onclick="deleteContainerCronJob(' + e.index + ')" title="Delete" style="color:var(--danger);font-size:14px;"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>' +
                     '</td></tr>';
             });
             html += '</tbody></table>';
@@ -16095,7 +16095,7 @@ function addLxcNic() {
             <div class="lxc-nic-editor" id="lxc-nic-editor-${newIdx}" style="display:none;padding:14px;border-top:1px solid var(--border);background:var(--bg-primary);">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
                     <h4 style="margin:0;font-size:14px;">Edit net${newIdx} — eth${newIdx}</h4>
-                    <button class="btn btn-sm" onclick="closeNicEditor()" style="font-size:16px;padding:2px 8px;line-height:1;" title="Close"></button>
+                    <button class="btn btn-sm" onclick="closeNicEditor()" style="font-size:16px;padding:2px 8px;line-height:1;" title="Close"><span class="ws-icon-clean-wrap" data-icon="close"></span></button>
                 </div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
                     <div class="form-group" style="margin:0;">
@@ -16114,7 +16114,7 @@ function addLxcNic() {
                         <label style="font-size:11px;">MAC Address</label>
                         <div style="display:flex;gap:4px;">
                             <input type="text" class="form-control lxc-nic-field" data-nic="${newIdx}" data-field="hwaddr" value="" placeholder="AA:BB:CC:DD:EE:FF" style="flex:1;">
-                            <button class="btn btn-sm" onclick="generateMacFor(${newIdx})" title="Generate MAC" style="padding:4px 6px;font-size:10px;"></button>
+                            <button class="btn btn-sm" onclick="generateMacFor(${newIdx})" title="Generate MAC" style="padding:4px 6px;font-size:10px;"><span class="ws-icon-clean-wrap" data-icon="add"></span></button>
                         </div>
                     </div>
                     <div class="form-group" style="margin:0;">
@@ -16220,7 +16220,7 @@ async function openLxcSettings(name) {
                 <code style="flex:1;font-size:12px;color:var(--text-primary);">${escapeHtml(m.container_path)}</code>
                 ${m.read_only ? '<span class="badge" style="font-size:10px;">RO</span>' : ''}
                 <button class="btn btn-sm" style="font-size:11px;padding:2px 6px;color:var(--danger);"
-                    onclick="removeLxcMount('${name}','${m.host_path.replace(/'/g, "\\'")}')" title="Remove"></button>
+                    onclick="removeLxcMount('${name}','${m.host_path.replace(/'/g, "\\'")}')" title="Remove"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
             </div>
         `).join('') : '<div style="color:var(--text-muted);font-size:12px;padding:8px;">No bind mounts configured</div>';
 
@@ -16327,7 +16327,7 @@ async function openLxcSettings(name) {
                         <div class="lxc-nic-editor" id="lxc-nic-editor-${nic.index}" style="display:none;padding:14px;border-top:1px solid var(--border);background:var(--bg-primary);">
                             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
                                 <h4 style="margin:0;font-size:14px;">Edit net${nic.index} — ${escapeHtml(nic.name || 'eth' + nic.index)}</h4>
-                                <button class="btn btn-sm" onclick="closeNicEditor()" style="font-size:16px;padding:2px 8px;line-height:1;" title="Close"></button>
+                                <button class="btn btn-sm" onclick="closeNicEditor()" style="font-size:16px;padding:2px 8px;line-height:1;" title="Close"><span class="ws-icon-clean-wrap" data-icon="close"></span></button>
                             </div>
                             <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
                                 <div class="form-group" style="margin:0;">
@@ -16346,7 +16346,7 @@ async function openLxcSettings(name) {
                                     <label style="font-size:11px;">MAC Address</label>
                                     <div style="display:flex;gap:4px;">
                                         <input type="text" class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="hwaddr" value="${escapeHtml(nic.hwaddr)}" placeholder="AA:BB:CC:DD:EE:FF" style="flex:1;">
-                                        <button class="btn btn-sm" onclick="generateMacFor(${nic.index})" title="Generate MAC" style="padding:4px 6px;font-size:10px;"></button>
+                                        <button class="btn btn-sm" onclick="generateMacFor(${nic.index})" title="Generate MAC" style="padding:4px 6px;font-size:10px;"><span class="ws-icon-clean-wrap" data-icon="refresh"></span></button>
                                     </div>
                                 </div>
                                 <div class="form-group" style="margin:0;">
@@ -18352,7 +18352,7 @@ function addDockerPortRow(containerId, hostPort, containerPort, protocol) {
             <option value="udp" ${protocol === 'udp' ? 'selected' : ''}>UDP</option>
             <option value="both" ${protocol === 'both' ? 'selected' : ''}>Both</option>
         </select>
-        <button type="button" onclick="this.parentElement.remove()" class="btn btn-sm" style="padding:4px 8px; font-size:11px; color:var(--danger);" title="Remove"></button>
+        <button type="button" onclick="this.parentElement.remove()" class="btn btn-sm" style="padding:4px 8px; font-size:11px; color:var(--danger);" title="Remove"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
     `;
     list.appendChild(row);
 }
@@ -18499,7 +18499,7 @@ async function addDockerVolumeRow() {
         <label style="display:flex; align-items:center; gap:3px; font-size:11px; color:var(--text-muted); white-space:nowrap; cursor:pointer;">
             <input class="docker-vol-ro" type="checkbox" style="margin:0;"> RO
         </label>
-        <button class="btn btn-sm" onclick="removeDockerVolumeRow(this)" style="font-size:11px; padding:4px 8px; color:var(--danger);"></button>
+        <button class="btn btn-sm" onclick="removeDockerVolumeRow(this)" style="font-size:11px; padding:4px 8px; color:var(--danger);"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
     `;
     list.appendChild(row);
 }
@@ -18549,7 +18549,7 @@ async function addLxcMountRow() {
         <label style="display:flex; align-items:center; gap:3px; font-size:11px; color:var(--text-muted); white-space:nowrap; cursor:pointer;">
             <input class="lxc-mount-ro" type="checkbox" style="margin:0;"> RO
         </label>
-        <button class="btn btn-sm" onclick="removeLxcMountRow(this)" style="font-size:11px; padding:4px 8px; color:var(--danger);"></button>
+        <button class="btn btn-sm" onclick="removeLxcMountRow(this)" style="font-size:11px; padding:4px 8px; color:var(--danger);"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
     `;
     list.appendChild(row);
 }
@@ -19609,7 +19609,7 @@ function _containerVncBtnHtml(uiRuntime, name, displayName, style, isRunning) {
     const colour = installed ? 'color:#10b981;' : 'color:var(--text-muted);';
     const safeDn = String(displayName || name).replace(/'/g, "\\'");
     const title = installed ? 'VNC desktop' : 'Install VNC desktop';
-    return `<button class="btn btn-sm" style="${style}${colour}" onclick="openContainerVnc('${uiRuntime}','${name}','${safeDn}')" title="${title}"></button>`;
+    return `<button class="btn btn-sm" style="${style}${colour}" onclick="openContainerVnc('${uiRuntime}','${name}','${safeDn}')" title="${title}"><span class="ws-icon-clean-wrap" data-icon="monitor"></span></button>`;
 }
 
 async function openContainerVnc(uiRuntime, name, displayName) {
@@ -19929,9 +19929,9 @@ async function showVmSettings(name) {
                     </div>
                     <div style="display:flex; gap:4px;">
                         <button class="btn btn-sm" onclick="resizeVmVolume('${name}', '${vol.name}', ${vol.size_gb})" 
-                            style="font-size:11px; padding:2px 8px;" title="Resize"></button>
+                            style="font-size:11px; padding:2px 8px;" title="Resize"><span class="ws-icon-clean-wrap" data-icon="hard-drive"></span></button>
                         <button class="btn btn-sm btn-danger" onclick="removeVmVolume('${name}', '${vol.name}')" 
-                            style="font-size:11px; padding:2px 8px;" title="Delete"></button>
+                            style="font-size:11px; padding:2px 8px;" title="Delete"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                     </div>
                 </div>
             `).join('');
@@ -20921,7 +20921,7 @@ function renderBackupHistory(backups) {
             <td>${statusBadge}</td>
             <td style="text-align:right; white-space:nowrap;">
                 ${b.status === 'completed' ? `<button class="btn btn-sm btn-primary" onclick="restoreBackup('${b.id}')" style="margin-right:4px;">Restore</button>` : ''}
-                <button class="btn btn-sm" onclick="deleteBackup('${b.id}')" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"></button>
+                <button class="btn btn-sm" onclick="deleteBackup('${b.id}')" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
             </td>
         </tr>`;
     }).join('');
@@ -20956,7 +20956,7 @@ function renderSchedules(schedules) {
             <td>${retention}</td>
             <td>${enabled}</td>
             <td style="text-align:right;">
-                <button class="btn btn-sm" onclick="deleteSchedule('${s.id}')" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"></button>
+                <button class="btn btn-sm" onclick="deleteSchedule('${s.id}')" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
             </td>
         </tr>`;
     }).join('');
@@ -23571,7 +23571,7 @@ async function mysqlLoadDatabases() {
                         <span style="font-size:14px;">${isSystem ? '' : ''}</span>
                         <span style="color:var(--text-primary); font-size:12px; ${isSystem ? 'opacity:0.6;' : ''}">${db}</span>
                     </span>
-                    <button onclick="event.stopPropagation(); mysqlDumpDatabase('${db}')" style="background:none; border:none; cursor:pointer; font-size:12px; opacity:0.5; padding:2px 4px;" title="Dump SQL" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'"></button>
+                    <button onclick="event.stopPropagation(); mysqlDumpDatabase('${db}')" style="background:none; border:none; cursor:pointer; font-size:12px; opacity:0.5; padding:2px 4px;" title="Dump SQL" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
                 </div>
                 <div id="mysql-tables-${db}" style="display:none; padding-left:28px;"></div>
             </div>`;
@@ -23760,7 +23760,7 @@ function mysqlRenderGrid(columns, rows, container) {
         const bgColor = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
         html += `<tr style="background:${bgColor}; transition:background 0.1s; cursor:pointer;" onmouseover="this.style.background='var(--bg-card-hover,rgba(255,255,255,0.04))'" onmouseout="this.style.background='${bgColor}'" ondblclick="mysqlEditRow(${i})">`;
         html += `<td style="padding:4px 6px; border-bottom:1px solid var(--border); text-align:center;">
-            <button class="btn btn-sm" onclick="event.stopPropagation(); mysqlEditRow(${i})" style="font-size:10px; padding:2px 5px; background:var(--bg-tertiary); color:var(--text-muted); border:1px solid var(--border);" title="Edit row"></button>
+            <button class="btn btn-sm" onclick="event.stopPropagation(); mysqlEditRow(${i})" style="font-size:10px; padding:2px 5px; background:var(--bg-tertiary); color:var(--text-muted); border:1px solid var(--border);" title="Edit row"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
         </td>`;
         for (let j = 0; j < columns.length; j++) {
             const val = j < row.length ? row[j] : null;
@@ -24067,8 +24067,8 @@ async function mysqlLoadStructure() {
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:var(--text-muted);">${c.default != null ? escapeHtml(String(c.default)) : '<span style="font-style:italic;">NULL</span>'}</td>
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:var(--text-muted);">${escapeHtml(c.extra || '')}</td>
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">
-                    <button onclick='mysqlModifyColumnDialog(${colJson})' style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px; margin-right:4px;" title="Modify column"></button>
-                    <button onclick="mysqlDropColumn('${escapeHtml(c.name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop column"></button>
+                    <button onclick='mysqlModifyColumnDialog(${colJson})' style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px; margin-right:4px;" title="Modify column"><span class="ws-icon-clean-wrap" data-icon="edit"></span></button>
+                    <button onclick="mysqlDropColumn('${escapeHtml(c.name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop column"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 </td>
             </tr>`;
         }
@@ -24163,7 +24163,7 @@ async function mysqlLoadIndexes() {
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center; color:var(--text-muted);">${escapeHtml(idx.type)}</td>
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">${badge || '—'}</td>
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">
-                    ${isPrimary ? '' : `<button onclick="mysqlDropIndex('${escapeHtml(name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop index"></button>`}
+                    ${isPrimary ? '' : `<button onclick="mysqlDropIndex('${escapeHtml(name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop index"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>`}
                 </td>
             </tr>`;
             i++;
@@ -24311,7 +24311,7 @@ async function mysqlLoadTriggers() {
                     <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:#e67e22;">${escapeHtml(event)}</td>
                     <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:var(--text-muted); font-size:12px; max-width:400px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(stmt)}">${escapeHtml(stmt)}</td>
                     <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">
-                        <button onclick="mysqlDropTrigger('${escapeHtml(name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop trigger"></button>
+                        <button onclick="mysqlDropTrigger('${escapeHtml(name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop trigger"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                     </td>
                 </tr>`;
             });
@@ -24812,7 +24812,7 @@ function mysqlCreateTableAddCol(name, type, nullable, pk, ai) {
         <label style="display:flex; align-items:center; gap:3px; font-size:11px; color:var(--text-muted); cursor:pointer; white-space:nowrap;" title="Auto Increment">
             <input type="checkbox" class="ct-col-ai" ${ai ? 'checked' : ''}> AI
         </label>
-        <button onclick="this.parentElement.remove(); mysqlCreateTableUpdatePreview()" style="background:none; border:none; color:#e74c3c; cursor:pointer; font-size:14px; padding:2px 6px;" title="Remove column"></button>
+        <button onclick="this.parentElement.remove(); mysqlCreateTableUpdatePreview()" style="background:none; border:none; color:#e74c3c; cursor:pointer; font-size:14px; padding:2px 6px;" title="Remove column"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
     `;
     container.appendChild(row);
 }
@@ -26183,29 +26183,29 @@ async function loadFleetContainers() {
         // Control buttons
         if (r) {
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'stop\',this)" title="Stop"></button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'restart\',this)" title="Restart"></button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'pause\',this)" title="Pause"></button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenConsole(\'' + nid + '\',\'docker\',\'' + eName + '\')" title="Console"></button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Remove"></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'stop\',this)" title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'restart\',this)" title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'pause\',this)" title="Pause"><span class="ws-icon-clean-wrap" data-icon="pause"></span></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenConsole(\'' + nid + '\',\'docker\',\'' + eName + '\')" title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Remove"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>';
         } else if (p) {
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'unpause\',this)" title="Unpause">▶️</button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console"></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>';
         } else {
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop"></button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart"></button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console"></button>';
-            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'remove\',this)" title="Remove"></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>';
+            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'remove\',this)" title="Remove"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>';
         }
         // Management buttons
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetViewLogs(\'' + nid + '\',\'docker\',\'' + eName + '\')" title="Logs"></button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');viewDockerVolumes(\'' + eName + '\')" title="Volumes"></button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');browseContainerFiles(\'docker\',\'' + eName + '\')" title="Browse Files"></button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openDockerSettings(\'' + eName + '\')" title="Settings"></button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openContainerConfigurator(\'docker\',\'' + eName + '\')" title="Configure"></button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');cloneDockerContainer(\'' + eName + '\')" title="Clone"></button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');migrateDockerContainer(\'' + eName + '\')" title="Migrate"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetViewLogs(\'' + nid + '\',\'docker\',\'' + eName + '\')" title="Logs"><span class="ws-icon-clean-wrap" data-icon="logs"></span></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');viewDockerVolumes(\'' + eName + '\')" title="Volumes"><span class="ws-icon-clean-wrap" data-icon="database"></span></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');browseContainerFiles(\'docker\',\'' + eName + '\')" title="Browse Files"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openDockerSettings(\'' + eName + '\')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openContainerConfigurator(\'docker\',\'' + eName + '\')" title="Configure"><span class="ws-icon-clean-wrap" data-icon="configure"></span></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');cloneDockerContainer(\'' + eName + '\')" title="Clone"><span class="ws-icon-clean-wrap" data-icon="copy"></span></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');migrateDockerContainer(\'' + eName + '\')" title="Migrate"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>';
         return h;
     }
 
@@ -26218,26 +26218,26 @@ async function loadFleetContainers() {
         // Control buttons
         if (r) {
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'stop\',this)" title="Stop"></button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'restart\',this)" title="Restart"></button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'freeze\',this)" title="Freeze"></button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenConsole(\'' + nid + '\',\'lxc\',\'' + eName + '\')" title="Console"></button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Destroy"></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'stop\',this)" title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'restart\',this)" title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'freeze\',this)" title="Freeze"><span class="ws-icon-clean-wrap" data-icon="snowflake"></span></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenConsole(\'' + nid + '\',\'lxc\',\'' + eName + '\')" title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Destroy"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>';
         } else {
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop"></button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart"></button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console"></button>';
-            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'destroy\',this)" title="Destroy"></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>';
+            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'destroy\',this)" title="Destroy"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>';
         }
         // Management buttons
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetViewLogs(\'' + nid + '\',\'lxc\',\'' + eName + '\')" title="Logs"></button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');browseContainerFiles(\'lxc\',\'' + eName + '\',\'' + ePath + '\')" title="Browse Files"></button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openLxcSettings(\'' + eName + '\')" title="Settings"></button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openContainerConfigurator(\'lxc\',\'' + eName + '\')" title="Configure"></button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');cloneLxcContainer(\'' + eName + '\')" title="Clone"></button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');migrateLxcContainer(\'' + eName + '\')" title="Migrate"></button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');exportLxcContainer(\'' + eName + '\')" title="Export"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetViewLogs(\'' + nid + '\',\'lxc\',\'' + eName + '\')" title="Logs"><span class="ws-icon-clean-wrap" data-icon="logs"></span></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');browseContainerFiles(\'lxc\',\'' + eName + '\',\'' + ePath + '\')" title="Browse Files"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openLxcSettings(\'' + eName + '\')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openContainerConfigurator(\'lxc\',\'' + eName + '\')" title="Configure"><span class="ws-icon-clean-wrap" data-icon="configure"></span></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');cloneLxcContainer(\'' + eName + '\')" title="Clone"><span class="ws-icon-clean-wrap" data-icon="copy"></span></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');migrateLxcContainer(\'' + eName + '\')" title="Migrate"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');exportLxcContainer(\'' + eName + '\')" title="Export"><span class="ws-icon-clean-wrap" data-icon="export"></span></button>';
         return h;
     }
 
@@ -26247,18 +26247,18 @@ async function loadFleetContainers() {
         var h = '';
         if (vm.running) {
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>';
-            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'stop\',this)" title="Stop"></button>';
+            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'stop\',this)" title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>';
             var fleetVncPort = vm.vnc_ws_port || vm.vnc_port;
             if (fleetVncPort) {
-                h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenVnc(\'' + nid + '\',\'' + eName + '\',' + fleetVncPort + ')" title="VNC Console"></button>';
+                h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenVnc(\'' + nid + '\',\'' + eName + '\',' + fleetVncPort + ')" title="VNC Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>';
             }
         } else {
             h += '<button class="btn btn-sm" style="' + BS + 'color:#22c55e;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop"></button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');showVmSettings(\'' + eName + '\')" title="Settings"></button>';
-            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetDeleteVm(\'' + nid + '\',\'' + eName + '\')" title="Delete"></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');showVmSettings(\'' + eName + '\')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>';
+            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetDeleteVm(\'' + nid + '\',\'' + eName + '\')" title="Delete"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>';
         }
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetShowVmLogs(\'' + nid + '\',\'' + eName + '\')" title="Logs"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetShowVmLogs(\'' + nid + '\',\'' + eName + '\')" title="Logs"><span class="ws-icon-clean-wrap" data-icon="logs"></span></button>';
         return h;
     }
 
@@ -27573,7 +27573,7 @@ function showDialog(config) {
         <div class="ws-dialog-shell" style="background:var(--bg-card); border:1px solid var(--border); border-radius:12px; width:640px; max-width:90vw; max-height:85vh; display:flex; flex-direction:column; box-shadow:0 20px 60px rgba(0,0,0,0.4); overflow:hidden;">
             <div style="padding:20px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between;">
                 <h3 style="margin:0; font-size:16px; font-weight:600;">${config.title || 'Dialog'}</h3>
-                <button class="ws-dialog-x" style="background:none; border:none; color:var(--text-muted); font-size:20px; cursor:pointer; padding:4px;"></button>
+                <button class="ws-dialog-x" style="background:none; border:none; color:var(--text-muted); font-size:20px; cursor:pointer; padding:4px;"><span class="ws-icon-clean-wrap" data-icon="close"></span></button>
             </div>
             <div style="padding:20px 24px; flex:1; overflow-y:auto;">
                 ${config.html || ''}
@@ -27940,7 +27940,7 @@ async function editJailLocal(nodePrefix) {
                         <span style="font-size:20px;"></span>
                         <h3 style="margin:0; font-size:16px;">Edit jail.local</h3>
                     </div>
-                    <button onclick="this.closest('div[style*=fixed]').remove()" style="background:none; border:none; color:var(--text-muted); font-size:20px; cursor:pointer; padding:4px;"></button>
+                    <button onclick="this.closest('div[style*=fixed]').remove()" style="background:none; border:none; color:var(--text-muted); font-size:20px; cursor:pointer; padding:4px;"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 </div>
                 <div style="padding:16px 24px; flex:1; overflow:auto;">
                     <textarea id="jail-local-editor" spellcheck="false" style="width:100%; height:400px; font-family:'JetBrains Mono','Fira Code',monospace; font-size:13px; line-height:1.6; background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border); border-radius:8px; padding:12px; resize:vertical; outline:none; tab-size:4;">${escapeHtml(content)}</textarea>
@@ -28314,7 +28314,7 @@ function initMonoIcons() {
         presetsEl.innerHTML = MONO_PRESETS.map(p =>
             `<button class="mono-preset-btn" data-preset="${p.name}" onclick="applyMonoPreset('${p.name}')"
                 style="width:32px;height:32px;border-radius:50%;border:2px solid var(--border);background:${p.color};cursor:pointer;padding:0;transition:outline .15s;"
-                title="${p.name}"></button>`
+                title="${p.name}"><span class="ws-icon-clean-wrap" data-icon="check"></span></button>`
         ).join('');
     }
 
@@ -31704,13 +31704,13 @@ function renderWolfRunServices(services) {
             <td>${vipHtml}</td>
             <td style="text-align:right; white-space:nowrap;" onclick="event.stopPropagation();">
                 <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'start')" title="Start All" style="padding:4px 8px; font-size:12px; color:#10b981;">▶️</button>
-                <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'stop')" title="Stop All" style="padding:4px 8px; font-size:12px; color:#eab308;"></button>
-                <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'restart')" title="Restart All" style="padding:4px 8px; font-size:12px; color:#3b82f6;"></button>
-                <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired - 1})" ${desired <= minR ? 'disabled' : ''} title="Scale down" style="padding:4px 8px; font-size:12px;"></button>
+                <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'stop')" title="Stop All" style="padding:4px 8px; font-size:12px; color:#eab308;"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
+                <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'restart')" title="Restart All" style="padding:4px 8px; font-size:12px; color:#3b82f6;"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>
+                <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired - 1})" ${desired <= minR ? 'disabled' : ''} title="Scale down" style="padding:4px 8px; font-size:12px;"><span class="ws-icon-clean-wrap" data-icon="minus"></span></button>
                 <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired + 1})" ${desired >= maxR ? 'disabled' : ''} title="Scale up" style="padding:4px 8px; font-size:12px;"></button>
-                <button class="btn btn-sm" onclick="wolfrunSettings('${svc.id}', '${svc.name}', ${desired}, ${minR}, ${maxR}, '${svc.lb_policy || 'round_robin'}', ${JSON.stringify(svc.allowed_nodes || [])}, '${svc.cluster_name || ''}', ${!!svc.failover})" title="Settings" style="padding:4px 8px; font-size:12px; color:#a78bfa;"></button>
-                <button class="btn btn-sm" onclick="openWolfRunPortForward('${svc.id}', '${svc.name}', '${vip || ''}')" title="Port Forward" style="padding:4px 8px; font-size:12px; color:#818cf8;" ${!vip ? 'disabled' : ''}></button>
-                <button class="btn btn-sm" onclick="wolfrunDelete('${svc.id}', '${svc.name}')" title="Remove" style="padding:4px 8px; font-size:12px; color:#ef4444;"></button>
+                <button class="btn btn-sm" onclick="wolfrunSettings('${svc.id}', '${svc.name}', ${desired}, ${minR}, ${maxR}, '${svc.lb_policy || 'round_robin'}', ${JSON.stringify(svc.allowed_nodes || [])}, '${svc.cluster_name || ''}', ${!!svc.failover})" title="Settings" style="padding:4px 8px; font-size:12px; color:#a78bfa;"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>
+                <button class="btn btn-sm" onclick="openWolfRunPortForward('${svc.id}', '${svc.name}', '${vip || ''}')" title="Port Forward" style="padding:4px 8px; font-size:12px; color:#818cf8;" ${!vip ? 'disabled' : ''}><span class="ws-icon-clean-wrap" data-icon="link"></span></button>
+                <button class="btn btn-sm" onclick="wolfrunDelete('${svc.id}', '${svc.name}')" title="Remove" style="padding:4px 8px; font-size:12px; color:#ef4444;"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
             </td>
         </tr>${instanceRows}`;
     }).join('');
@@ -32497,7 +32497,7 @@ async function loadWolfRunPortForwards(serviceId) {
                     <span style="font-size:14px;">${f.protocol === 'tcp' ? '' : f.protocol === 'udp' ? '' : ''}</span>
                     <code style="font-size:12px; flex:1; color:var(--text-primary);">${f.public_ip}${srcPorts} → VIP${dstPorts}</code>
                     <span style="font-size:10px; padding:2px 6px; border-radius:4px; background:rgba(99,102,241,0.12); color:#818cf8;">${f.protocol}</span>
-                    <button class="btn btn-sm" onclick="deleteWolfRunPortForward('${serviceId}', '${f.id}')" style="padding:2px 6px; font-size:11px; color:#ef4444;"></button>
+                    <button class="btn btn-sm" onclick="deleteWolfRunPortForward('${serviceId}', '${f.id}')" style="padding:2px 6px; font-size:11px; color:#ef4444;"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 </div>`;
             }).join('');
     } catch (e) {
@@ -34049,7 +34049,7 @@ function renderStatusPages(pages) {
                     <button class="btn btn-sm" onclick="showIncidentForm(null, '${p.page.id}')" style="font-size:11px;">Report Incident</button>
                     <button class="btn btn-sm" onclick="editStatusPage('${p.page.id}')" style="font-size:11px;">Edit</button>
                     <button class="btn btn-sm" onclick="window.open('${pageUrl}', '_blank')" style="font-size:11px;">View</button>
-                    <button class="btn btn-sm" onclick="deleteStatusPage('${p.page.id}')" style="font-size:11px; color:#ef4444;"></button>
+                    <button class="btn btn-sm" onclick="deleteStatusPage('${p.page.id}')" style="font-size:11px; color:#ef4444;"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 </div>
             </div>
         </div>`;
@@ -34099,9 +34099,9 @@ function renderStatusMonitors(monitors) {
                         <div style="font-size:10px; color:var(--text-muted);">30-day uptime</div>
                     </div>
                     <div style="display:flex; gap:4px; margin-left:12px;">
-                        <button class="btn btn-sm" onclick="showMonitorDetails('${mon.id}')" style="font-size:11px;" title="View Details"></button>
-                        <button class="btn btn-sm" onclick="editMonitor('${mon.id}')" style="font-size:11px;" title="Edit"></button>
-                        <button class="btn btn-sm" onclick="deleteMonitor('${mon.id}')" style="font-size:11px; color:#ef4444;" title="Delete"></button>
+                        <button class="btn btn-sm" onclick="showMonitorDetails('${mon.id}')" style="font-size:11px;" title="View Details"><span class="ws-icon-clean-wrap" data-icon="eye"></span></button>
+                        <button class="btn btn-sm" onclick="editMonitor('${mon.id}')" style="font-size:11px;" title="Edit"><span class="ws-icon-clean-wrap" data-icon="edit"></span></button>
+                        <button class="btn btn-sm" onclick="deleteMonitor('${mon.id}')" style="font-size:11px; color:#ef4444;" title="Delete"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                     </div>
                 </div>
             </div>
@@ -34507,8 +34507,8 @@ function renderIncidentsList() {
                 </div>
                 <div style="display:flex; gap:6px;">
                     ${status !== 'resolved' ? `<button class="btn btn-sm" onclick="updateIncident('${inc.id}')" style="font-size:11px;">Update</button>` : ''}
-                    <button class="btn btn-sm" onclick="editIncident('${inc.id}')" style="font-size:11px;"></button>
-                    <button class="btn btn-sm" onclick="deleteIncident('${inc.id}')" style="font-size:11px; color:#ef4444;"></button>
+                    <button class="btn btn-sm" onclick="editIncident('${inc.id}')" style="font-size:11px;"><span class="ws-icon-clean-wrap" data-icon="edit"></span></button>
+                    <button class="btn btn-sm" onclick="deleteIncident('${inc.id}')" style="font-size:11px; color:#ef4444;"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 </div>
             </div>
             ${updates.length > 0 ? `
@@ -41911,7 +41911,7 @@ async function loadComposeStacks() {
                         <button class="btn btn-sm" onclick="composeAction('${escapeHtml(s.name)}', 'pull')" style="font-size:11px; padding:2px 8px;">⬇ Pull</button>
                         <button class="btn btn-sm" onclick="openComposeEditor('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px;">Edit</button>
                         <button class="btn btn-sm" onclick="showComposeLogs('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px;">Logs</button>
-                        <button class="btn btn-sm" onclick="deleteComposeStack('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px; color:var(--danger-color, #ef4444);"></button>
+                        <button class="btn btn-sm" onclick="deleteComposeStack('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px; color:var(--danger-color, #ef4444);"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                     </div>
                 </td>
             </tr>`;
@@ -42194,12 +42194,12 @@ async function loadSecrets() {
             return `<tr data-secret-key="${safeKey}">
             <td><code style="background:var(--bg-secondary); padding:2px 6px; border-radius:4px; font-size:12px;">${escapeHtml(s.key)}</code></td>
             <td><span style="font-family:var(--font-mono); font-size:12px; color:var(--text-muted);">${escapeHtml(s.value_masked)}</span>
-                <button class="btn btn-sm secret-reveal-btn" style="font-size:10px; padding:1px 6px; margin-left:4px;"></button></td>
+                <button class="btn btn-sm secret-reveal-btn" style="font-size:10px; padding:1px 6px; margin-left:4px;"><span class="ws-icon-clean-wrap" data-icon="eye"></span></button></td>
             <td style="font-size:12px; color:var(--text-muted);">${escapeHtml(s.description || '—')}</td>
             <td style="font-size:11px; color:var(--text-muted);">${escapeHtml(s.updated || s.created || '—')}</td>
             <td>
-                <button class="btn btn-sm secret-edit-btn" style="font-size:11px; padding:2px 8px;"></button>
-                <button class="btn btn-sm secret-delete-btn" style="font-size:11px; padding:2px 8px; color:var(--danger-color, #ef4444);"></button>
+                <button class="btn btn-sm secret-edit-btn" style="font-size:11px; padding:2px 8px;"><span class="ws-icon-clean-wrap" data-icon="edit"></span></button>
+                <button class="btn btn-sm secret-delete-btn" style="font-size:11px; padding:2px 8px; color:var(--danger-color, #ef4444);"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
             </td>
         </tr>`;
         }).join('');
@@ -44232,9 +44232,9 @@ function cpRenderRow(row, idx, mode) {
         ? `<span style="display:flex;gap:4px;margin-left:8px;">
                 <button class="btn btn-sm" onclick="cpMoveGroup('${row.id}',-1)" title="Move up">↑</button>
                 <button class="btn btn-sm" onclick="cpMoveGroup('${row.id}',1)" title="Move down">↓</button>
-                <button class="btn btn-sm" onclick="cpRecolourGroup('${row.id}')" title="Change colour"></button>
-                <button class="btn btn-sm" onclick="cpRenameGroup('${row.id}')" title="Rename"></button>
-                <button class="btn btn-sm" onclick="cpDeleteGroup('${row.id}')" title="Delete group"></button>
+                <button class="btn btn-sm" onclick="cpRecolourGroup('${row.id}')" title="Change colour"><span class="ws-icon-clean-wrap" data-icon="palette"></span></button>
+                <button class="btn btn-sm" onclick="cpRenameGroup('${row.id}')" title="Rename"><span class="ws-icon-clean-wrap" data-icon="edit"></span></button>
+                <button class="btn btn-sm" onclick="cpDeleteGroup('${row.id}')" title="Delete group"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
             </span>`
         : '';
 
@@ -44501,9 +44501,9 @@ async function cpOpenItemModal(key) {
                     <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${it.kind.toUpperCase()} · ${escapeHtml(it.node_hostname || it.node_id)}</div>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center;">
-                    <button class="btn btn-sm" title="Refresh" onclick="cpModalRefresh()"></button>
+                    <button class="btn btn-sm" title="Refresh" onclick="cpModalRefresh()"><span class="ws-icon-clean-wrap" data-icon="refresh"></span></button>
                     <button class="btn btn-sm" title="Open full node view" onclick="cpModalGoToNode()">↗</button>
-                    <button class="btn btn-sm" title="Close" onclick="cpCloseItemModal()"></button>
+                    <button class="btn btn-sm" title="Close" onclick="cpCloseItemModal()"><span class="ws-icon-clean-wrap" data-icon="close"></span></button>
                 </div>
             </div>
             <div id="cp-modal-status" style="font-size:11px;color:var(--text-muted);padding:6px 18px;border-bottom:1px solid var(--border);">Loading…</div>
@@ -45623,7 +45623,7 @@ function dbOpenConnection(id) {
                 <div style="padding:8px 10px; border-bottom:1px solid var(--border); font-size:12px; font-weight:600; display:flex; justify-content:space-between; align-items:center;">
                     <span>Schema</span>
                     <div style="display:flex; gap:4px;">
-                        <button class="btn btn-sm" onclick="dbMgrLoadTree(true)" title="Refresh" style="padding:2px 6px;"></button>
+                        <button class="btn btn-sm" onclick="dbMgrLoadTree(true)" title="Refresh" style="padding:2px 6px;"><span class="ws-icon-clean-wrap" data-icon="refresh"></span></button>
                         <button class="btn btn-sm" onclick="dbToggleTree()" title="Hide the schema tree" style="padding:2px 6px;">◀</button>
                     </div>
                 </div>
@@ -45882,7 +45882,7 @@ function dbWizAddRow(seed) {
         <td style="padding:3px; text-align:center;"><input type="checkbox" class="db-wiz-col-null" ${seed && seed.nullable === false ? '' : 'checked'}></td>
         <td style="padding:3px; text-align:center;"><input type="checkbox" class="db-wiz-col-pk" ${seed && seed.pk ? 'checked' : ''}></td>
         <td style="padding:3px;"><input class="form-control db-wiz-col-default" placeholder="(none)" style="font-size:12px; padding:4px 6px;"></td>
-        <td style="padding:3px; text-align:right;"><button class="btn btn-sm" onclick="this.closest('tr').remove(); dbWizUpdatePreview()" style="padding:2px 8px; font-size:11px;"></button></td>
+        <td style="padding:3px; text-align:right;"><button class="btn btn-sm" onclick="this.closest('tr').remove(); dbWizUpdatePreview()" style="padding:2px 8px; font-size:11px;"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button></td>
     `;
     body.appendChild(row);
     // Live preview
@@ -47283,8 +47283,8 @@ function dbDataRenderGrid(wrap, data, st) {
         const origIdx = data.rows.indexOf(rows[ri]);
         html += '<tr>';
         html += `<td style="padding:4px 6px; white-space:nowrap; ${stickyActCss} border-bottom:1px solid var(--border);">
-            <button class="btn btn-sm" onclick="dbDataEditRow(${origIdx})" title="Edit row" style="padding:1px 6px; font-size:10px;"></button>
-            <button class="btn btn-sm" onclick="dbDataDeleteRow(${origIdx})" title="Delete row" style="padding:1px 6px; font-size:10px;"></button>
+            <button class="btn btn-sm" onclick="dbDataEditRow(${origIdx})" title="Edit row" style="padding:1px 6px; font-size:10px;"><span class="ws-icon-clean-wrap" data-icon="edit"></span></button>
+            <button class="btn btn-sm" onclick="dbDataDeleteRow(${origIdx})" title="Delete row" style="padding:1px 6px; font-size:10px;"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
         </td>`;
         for (let ci = 0; ci < rows[ri].length; ci++) {
             const v = rows[ri][ci];
@@ -47987,7 +47987,7 @@ function dbBldRenderWhere() {
             <select onchange="_dbBldWhere[${i}].col=this.value; dbBldRenderSql()" class="form-control" style="display:inline-block; width:auto; font-size:12px;">${colOpts}</select>
             <select onchange="_dbBldWhere[${i}].op=this.value; dbBldRenderSql()" class="form-control" style="display:inline-block; width:auto; font-size:12px;">${opOpts.replace(`<option>${w.op}</option>`, `<option selected>${w.op}</option>`)}</select>
             <input value="${escapeHtml(w.value || '')}" oninput="_dbBldWhere[${i}].value=this.value; dbBldRenderSql()" class="form-control" placeholder="value" style="flex:1; font-size:12px;">
-            <button class="btn btn-sm" onclick="_dbBldWhere.splice(${i},1); dbBldRenderWhere(); dbBldRenderSql()" style="padding:2px 6px; font-size:10px;"></button>
+            <button class="btn btn-sm" onclick="_dbBldWhere.splice(${i},1); dbBldRenderWhere(); dbBldRenderSql()" style="padding:2px 6px; font-size:10px;"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
         </div>`;
     }
     el.innerHTML = html;
@@ -48116,7 +48116,7 @@ async function dbSrvLoadVersion() {
         const v = conn.kind === 'postgres'
             ? await dbMgrRunSql('SELECT version() AS version, current_database() AS db, current_user AS "user", inet_server_addr()::text AS host, inet_server_port() AS port')
             : await dbMgrRunSql("SELECT VERSION() AS version, DATABASE() AS db, USER() AS user, @@hostname AS host, @@port AS port");
-        el.innerHTML = '<h4 style="margin:0 0 6px; font-size:13px; display:flex; gap:8px; align-items:center;"><span>Server</span> <button class="btn btn-sm" onclick="dbSrvLoadVersion()" style="padding:2px 8px; font-size:10px;"></button></h4>' + renderKvTable(v);
+        el.innerHTML = '<h4 style="margin:0 0 6px; font-size:13px; display:flex; gap:8px; align-items:center;"><span>Server</span> <button class="btn btn-sm" onclick="dbSrvLoadVersion()" style="padding:2px 8px; font-size:10px;"><span class="ws-icon-clean-wrap" data-icon="refresh"></span></button></h4>' + renderKvTable(v);
     } catch (e) { el.innerHTML = `<div style="color:var(--danger);">Version: ${escapeHtml(e.message)}</div>`; }
 }
 
@@ -48132,7 +48132,7 @@ async function dbSrvLoadVars() {
         // Custom row renderer so we can add an Edit button per variable.
         let html = `<h4 style="margin:0 0 6px; font-size:13px; display:flex; gap:8px; align-items:center;">
             <span>Key variables</span>
-            <button class="btn btn-sm" onclick="dbSrvLoadVars()" style="padding:2px 8px; font-size:10px;"></button>
+            <button class="btn btn-sm" onclick="dbSrvLoadVars()" style="padding:2px 8px; font-size:10px;"><span class="ws-icon-clean-wrap" data-icon="refresh"></span></button>
             <span style="font-size:11px; color:var(--text-muted);">Click to change — requires Schema permission</span>
         </h4>`;
         html += '<div style="overflow:auto; border:1px solid var(--border); border-radius:6px;"><table style="width:100%; font-size:12px; border-collapse:collapse;"><thead><tr style="background:var(--bg-tertiary);">';
@@ -48146,7 +48146,7 @@ async function dbSrvLoadVars() {
             html += '<tr>';
             for (const v of row) html += `<td style="padding:5px 8px; border-bottom:1px solid var(--border);">${v == null ? '<span style="color:var(--text-muted);">NULL</span>' : escapeHtml(String(v))}</td>`;
             html += `<td style="padding:5px 8px; border-bottom:1px solid var(--border); text-align:right;">
-                ${readOnly ? '<span style="color:var(--text-muted); font-size:10px;">read-only</span>' : `<button class="btn btn-sm" onclick="dbSrvEditVar('${escapeHtml(name).replace(/'/g, "\\'")}', '${escapeHtml(value).replace(/'/g, "\\'")}')" title="Change this variable" style="padding:1px 8px; font-size:10px;"></button>`}
+                ${readOnly ? '<span style="color:var(--text-muted); font-size:10px;">read-only</span>' : `<button class="btn btn-sm" onclick="dbSrvEditVar('${escapeHtml(name).replace(/'/g, "\\'")}', '${escapeHtml(value).replace(/'/g, "\\'")}')" title="Change this variable" style="padding:1px 8px; font-size:10px;"><span class="ws-icon-clean-wrap" data-icon="edit"></span></button>`}
             </td></tr>`;
         }
         html += '</tbody></table></div>';
@@ -48165,7 +48165,7 @@ async function dbSrvLoadProcs() {
             : await dbMgrRunSql("SHOW FULL PROCESSLIST");
         let html = `<h4 style="margin:0 0 6px; font-size:13px; display:flex; gap:8px; align-items:center;">
             <span>Active sessions (${procs.row_count})</span>
-            <button class="btn btn-sm" onclick="dbSrvLoadProcs()" style="padding:2px 8px; font-size:10px;"></button>
+            <button class="btn btn-sm" onclick="dbSrvLoadProcs()" style="padding:2px 8px; font-size:10px;"><span class="ws-icon-clean-wrap" data-icon="refresh"></span></button>
             <span style="font-size:11px; color:var(--text-muted);">Click to kill a session — requires Schema permission</span>
         </h4>`;
         html += '<div style="overflow:auto; border:1px solid var(--border); border-radius:6px;"><table style="width:100%; font-size:12px; border-collapse:collapse;"><thead><tr style="background:var(--bg-tertiary);">';
@@ -48177,7 +48177,7 @@ async function dbSrvLoadProcs() {
             html += '<tr>';
             for (const v of row) html += `<td style="padding:5px 8px; border-bottom:1px solid var(--border); max-width:360px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${v == null ? '' : escapeHtml(String(v))}">${v == null ? '<span style="color:var(--text-muted);">NULL</span>' : escapeHtml(String(v))}</td>`;
             html += `<td style="padding:5px 8px; border-bottom:1px solid var(--border); text-align:right;">
-                <button class="btn btn-sm" onclick="dbSrvKillSession('${escapeHtml(String(pid))}')" title="Kill session ${pid}" style="padding:1px 8px; font-size:10px;"></button>
+                <button class="btn btn-sm" onclick="dbSrvKillSession('${escapeHtml(String(pid))}')" title="Kill session ${pid}" style="padding:1px 8px; font-size:10px;"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
             </td></tr>`;
         }
         html += '</tbody></table></div>';
@@ -49522,7 +49522,7 @@ function renderPredictiveInbox() {
                                 <span id="predictive-term-status" style="color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">No active terminal</span>
                             </div>
                             <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-                                <button class="btn btn-sm" onclick="predictiveToggleMaximize()" id="predictive-term-max" title="Maximize terminal" style="font-size:11px;padding:2px 8px;"></button>
+                                <button class="btn btn-sm" onclick="predictiveToggleMaximize()" id="predictive-term-max" title="Maximize terminal" style="font-size:11px;padding:2px 8px;"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>
                                 <button class="btn btn-sm" onclick="predTermClose()" id="predictive-term-close" style="display:none;font-size:11px;padding:2px 8px;">Close</button>
                             </div>
                         </div>
@@ -49915,7 +49915,7 @@ function predictiveRender() {
                     <button class="btn btn-sm" onclick="predictiveBulkSnooze(24)">Snooze 24h</button>
                     <button class="btn btn-sm" onclick="predictiveBulkSnooze(168)">Snooze 1w</button>
                     <button class="btn btn-sm" onclick="predictiveBulkDismiss()">Dismiss…</button>
-                    <button class="btn btn-sm" onclick="predictiveClearSelection()" title="Clear selection without acting"></button>
+                    <button class="btn btn-sm" onclick="predictiveClearSelection()" title="Clear selection without acting"><span class="ws-icon-clean-wrap" data-icon="check"></span></button>
                 </div>
             </div>
         `;
@@ -52226,7 +52226,7 @@ async function gwRenderWizard() {
         <div class="card" style="width:680px;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;">
             <div class="card-body" style="border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
                 <h3 style="margin:0;display:flex;align-items:center;gap:8px;">${titleLabel}</h3>
-                <button class="btn btn-sm" onclick="gwCloseWizard()"></button>
+                <button class="btn btn-sm" onclick="gwCloseWizard()"><span class="ws-icon-clean-wrap" data-icon="close"></span></button>
             </div>
             <div class="card-body" style="padding:12px 18px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);">${stepBadge}</div>
             <div class="card-body" style="overflow:auto;flex:1;">${body}</div>
@@ -52400,7 +52400,7 @@ function gwWizardStep2() {
                         <label style="font-size:11px;display:flex;align-items:center;gap:4px;">
                             <input type="checkbox" ${u.writable ? 'checked' : ''} onchange="_gwWizardData.users[${i}].writable=this.checked;"> writable
                         </label>
-                        <button class="btn btn-sm" onclick="_gwWizardData.users.splice(${i},1);gwRenderWizard();"></button>
+                        <button class="btn btn-sm" onclick="_gwWizardData.users.splice(${i},1);gwRenderWizard();"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                     </div>
                 `).join('')}
             </div>
@@ -52559,7 +52559,7 @@ async function gwOpenDetail(id) {
         <div class="card" style="width:680px;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;">
             <div class="card-body" style="border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
                 <h3 style="margin:0;display:flex;align-items:center;gap:8px;">${escapeHtml(g.name)}</h3>
-                <button class="btn btn-sm" onclick="document.getElementById('gw-detail').remove()"></button>
+                <button class="btn btn-sm" onclick="document.getElementById('gw-detail').remove()"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
             </div>
             <div class="card-body" style="overflow:auto;flex:1;">
                 <div style="display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;font-size:13px;">
