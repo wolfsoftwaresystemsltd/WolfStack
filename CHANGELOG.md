@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v22.14.9: Icon packs actually apply to data-icon placeholders** _(2026-05-11 — [`613c945`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/613c945c340d442325d8f390b4fb5fbd2d5a0699))_
 - **v22.14.8: WolfNet endpoint safety guards — stop the kernel-loop flood** _(2026-05-11 — [`cd4bcb9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cd4bcb9c30b7f967e4ffb538aac62acdc9272396))_
 - **v22.14.7: WolfNet per-target endpoint picker + self-healing reconciler** _(2026-05-11 — [`3a551fc`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3a551fca38462ddd480f8c99ea9ad5cd3187b7c6))_
 - **v22.14.6: Fix invisible modal-overlay, infrastructure-map cold-load, appstore icon fallback** _(2026-05-11 — [`6fc2d85`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6fc2d85c082f5edaf47414eefece46c2356aac72))_
