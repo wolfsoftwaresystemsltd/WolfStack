@@ -885,16 +885,22 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             // the demonstrably-bad pattern (public self + RFC1918
                             // peer endpoint). See
                             // networking::reconcile_local_wolfnet_endpoint_if_needed
-                            // for the conservative decision rule. Runs in a
-                            // blocking task to keep file I/O off the poll task.
+                            // for the conservative decision rule, and
+                            // networking::decide_peer_endpoint for the five safety
+                            // guards (wolfnet-subnet loop, self-loop,
+                            // loopback/link-local, behind-NAT, no-public-ip). Runs
+                            // in a blocking task to keep file I/O off the poll
+                            // task.
                             {
                                 let self_addr = cluster.self_address.clone();
                                 let hn = peer_hostname_for_reconcile;
+                                let plan = node.address.clone();
                                 let pip = peer_public_ip_for_reconcile;
                                 tokio::task::spawn_blocking(move || {
                                     crate::networking::reconcile_local_wolfnet_endpoint_if_needed(
                                         &self_addr,
                                         &hn,
+                                        Some(&plan),
                                         pip.as_deref(),
                                     );
                                 });

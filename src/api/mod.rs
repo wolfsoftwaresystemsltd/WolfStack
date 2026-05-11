@@ -2743,36 +2743,49 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
 
     /// Pick the WolfNet endpoint string to write into `target`'s config
     /// for `peer`. `None` means "no static endpoint — let WolfNet learn
-    /// it via roaming". Lives inline so the sync loop is self-contained.
+    /// it via roaming".
+    ///
+    /// Two cases:
+    ///   * Target is on a LAN (RFC1918) → peers in the same LAN dial
+    ///     each other directly at their LAN addresses; the LAN
+    ///     gateway / WolfNet relay handles the rest. We keep the
+    ///     pre-22.14.8 behaviour here because the loop / NAT-traversal
+    ///     guards in `decide_peer_endpoint` are oriented at the
+    ///     public-self perspective and would Clear unnecessarily for
+    ///     a same-LAN peer with a public_ip that differs from its
+    ///     lan_address (a perfectly common case behind shared NAT).
+    ///   * Target is on the public internet → delegate to
+    ///     `decide_peer_endpoint` so the wolfnet-subnet-loop and
+    ///     behind-NAT guards fire identically with the auto-reconciler
+    ///     path. This is the only place those guards matter for the
+    ///     sync (the LAN-target case is structurally safe).
     fn pick_wolfnet_endpoint(target: &NodeWnInfo, peer: &NodeWnInfo) -> Option<String> {
         use std::net::Ipv4Addr;
         let target_addr_priv = target.lan_address.parse::<Ipv4Addr>()
             .map(crate::networking::is_private_ip)
             .unwrap_or(true); // unparseable → assume private, keep old behaviour
-        let peer_addr_priv = peer.lan_address.parse::<Ipv4Addr>()
-            .map(crate::networking::is_private_ip)
-            .unwrap_or(false);
 
         if target_addr_priv {
-            // Target is on a LAN. Peers on the same LAN are reachable at
-            // their LAN address; peers on the public internet have their
-            // public IP in `node.address` (because the agent reports its
-            // own address with no NAT), so `lan_address` still works.
             return Some(format!("{}:{}", peer.lan_address, peer.wolfnet_port));
         }
-        // Target is internet-only. A peer with a private LAN address is
-        // not directly reachable — prefer its `public_ip` (the WolfStack
-        // agent detected this via an outbound probe); if unknown, return
-        // None so WolfNet runs roaming-only on this target for this
-        // peer. The peer must initiate at least once for the target to
-        // learn the real source address, but the peer's keepalive loop
-        // covers that on the order of seconds.
-        if peer_addr_priv {
-            peer.public_ip.as_ref()
-                .filter(|s| !s.is_empty())
-                .map(|p| format!("{}:{}", p, peer.wolfnet_port))
-        } else {
-            Some(format!("{}:{}", peer.lan_address, peer.wolfnet_port))
+
+        // Public-internet target — use the shared decision function so
+        // the loop / NAT / loopback guards apply. We pass our local
+        // wolfnet subnet as a proxy for target's (one cluster = one
+        // wolfnet subnet in practice). Map the result back to
+        // Option<String> for the call site that expects `None` =
+        // "wipe / roaming".
+        let decision = crate::networking::decide_peer_endpoint(
+            &target.lan_address,
+            crate::networking::get_local_wolfnet_subnet(),
+            Some(&peer.lan_address),
+            peer.public_ip.as_deref(),
+            peer.wolfnet_port,
+        );
+        match decision {
+            crate::networking::PeerEndpoint::Set(s) => Some(s),
+            crate::networking::PeerEndpoint::Clear
+            | crate::networking::PeerEndpoint::Preserve => None,
         }
     }
 

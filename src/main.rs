@@ -967,11 +967,12 @@ async fn main() -> std::io::Result<()> {
                     if node.is_self { continue; }
                     if node.node_type != "wolfstack" { continue; }
                     let hn = node.hostname.clone();
+                    let plan = node.address.clone();
                     let pip = node.public_ip.clone();
                     let sa = self_addr.clone();
                     tokio::task::spawn_blocking(move || {
                         crate::networking::reconcile_local_wolfnet_endpoint_if_needed(
-                            &sa, &hn, pip.as_deref(),
+                            &sa, &hn, Some(&plan), pip.as_deref(),
                         );
                     }).await.ok();
                 }

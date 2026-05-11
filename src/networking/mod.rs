@@ -800,6 +800,131 @@ pub enum PeerEndpoint {
     Preserve,
 }
 
+/// Serialises every `add_wolfnet_peer` invocation so concurrent
+/// reconciler / gossip-arrival / manual-API paths can't race on the
+/// `/etc/wolfnet/config.toml` read-modify-write cycle. 22.14.7 shipped
+/// without this and on klasSponsor's 14-node cluster Hook B fired
+/// per-peer in parallel — concurrent writes could lose updates and
+/// leave the TOML half-written, which would make wolfnet refuse to
+/// start. The mutex is process-local; cross-process safety isn't
+/// needed because only one WolfStack instance touches the file.
+static WOLFNET_CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Read the local wolfnet `(address, prefix_length)` from
+/// `/etc/wolfnet/config.toml`. Used by `decide_peer_endpoint` to
+/// detect the routing-loop case where a peer's `public_ip` lands
+/// inside our own wolfnet subnet — see `decide_peer_endpoint` guard #2
+/// for the failure mode. Returns `None` when the config is missing or
+/// the `address`/`subnet` fields are malformed (callers treat that as
+/// "don't apply the subnet guard"; the other guards still fire).
+pub fn get_local_wolfnet_subnet() -> Option<(std::net::Ipv4Addr, u8)> {
+    let content = std::fs::read_to_string("/etc/wolfnet/config.toml").ok()?;
+    let doc: toml::Value = toml::from_str(&content).ok()?;
+    let net = doc.get("network")?;
+    let addr: std::net::Ipv4Addr = net.get("address")?.as_str()?.parse().ok()?;
+    // Default to /24 if the field is missing or out of range — wolfnet's
+    // own default is /24, so the assumption is safe in practice.
+    let prefix: u8 = net.get("subnet")
+        .and_then(|v| v.as_integer())
+        .and_then(|i| u8::try_from(i).ok())
+        .filter(|p| *p <= 32)
+        .unwrap_or(24);
+    Some((addr, prefix))
+}
+
+/// Does `ip` fall inside the subnet `(net_addr, prefix)`?
+fn is_in_subnet(ip: std::net::Ipv4Addr, net_addr: std::net::Ipv4Addr, prefix: u8) -> bool {
+    if prefix == 0 { return true; }
+    if prefix > 32 { return false; }
+    let ip_u32 = u32::from(ip);
+    let net_u32 = u32::from(net_addr);
+    let mask: u32 = (!0u32).checked_shl(32 - prefix as u32).unwrap_or(0);
+    (ip_u32 & mask) == (net_u32 & mask)
+}
+
+/// Decide the endpoint to write for a peer, given everything we know.
+/// Pure function — pulled out of `reconcile_local_wolfnet_endpoint_if_needed`
+/// and `pick_wolfnet_endpoint` so the safety guards are unit-testable
+/// without touching the filesystem, and so both the auto-reconciler
+/// path AND the manual-sync path apply the same logic.
+///
+/// Guards (in order, all default to `Clear` for safety):
+///   1. No public_ip → roaming-only. Peer's keepalive will let wolfnet
+///      learn the source address on first arrival.
+///   2. public_ip inside our wolfnet subnet → kernel routing loop.
+///      The catastrophic klasSponsor 2026-05-11 case: unifios's
+///      wolfstack agent reported `10.100.10.1` (its own WolfNet IP)
+///      as its public_ip; 22.14.7 wrote `10.100.10.1:9634` as the
+///      endpoint, kernel routed wolfnet's outgoing UDP back through
+///      wolfnet0, wolfnet re-encapsulated, repeat → 17 MB/s outbound
+///      black-hole.
+///   3. public_ip equals our own address → self-loop.
+///   4. public_ip is loopback or link-local → never a valid endpoint.
+///   5. peer.lan_address differs from peer.public_ip → peer is behind
+///      NAT. Set is fragile (requires either NAT source-port
+///      preservation or a manually configured port-forward on the
+///      same port wolfnet listens on, neither guaranteed); Clear is
+///      robust (roaming-only via the source address+port the peer
+///      actually initiated from, kept alive by NAT's flow mapping).
+///   Otherwise → Set to `public_ip:peer_port`.
+pub fn decide_peer_endpoint(
+    self_lan_address: &str,
+    self_wolfnet_subnet: Option<(std::net::Ipv4Addr, u8)>,
+    peer_lan_address: Option<&str>,
+    peer_public_ip: Option<&str>,
+    peer_port: u16,
+) -> PeerEndpoint {
+    // 1. No public IP → roaming-only.
+    let pip_str = match peer_public_ip.filter(|s| !s.is_empty()) {
+        Some(p) => p,
+        None => return PeerEndpoint::Clear,
+    };
+
+    // The remaining guards only apply to IPv4 literals — wolfnet config
+    // also accepts hostnames as endpoints (resolve_endpoint handles
+    // both), and we don't second-guess those.
+    let pip = match pip_str.parse::<std::net::Ipv4Addr>() {
+        Ok(ip) => ip,
+        Err(_) => return PeerEndpoint::Set(format!("{}:{}", pip_str, peer_port)),
+    };
+
+    // 2. WolfNet subnet loop — most important guard (the klasSponsor
+    //    flood). Must check before self-loop because for a peer with
+    //    `public_ip == self_lan_address` the self-loop branch would
+    //    also trigger, but the loop guard logs the more specific
+    //    cause.
+    if let Some((net_addr, prefix)) = self_wolfnet_subnet {
+        if is_in_subnet(pip, net_addr, prefix) {
+            return PeerEndpoint::Clear;
+        }
+    }
+
+    // 3. Self-loop.
+    if let Ok(self_ip) = self_lan_address.parse::<std::net::Ipv4Addr>() {
+        if pip == self_ip { return PeerEndpoint::Clear; }
+    }
+
+    // 4. Loopback / link-local.
+    if pip.is_loopback() {
+        return PeerEndpoint::Clear;
+    }
+    let oct = pip.octets();
+    if oct[0] == 169 && oct[1] == 254 {
+        return PeerEndpoint::Clear;
+    }
+
+    // 5. Behind-NAT.
+    if let Some(plan) = peer_lan_address {
+        if let Ok(plan_ip) = plan.parse::<std::net::Ipv4Addr>() {
+            if plan_ip != pip {
+                return PeerEndpoint::Clear;
+            }
+        }
+    }
+
+    PeerEndpoint::Set(format!("{}:{}", pip, peer_port))
+}
+
 /// Add or update a peer in WolfNet config (upsert).
 /// If a peer with the same name, public key, or allowed IP already exists,
 /// its name is updated and the endpoint is handled per `endpoint` (see
@@ -811,6 +936,13 @@ pub enum PeerEndpoint {
 /// without an active wipe, every SIGHUP re-pins the wrong address and
 /// any roaming-learned update gets clobbered on the next tick.
 pub fn add_wolfnet_peer(name: &str, endpoint: PeerEndpoint, ip: &str, public_key: Option<&str>) -> Result<String, String> {
+    // Serialise concurrent callers (reconciler / sync / manual API). The
+    // mutex is held for the whole read-modify-write-reload cycle so a
+    // racing call can't observe a half-written TOML or clobber our edit.
+    // Poisoning shouldn't happen here (no panics inside), but recover if
+    // it does so we don't deadlock the cluster on a stray panic.
+    let _guard = WOLFNET_CONFIG_WRITE_LOCK.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = "/etc/wolfnet/config.toml";
     let content = std::fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read config: {}", e))?;
@@ -963,29 +1095,35 @@ pub fn add_wolfnet_peer(name: &str, endpoint: PeerEndpoint, ip: &str, public_key
 }
 
 /// Auto-fix a single peer's endpoint in the local wolfnet config if it
-/// matches the klasSponsor failure pattern: this node sits on the public
-/// internet but its wolfnet config has the peer pinned to an RFC1918
-/// address (e.g. `10.10.10.30:9630`) that's only valid on the peer's
-/// LAN. Returns `Some(msg)` when a fix was applied, `None` when nothing
+/// matches a known-bad pattern that can't be reached from this node.
+/// Returns `Some(msg)` when a fix was applied, `None` when nothing
 /// needed doing — the common case for healthy configs, so this is cheap
 /// to call from gossip arrival.
 ///
-/// **Conservative on purpose**: we only act when the existing endpoint
-/// is clearly unreachable from us (public-self + private-endpoint). We
-/// never "improve" a plausible entry, so a partially-converged cluster
-/// during a rolling upgrade can't make things worse by guessing with
-/// stale gossip — peers we don't yet have `public_ip` for stay roaming-
-/// only, peers with correct endpoints are left alone.
+/// Trigger condition: this node sits on the public internet AND the
+/// current configured endpoint resolves to an RFC1918 address that
+/// can't be reached from a public-internet host. That's klasSponsor's
+/// 2026-05-11 symptom — VPS's wolfnet config pinned `ninni` to
+/// `10.10.10.30:9630`.
+///
+/// Desired-endpoint computation is delegated to `decide_peer_endpoint`
+/// which applies five safety guards (wolfnet-subnet loop, self-loop,
+/// loopback/link-local, behind-NAT, no-public-ip) — see that function
+/// for the rationale. The key takeaway is that this reconciler is
+/// CONSERVATIVE: it never "improves" a plausible entry, only repairs
+/// a demonstrably-bad one, so a partially-converged cluster during a
+/// rolling upgrade can't make things worse with stale gossip.
 ///
 /// `self_lan_address` is the local node's externally-known address
-/// (typically `Node.address`), used to classify self as public vs LAN.
-/// `peer_hostname` matches the `name = "..."` field in the wolfnet
-/// config peer entry. `peer_public_ip` is what the peer reported via
-/// gossip; `None` triggers a Clear (roaming-only) so the daemon stops
-/// dialing the unreachable RFC1918 address.
+/// (typically `Node.address`), used to classify self as public vs LAN
+/// and to populate the self-loop guard. `peer_hostname` matches the
+/// `name = "..."` field in the wolfnet config peer entry.
+/// `peer_lan_address` and `peer_public_ip` come from cluster gossip
+/// and drive the behind-NAT guard.
 pub fn reconcile_local_wolfnet_endpoint_if_needed(
     self_lan_address: &str,
     peer_hostname: &str,
+    peer_lan_address: Option<&str>,
     peer_public_ip: Option<&str>,
 ) -> Option<String> {
     // 1. Bail if self is private — the bug pattern requires self-public.
@@ -1027,18 +1165,16 @@ pub fn reconcile_local_wolfnet_endpoint_if_needed(
         .and_then(|(_, p)| p.parse::<u16>().ok())
         .unwrap_or(9600);
 
-    // 6. Decide the new endpoint based on whether we know a public IP
-    //    for the peer. None → Clear (roaming-only is strictly better
-    //    than dialing the wrong address). Avoid pinning to self's own
-    //    public IP — that happens when peer.public_ip detection
-    //    actually returns self's IP because they sit behind the same
-    //    NAT as us, which is impossible since we already established
-    //    self is public.
-    let new_endpoint = match peer_public_ip.filter(|s| !s.is_empty()) {
-        Some(p) if p == self_lan_address => PeerEndpoint::Clear,
-        Some(p) => PeerEndpoint::Set(format!("{}:{}", p, port)),
-        None => PeerEndpoint::Clear,
-    };
+    // 6. Compute the desired endpoint via the shared decision function
+    //    so all the safety guards (wolfnet-subnet loop, behind-NAT,
+    //    self-loop, loopback, no-public-ip) apply in one place.
+    let new_endpoint = decide_peer_endpoint(
+        self_lan_address,
+        get_local_wolfnet_subnet(),
+        peer_lan_address,
+        peer_public_ip,
+        port,
+    );
 
     // 7. Apply. `add_wolfnet_peer` returns Err for "no changes needed"
     //    — we treat that as success (nothing to do this tick).
@@ -3473,4 +3609,166 @@ fn chrono_now() -> String {
     }
 
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m + 1, remaining + 1, hours, minutes, seconds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn ip(s: &str) -> Ipv4Addr { s.parse().unwrap() }
+
+    // ─── is_in_subnet ───
+    #[test]
+    fn is_in_subnet_24() {
+        let net = ip("10.100.10.0");
+        assert!(is_in_subnet(ip("10.100.10.1"), net, 24));
+        assert!(is_in_subnet(ip("10.100.10.40"), net, 24));
+        assert!(is_in_subnet(ip("10.100.10.255"), net, 24));
+        assert!(!is_in_subnet(ip("10.100.11.1"), net, 24));
+        assert!(!is_in_subnet(ip("185.57.4.152"), net, 24));
+    }
+
+    #[test]
+    fn is_in_subnet_16() {
+        let net = ip("172.16.0.0");
+        assert!(is_in_subnet(ip("172.16.0.1"), net, 16));
+        assert!(is_in_subnet(ip("172.16.255.255"), net, 16));
+        assert!(!is_in_subnet(ip("172.17.0.1"), net, 16));
+    }
+
+    #[test]
+    fn is_in_subnet_zero_prefix_matches_all() {
+        assert!(is_in_subnet(ip("8.8.8.8"), ip("0.0.0.0"), 0));
+    }
+
+    // ─── decide_peer_endpoint guards ───
+    // Each guard exercised independently. The base "ok" case sits at the
+    // bottom to show what the function looks like when nothing trips.
+
+    fn klas_wn() -> Option<(Ipv4Addr, u8)> { Some((ip("10.100.10.0"), 24)) }
+
+    #[test]
+    fn decide_clears_when_no_public_ip() {
+        let r = decide_peer_endpoint(
+            "194.104.94.40", klas_wn(),
+            Some("10.10.10.30"), None, 9630,
+        );
+        assert!(matches!(r, PeerEndpoint::Clear));
+    }
+
+    #[test]
+    fn decide_clears_when_public_ip_empty() {
+        let r = decide_peer_endpoint(
+            "194.104.94.40", klas_wn(),
+            Some("10.10.10.30"), Some(""), 9630,
+        );
+        assert!(matches!(r, PeerEndpoint::Clear));
+    }
+
+    #[test]
+    fn decide_clears_when_public_ip_in_wolfnet_subnet() {
+        // klasSponsor 2026-05-11 regression: unifios's wolfstack agent
+        // reported its WolfNet IP (10.100.10.1) as public_ip; without
+        // this guard we wrote that as the endpoint and triggered the
+        // kernel routing loop.
+        let r = decide_peer_endpoint(
+            "194.104.94.40", klas_wn(),
+            Some("10.10.5.2"), Some("10.100.10.1"), 9634,
+        );
+        assert!(matches!(r, PeerEndpoint::Clear), "must Clear loop-inducing endpoint, got {:?}", r);
+    }
+
+    #[test]
+    fn decide_clears_self_loop() {
+        let r = decide_peer_endpoint(
+            "194.104.94.40", klas_wn(),
+            Some("194.104.94.40"), Some("194.104.94.40"), 9600,
+        );
+        assert!(matches!(r, PeerEndpoint::Clear));
+    }
+
+    #[test]
+    fn decide_clears_loopback_endpoint() {
+        let r = decide_peer_endpoint(
+            "194.104.94.40", klas_wn(),
+            Some("127.0.0.1"), Some("127.0.0.1"), 9600,
+        );
+        assert!(matches!(r, PeerEndpoint::Clear));
+    }
+
+    #[test]
+    fn decide_clears_link_local_endpoint() {
+        let r = decide_peer_endpoint(
+            "194.104.94.40", klas_wn(),
+            Some("169.254.1.1"), Some("169.254.1.1"), 9600,
+        );
+        assert!(matches!(r, PeerEndpoint::Clear));
+    }
+
+    #[test]
+    fn decide_clears_when_peer_behind_nat() {
+        // peer.lan_address (10.10.10.30) != peer.public_ip (185.57.4.152)
+        // → behind NAT → roaming-only is the robust answer.
+        let r = decide_peer_endpoint(
+            "194.104.94.40", klas_wn(),
+            Some("10.10.10.30"), Some("185.57.4.152"), 9630,
+        );
+        assert!(matches!(r, PeerEndpoint::Clear));
+    }
+
+    #[test]
+    fn decide_sets_when_peer_is_direct_internet() {
+        // peer.lan_address == peer.public_ip — peer is sitting directly
+        // on the public internet, Set is safe.
+        let r = decide_peer_endpoint(
+            "194.104.94.40", klas_wn(),
+            Some("185.57.4.100"), Some("185.57.4.100"), 9600,
+        );
+        match r {
+            PeerEndpoint::Set(s) => assert_eq!(s, "185.57.4.100:9600"),
+            other => panic!("expected Set, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decide_sets_when_peer_public_ip_is_hostname() {
+        // Hostname endpoints are common in DynDNS setups — we trust
+        // them and Set without applying the IP-literal guards.
+        let r = decide_peer_endpoint(
+            "194.104.94.40", klas_wn(),
+            Some("10.10.10.30"), Some("ninni.example.com"), 9630,
+        );
+        match r {
+            PeerEndpoint::Set(s) => assert_eq!(s, "ninni.example.com:9630"),
+            other => panic!("expected Set, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decide_loop_guard_fires_even_without_peer_lan_address() {
+        // The wolfnet-subnet loop check must work without peer_lan_address
+        // — that's the worst case (gossip half-converged, peer.address
+        // unknown but peer.public_ip happens to be a wolfnet-subnet IP).
+        let r = decide_peer_endpoint(
+            "194.104.94.40", klas_wn(),
+            None, Some("10.100.10.5"), 9600,
+        );
+        assert!(matches!(r, PeerEndpoint::Clear));
+    }
+
+    #[test]
+    fn decide_loop_guard_off_when_no_subnet_known() {
+        // If we couldn't read the local wolfnet subnet (e.g. config
+        // missing on a fresh install), the subnet guard skips and the
+        // other guards still fire normally.
+        let r = decide_peer_endpoint(
+            "194.104.94.40", None,
+            Some("185.57.4.100"), Some("185.57.4.100"), 9600,
+        );
+        match r {
+            PeerEndpoint::Set(s) => assert_eq!(s, "185.57.4.100:9600"),
+            other => panic!("expected Set, got {:?}", other),
+        }
+    }
 }
