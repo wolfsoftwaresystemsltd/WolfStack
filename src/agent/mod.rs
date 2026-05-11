@@ -825,6 +825,11 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             // HTTPS on main port also means TLS. Only plain HTTP on the
                             // main port means no TLS.
                             let node_tls = *url != format!("http://{}:{}/api/agent/status", node.address, node.port);
+                            // Capture fresh hostname + public_ip BEFORE the move into
+                            // update_remote so we can pass them to the wolfnet endpoint
+                            // reconciler below without re-locking cluster state.
+                            let peer_hostname_for_reconcile = hostname.clone();
+                            let peer_public_ip_for_reconcile = public_ip.clone();
                             cluster.update_remote(Node {
                                 id: node.id.clone(),
                                 hostname,
@@ -874,6 +879,26 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
 
                             // Reset fail count on success
                             POLL_FAIL_COUNTS.lock().unwrap().remove(&node.id);
+
+                            // Hook B for WolfNet endpoint self-healing — cheap O(1)
+                            // check against the local wolfnet config; only acts on
+                            // the demonstrably-bad pattern (public self + RFC1918
+                            // peer endpoint). See
+                            // networking::reconcile_local_wolfnet_endpoint_if_needed
+                            // for the conservative decision rule. Runs in a
+                            // blocking task to keep file I/O off the poll task.
+                            {
+                                let self_addr = cluster.self_address.clone();
+                                let hn = peer_hostname_for_reconcile;
+                                let pip = peer_public_ip_for_reconcile;
+                                tokio::task::spawn_blocking(move || {
+                                    crate::networking::reconcile_local_wolfnet_endpoint_if_needed(
+                                        &self_addr,
+                                        &hn,
+                                        pip.as_deref(),
+                                    );
+                                });
+                            }
 
                             // Enterprise license propagation: if a remote node has a
                             // valid license and we don't, save it locally.

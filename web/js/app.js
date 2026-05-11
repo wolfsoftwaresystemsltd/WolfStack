@@ -14203,11 +14203,19 @@ async function addWolfNetPeer() {
     if (!name) { showModal('Please enter a peer name'); return; }
     if (!ip) { showModal('Please enter the peer\'s WolfNet IP address'); return; }
 
+    // Belt-and-braces: only include `endpoint` in the payload when the
+    // user actually typed one. The backend already treats null/empty as
+    // "preserve" (only the `__clear__` sentinel from cluster-sync wipes
+    // an endpoint), so this is defensive — keeps the wire payload tight
+    // and prevents a future backend default flip from silently clearing
+    // endpoints on manual peer edits.
+    const body = { name, ip: ip || null, public_key: public_key || null };
+    if (endpoint) body.endpoint = endpoint;
     try {
         const resp = await fetch(apiUrl('/api/networking/wolfnet/peers'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, ip: ip || null, endpoint: endpoint || null, public_key: public_key || null }),
+            body: JSON.stringify(body),
         });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Failed to add peer');

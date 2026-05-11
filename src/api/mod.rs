@@ -2714,17 +2714,66 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "Need at least 2 nodes to sync"}));
     }
 
-    // Collect WolfNet info from each node
+    // Collect WolfNet info from each node. Each peer carries BOTH its
+    // LAN address (`lan_address`, what the local WolfStack agent reports
+    // as its bind/management address) AND its public IP if known. The
+    // right endpoint to write into the WolfNet config depends on which
+    // target node the config is going to — see `pick_wolfnet_endpoint`
+    // below. The old design baked a single `endpoint` string per peer
+    // and reused it for every target, which on klasSponsor's 14-node
+    // cluster left the internet-only VPS with peer endpoints like
+    // `10.10.10.30:9630` that route via lo and black-hole.
     #[derive(Clone)]
     struct NodeWnInfo {
         hostname: String,
         wolfnet_ip: String,
         public_key: String,
-        /// The reachable endpoint (node.address:listen_port) for WolfNet
-        endpoint: String,
+        /// WolfNet listen port (the daemon's own UDP port, distinct
+        /// from the WolfStack API `port`).
+        wolfnet_port: u16,
         is_self: bool,
-        address: String,
+        /// The agent's reported address (`node.address`) — typically a
+        /// LAN IP, but for an internet-only node this is its public IP.
+        lan_address: String,
+        public_ip: Option<String>,
+        /// WolfStack API port — used to call back into this node when
+        /// pushing peer entries to it.
         port: u16,
+    }
+
+    /// Pick the WolfNet endpoint string to write into `target`'s config
+    /// for `peer`. `None` means "no static endpoint — let WolfNet learn
+    /// it via roaming". Lives inline so the sync loop is self-contained.
+    fn pick_wolfnet_endpoint(target: &NodeWnInfo, peer: &NodeWnInfo) -> Option<String> {
+        use std::net::Ipv4Addr;
+        let target_addr_priv = target.lan_address.parse::<Ipv4Addr>()
+            .map(crate::networking::is_private_ip)
+            .unwrap_or(true); // unparseable → assume private, keep old behaviour
+        let peer_addr_priv = peer.lan_address.parse::<Ipv4Addr>()
+            .map(crate::networking::is_private_ip)
+            .unwrap_or(false);
+
+        if target_addr_priv {
+            // Target is on a LAN. Peers on the same LAN are reachable at
+            // their LAN address; peers on the public internet have their
+            // public IP in `node.address` (because the agent reports its
+            // own address with no NAT), so `lan_address` still works.
+            return Some(format!("{}:{}", peer.lan_address, peer.wolfnet_port));
+        }
+        // Target is internet-only. A peer with a private LAN address is
+        // not directly reachable — prefer its `public_ip` (the WolfStack
+        // agent detected this via an outbound probe); if unknown, return
+        // None so WolfNet runs roaming-only on this target for this
+        // peer. The peer must initiate at least once for the target to
+        // learn the real source address, but the peer's keepalive loop
+        // covers that on the order of seconds.
+        if peer_addr_priv {
+            peer.public_ip.as_ref()
+                .filter(|s| !s.is_empty())
+                .map(|p| format!("{}:{}", p, peer.wolfnet_port))
+        } else {
+            Some(format!("{}:{}", peer.lan_address, peer.wolfnet_port))
+        }
     }
 
     let client = &*API_HTTP_CLIENT;
@@ -2747,17 +2796,16 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
             match networking::get_wolfnet_local_info() {
                 Some(info) => {
                     let hostname = info["hostname"].as_str().unwrap_or("").to_string();
-                    let address = info["address"].as_str().unwrap_or("").to_string();
+                    let wolfnet_ip = info["address"].as_str().unwrap_or("").to_string();
                     let public_key = info["public_key"].as_str().unwrap_or("").to_string();
                     let listen_port = info["listen_port"].as_u64().unwrap_or(9600) as u16;
-                    if address.is_empty() || public_key.is_empty() {
+                    if wolfnet_ip.is_empty() || public_key.is_empty() {
                         errors.push(format!("{}: WolfNet not configured", node.hostname));
                         continue;
                     }
-                    // Use the node's real address as the endpoint.
-                    // If bound to 0.0.0.0 or 127.0.0.1, those aren't routable — use the
-                    // public IP (for internet-reachable nodes) or fall back to LAN IP
-                    // (for local-only networks).
+                    // If WolfStack is bound to 0.0.0.0 / 127.0.0.1, fall
+                    // back to public_ip then LAN-detected IP so the
+                    // address we record for this node is actually dialable.
                     let effective_addr = if node.address == "0.0.0.0" || node.address == "127.0.0.1" {
                         node.public_ip.clone()
                             .or_else(|| networking::detect_lan_ip())
@@ -2765,14 +2813,14 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                     } else {
                         node.address.clone()
                     };
-                    let endpoint = format!("{}:{}", effective_addr, listen_port);
                     infos.push(NodeWnInfo {
                         hostname,
-                        wolfnet_ip: address,
+                        wolfnet_ip,
                         public_key,
-                        endpoint,
+                        wolfnet_port: listen_port,
                         is_self: true,
-                        address: effective_addr,
+                        lan_address: effective_addr,
+                        public_ip: node.public_ip.clone(),
                         port: node.port,
                     });
                 }
@@ -2798,22 +2846,22 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                                 break;
                             }
                             let hostname = info["hostname"].as_str().unwrap_or("").to_string();
-                            let address = info["address"].as_str().unwrap_or("").to_string();
+                            let wolfnet_ip = info["address"].as_str().unwrap_or("").to_string();
                             let public_key = info["public_key"].as_str().unwrap_or("").to_string();
                             let listen_port = info["listen_port"].as_u64().unwrap_or(9600) as u16;
-                            if address.is_empty() || public_key.is_empty() {
+                            if wolfnet_ip.is_empty() || public_key.is_empty() {
                                 errors.push(format!("{}: WolfNet not configured", node.hostname));
                                 fetched = true;
                                 break;
                             }
-                            let endpoint = format!("{}:{}", node.address, listen_port);
                             infos.push(NodeWnInfo {
                                 hostname,
-                                wolfnet_ip: address,
+                                wolfnet_ip,
                                 public_key,
-                                endpoint,
+                                wolfnet_port: listen_port,
                                 is_self: false,
-                                address: node.address.clone(),
+                                lan_address: node.address.clone(),
+                                public_ip: node.public_ip.clone(),
                                 port: node.port,
                             });
                             fetched = true;
@@ -2847,11 +2895,27 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
             if i == j { continue; }
             let peer = &infos[j];
 
+            // Per-target endpoint selection — see `pick_wolfnet_endpoint`
+            // above. `None` means "roaming-only on this target for this
+            // peer" — we translate that into PeerEndpoint::Clear locally
+            // (and the sentinel `__clear__` over the wire) so the remote
+            // handler actively wipes any stale endpoint rather than
+            // preserving the wrong one.
+            let endpoint_choice: Option<String> = pick_wolfnet_endpoint(target, peer);
+            let endpoint_local = match &endpoint_choice {
+                Some(s) => networking::PeerEndpoint::Set(s.clone()),
+                None => networking::PeerEndpoint::Clear,
+            };
+            let endpoint_wire: &str = match &endpoint_choice {
+                Some(s) => s.as_str(),
+                None => "__clear__",
+            };
+
             if target.is_self {
                 // Add peer locally
                 match networking::add_wolfnet_peer(
                     &peer.hostname,
-                    &peer.endpoint,
+                    endpoint_local,
                     &peer.wolfnet_ip,
                     Some(&peer.public_key),
                 ) {
@@ -2866,10 +2930,10 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                 }
             } else {
                 // Add peer on remote node — try HTTPS first, then HTTP fallback
-                let urls = build_node_urls(&target.address, target.port, "/api/networking/wolfnet/peers");
+                let urls = build_node_urls(&target.lan_address, target.port, "/api/networking/wolfnet/peers");
                 let payload = serde_json::json!({
                     "name": peer.hostname,
-                    "endpoint": peer.endpoint,
+                    "endpoint": endpoint_wire,
                     "ip": peer.wolfnet_ip,
                     "public_key": peer.public_key,
                 });
@@ -8778,7 +8842,16 @@ pub struct WolfNetAddPeer {
 /// POST /api/networking/wolfnet/peers — add a WolfNet peer
 pub async fn net_add_wolfnet_peer(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfNetAddPeer>) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    let endpoint = body.endpoint.as_deref().unwrap_or("");
+    // Manual API: a missing/null/empty endpoint means "preserve whatever
+    // the existing peer has" so a third-party script PATCHing other
+    // fields doesn't accidentally wipe a working endpoint. The cluster-
+    // sync code uses a different inbound endpoint marker (`__clear__`)
+    // when it specifically wants to remove a stale unreachable endpoint.
+    let endpoint = match body.endpoint.as_deref() {
+        Some("__clear__") => networking::PeerEndpoint::Clear,
+        Some(s) if !s.is_empty() => networking::PeerEndpoint::Set(s.to_string()),
+        _ => networking::PeerEndpoint::Preserve,
+    };
     let ip = body.ip.as_deref().unwrap_or("");
     let public_key = body.public_key.as_deref();
     match networking::add_wolfnet_peer(&body.name, endpoint, ip, public_key) {

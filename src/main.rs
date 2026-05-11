@@ -948,6 +948,36 @@ async fn main() -> std::io::Result<()> {
             });
         }
 
+        // Hook A for WolfNet endpoint self-healing — one-shot startup pass
+        // 30s after launch. By then the first cluster gossip cycle has
+        // run and we have public_ip for any peer that's online; offline
+        // peers stay roaming-only until they come back and hit Hook B
+        // (the gossip-arrival check in agent::mod). The pair fixes
+        // klasSponsor's "VPS upgraded but wolfnet config still pins LAN
+        // peers to 10.10.x.x" without ever needing the manual Sync
+        // button. Bails immediately on LAN-only clusters (the bad
+        // pattern requires self-public).
+        {
+            let cluster_for_wnfix = cluster.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let self_addr = cluster_for_wnfix.self_address.clone();
+                let nodes_snapshot = cluster_for_wnfix.get_all_nodes();
+                for node in nodes_snapshot {
+                    if node.is_self { continue; }
+                    if node.node_type != "wolfstack" { continue; }
+                    let hn = node.hostname.clone();
+                    let pip = node.public_ip.clone();
+                    let sa = self_addr.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::networking::reconcile_local_wolfnet_endpoint_if_needed(
+                            &sa, &hn, pip.as_deref(),
+                        );
+                    }).await.ok();
+                }
+            });
+        }
+
         // Daily certbot renewal. Runs certbot's own `renew --quiet`
         // which is a no-op for any cert with >30 days left, so it's
         // cheap to fire every 24h. Skipped by config flag and when

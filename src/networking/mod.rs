@@ -784,10 +784,33 @@ pub fn save_wolfnet_config(content: &str) -> Result<String, String> {
     Ok("Configuration saved".to_string())
 }
 
+/// What `add_wolfnet_peer` should do with the endpoint field on an
+/// existing peer. Three states, because empty-string-means-X is too
+/// ambiguous: the manual "Add Peer" form wants to preserve whatever
+/// endpoint is already there if the user leaves the field blank, while
+/// the cluster-sync code wants to ACTIVELY WIPE a stale endpoint when
+/// the target can't reach the peer's static address (roaming-only).
+#[derive(Debug, Clone)]
+pub enum PeerEndpoint {
+    /// Set or update the endpoint to this string.
+    Set(String),
+    /// Remove the endpoint field entirely — roaming-only.
+    Clear,
+    /// Leave whatever endpoint the existing peer has (or none, for new).
+    Preserve,
+}
+
 /// Add or update a peer in WolfNet config (upsert).
 /// If a peer with the same name, public key, or allowed IP already exists,
-/// its name and endpoint are updated. Otherwise a new peer is appended.
-pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option<&str>) -> Result<String, String> {
+/// its name is updated and the endpoint is handled per `endpoint` (see
+/// `PeerEndpoint` for the three modes). Otherwise a new peer is appended,
+/// with the endpoint included only for `PeerEndpoint::Set`.
+///
+/// `PeerEndpoint::Clear` is what cluster-sync uses when an internet-only
+/// node would otherwise be pinned to an unreachable RFC1918 endpoint —
+/// without an active wipe, every SIGHUP re-pins the wrong address and
+/// any roaming-learned update gets clobbered on the next tick.
+pub fn add_wolfnet_peer(name: &str, endpoint: PeerEndpoint, ip: &str, public_key: Option<&str>) -> Result<String, String> {
     let config_path = "/etc/wolfnet/config.toml";
     let content = std::fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read config: {}", e))?;
@@ -846,17 +869,56 @@ pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option
             peer.as_table_mut().unwrap().insert("name".to_string(), toml::Value::String(name.to_string()));
             changed = true;
         }
-        if !endpoint.is_empty() && peer.get("endpoint").and_then(|v| v.as_str()) != Some(endpoint) {
-            peer.as_table_mut().unwrap().insert("endpoint".to_string(), toml::Value::String(endpoint.to_string()));
-            changed = true;
+        // Track whether we wiped an endpoint that was actually present —
+        // if so, fall back to a full wolfnet restart instead of SIGHUP.
+        // Pre-0.5.22 wolfnet's SIGHUP handler only honours the "Some(ep)"
+        // branch and silently leaves a stale in-memory endpoint when the
+        // config line vanishes (klasSponsor's symptom — the bad
+        // `10.10.10.30` endpoint kept being dialed even after WolfStack
+        // rewrote the config without it). A cold restart re-reads the
+        // config from scratch and the cleared peer comes up roaming-only
+        // as intended. New wolfnet handles SIGHUP correctly so this is
+        // belt-and-braces for mixed-version clusters.
+        let mut cleared_endpoint = false;
+        match &endpoint {
+            PeerEndpoint::Set(s) if !s.is_empty() => {
+                if peer.get("endpoint").and_then(|v| v.as_str()) != Some(s.as_str()) {
+                    peer.as_table_mut().unwrap().insert("endpoint".to_string(), toml::Value::String(s.clone()));
+                    changed = true;
+                }
+            }
+            PeerEndpoint::Set(_) | PeerEndpoint::Preserve => {
+                // Set("") is treated as Preserve — historically callers used
+                // empty string to mean "no change", and we honour that here
+                // so a stray empty payload from a script doesn't wipe a good
+                // endpoint by accident.
+            }
+            PeerEndpoint::Clear => {
+                if peer.as_table_mut().unwrap().remove("endpoint").is_some() {
+                    changed = true;
+                    cleared_endpoint = true;
+                }
+            }
         }
 
         if !changed {
             return Err(format!("Peer '{}' already exists (no changes needed)", name));
         }
 
+        // Write back, then either SIGHUP or full restart depending on
+        // whether we cleared an endpoint (see above).
+        let output = toml::to_string_pretty(&doc)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+        std::fs::write(config_path, &output)
+            .map_err(|e| format!("Failed to write config: {}", e))?;
+        if cleared_endpoint {
+            restart_wolfnet();
+        } else {
+            reload_or_restart_wolfnet();
+        }
 
-        result_msg = format!("Peer '{}' updated and WolfNet restarted", name);
+        return Ok(format!("Peer '{}' updated and WolfNet {}", name,
+            if cleared_endpoint { "restarted" } else { "reloaded" }));
     } else {
         // Add new peer
         let mut new_peer = toml::map::Map::new();
@@ -866,8 +928,10 @@ pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option
                 new_peer.insert("public_key".to_string(), toml::Value::String(pk.to_string()));
             }
         }
-        if !endpoint.is_empty() {
-            new_peer.insert("endpoint".to_string(), toml::Value::String(endpoint.to_string()));
+        if let PeerEndpoint::Set(s) = &endpoint {
+            if !s.is_empty() {
+                new_peer.insert("endpoint".to_string(), toml::Value::String(s.clone()));
+            }
         }
         if !ip.is_empty() {
             new_peer.insert("allowed_ip".to_string(), toml::Value::String(ip.to_string()));
@@ -896,6 +960,105 @@ pub fn add_wolfnet_peer(name: &str, endpoint: &str, ip: &str, public_key: Option
     reload_or_restart_wolfnet();
 
     Ok(result_msg)
+}
+
+/// Auto-fix a single peer's endpoint in the local wolfnet config if it
+/// matches the klasSponsor failure pattern: this node sits on the public
+/// internet but its wolfnet config has the peer pinned to an RFC1918
+/// address (e.g. `10.10.10.30:9630`) that's only valid on the peer's
+/// LAN. Returns `Some(msg)` when a fix was applied, `None` when nothing
+/// needed doing — the common case for healthy configs, so this is cheap
+/// to call from gossip arrival.
+///
+/// **Conservative on purpose**: we only act when the existing endpoint
+/// is clearly unreachable from us (public-self + private-endpoint). We
+/// never "improve" a plausible entry, so a partially-converged cluster
+/// during a rolling upgrade can't make things worse by guessing with
+/// stale gossip — peers we don't yet have `public_ip` for stay roaming-
+/// only, peers with correct endpoints are left alone.
+///
+/// `self_lan_address` is the local node's externally-known address
+/// (typically `Node.address`), used to classify self as public vs LAN.
+/// `peer_hostname` matches the `name = "..."` field in the wolfnet
+/// config peer entry. `peer_public_ip` is what the peer reported via
+/// gossip; `None` triggers a Clear (roaming-only) so the daemon stops
+/// dialing the unreachable RFC1918 address.
+pub fn reconcile_local_wolfnet_endpoint_if_needed(
+    self_lan_address: &str,
+    peer_hostname: &str,
+    peer_public_ip: Option<&str>,
+) -> Option<String> {
+    // 1. Bail if self is private — the bug pattern requires self-public.
+    //    (And keeps LAN-only clusters out of this code entirely.)
+    let self_addr: std::net::Ipv4Addr = self_lan_address.parse().ok()?;
+    if is_private_ip(self_addr) { return None; }
+
+    // 2. Read the wolfnet config. Missing/unparseable file → nothing to do.
+    let config_path = "/etc/wolfnet/config.toml";
+    let content = std::fs::read_to_string(config_path).ok()?;
+    let doc: toml::Value = toml::from_str(&content).ok()?;
+    let peers = doc.get("peers").and_then(|v| v.as_array())?;
+
+    // 3. Locate the peer entry by hostname. Hostname is the stable key
+    //    here — wolfnet IP can be reused after a rejoin and public_key
+    //    isn't carried in gossip. Also capture the allowed_ip and
+    //    public_key so we can hand them back to add_wolfnet_peer below;
+    //    that way if the peer was concurrently removed between this
+    //    read and the upsert (rare, but possible — operator hit Delete
+    //    in the UI mid-tick), the upsert still constructs a valid
+    //    `[[peers]]` entry instead of a name-only stub.
+    let peer_entry = peers.iter().find(|p| {
+        p.get("name").and_then(|v| v.as_str()) == Some(peer_hostname)
+    })?;
+    let current_endpoint = peer_entry.get("endpoint").and_then(|v| v.as_str())?;
+    let existing_ip = peer_entry.get("allowed_ip").and_then(|v| v.as_str()).unwrap_or("");
+    let existing_pk = peer_entry.get("public_key").and_then(|v| v.as_str());
+
+    // 4. Extract the host portion. If it's not an RFC1918 IPv4 we have
+    //    no evidence the entry is wrong — leave it alone.
+    let host = endpoint_host(current_endpoint)?;
+    let host_ip: std::net::Ipv4Addr = host.parse().ok()?;
+    if !is_private_ip(host_ip) { return None; }
+
+    // 5. Reuse the existing port (wolfnet listen ports vary per peer,
+    //    e.g. 9600/9605/9630 in klas's cluster). If somehow malformed,
+    //    fall back to the wolfnet default 9600.
+    let port = current_endpoint.rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+        .unwrap_or(9600);
+
+    // 6. Decide the new endpoint based on whether we know a public IP
+    //    for the peer. None → Clear (roaming-only is strictly better
+    //    than dialing the wrong address). Avoid pinning to self's own
+    //    public IP — that happens when peer.public_ip detection
+    //    actually returns self's IP because they sit behind the same
+    //    NAT as us, which is impossible since we already established
+    //    self is public.
+    let new_endpoint = match peer_public_ip.filter(|s| !s.is_empty()) {
+        Some(p) if p == self_lan_address => PeerEndpoint::Clear,
+        Some(p) => PeerEndpoint::Set(format!("{}:{}", p, port)),
+        None => PeerEndpoint::Clear,
+    };
+
+    // 7. Apply. `add_wolfnet_peer` returns Err for "no changes needed"
+    //    — we treat that as success (nothing to do this tick).
+    match add_wolfnet_peer(peer_hostname, new_endpoint, existing_ip, existing_pk) {
+        Ok(msg) => {
+            tracing::info!(
+                "WolfNet endpoint auto-fixed: peer '{}' had unreachable RFC1918 endpoint '{}', repaired",
+                peer_hostname, current_endpoint
+            );
+            Some(msg)
+        }
+        Err(e) if e.contains("no changes needed") => None,
+        Err(e) => {
+            tracing::warn!(
+                "WolfNet endpoint auto-fix for peer '{}' failed: {}",
+                peer_hostname, e
+            );
+            None
+        }
+    }
 }
 
 /// Remove a peer from WolfNet config by name
@@ -972,6 +1135,15 @@ pub fn remove_wolfnet_peer(name: &str) -> Result<String, String> {
 
 /// Try SIGHUP hot-reload first; if wolfnet dies (old version without handler),
 /// fall back to systemctl restart.
+/// Force a full systemctl restart of wolfnet (skip SIGHUP). Used when
+/// the config change is one that pre-0.5.22 wolfnet can't apply via
+/// SIGHUP — currently just "endpoint removed from peer entry". A cold
+/// restart re-reads the file and the peer comes up with no static
+/// endpoint, ready for roaming.
+fn restart_wolfnet() {
+    let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
+}
+
 fn reload_or_restart_wolfnet() {
     // Check if wolfnet is currently running
     let was_running = Command::new("pgrep").arg("wolfnet")
