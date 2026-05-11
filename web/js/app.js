@@ -3818,15 +3818,32 @@ function getClusterColor(clusterKey) {
     return CLUSTER_COLORS[clusterColorMap[clusterKey]];
 }
 
+let _mapInitRetryTimer = null;
+let _mapInitRetryCount = 0;
 function initMap() {
     if (worldMap) return;
     const mapEl = document.getElementById('world-map');
     if (!mapEl) return;
     // Leaflet is loaded with `defer` in index.html but app.js is injected via
     // document.write without defer, so on cold loads `L` may not be ready when
-    // the first dashboard render fires updateMap(). Bail quietly — the next
-    // poll tick will retry once Leaflet has parsed.
-    if (typeof L === 'undefined') return;
+    // the first dashboard render fires updateMap(). The dashboard poll runs
+    // every 15s — too slow to recover from a cold load — so retry every 100ms
+    // here until Leaflet has parsed (capped at 5s so we don't loop forever
+    // if the CDN is dead).
+    const ready = typeof L !== 'undefined' && mapEl.clientHeight > 0 && mapEl.clientWidth > 0;
+    if (!ready) {
+        if (_mapInitRetryTimer || _mapInitRetryCount >= 50) return;
+        _mapInitRetryTimer = setTimeout(() => {
+            _mapInitRetryTimer = null;
+            _mapInitRetryCount++;
+            initMap();
+            // Once the map exists, re-run updateMap so markers are placed for
+            // the current node set — initMap on its own only paints tiles.
+            if (worldMap && typeof allNodes !== 'undefined' && Array.isArray(allNodes)) updateMap(allNodes);
+        }, 100);
+        return;
+    }
+    _mapInitRetryCount = 0;
 
     worldMap = L.map('world-map', {
         attributionControl: false,
@@ -3840,7 +3857,10 @@ function initMap() {
 
 function updateMap(nodes) {
     if (!document.getElementById('world-map')) return;
-    if (typeof L === 'undefined') return;
+    // initMap handles "Leaflet not loaded yet" and "container has zero size"
+    // by scheduling its own 100ms retry. Don't pre-return on `typeof L ===
+    // 'undefined'` — that would block the retry from ever starting on cold
+    // loads where the 15s dashboard poll is the only fallback.
     if (!worldMap) initMap();
     if (!worldMap) return;
 
@@ -6692,7 +6712,10 @@ async function editContainerConfigFile(type, name) {
     const modal = document.createElement('div');
     modal.id = 'container-file-edit-modal';
     modal.className = 'modal-overlay';
-    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
+    // .modal-overlay ships with opacity:0; pointer-events:none until
+    // .active is added — override inline so the modal is visible the
+    // instant we attach it (no rAF dance needed for this single-shot).
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);opacity:1;pointer-events:all;';
     const typeIcon = type === 'docker' ? '' : '';
     modal.innerHTML = `
         <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px;min-width:720px;max-width:90vw;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
@@ -17790,7 +17813,9 @@ async function migrateVmDiskStorage(name) {
 
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
-    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
+    // .modal-overlay defaults to opacity:0; pointer-events:none — override
+    // inline so the modal is interactive immediately on append.
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);opacity:1;pointer-events:all;';
     modal.innerHTML = `
         <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:440px;max-width:560px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
             <h3 style="margin:0 0 10px;color:var(--text,#fff);">Migrate VM Disk Storage</h3>
@@ -26422,7 +26447,12 @@ function renderAppStoreGrid() {
     filtered.sort((a, b) => a.name.localeCompare(b.name));
 
     grid.innerHTML = filtered.map(app => {
-        const icon = APP_ICONS[app.id] || '';
+        // Fallback: most catalog apps (VMs, hosts, the ~150 newer Docker
+        // recipes) have no APP_ICONS entry. Use a theme-aware [data-icon]
+        // placeholder so the card never renders an empty 48×48 square —
+        // fillDataIconPlaceholders fills it with a Lucide SVG on `clean`
+        // and a package emoji on `standard`/`candy_emoji`.
+        const icon = APP_ICONS[app.id] || '<span class="ws-icon-clean-wrap" data-icon="package"></span>';
         const targets = [];
         if (app.docker) targets.push('Docker');
         if (app.lxc) targets.push('LXC');
@@ -26504,7 +26534,12 @@ function renderAppStoreTable() {
     html += '</tr></thead><tbody>';
 
     html += filtered.map(app => {
-        const icon = APP_ICONS[app.id] || '';
+        // Fallback: most catalog apps (VMs, hosts, the ~150 newer Docker
+        // recipes) have no APP_ICONS entry. Use a theme-aware [data-icon]
+        // placeholder so the card never renders an empty 48×48 square —
+        // fillDataIconPlaceholders fills it with a Lucide SVG on `clean`
+        // and a package emoji on `standard`/`candy_emoji`.
+        const icon = APP_ICONS[app.id] || '<span class="ws-icon-clean-wrap" data-icon="package"></span>';
         const targets = [];
         if (app.docker) targets.push('<span class="appstore-target-badge">Docker</span>');
         if (app.lxc) targets.push('<span class="appstore-target-badge">LXC</span>');
@@ -27212,7 +27247,7 @@ async function loadInstalledApps() {
         }
 
         listEl.innerHTML = installed.map(app => {
-            const icon = APP_ICONS[app.app_id] || '';
+            const icon = APP_ICONS[app.app_id] || '<span class="ws-icon-clean-wrap" data-icon="package"></span>';
             const date = new Date(app.installed_at).toLocaleString();
             // InstalledApp uses `install_id` and `app_name` in the
             // backend JSON. Older code read `app.id` / `app.name` and
