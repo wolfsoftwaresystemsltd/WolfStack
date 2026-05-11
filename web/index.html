@@ -225,7 +225,7 @@
                 </a>
                 <a class="nav-item" data-page="inbox" onclick="selectView('inbox')" title="Predictive Inbox"
                     style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;border-radius:10px;position:relative;">
-                    <span class="icon" style="margin:0;font-size:20px;">🔮</span>
+                    <span class="icon" style="margin:0;font-size:20px;"><span class="ws-icon-clean-wrap" data-icon="inbox"></span></span>
                     <span id="predictive-badge" style="display:none;position:absolute;top:2px;right:2px;background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:1px 5px;border-radius:8px;line-height:1.4;min-width:14px;text-align:center;"></span>
                 </a>
                 <!-- Apps & Tools launcher — opens a slide-out drawer
@@ -1914,7 +1914,7 @@
                         </div>
 
                         <div style="border-top:1px solid var(--border); padding-top:12px;">
-                            <label style="font-size:13px; font-weight:600;">🧰 Allowed Tools</label>
+                            <label style="font-size:13px; font-weight:600;"><span class="ws-icon-clean-wrap" data-icon="wrench"></span> Allowed Tools</label>
                             <small style="color:var(--text-muted); display:block; margin-bottom:6px;">
                                 Each tool must be explicitly granted. Newly created agents start with zero tools — even read-only ones.
                             </small>
@@ -2074,7 +2074,7 @@
                 <div class="card-body" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
                     <div>
                         <h2 style="margin:0;display:flex;align-items:center;gap:10px;">
-                            <span style="font-size:28px;">🎛️</span>Control Panel
+                            <span style="font-size:28px;"><span class="ws-icon-clean-wrap" data-icon="sliders"></span></span>Control Panel
                         </h2>
                         <p style="margin:6px 0 0;color:var(--text-muted);font-size:13px;">Every VM, LXC and Docker container across every cluster in one place. Switch how they're grouped, drag items between custom groups, and act on anything from one view.</p>
                     </div>
@@ -2131,7 +2131,7 @@
                 <div class="card-body" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
                     <div>
                         <h2 style="margin:0;display:flex;align-items:center;gap:10px;">
-                            <span style="font-size:28px;">💽</span>Storage Array
+                            <span style="font-size:28px;"><span class="ws-icon-clean-wrap" data-icon="hard-drive"></span></span>Storage Array
                         </h2>
                         <p style="margin:6px 0 0;color:var(--text-muted);font-size:13px;">
                             Manage Linux mdadm RAID and NoNRAID parity arrays. Start/stop, parity checks, scheduled verification, drive health alerts. Auto-detects which backend is on this host.
@@ -2228,7 +2228,7 @@
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-label">Info</span>
-                        <div class="stat-icon" style="background:rgba(59,130,246,0.15); color:#3b82f6;">🔵</div>
+                        <div class="stat-icon" style="background:rgba(59,130,246,0.15); color:#3b82f6;"><span class="ws-icon-clean-wrap" data-icon="circle-blue"></span></div>
                     </div>
                     <div class="stat-value" id="issues-count-info" style="color:#3b82f6;">0</div>
                 </div>
@@ -4144,7 +4144,7 @@
                         <button class="btn btn-sm" onclick="switchStatusTab('monitors')" id="sp-tab-monitors"
                             style="font-size:12px;"><span class="ws-icon-clean-wrap" data-icon="search"></span> Monitors</button>
                         <button class="btn btn-sm" onclick="switchStatusTab('incidents')" id="sp-tab-incidents"
-                            style="font-size:12px;">🚨 Incidents</button>
+                            style="font-size:12px;"><span class="ws-icon-clean-wrap" data-icon="warning"></span> Incidents</button>
                     </div>
                 </div>
                 <div class="card-body" style="padding:20px;">
@@ -4341,7 +4341,7 @@
                             <select id="sp-incident-status" class="form-control">
                                 <option value="investigating"><span class="ws-icon-clean-wrap" data-icon="search"></span> Investigating</option>
                                 <option value="identified"><span class="ws-icon-clean-wrap" data-icon="target"></span> Identified</option>
-                                <option value="monitoring">👀 Monitoring</option>
+                                <option value="monitoring"><span class="ws-icon-clean-wrap" data-icon="eye"></span> Monitoring</option>
                                 <option value="resolved"><span class="ws-icon-clean-wrap" data-icon="check-circle"></span> Resolved</option>
                             </select>
                         </div>
@@ -4390,7 +4390,7 @@
                         <button class="settings-tab-btn" onclick="switchSettingsTab('alerting')"><span class="ws-icon-clean-wrap" data-icon="bell"></span> Alerting</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('ai')"><span class="ws-icon-clean-wrap" data-icon="robot"></span> AI Agent</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('backup')"><span class="ws-icon-clean-wrap" data-icon="package"></span> Config Backup</button>
-                        <button class="settings-tab-btn" onclick="switchSettingsTab('users')">👤 Users &amp; Auth</button>
+                        <button class="settings-tab-btn" onclick="switchSettingsTab('users')"><span class="ws-icon-clean-wrap" data-icon="user"></span> Users &amp; Auth</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('security')"><span class="ws-icon-clean-wrap" data-icon="lock"></span> Security</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('passkeys')"><span class="ws-icon-clean-wrap" data-icon="key"></span> Passkeys</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('systemcheck')"><span class="ws-icon-clean-wrap" data-icon="health"></span> System Check</button>
@@ -4899,7 +4899,7 @@
                                     </small>
                                 </div>
 
-                                <h4 style="margin:16px 0 12px 0; font-size:14px; color:var(--accent-light);">📱 Discord bot (inbound)</h4>
+                                <h4 style="margin:16px 0 12px 0; font-size:14px; color:var(--accent-light);">Discord bot (inbound)</h4>
                                 <div class="form-group" style="margin-bottom:16px;">
                                     <label>Discord Bot Token</label>
                                     <input type="password" id="alerting-discord-bot-token" class="form-control"
@@ -5884,12 +5884,12 @@
                  we surface it as a one-click jump from here rather than
                  duplicate it as a per-node tab. -->
             <div style="background:rgba(96,165,250,0.06);border:1px solid rgba(96,165,250,0.25);border-radius:8px;padding:10px 14px;margin-bottom:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-                <span style="font-size:20px;">💽</span>
+                <span style="font-size:20px;"><span class="ws-icon-clean-wrap" data-icon="hard-drive"></span></span>
                 <div style="flex:1;min-width:200px;font-size:12px;color:var(--text-secondary);line-height:1.45;">
                     <strong style="color:var(--text-primary);">Looking for mdadm / NoNRAID arrays?</strong>
                     The <em>Storage Array</em> page aggregates every parity array across the cluster — open it for status, parity checks, and drive alerts.
                 </div>
-                <button class="btn btn-sm" onclick="selectView('array')" style="flex-shrink:0;">💽 Open Storage Array →</button>
+                <button class="btn btn-sm" onclick="selectView('array')" style="flex-shrink:0;"><span class="ws-icon-clean-wrap" data-icon="hard-drive"></span> Open Storage Array →</button>
             </div>
             <!-- Installed Storage Providers -->
             <div class="card" style="margin-bottom:20px;">
@@ -6000,7 +6000,7 @@
             <!-- Disk Partitions (always shown) -->
             <div id="disk-info-section" class="card" style="margin-top:20px;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                    <h3>💿 Node Disk Layout</h3>
+                    <h3>Node Disk Layout</h3>
                     <button class="btn btn-sm" onclick="loadDiskInfo()"
                         style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;">↻
                         Refresh</button>
@@ -6615,7 +6615,7 @@
         <div id="page-wolfrouter" class="page-view" style="display:none;">
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                    <h3 style="display:flex; align-items:center; gap:8px;">🧩 WolfRouter
+                    <h3 style="display:flex; align-items:center; gap:8px;">WolfRouter
                         <span class="badge" style="background:rgba(168,85,247,0.15); color:#a855f7; font-size:10px; padding:2px 8px; border-radius:10px;">beta</span>
                         <span style="font-size:11px; color:var(--text-muted); font-weight:normal;">Cluster-wide firewall, DHCP, DNS</span>
                     </h3>

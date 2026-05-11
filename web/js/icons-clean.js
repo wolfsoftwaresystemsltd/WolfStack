@@ -101,6 +101,15 @@ const LUCIDE_NAME_MAP = {
     'docker':       'container',
     'bookmark':     'bookmark',
     'minus':        'minus',
+    'inbox':        'inbox',
+    'hard-drive':   'hard-drive',
+    'disc':         'disc',
+    'sliders':      'sliders-horizontal',
+    'puzzle':       'puzzle',
+    'smartphone':   'smartphone',
+    'eye':          'eye',
+    'user':         'user',
+    'siren':        'siren',
     // Fallbacks for decorative-emoji-as-data entries (MOUNT_TYPE_ICONS,
     // EMOJI_TO_SEMANTIC, etc.). Lucide doesn't ship a wolf — paw-print
     // is the closest "animal mascot" glyph and renders consistently
@@ -212,17 +221,53 @@ function wsIcon(semantic) {
 
 // ─── data-icon placeholder filler ────────────────────────────────────
 
+// Inverse lookup: semantic name → emoji glyph. Built lazily from
+// EMOJI_TO_SEMANTIC the first time we need it (after app.js has had a
+// chance to define that table). Lets the `standard` and `candy_emoji`
+// themes render their glyph in static `[data-icon]` placeholders so
+// switching themes actually changes what users see.
+let _semanticToEmoji = null;
+function semanticToEmoji(semantic) {
+    if (typeof EMOJI_TO_SEMANTIC === 'undefined') return '';
+    if (!_semanticToEmoji) {
+        _semanticToEmoji = {};
+        for (const [emoji, sem] of Object.entries(EMOJI_TO_SEMANTIC)) {
+            // First-write wins so a single canonical emoji per semantic.
+            if (!(sem in _semanticToEmoji)) _semanticToEmoji[sem] = emoji;
+        }
+        // Fill in the extras icons-clean knows about that aren't in app.js's table.
+        for (const [emoji, sem] of Object.entries(CLEAN_EXTRA_EMOJI_MAP)) {
+            if (!(sem in _semanticToEmoji)) _semanticToEmoji[sem] = emoji;
+        }
+    }
+    return _semanticToEmoji[semantic] || '';
+}
+
 function fillDataIconPlaceholders(root) {
     const scope = root || document.body;
+    const theme = (typeof currentIconTheme !== 'undefined') ? currentIconTheme : 'clean';
     scope.querySelectorAll('[data-icon]').forEach(el => {
-        // Already filled — skip. Idempotent.
-        if (el.querySelector('svg.ws-icon-clean')) return;
         const semantic = el.getAttribute('data-icon');
         if (!semantic) return;
-        if (!cleanIconAvailable(semantic)) return;
-        if (!el.classList.contains('ws-icon-clean-wrap')) {
-            el.classList.add('ws-icon-clean-wrap');
+        // Try theme-specific render first. For `standard` / `candy_emoji`,
+        // if the semantic doesn't have an emoji glyph mapping, fall back
+        // to Lucide so the placeholder never ends up blank — better a
+        // line icon than missing chrome.
+        if (theme === 'standard' || theme === 'candy_emoji') {
+            let glyph = semanticToEmoji(semantic);
+            if (glyph) {
+                if (theme === 'candy_emoji' && typeof CANDY_ICON_MAP !== 'undefined' && CANDY_ICON_MAP[glyph]) {
+                    glyph = CANDY_ICON_MAP[glyph];
+                }
+                el.textContent = glyph;
+                el.classList.remove('ws-icon-clean-wrap');
+                return;
+            }
+            // No emoji for this semantic — fall through to Lucide below.
         }
+        if (el.querySelector('svg.ws-icon-clean')) return;
+        if (!cleanIconAvailable(semantic)) return;
+        if (!el.classList.contains('ws-icon-clean-wrap')) el.classList.add('ws-icon-clean-wrap');
         el.innerHTML = cleanIconSvg(semantic);
     });
 }

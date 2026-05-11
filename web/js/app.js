@@ -605,14 +605,19 @@ async function removeIconPack(packId) {
 }
 
 // ─── Bookmarks ───
+// Each entry is an emoji glyph used as a lookup key. At render time the
+// active icon theme substitutes the glyph for a real icon — under the
+// default `clean` theme that's a Lucide SVG via the EMOJI_TO_SEMANTIC
+// map below. The emoji here are DATA (palette choices for the bookmark
+// picker), never displayed to users on the default theme.
 const BOOKMARK_ICONS = [
-    '','','','','','','','','','',
-    '','','','','','','','','','',
-    '','','','','','⭐','','','','',
-    '','','','','','','','','','',
-    '','','','','','','','','','',
-    '','','','','','','','','','',
-    '','','','','','','','','','',
+    '🌐','📁','💻','🖥️','📊','📈','🔧','⚙️','🛠️','📝',
+    '📋','📦','🗄️','🔒','🔑','💾','📡','🌍','☁️','🐳',
+    '🐧','🔥','💬','📧','🎯','⭐','❤️','🏠','🚀','📌',
+    '🎮','🎵','📷','🛒','💰','📚','🔬','🧪','🤖','👾',
+    '🗂️','📎','🔗','🧭','🗺️','📱','🖨️','🎨','🔍','💡',
+    '🏢','🏗️','📡','🛡️','🧩','📐','🗃️','💳','🔔','📢',
+    '🎓','🏆','🌟','💎','🔮','🧲','⚡','🌈','🍀','🐾',
 ];
 
 function loadBookmarks() {
@@ -26366,15 +26371,20 @@ let appStoreCategory = 'All';
 let appStoreInstallAppId = null;
 let appStoreInstallTarget = 'docker';
 
+// Per-app emoji glyph used as a lookup key for the active icon theme.
+// The default `clean` theme substitutes via EMOJI_TO_SEMANTIC at render
+// so end users see Lucide icons; users on the explicit `standard`
+// (emoji) theme see these glyphs directly. Each emoji here also has an
+// EMOJI_TO_SEMANTIC mapping so the clean theme has something to render.
 const APP_ICONS = {
-    'wordpress': '', 'nextcloud': '', 'gitea': '', 'grafana': '',
-    'prometheus': '', 'postgresql': '', 'mariadb': '', 'redis': '',
-    'nginx': '', 'traefik': '', 'pihole': '', 'jellyfin': '',
-    'portainer': '', 'minio': '', 'code-server': '', 'homeassistant': '',
-    'minecraft-java': '', 'minecraft-bedrock': '', 'valheim': '',
-    'terraria': '', 'palworld': '', 'factorio': '', 'cs2': '',
-    'rust-game': '', 'ark-survival': '', 'satisfactory': '',
-    'project-zomboid': '', '7dtd': '',
+    'wordpress': '📝', 'nextcloud': '☁️', 'gitea': '🦊', 'grafana': '📊',
+    'prometheus': '🔥', 'postgresql': '🐘', 'mariadb': '🗄️', 'redis': '⚡',
+    'nginx': '🌐', 'traefik': '🔀', 'pihole': '🛡️', 'jellyfin': '🎬',
+    'portainer': '🐳', 'minio': '💾', 'code-server': '💻', 'homeassistant': '🏠',
+    'minecraft-java': '⛏️', 'minecraft-bedrock': '🧱', 'valheim': '⚔️',
+    'terraria': '🌳', 'palworld': '🦎', 'factorio': '🏭', 'cs2': '🔫',
+    'rust-game': '🪓', 'ark-survival': '🦖', 'satisfactory': '🔧',
+    'project-zomboid': '🧟', '7dtd': '💀',
 };
 
 let appStoreViewMode = 'grid';
