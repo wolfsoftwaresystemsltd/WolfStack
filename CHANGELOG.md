@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v22.14.6: Fix invisible modal-overlay, infrastructure-map cold-load, appstore icon fallback** _(2026-05-11 — [`6fc2d85`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6fc2d85c082f5edaf47414eefece46c2356aac72))_
 - **v22.14.5: cache collect_workload_subnets, memoise + regex-fast-path icons-clean** _(2026-05-11 — [`9d7bdc6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9d7bdc66c55a7a89333dc925de2b7a9683587b04))_
 - **v22.14.4: Restore action-button icons across LXC, Docker, VMs and the rest** _(2026-05-11 — [`2a8c12d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2a8c12dece92925433dd14c22b0738175db9d9eb))_
 - **v22.14.3: Restore APP_ICONS + BOOKMARK_ICONS, theme-aware data-icon fill, Lucide fallbacks** _(2026-05-11 — [`20cb2e8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/20cb2e8ca9870b886fb447500438543d3cbeb597))_
