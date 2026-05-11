@@ -2,8 +2,8 @@
 /* (C)Copyright Wolf Software Systems Ltd */
 /* https://wolf.uk.com */
 
-/* WolfStack Dashboard — Premium Dark Theme */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Antonio:wght@400;500;600;700&display=swap');
+/* WolfStack Dashboard — default theme tokens */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
     --bg-primary: #0a0e1a;
@@ -30,14 +30,14 @@
     --gradient-main: linear-gradient(135deg, #dc2626 0%, #ef4444 50%, #f87171 100%);
     --gradient-success: linear-gradient(135deg, #10b981 0%, #34d399 100%);
     --gradient-danger: linear-gradient(135deg, #ef4444 0%, #f87171 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
-    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.4);
-    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.5);
-    --shadow-glow: 0 0 30px rgba(220, 38, 38, 0.15);
-    --radius: 12px;
-    --radius-sm: 8px;
-    --radius-lg: 16px;
-    --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.28);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.38);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
+    --radius: 6px;
+    --radius-sm: 4px;
+    --radius-lg: 10px;
+    --transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* ─── Light Theme ─── */
@@ -66,10 +66,10 @@
     --gradient-main: linear-gradient(135deg, #dc2626 0%, #ef4444 50%, #f87171 100%);
     --gradient-success: linear-gradient(135deg, #059669 0%, #10b981 100%);
     --gradient-danger: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
-    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.08);
-    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.1);
-    --shadow-glow: 0 0 30px rgba(220, 38, 38, 0.1);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.07);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.09);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
 /* ─── Midnight Theme ─── */
@@ -98,10 +98,10 @@
     --gradient-main: linear-gradient(135deg, #06b6d4 0%, #22d3ee 50%, #67e8f9 100%);
     --gradient-success: linear-gradient(135deg, #10b981 0%, #34d399 100%);
     --gradient-danger: linear-gradient(135deg, #f43f5e 0%, #fb7185 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
-    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.6);
-    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.7);
-    --shadow-glow: 0 0 30px rgba(6, 182, 212, 0.12);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.55);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
 /* ─── Datacenter Theme ─── */
@@ -130,10 +130,10 @@
     --gradient-main: linear-gradient(135deg, #3ba4c4 0%, #5fc3e0 100%);
     --gradient-success: linear-gradient(135deg, #2ea87e 0%, #48c898 100%);
     --gradient-danger: linear-gradient(135deg, #d04040 0%, #e06060 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.25);
-    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.3);
-    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.4);
-    --shadow-glow: 0 0 20px rgba(59, 164, 196, 0.1);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.22);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.3);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
 /* ─── Forest Theme ─── */
@@ -162,10 +162,10 @@
     --gradient-main: linear-gradient(135deg, #22c55e 0%, #4ade80 50%, #86efac 100%);
     --gradient-success: linear-gradient(135deg, #22c55e 0%, #4ade80 100%);
     --gradient-danger: linear-gradient(135deg, #ef4444 0%, #f87171 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
-    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.4);
-    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.5);
-    --shadow-glow: 0 0 30px rgba(34, 197, 94, 0.12);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.28);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.38);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
 /* ─── Punk (Cyberpunk 2077) Theme ───
@@ -235,10 +235,10 @@
     --gradient-main: linear-gradient(135deg, #007aff 0%, #5ac8fa 100%);
     --gradient-success: linear-gradient(135deg, #34c759 0%, #30d158 100%);
     --gradient-danger: linear-gradient(135deg, #ff3b30 0%, #ff453a 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04);
-    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.06);
-    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.08);
-    --shadow-glow: 0 0 24px rgba(0, 122, 255, 0.14);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.08);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
 /* ─── Amber Terminal Theme ─── */
@@ -267,10 +267,10 @@
     --gradient-main: linear-gradient(135deg, #f0a000 0%, #ffc040 50%, #ffe080 100%);
     --gradient-success: linear-gradient(135deg, #88c020 0%, #a8e040 100%);
     --gradient-danger: linear-gradient(135deg, #e04020 0%, #f06040 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
-    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.6);
-    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.7);
-    --shadow-glow: 0 0 30px rgba(240, 160, 0, 0.15);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.55);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
 /* ─── Obe 1 (Jedi Mentor) Theme ───
@@ -302,10 +302,10 @@
     --gradient-main: linear-gradient(135deg, #4fa3ff 0%, #7ec0ff 50%, #c9e4ff 100%);
     --gradient-success: linear-gradient(135deg, #9be8a8 0%, #c0f0cb 100%);
     --gradient-danger: linear-gradient(135deg, #e0503a 0%, #f07a5f 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
-    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.5);
-    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.6);
-    --shadow-glow: 0 0 30px rgba(79, 163, 255, 0.28);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
 /* ─── Light theme overrides for specific elements ─── */
@@ -319,8 +319,8 @@
 }
 
 [data-theme="light"] .appstore-card:hover {
-    border-color: rgba(220, 38, 38, 0.3);
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
+    border-color: var(--accent);
+    box-shadow: var(--shadow-sm);
 }
 
 /* ─── Amber theme font tweaks ─── */
@@ -562,10 +562,10 @@
     --gradient-main: linear-gradient(135deg, #7f1d1d 0%, #dc2626 50%, #f87171 100%);
     --gradient-success: linear-gradient(135deg, #10b981 0%, #34d399 100%);
     --gradient-danger: linear-gradient(135deg, #b91c1c 0%, #ef4444 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
-    --shadow-md: 0 4px 20px rgba(40, 0, 10, 0.6);
-    --shadow-lg: 0 10px 40px rgba(40, 0, 10, 0.7);
-    --shadow-glow: 0 0 30px rgba(220, 38, 38, 0.2);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 2px 8px rgba(40, 0, 10, 0.45);
+    --shadow-lg: 0 8px 24px rgba(40, 0, 10, 0.55);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
 /* ─── TTY Theme — classic green phosphor terminal ─── */
@@ -723,10 +723,10 @@
     --gradient-main: linear-gradient(135deg, #00d4aa 0%, #00a3cc 100%);
     --gradient-success: linear-gradient(135deg, #00d4aa 0%, #33e8c0 100%);
     --gradient-danger: linear-gradient(135deg, #ff6b9d 0%, #ff8fb3 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
-    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.6);
-    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.7);
-    --shadow-glow: 0 0 30px rgba(0, 212, 170, 0.1);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.55);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
 [data-theme="obsidian"] .log-viewer {
@@ -760,10 +760,10 @@
     --gradient-main: linear-gradient(135deg, #bb86fc 0%, #d0a8ff 100%);
     --gradient-success: linear-gradient(135deg, #03dac6 0%, #64ffda 100%);
     --gradient-danger: linear-gradient(135deg, #cf6679 0%, #e08090 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
-    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.6);
-    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.7);
-    --shadow-glow: 0 0 30px rgba(187, 134, 252, 0.1);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.55);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
 [data-theme="carbon"] .log-viewer {
@@ -797,10 +797,10 @@
     --gradient-main: linear-gradient(135deg, #58a6ff 0%, #79c0ff 100%);
     --gradient-success: linear-gradient(135deg, #3fb950 0%, #56d364 100%);
     --gradient-danger: linear-gradient(135deg, #f85149 0%, #ff7b72 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
-    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.5);
-    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.6);
-    --shadow-glow: 0 0 30px rgba(88, 166, 255, 0.1);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.32);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.38);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.48);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
 [data-theme="void"] .log-viewer {
@@ -834,10 +834,10 @@
     --gradient-main: linear-gradient(135deg, #9d7cd8 0%, #b99aee 100%);
     --gradient-success: linear-gradient(135deg, #7aa2f7 0%, #95b8ff 100%);
     --gradient-danger: linear-gradient(135deg, #f7768e 0%, #ff9eac 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
-    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.5);
-    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.6);
-    --shadow-glow: 0 0 30px rgba(157, 124, 216, 0.1);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.32);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.38);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.48);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
 [data-theme="twilight"] .log-viewer {
@@ -871,10 +871,10 @@
     --gradient-main: linear-gradient(135deg, #0284c7 0%, #0ea5e9 100%);
     --gradient-success: linear-gradient(135deg, #059669 0%, #10b981 100%);
     --gradient-danger: linear-gradient(135deg, #e11d48 0%, #f43f5e 100%);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
-    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.06);
-    --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.08);
-    --shadow-glow: 0 0 30px rgba(2, 132, 199, 0.08);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.08);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
 [data-theme="arctic"] .top-bar {
@@ -1694,8 +1694,7 @@
 
 .theme-card:hover {
     border-color: var(--border-light);
-    transform: translateY(-3px);
-    box-shadow: var(--shadow-md);
+    box-shadow: var(--shadow-sm);
 }
 
 .theme-card.active {
@@ -1862,22 +1861,20 @@ body.sidebar-collapsed #task-log-footer {
 .sidebar-logo .logo-icon {
     width: 40px;
     height: 40px;
-    background: var(--gradient-main);
-    border-radius: 10px;
+    background: var(--accent);
+    border-radius: 6px;
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 20px;
-    box-shadow: var(--shadow-glow);
+    color: white;
 }
 
 .sidebar-logo h1 {
     font-size: 18px;
     font-weight: 700;
-    background: var(--gradient-main);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
 }
 
 .sidebar-logo .version {
@@ -2154,7 +2151,7 @@ body.sidebar-collapsed #task-log-footer {
 }
 
 .card-header {
-    padding: 18px 22px;
+    padding: 12px 16px;
     border-bottom: 1px solid var(--border);
     display: flex;
     align-items: center;
@@ -2162,12 +2159,13 @@ body.sidebar-collapsed #task-log-footer {
 }
 
 .card-header h3 {
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 600;
+    letter-spacing: -0.005em;
 }
 
 .card-body {
-    padding: 22px;
+    padding: 16px;
     overflow-x: auto;
 }
 
@@ -2189,9 +2187,9 @@ body.sidebar-collapsed #task-log-footer {
 /* ─── Stats Grid ─── */
 .stats-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-    gap: 20px;
-    margin-bottom: 28px;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
 }
 
 .stat-card {
@@ -2210,10 +2208,10 @@ body.sidebar-collapsed #task-log-footer {
     top: 0;
     left: 0;
     right: 0;
-    height: 3px;
-    background: var(--gradient-main);
+    height: 2px;
+    background: var(--accent);
     opacity: 0;
-    transition: var(--transition);
+    transition: opacity 0.15s ease;
 }
 
 .stat-card:hover::before {
@@ -2221,8 +2219,6 @@ body.sidebar-collapsed #task-log-footer {
 }
 
 .stat-card:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-md);
     border-color: var(--border-light);
 }
 
@@ -2278,19 +2274,19 @@ body.sidebar-collapsed #task-log-footer {
 }
 
 .progress-bar .fill.success {
-    background: var(--gradient-success);
+    background: var(--success);
 }
 
 .progress-bar .fill.warning {
-    background: linear-gradient(90deg, var(--warning), #fbbf24);
+    background: var(--warning);
 }
 
 .progress-bar .fill.danger {
-    background: var(--gradient-danger);
+    background: var(--danger);
 }
 
 .progress-bar .fill.accent {
-    background: var(--gradient-main);
+    background: var(--accent);
 }
 
 /* ─── Gauge ─── */
@@ -2509,8 +2505,7 @@ body.sidebar-collapsed #task-log-footer {
 
 .component-card:hover {
     border-color: var(--border-light);
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-md);
+    box-shadow: var(--shadow-sm);
 }
 
 /* ═══ Historical Charts ═══ */
@@ -2563,7 +2558,7 @@ body.sidebar-collapsed #task-log-footer {
 .component-card .component-icon {
     width: 42px;
     height: 42px;
-    border-radius: 10px;
+    border-radius: 6px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2644,7 +2639,6 @@ body.sidebar-collapsed #task-log-footer {
 
 .btn-primary:hover {
     background: var(--accent-light);
-    box-shadow: var(--shadow-glow);
 }
 
 .btn-success {
@@ -2672,13 +2666,13 @@ body.sidebar-collapsed #task-log-footer {
 .grid-2 {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 20px;
+    gap: 14px;
 }
 
 .grid-3 {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
-    gap: 20px;
+    gap: 14px;
 }
 
 /* ─── Charts ─── */
@@ -2697,6 +2691,7 @@ body.sidebar-collapsed #task-log-footer {
 .data-table {
     width: 100%;
     border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
 }
 
 .data-table th {
@@ -2704,20 +2699,33 @@ body.sidebar-collapsed #task-log-footer {
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.4px;
     color: var(--text-muted);
-    padding: 10px 16px;
+    padding: 6px 12px;
     border-bottom: 1px solid var(--border);
 }
 
 .data-table td {
-    padding: 12px 16px;
+    padding: 7px 12px;
     font-size: 13px;
     border-bottom: 1px solid var(--border);
+    line-height: 1.4;
 }
 
 .data-table tr:hover td {
     background: var(--bg-card-hover);
+}
+
+.data-table td.num,
+.data-table td.mono,
+.data-table td.ip,
+.data-table td.id {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 12px;
+}
+
+.data-table td.num {
+    text-align: right;
 }
 
 /* ─── Code editor gutter ───
@@ -2890,9 +2898,9 @@ body.sidebar-collapsed #task-log-footer {
 }
 
 .toast {
-    padding: 14px 20px;
+    padding: 12px 16px;
     border-radius: var(--radius-sm);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08);
+    box-shadow: var(--shadow-lg);
     display: flex;
     align-items: center;
     gap: 10px;
@@ -3026,7 +3034,7 @@ body.sidebar-collapsed #task-log-footer {
     align-items: center;
     justify-content: center;
     font-size: 18px;
-    border-radius: 10px;
+    border-radius: 6px;
     border: 1px solid var(--border);
     background: var(--bg-card);
     color: var(--text-primary);
@@ -3037,8 +3045,6 @@ body.sidebar-collapsed #task-log-footer {
 .btn-icon:hover {
     background: var(--bg-card-hover);
     border-color: var(--border-light);
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-sm);
 }
 
 /* ─── Config Editor ─── */
@@ -3150,9 +3156,8 @@ body.sidebar-collapsed #task-log-footer {
 }
 
 .appstore-card:hover {
-    border-color: rgba(220, 38, 38, 0.4);
-    transform: translateY(-3px);
-    box-shadow: 0 8px 30px rgba(220, 38, 38, 0.12);
+    border-color: var(--accent);
+    box-shadow: var(--shadow-sm);
 }
 
 .appstore-card-header {
@@ -3164,13 +3169,13 @@ body.sidebar-collapsed #task-log-footer {
 .appstore-card-icon {
     width: 48px;
     height: 48px;
-    border-radius: 12px;
+    border-radius: 6px;
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 24px;
-    background: linear-gradient(135deg, rgba(220, 38, 38, 0.15), rgba(59, 130, 246, 0.1));
-    border: 1px solid rgba(220, 38, 38, 0.2);
+    background: var(--accent-glow);
+    border: 1px solid var(--border);
     flex-shrink: 0;
 }
 
@@ -3222,20 +3227,19 @@ body.sidebar-collapsed #task-log-footer {
 
 .appstore-install-btn {
     padding: 6px 14px;
-    border-radius: 8px;
-    border: none;
-    background: linear-gradient(135deg, #dc2626, #ef4444);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--accent);
+    background: var(--accent);
     color: white;
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: var(--transition);
     font-family: inherit;
 }
 
 .appstore-install-btn:hover {
-    transform: scale(1.05);
-    box-shadow: 0 4px 16px rgba(220, 38, 38, 0.35);
+    background: var(--accent-light);
 }
 
 .appstore-cat-btn {
@@ -3257,19 +3261,19 @@ body.sidebar-collapsed #task-log-footer {
 }
 
 .appstore-cat-btn.active {
-    background: linear-gradient(135deg, rgba(220, 38, 38, 0.2), rgba(59, 130, 246, 0.15));
-    border-color: rgba(220, 38, 38, 0.5);
-    color: #fca5a5;
+    background: var(--accent-glow);
+    border-color: var(--accent);
+    color: var(--accent-light);
 }
 
 .appstore-tab-btn {
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
 }
 
 .appstore-tab-btn.active {
-    background: linear-gradient(135deg, rgba(220, 38, 38, 0.2), rgba(59, 130, 246, 0.15));
-    border-color: rgba(220, 38, 38, 0.5);
-    color: #fca5a5;
+    background: var(--accent-glow);
+    border-color: var(--accent);
+    color: var(--accent-light);
 }
 
 .appstore-target-pill {
