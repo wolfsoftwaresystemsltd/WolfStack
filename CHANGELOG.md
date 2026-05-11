@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v22.14.1: auto-apply safeguard — skip peer subnet that's also local** _(2026-05-11 — [`4573e90`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4573e90f3224a77472b9a8beda772f26f2b8890d))_
+- **v22.14.0: Auto-apply missing peer subnet routes + aggressive emoji purge** _(2026-05-11 — [`a32ad37`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a32ad376585a3d0880a16f435e246f39167258bf))_
 - **v22.13.0: WolfNet diagnostics — three predictive analyzers + cluster workload-subnet plumbing + emoji purge** _(2026-05-11 — [`a67e283`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a67e28303a3c2ae74c1d3003029024b0758b1c59))_
 - **v22.12.0: Clean built-in icon theme (inline Lucide-style SVGs), new default; minor copy polish** _(2026-05-11 — [`5b1487b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5b1487b9e53a1d8b615e34f8d6dd43168dcfd694))_
 - **v22.11.0: UI visual sweep — tighter radii/shadows, flat hover states, denser tables across all themes** _(2026-05-11 — [`68fd127`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/68fd127071bd46896d97b06085005ff4ad301c44))_
