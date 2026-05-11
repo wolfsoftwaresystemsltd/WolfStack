@@ -365,9 +365,9 @@ async function renderIconPacksUI(packs) {
             const cleanSet = ['package', 'computer', 'globe', 'save', 'settings'];
             preview = cleanSet.map(n => `<span class="ws-icon-clean-wrap" style="font-size:28px;color:var(--text-primary);">${cleanIconSvg(n)}</span>`).join(' ');
         } else if (id === 'standard') {
-            preview = '📦 🖥️ 🌐 💾 ⚙️';
+            preview = '';
         } else {
-            preview = '🍬 🧁 🍩 🍪 🍭';
+            preview = '';
         }
         html += `
             <div class="icon-theme-card theme-card${active}" data-icon-theme="${id}" onclick="applyIconTheme('${id}')">
@@ -606,13 +606,13 @@ async function removeIconPack(packId) {
 
 // ─── Bookmarks ───
 const BOOKMARK_ICONS = [
-    '🌐','📁','💻','🖥️','📊','📈','🔧','⚙️','🛠️','📝',
-    '📋','📦','🗄️','🔒','🔑','💾','📡','🌍','☁️','🐳',
-    '🐧','🔥','💬','📧','🎯','⭐','❤️','🏠','🚀','📌',
-    '🎮','🎵','📷','🛒','💰','📚','🔬','🧪','🤖','👾',
-    '🗂️','📎','🔗','🧭','🗺️','📱','🖨️','🎨','🔍','💡',
-    '🏢','🏗️','📡','🛡️','🧩','📐','🗃️','💳','🔔','📢',
-    '🎓','🏆','🌟','💎','🔮','🧲','⚡','🌈','🍀','🐾',
+    '','','','','','','','','','',
+    '','','','','','','','','','',
+    '','','','','','⭐','','','','',
+    '','','','','','','','','','',
+    '','','','','','','','','','',
+    '','','','','','','','','','',
+    '','','','','','','','','','',
 ];
 
 function loadBookmarks() {
@@ -628,7 +628,7 @@ function renderBookmarks() {
     const bookmarks = loadBookmarks();
     if (bookmarks.length === 0) {
         el.innerHTML = renderEmptyState({
-            icon: '🔖',
+            icon: '',
             title: 'No bookmarks yet',
             body: 'Save the URLs you visit most so they land one click from the dashboard.',
             action: { label: '+ Add bookmark', onclick: 'showAddBookmarkModal()' },
@@ -639,18 +639,18 @@ function renderBookmarks() {
         const esc = (s) => s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         const iconHtml = b.imageUrl
             ? `<img src="${esc(b.imageUrl)}" style="width:18px;height:18px;border-radius:3px;object-fit:contain;" onerror="this.style.display='none';this.nextElementSibling.style.display=''">`
-              + `<span style="font-size:16px;line-height:1;display:none;">${b.icon || '🌐'}</span>`
-            : `<span style="font-size:16px;line-height:1;">${b.icon || '🌐'}</span>`;
+              + `<span style="font-size:16px;line-height:1;display:none;">${b.icon || ''}</span>`
+            : `<span style="font-size:16px;line-height:1;">${b.icon || ''}</span>`;
         return `<a href="${esc(b.url)}" target="_blank" rel="noopener" class="bookmark-item" title="${esc(b.url)}">
             ${iconHtml}
             <span>${esc(b.name)}</span>
-            <span class="bookmark-edit" onclick="event.preventDefault();event.stopPropagation();showEditBookmarkModal(${i})">✎</span>
+            <span class="bookmark-edit" onclick="event.preventDefault();event.stopPropagation();showEditBookmarkModal(${i})"></span>
             <span class="bookmark-delete" onclick="event.preventDefault();event.stopPropagation();deleteBookmark(${i})">×</span>
         </a>`;
     }).join('');
 }
 let _bookmarkOverlay = null;
-let _selectedBookmarkIcon = '🌐';
+let _selectedBookmarkIcon = '';
 let _editingBookmarkIndex = -1;
 function _bookmarkModalHtml(icon, name, url, imageUrl, isEdit) {
     const iconGrid = BOOKMARK_ICONS.map(ic =>
@@ -674,9 +674,9 @@ function _bookmarkModalHtml(icon, name, url, imageUrl, isEdit) {
         </div>`;
 }
 function showAddBookmarkModal() {
-    _selectedBookmarkIcon = '🌐';
+    _selectedBookmarkIcon = '';
     _editingBookmarkIndex = -1;
-    showModal(_bookmarkModalHtml('🌐', '', '', '', false), '🔖 Add Bookmark', { noOk: true });
+    showModal(_bookmarkModalHtml('', '', '', '', false), 'Add Bookmark', { noOk: true });
     _bookmarkOverlay = document.body.lastElementChild;
     setTimeout(() => document.getElementById('bookmark-name')?.focus(), 100);
 }
@@ -685,8 +685,8 @@ function showEditBookmarkModal(index) {
     const b = bookmarks[index];
     if (!b) return;
     _editingBookmarkIndex = index;
-    _selectedBookmarkIcon = b.icon || '🌐';
-    showModal(_bookmarkModalHtml(b.icon || '🌐', b.name, b.url, b.imageUrl || '', true), '✎ Edit Bookmark', { noOk: true });
+    _selectedBookmarkIcon = b.icon || '';
+    showModal(_bookmarkModalHtml(b.icon || '', b.name, b.url, b.imageUrl || '', true), 'Edit Bookmark', { noOk: true });
     _bookmarkOverlay = document.body.lastElementChild;
     setTimeout(() => document.getElementById('bookmark-name')?.focus(), 100);
 }
@@ -1215,12 +1215,12 @@ function openFileBrowser(opts) {
     overlay.innerHTML = `
       <div style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;width:680px;max-width:95%;max-height:85vh;display:flex;flex-direction:column;color:var(--text-primary,#e4e4e7);box-shadow:0 20px 60px rgba(0,0,0,0.5);">
         <div style="padding:14px 18px;border-bottom:1px solid var(--border-color,#2d2f3a);display:flex;align-items:center;gap:10px;">
-          <h3 style="margin:0;flex:1;font-size:15px;color:var(--accent-light,#60a5fa);">📁 ${escapeHtml(title)}</h3>
-          <button class="btn btn-sm" id="fb-close" title="Close">✕</button>
+          <h3 style="margin:0;flex:1;font-size:15px;color:var(--accent-light,#60a5fa);">${escapeHtml(title)}</h3>
+          <button class="btn btn-sm" id="fb-close" title="Close"></button>
         </div>
         <div style="padding:10px 14px;border-bottom:1px solid var(--border-color,#2d2f3a);display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <button class="btn btn-sm" id="fb-up" title="Parent directory">⬆️</button>
-          <button class="btn btn-sm" id="fb-home" title="Filesystem root">🏠</button>
+          <button class="btn btn-sm" id="fb-home" title="Filesystem root"></button>
           <input id="fb-path" type="text" value="${escapeAttr(start)}" spellcheck="false" autocomplete="off"
                  style="flex:1;min-width:200px;font-family:var(--font-mono,monospace);font-size:12px;padding:6px 10px;border:1px solid var(--border-color,#3f4150);border-radius:6px;background:var(--bg-input,var(--bg-tertiary,#2d2f3a));color:var(--text-primary,#e4e4e7);">
           <button class="btn btn-sm" id="fb-go" title="Go to typed path (Enter)">Go</button>
@@ -1298,7 +1298,7 @@ function openFileBrowser(opts) {
                 return;
             }
             list.innerHTML = items.map(e => {
-                const icon = e.kind === 'dir' ? '📁' : e.kind === 'symlink' ? '🔗' : '📄';
+                const icon = e.kind === 'dir' ? '' : e.kind === 'symlink' ? '' : '';
                 const size = e.kind === 'file' && e.size != null ? formatBytes(e.size) : '';
                 return `<div class="fb-entry" data-name="${escapeAttr(e.name)}" data-kind="${escapeAttr(e.kind)}"
                           style="display:flex;align-items:center;gap:10px;padding:6px 12px;cursor:pointer;border-radius:4px;font-size:13px;user-select:none;">
@@ -1435,7 +1435,7 @@ function renderLoadingBlock(message, lines) {
 function renderEmptyState(opts) {
     opts = opts || {};
     const tone = opts.tone || 'default';
-    const icon = opts.icon || (tone === 'error' ? '⚠️' : tone === 'filtered' ? '🔍' : '📭');
+    const icon = opts.icon || (tone === 'error' ? '' : tone === 'filtered' ? '' : '');
     const title = opts.title || (tone === 'error' ? 'Couldn’t load' : tone === 'filtered' ? 'No matches' : 'Nothing here yet');
     const body = opts.body || '';
     const action = opts.action; // {label, onclick} or {label, href}
@@ -1593,7 +1593,7 @@ function renderStatusPill(opts) {
     const palette = {
         ok:      { bg: 'rgba(34,197,94,0.15)',  fg: '#22c55e', icon: '●' },
         warn:    { bg: 'rgba(251,191,36,0.15)', fg: '#fbbf24', icon: '▲' },
-        danger:  { bg: 'rgba(239,68,68,0.15)',  fg: '#ef4444', icon: '✗' },
+        danger:  { bg: 'rgba(239,68,68,0.15)',  fg: '#ef4444', icon: '' },
         info:    { bg: 'rgba(59,130,246,0.15)', fg: '#60a5fa', icon: '◔' },
         neutral: { bg: 'rgba(156,163,175,0.15)', fg: '#9ca3af', icon: '○' },
     };
@@ -1665,7 +1665,7 @@ function updateClusterPill() {
         return;
     }
     pill.style.display = 'inline-flex';
-    pill.innerHTML = '<span aria-hidden="true" style="opacity:0.8;">⌂</span>'
+    pill.innerHTML = '<span aria-hidden="true" style="opacity:0.8;"></span>'
         + (cluster ? '<span>' + escapeHtmlSafe(cluster) + '</span>' : '')
         + (cluster && node ? '<span style="opacity:0.5;">›</span>' : '')
         + (node ? '<span style="opacity:0.85;">' + escapeHtmlSafe(node) + '</span>' : '');
@@ -2090,7 +2090,7 @@ async function renderTenants() {
         <div class="card" style="margin-bottom:16px;">
             <div class="card-body" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;">
                 <div style="flex:1;min-width:280px;">
-                    <h2 style="margin:0;display:flex;align-items:center;gap:10px;"><span style="font-size:28px;">🏢</span>Tenants</h2>
+                    <h2 style="margin:0;display:flex;align-items:center;gap:10px;"><span style="font-size:28px;"></span>Tenants</h2>
                     <p style="margin:6px 0 0;color:var(--text-muted);font-size:13px;max-width:780px;line-height:1.55;">
                         A <strong>tenant</strong> is a separate WolfStack cluster — typically a customer's — that this WolfStack
                         watches over a signed bearer token. Each tenant runs independently (its own users, hosts, VMs and config);
@@ -2098,19 +2098,19 @@ async function renderTenants() {
                         utilisation across every customer at once.
                     </p>
                     <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
-                        <button class="btn btn-xs" onclick="document.getElementById('tenants-help').open=!document.getElementById('tenants-help').open;">📖 How this works</button>
-                        <button class="btn btn-xs" onclick="document.getElementById('tenants-pools-help').open=!document.getElementById('tenants-pools-help').open;" title="Provision a new tenant cluster from a host pool — roadmap">🧰 WolfStack Pools (roadmap)</button>
+                        <button class="btn btn-xs" onclick="document.getElementById('tenants-help').open=!document.getElementById('tenants-help').open;">How this works</button>
+                        <button class="btn btn-xs" onclick="document.getElementById('tenants-pools-help').open=!document.getElementById('tenants-pools-help').open;" title="Provision a new tenant cluster from a host pool — roadmap">WolfStack Pools (roadmap)</button>
                     </div>
                 </div>
                 <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap;">
-                    <button class="btn" onclick="renderTenants()">🔄 Refresh all</button>
-                    <button class="btn" onclick="poolWizardOpen()" title="Provision a new tenant cluster (WolfStack Pool)">🧰 + New Pool</button>
+                    <button class="btn" onclick="renderTenants()">Refresh all</button>
+                    <button class="btn" onclick="poolWizardOpen()" title="Provision a new tenant cluster (WolfStack Pool)">+ New Pool</button>
                     <button class="btn btn-primary" onclick="tenantRegisterModal()">+ Register tenant</button>
                 </div>
             </div>
             <details id="tenants-help" style="border-top:1px solid var(--border-color,#2d2f3a);">
                 <summary style="cursor:pointer;padding:12px 18px;font-size:13px;font-weight:600;color:var(--text-secondary,#a1a1aa);user-select:none;">
-                    📖 How tenant federation works
+                    How tenant federation works
                 </summary>
                 <div style="padding:0 18px 18px;font-size:13px;color:var(--text-secondary,#a1a1aa);line-height:1.6;max-width:880px;">
                     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px;">
@@ -2156,7 +2156,7 @@ async function renderTenants() {
             </details>
             <details id="tenants-pools-help" style="border-top:1px solid var(--border-color,#2d2f3a);">
                 <summary style="cursor:pointer;padding:12px 18px;font-size:13px;font-weight:600;color:var(--text-secondary,#a1a1aa);user-select:none;">
-                    🧰 WolfStack Pools &mdash; provision tenant clusters (roadmap)
+                    WolfStack Pools &mdash; provision tenant clusters (roadmap)
                 </summary>
                 <div style="padding:0 18px 18px;font-size:13px;color:var(--text-secondary,#a1a1aa);line-height:1.6;max-width:880px;">
                     <p style="margin:0 0 10px;">
@@ -2205,7 +2205,7 @@ async function tenantLoadList() {
         rollup.innerHTML = '';
         list.innerHTML = `<div class="card"><div class="card-body" style="padding:32px;color:var(--text-secondary,#a1a1aa);max-width:680px;margin:0 auto;">
             <div style="text-align:center;">
-                <div style="font-size:42px;margin-bottom:8px;">🏢</div>
+                <div style="font-size:42px;margin-bottom:8px;"></div>
                 <div style="font-size:16px;font-weight:600;color:var(--text-primary,#e4e4e7);margin-bottom:4px;">No tenants registered yet</div>
                 <div style="font-size:13px;color:var(--text-muted);margin-bottom:20px;">Federate to your first customer's WolfStack cluster.</div>
             </div>
@@ -2256,14 +2256,14 @@ function tenantTile(t) {
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
                 <div style="min-width:0;flex:1;">
                     <h3 style="margin:0 0 4px;display:flex;align-items:center;gap:8px;">
-                        <span style="font-size:18px;">🏢</span>${escapeHtml(t.name)}
+                        <span style="font-size:18px;"></span>${escapeHtml(t.name)}
                     </h3>
                     <div style="font-size:11px;color:${colour};font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">● ${escapeHtml(label)}</div>
                     <div style="font-size:11px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;word-break:break-all;margin-top:4px;">${escapeHtml(t.url)}</div>
                 </div>
                 <div style="display:flex;gap:4px;flex-shrink:0;">
                     <button class="btn btn-xs" title="Open the tenant cluster in a new tab" onclick="window.open('${escapeAttr(t.url)}', '_blank', 'noopener')">↗</button>
-                    <button class="btn btn-xs" onclick="tenantRefresh('${escapeAttr(t.id)}')">🔄</button>
+                    <button class="btn btn-xs" onclick="tenantRefresh('${escapeAttr(t.id)}')"></button>
                     <button class="btn btn-xs btn-danger" onclick="tenantDelete('${escapeAttr(t.id)}','${escapeAttr(t.name)}')">×</button>
                 </div>
             </div>
@@ -2310,7 +2310,7 @@ window.tenantRegisterModal = function() {
     overlay.innerHTML = `
         <div style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:600px;width:92%;color:var(--text-primary,#e4e4e7);font-family:inherit;max-height:90vh;overflow-y:auto;">
             <div style="font-size:16px;font-weight:600;margin-bottom:6px;display:flex;align-items:center;gap:10px;">
-                <span style="font-size:22px;">🏢</span>Register tenant cluster
+                <span style="font-size:22px;"></span>Register tenant cluster
             </div>
             <div style="font-size:13px;color:var(--text-secondary,#a1a1aa);margin-bottom:14px;line-height:1.55;">
                 You'll need the customer's cluster URL and a federation token they minted on their side.
@@ -2322,7 +2322,7 @@ window.tenantRegisterModal = function() {
                     On their WolfStack, logged in as admin:
                     <div style="display:flex;align-items:flex-start;gap:6px;margin-top:6px;">
                         <pre style="flex:1;background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:4px;padding:8px 10px;font-size:11px;margin:0;overflow-x:auto;"><code>${escapeHtml(curlSnippet)}</code></pre>
-                        <button class="btn btn-xs" onclick="navigator.clipboard.writeText('${escapeAttr(curlSnippet)}').then(()=>showToast('Copied','success',1200))" title="Copy">📋</button>
+                        <button class="btn btn-xs" onclick="navigator.clipboard.writeText('${escapeAttr(curlSnippet)}').then(()=>showToast('Copied','success',1200))" title="Copy"></button>
                     </div>
                     <div style="margin-top:6px;">Returns a <code>wsk_…</code> bearer. They paste it into the field below.</div>
                 </div>
@@ -2338,7 +2338,7 @@ window.tenantRegisterModal = function() {
             <div id="tenant-reg-error" style="display:none;color:var(--danger);font-size:12px;margin-top:10px;"></div>
             <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;">
                 <button class="btn" id="tenant-reg-cancel">Cancel</button>
-                <button class="btn btn-primary" id="tenant-reg-submit">🔌 Probe &amp; register</button>
+                <button class="btn btn-primary" id="tenant-reg-submit">Probe &amp; register</button>
             </div>
         </div>`;
     document.body.appendChild(overlay);
@@ -2369,7 +2369,7 @@ window.tenantRegisterModal = function() {
                 errEl.textContent = 'Registration failed: ' + body;
                 errEl.style.display = '';
                 submitBtn.disabled = false;
-                submitBtn.textContent = '🔌 Probe & register';
+                submitBtn.textContent = 'Probe & register';
                 return;
             }
             overlay.remove();
@@ -2378,7 +2378,7 @@ window.tenantRegisterModal = function() {
             errEl.textContent = 'Network error: ' + (e.message || e);
             errEl.style.display = '';
             submitBtn.disabled = false;
-            submitBtn.textContent = '🔌 Probe & register';
+            submitBtn.textContent = 'Probe & register';
         }
     };
 };
@@ -2411,9 +2411,9 @@ async function poolsLoadList() {
             <div class="card-body">
                 <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px;">
                     <h3 style="margin:0;display:flex;align-items:center;gap:8px;font-size:15px;">
-                        <span style="font-size:20px;">🧰</span>WolfStack Pools (${pools.length})${inflight.length ? ` — ${inflight.length} in flight` : ''}
+                        <span style="font-size:20px;"></span>WolfStack Pools (${pools.length})${inflight.length ? ` — ${inflight.length} in flight` : ''}
                     </h3>
-                    <button class="btn btn-xs" onclick="poolsLoadList()">🔄</button>
+                    <button class="btn btn-xs" onclick="poolsLoadList()"></button>
                 </div>
                 <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(360px, 1fr));gap:12px;">
                     ${pools.map(poolTile).join('')}
@@ -2449,7 +2449,7 @@ function poolTile(p) {
     const label = poolStatusLabel(p.status);
     const vms = (p.vms || []).map((vm, i) => {
         const ip = vm.ipv4 ? escapeHtml(vm.ipv4) : '<span style="color:var(--text-muted);">awaiting IP…</span>';
-        const role = vm.is_leader ? '👑' : (vm.joined ? '✅' : '⏳');
+        const role = vm.is_leader ? '' : (vm.joined ? '' : '');
         return `<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;">
             <span><span title="${vm.is_leader ? 'leader' : (vm.joined ? 'joined' : 'pending')}">${role}</span> ${escapeHtml(vm.hostname)}</span>
             <span style="font-family:'JetBrains Mono',monospace;">${ip}</span>
@@ -2459,19 +2459,19 @@ function poolTile(p) {
         ? `<a href="${escapeAttr(p.leader_url)}" target="_blank" rel="noopener" style="font-size:11px;color:var(--info,#3b82f6);font-family:'JetBrains Mono',monospace;word-break:break-all;">${escapeHtml(p.leader_url)} ↗</a>`
         : '<span style="font-size:11px;color:var(--text-muted);">leader URL pending self-register</span>';
     const errBlock = p.last_error
-        ? `<div style="margin-top:8px;padding:6px 8px;background:rgba(239,68,68,0.08);border-left:3px solid var(--danger);font-size:11px;color:var(--danger);">⚠ ${escapeHtml(p.last_error)}</div>`
+        ? `<div style="margin-top:8px;padding:6px 8px;background:rgba(239,68,68,0.08);border-left:3px solid var(--danger);font-size:11px;color:var(--danger);">${escapeHtml(p.last_error)}</div>`
         : '';
     return `<div class="card" style="border-left:3px solid ${colour};margin:0;">
         <div class="card-body" style="padding:12px 14px;">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px;">
                 <div style="min-width:0;flex:1;">
                     <h4 style="margin:0 0 2px;font-size:14px;display:flex;align-items:center;gap:6px;">
-                        <span style="font-size:16px;">🧰</span>${escapeHtml(p.tenant_name)}
+                        <span style="font-size:16px;"></span>${escapeHtml(p.tenant_name)}
                     </h4>
                     <div style="font-size:11px;color:${colour};font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">● ${escapeHtml(label)}</div>
                 </div>
                 <div style="display:flex;gap:4px;flex-shrink:0;">
-                    <button class="btn btn-xs" onclick="poolsLoadList()" title="Refresh">🔄</button>
+                    <button class="btn btn-xs" onclick="poolsLoadList()" title="Refresh"></button>
                     <button class="btn btn-xs btn-danger" onclick="poolDestroy('${escapeAttr(p.id)}','${escapeAttr(p.tenant_name)}','${escapeAttr(p.backend)}')" title="Destroy pool VMs">×</button>
                 </div>
             </div>
@@ -2519,7 +2519,7 @@ window.poolWizardOpen = async function() {
     overlay.innerHTML = `
         <div style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:640px;width:94%;color:var(--text-primary,#e4e4e7);font-family:inherit;max-height:92vh;overflow-y:auto;">
             <div style="font-size:16px;font-weight:600;margin-bottom:6px;display:flex;align-items:center;gap:10px;">
-                <span style="font-size:22px;">🧰</span>New WolfStack Pool
+                <span style="font-size:22px;"></span>New WolfStack Pool
             </div>
             <div style="font-size:13px;color:var(--text-secondary,#a1a1aa);margin-bottom:14px;line-height:1.55;">
                 Provision <em>N</em> VMs on a backend, auto-install WolfStack on each,
@@ -2576,7 +2576,7 @@ window.poolWizardOpen = async function() {
             <div id="pool-wiz-error" style="display:none;color:var(--danger);font-size:12px;margin-top:10px;line-height:1.5;"></div>
             <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;">
                 <button class="btn" id="pool-wiz-cancel">Cancel</button>
-                <button class="btn btn-primary" id="pool-wiz-submit">🚀 Provision pool</button>
+                <button class="btn btn-primary" id="pool-wiz-submit">Provision pool</button>
             </div>
         </div>`;
     document.body.appendChild(overlay);
@@ -2638,7 +2638,7 @@ window.poolWizardOpen = async function() {
                 errEl.textContent = 'Provision failed: ' + (data.error || r.status);
                 errEl.style.display = '';
                 submitBtn.disabled = false;
-                submitBtn.textContent = '🚀 Provision pool';
+                submitBtn.textContent = 'Provision pool';
                 return;
             }
             overlay.remove();
@@ -2648,7 +2648,7 @@ window.poolWizardOpen = async function() {
             errEl.textContent = 'Network error: ' + (e.message || e);
             errEl.style.display = '';
             submitBtn.disabled = false;
-            submitBtn.textContent = '🚀 Provision pool';
+            submitBtn.textContent = 'Provision pool';
         }
     };
 };
@@ -2783,7 +2783,7 @@ async function renderXoPools() {
         <div class="card" style="margin-bottom:16px;">
             <div class="card-body" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
                 <div>
-                    <h2 style="margin:0;display:flex;align-items:center;gap:10px;"><span style="font-size:28px;">🦊</span>XCP-ng / Xen Orchestra Pools</h2>
+                    <h2 style="margin:0;display:flex;align-items:center;gap:10px;"><span style="font-size:28px;"></span>XCP-ng / Xen Orchestra Pools</h2>
                     <p style="margin:6px 0 0;color:var(--text-muted);font-size:13px;max-width:780px;line-height:1.5;">
                         Drive XCP-ng pools through Xen Orchestra's REST API. Register an XO instance once with a token from
                         <em>Settings → Tokens</em>; WolfStack reads pools, hosts, and VMs from there. Same shape as the Proxmox
@@ -2816,7 +2816,7 @@ async function xoLoadList() {
     }
     if (!pools.length) {
         list.innerHTML = `<div class="card"><div class="card-body" style="text-align:center;padding:40px;color:var(--text-muted);">
-            <div style="font-size:36px;margin-bottom:10px;">🦊</div>
+            <div style="font-size:36px;margin-bottom:10px;"></div>
             <div style="font-size:15px;margin-bottom:6px;">No XO instances registered yet.</div>
             <div style="font-size:12px;">Click <strong>Register XO instance</strong> above to add the first one.</div>
         </div></div>`;
@@ -2846,15 +2846,15 @@ function xoPoolCardHtml(p) {
             <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
                 <div style="min-width:0;flex:1;">
                     <h3 style="margin:0 0 4px;display:flex;align-items:center;gap:10px;">
-                        <span style="font-size:22px;">🦊</span>
+                        <span style="font-size:22px;"></span>
                         ${escapeHtml(p.name)}
                         <span style="font-size:11px;color:${statusColour};font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">● ${escapeHtml(statusLabel)}</span>
                     </h3>
                     <div style="font-size:12px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;word-break:break-all;">${escapeHtml(p.url)}</div>
                 </div>
                 <div style="display:flex;gap:6px;">
-                    <button class="btn btn-sm" onclick="xoTestPool('${escapeAttr(p.id)}')">🔌 Test</button>
-                    <button class="btn btn-sm" onclick="xoRefreshPool('${escapeAttr(p.id)}')">🔄 Refresh</button>
+                    <button class="btn btn-sm" onclick="xoTestPool('${escapeAttr(p.id)}')">Test</button>
+                    <button class="btn btn-sm" onclick="xoRefreshPool('${escapeAttr(p.id)}')">Refresh</button>
                     <button class="btn btn-sm btn-danger" onclick="xoDeletePool('${escapeAttr(p.id)}','${escapeAttr(p.name)}')">Remove</button>
                 </div>
             </div>
@@ -2932,13 +2932,13 @@ function xoInventoryHtml(inv, poolId) {
                         const actions = [
                             !running ? `<button class="btn btn-xs" title="Power on" onclick="xoVmAction('${escapeAttr(poolId)}','${escapeAttr(v.uuid)}','start','${escapeAttr(v.name)}')">▶ Start</button>` : '',
                             running ? `<button class="btn btn-xs" title="Graceful reboot" onclick="xoVmAction('${escapeAttr(poolId)}','${escapeAttr(v.uuid)}','clean_reboot','${escapeAttr(v.name)}')">↻ Reboot</button>` : '',
-                            running ? `<button class="btn btn-xs" title="Graceful shutdown" onclick="xoVmAction('${escapeAttr(poolId)}','${escapeAttr(v.uuid)}','clean_shutdown','${escapeAttr(v.name)}')">⏻ Stop</button>` : '',
-                            running ? `<button class="btn btn-xs btn-danger" title="Force-kill (data loss possible)" onclick="xoVmAction('${escapeAttr(poolId)}','${escapeAttr(v.uuid)}','hard_shutdown','${escapeAttr(v.name)}')">⚡ Halt</button>` : '',
-                            running ? `<button class="btn btn-xs" title="Suspend (saves state to disk)" onclick="xoVmAction('${escapeAttr(poolId)}','${escapeAttr(v.uuid)}','suspend','${escapeAttr(v.name)}')">⏸ Suspend</button>` : '',
-                            (!running && !halted) ? `<button class="btn btn-xs" title="Resume from suspended state" onclick="xoVmAction('${escapeAttr(poolId)}','${escapeAttr(v.uuid)}','resume','${escapeAttr(v.name)}')">⏯ Resume</button>` : '',
+                            running ? `<button class="btn btn-xs" title="Graceful shutdown" onclick="xoVmAction('${escapeAttr(poolId)}','${escapeAttr(v.uuid)}','clean_shutdown','${escapeAttr(v.name)}')">Stop</button>` : '',
+                            running ? `<button class="btn btn-xs btn-danger" title="Force-kill (data loss possible)" onclick="xoVmAction('${escapeAttr(poolId)}','${escapeAttr(v.uuid)}','hard_shutdown','${escapeAttr(v.name)}')">Halt</button>` : '',
+                            running ? `<button class="btn btn-xs" title="Suspend (saves state to disk)" onclick="xoVmAction('${escapeAttr(poolId)}','${escapeAttr(v.uuid)}','suspend','${escapeAttr(v.name)}')">Suspend</button>` : '',
+                            (!running && !halted) ? `<button class="btn btn-xs" title="Resume from suspended state" onclick="xoVmAction('${escapeAttr(poolId)}','${escapeAttr(v.uuid)}','resume','${escapeAttr(v.name)}')">Resume</button>` : '',
                         ].filter(Boolean).join(' ');
                         return `<tr>
-                            <td>${running ? '🟢' : '⚫'}</td>
+                            <td>${running ? '' : ''}</td>
                             <td><strong>${escapeHtml(v.name)}</strong>${v.tags && v.tags.length ? `<div style="font-size:10px;color:var(--text-muted);">${v.tags.map(t => escapeHtml(t)).join(', ')}</div>` : ''}</td>
                             <td><span style="color:${vmStateColour};font-weight:600;">${escapeHtml(v.power_state)}</span></td>
                             <td>${v.cpus || 0}</td>
@@ -2963,7 +2963,7 @@ function xoInventoryHtml(inv, poolId) {
         }).join('');
         return `<div style="${sectionStyle}">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:8px;">
-                <div style="font-weight:700;font-size:13px;">📦 ${escapeHtml(pool.name)} <span style="font-size:11px;color:var(--text-muted);font-weight:400;">${pool.host_count} hosts${pool.ha_enabled ? ' · HA' : ''}</span></div>
+                <div style="font-weight:700;font-size:13px;">${escapeHtml(pool.name)} <span style="font-size:11px;color:var(--text-muted);font-weight:400;">${pool.host_count} hosts${pool.ha_enabled ? ' · HA' : ''}</span></div>
                 <button class="btn btn-sm btn-primary" onclick="xoProvisionModal('${escapeAttr(poolId)}','${escapeAttr(pool.uuid)}','${escapeAttr(pool.name)}')">+ Provision VM</button>
             </div>
             ${hostsHtml || '<div style="color:var(--text-muted);font-style:italic;">No hosts in this pool.</div>'}
@@ -3030,7 +3030,7 @@ window.xoProvisionModal = async function(poolId, _poolUuid, poolName) {
     overlay.innerHTML = `
         <div style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:680px;width:92%;max-height:90vh;overflow-y:auto;color:var(--text-primary,#e4e4e7);font-family:inherit;">
             <div style="font-size:16px;font-weight:600;margin-bottom:14px;display:flex;align-items:center;gap:10px;">
-                <span style="font-size:22px;">🦊</span>Provision VM in <strong>${escapeHtml(poolName)}</strong>
+                <span style="font-size:22px;"></span>Provision VM in <strong>${escapeHtml(poolName)}</strong>
             </div>
             <div style="font-size:13px;color:var(--text-secondary,#a1a1aa);margin-bottom:14px;line-height:1.5;">
                 Clone a template and (optionally) auto-install WolfStack on first boot. The cloud-init payload sets the
@@ -3147,7 +3147,7 @@ window.xoRegisterModal = function() {
     overlay.innerHTML = `
         <div style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:560px;width:90%;max-height:90vh;overflow-y:auto;color:var(--text-primary,#e4e4e7);font-family:inherit;">
             <div style="font-size:16px;font-weight:600;margin-bottom:14px;display:flex;align-items:center;gap:10px;">
-                <span style="font-size:22px;">🦊</span>Register Xen Orchestra instance
+                <span style="font-size:22px;"></span>Register Xen Orchestra instance
             </div>
             <div style="font-size:13px;color:var(--text-secondary,#a1a1aa);margin-bottom:14px;line-height:1.5;">
                 WolfStack drives XCP-ng through XO's REST API.
@@ -3167,7 +3167,7 @@ window.xoRegisterModal = function() {
             <div id="xo-reg-error" style="display:none;color:var(--danger);font-size:12px;margin-top:10px;"></div>
             <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;">
                 <button class="btn" id="xo-reg-cancel">Cancel</button>
-                <button class="btn btn-primary" id="xo-reg-submit">🔌 Test &amp; register</button>
+                <button class="btn btn-primary" id="xo-reg-submit">Test &amp; register</button>
             </div>
         </div>`;
     document.body.appendChild(overlay);
@@ -3186,7 +3186,7 @@ window.xoRegisterModal = function() {
         }
         const submitBtn = document.getElementById('xo-reg-submit');
         submitBtn.disabled = true;
-        submitBtn.textContent = '🔌 Testing…';
+        submitBtn.textContent = 'Testing…';
         try {
             const r = await fetch(apiUrl('/api/xo/pools'), {
                 method: 'POST',
@@ -3198,7 +3198,7 @@ window.xoRegisterModal = function() {
                 errEl.textContent = 'Registration failed: ' + body;
                 errEl.style.display = '';
                 submitBtn.disabled = false;
-                submitBtn.textContent = '🔌 Test & register';
+                submitBtn.textContent = 'Test & register';
                 return;
             }
             overlay.remove();
@@ -3207,7 +3207,7 @@ window.xoRegisterModal = function() {
             errEl.textContent = 'Network error: ' + (e.message || e);
             errEl.style.display = '';
             submitBtn.disabled = false;
-            submitBtn.textContent = '🔌 Test & register';
+            submitBtn.textContent = 'Test & register';
         }
     };
 };
@@ -3302,19 +3302,19 @@ function buildServerTree(nodes) {
             <div class="server-node-header" data-cluster-id="${clusterId}" onclick="toggleServerNode('${clusterId}')" style="background: linear-gradient(90deg, rgba(99,102,241,0.05), transparent);">
                 <span class="tree-toggle ${shouldExpandCluster ? 'expanded' : ''}" id="toggle-${clusterId}">▶</span>
                 <span class="server-dot ${anyOnline ? 'online' : 'offline'}"></span>
-                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><span style="position:relative;display:inline-block;margin-right:6px;">☁️<span style="position:absolute;bottom:-4px;right:-6px;min-width:15px;height:15px;line-height:15px;text-align:center;font-size:9px;font-weight:700;color:#fff;background:#16a34a;border-radius:50%;z-index:2;">${clusterNodes.length}</span></span>${clusterName}</span>
-                <span class="remove-server-btn" onclick="event.stopPropagation(); openWsClusterSettings('${escapedName}')" title="Cluster settings" style="margin-left:4px;">⚙️</span>
+                <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><span style="position:relative;display:inline-block;margin-right:6px;"><span style="position:absolute;bottom:-4px;right:-6px;min-width:15px;height:15px;line-height:15px;text-align:center;font-size:9px;font-weight:700;color:#fff;background:#16a34a;border-radius:50%;z-index:2;">${clusterNodes.length}</span></span>${clusterName}</span>
+                <span class="remove-server-btn" onclick="event.stopPropagation(); openWsClusterSettings('${escapedName}')" title="Cluster settings" style="margin-left:4px;"></span>
             </div>
             <div class="server-node-children ${shouldExpandCluster ? 'expanded' : ''}" id="children-${clusterId}">
                 <a class="nav-item server-child-item statuspage-cluster-item" data-cluster="${escapedName}" data-view="statuspage" onclick="showStatusPagesForCluster('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
-                    <span class="icon" style="font-size:15px;">🛡️</span> <span style="font-weight:600;">Status Pages</span>
+                    <span class="icon" style="font-size:15px;"></span> <span style="font-weight:600;">Status Pages</span>
                 </a>
                 <a class="nav-item server-child-item wolfrun-cluster-item" data-cluster="${escapedName}" data-view="wolfrun" onclick="showWolfRunPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
-                    <span class="icon" style="font-size:15px;">🏃</span> <span style="font-weight:600;">WolfRun</span>
+                    <span class="icon" style="font-size:15px;"></span> <span style="font-weight:600;">WolfRun</span>
                     <span class="wolfrun-svc-count" id="wolfrun-count-${clusterId}" style="margin-left:auto; font-size:10px; padding:1px 6px; background:var(--primary-color,#6366f1); color:#fff; border-radius:10px; display:none;"></span>
                 </a>
                 <a class="nav-item server-child-item cluster-backups-item" data-cluster="${escapedName}" data-view="cluster-backups" onclick="showClusterBackupsPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
-                    <span class="icon" style="font-size:15px;">💾</span> <span style="font-weight:600;">Backups</span>
+                    <span class="icon" style="font-size:15px;"></span> <span style="font-weight:600;">Backups</span>
                 </a>
 
                 <a class="nav-item server-child-item k8s-cluster-item" data-cluster="${escapedName}" data-view="kubernetes" onclick="showK8sClusterPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
@@ -3325,7 +3325,7 @@ function buildServerTree(nodes) {
                     <span class="icon" style="font-size:15px;"></span> <span style="font-weight:600;">WolfDisk</span>
                 </a>
                 <a class="nav-item server-child-item wolfrouter-cluster-item" data-cluster="${escapedName}" data-view="wolfrouter-cluster" onclick="showWolfRouterForCluster('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
-                    <span class="icon" style="font-size:15px;">🧩</span> <span style="font-weight:600;">WolfRouter</span>
+                    <span class="icon" style="font-size:15px;"></span> <span style="font-weight:600;">WolfRouter</span>
                 </a>`;
 
         // Each node within the cluster
@@ -3337,73 +3337,73 @@ function buildServerTree(nodes) {
                         <span class="tree-toggle ${shouldExpandNode ? 'expanded' : ''}" id="toggle-${node.id}" onclick="event.stopPropagation(); toggleServerNode('${node.id}')">▶</span>
                         <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
                         <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${node.hostname}</span>
-                        <span class="remove-server-btn" onclick="event.stopPropagation(); openNodeSettings('${node.id}')" title="Node settings" style="margin-left:4px;">⚙️</span>
-                        ${node.is_self ? '<span class="self-badge">this</span>' : `<span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemoveServer('${node.id}', '${node.hostname}')" title="Remove server">🗑️</span>`}
+                        <span class="remove-server-btn" onclick="event.stopPropagation(); openNodeSettings('${node.id}')" title="Node settings" style="margin-left:4px;"></span>
+                        ${node.is_self ? '<span class="self-badge">this</span>' : `<span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemoveServer('${node.id}', '${node.hostname}')" title="Remove server"></span>`}
                     </div>
                     <div class="server-node-children ${shouldExpandNode ? 'expanded' : ''}" id="children-${node.id}">
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="dashboard" onclick="selectServerView('${node.id}', 'dashboard')">
-                            <span class="icon">📊</span> Dashboard
+                            <span class="icon"></span> Dashboard
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="backups" onclick="selectServerView('${node.id}', 'backups')">
-                            <span class="icon">💾</span> Backups
+                            <span class="icon"></span> Backups
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="ceph" onclick="selectServerView('${node.id}', 'ceph')">
-                            <span class="icon">🔵</span> Ceph
+                            <span class="icon"></span> Ceph
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="certificates" onclick="selectServerView('${node.id}', 'certificates')">
-                            <span class="icon">🔒</span> Certificates
+                            <span class="icon"></span> Certificates
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="components" onclick="selectServerView('${node.id}', 'components')">
-                            <span class="icon">📦</span> Components
+                            <span class="icon"></span> Components
                             <span class="badge" style="font-size:10px; padding:1px 6px;">${(node.components || []).filter(c => c.installed).length}</span>
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="compose" onclick="selectServerView('${node.id}', 'compose')">
-                            <span class="icon">📋</span> Compose
+                            <span class="icon"></span> Compose
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="cron" onclick="selectServerView('${node.id}', 'cron')">
-                            <span class="icon">🕐</span> Cron Jobs
+                            <span class="icon"></span> Cron Jobs
                         </a>
                         <!-- Per-node Database Manager retired — use the cluster-wide
-                             🗄️ Databases page in the main sidebar, which drives
+                             Databases page in the main sidebar, which drives
                              predefined SQL connections and transparently proxies
                              queries to the owning node. -->
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="containers" onclick="selectServerView('${node.id}', 'containers')">
-                            <span class="icon">🐳</span> Docker
+                            <span class="icon"></span> Docker
                             ${node.docker_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.docker_count}</span>` : ''}
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="files" onclick="selectServerView('${node.id}', 'files')">
-                            <span class="icon">📂</span> Files
+                            <span class="icon"></span> Files
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="lxc" onclick="selectServerView('${node.id}', 'lxc')">
-                            <span class="icon">📦</span> LXC
+                            <span class="icon"></span> LXC
                             ${node.lxc_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.lxc_count}</span>` : ''}
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="networking" onclick="selectServerView('${node.id}', 'networking')">
-                            <span class="icon">🌐</span> Networking
+                            <span class="icon"></span> Networking
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="security" onclick="selectServerView('${node.id}', 'security')">
-                            <span class="icon">🛡️</span> Security
+                            <span class="icon"></span> Security
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="services" onclick="selectServerView('${node.id}', 'services')">
-                            <span class="icon">⚡</span> Services
+                            <span class="icon"></span> Services
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="shares" onclick="selectServerView('${node.id}', 'shares')">
-                            <span class="icon">📂</span> Shares
+                            <span class="icon"></span> Shares
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="storage" onclick="selectServerView('${node.id}', 'storage')">
-                            <span class="icon">💾</span> Storage
+                            <span class="icon"></span> Storage
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="array" onclick="selectView('array')" title="Storage Array — mdadm / NoNRAID parity. The Array page aggregates every node in the cluster, so this opens the cluster-wide view rather than a per-node one.">
-                            <span class="icon">💽</span> Storage Array
+                            <span class="icon"></span> Storage Array
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="syslogs" onclick="selectServerView('${node.id}', 'syslogs')">
-                            <span class="icon">📋</span> System Logs
+                            <span class="icon"></span> System Logs
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="terminal" onclick="selectServerView('${node.id}', 'terminal')">
-                            <span class="icon">💻</span> Terminal
+                            <span class="icon"></span> Terminal
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="vms" onclick="selectServerView('${node.id}', 'vms')">
-                            <span class="icon">🖥️</span> Virtual Machines
+                            <span class="icon"></span> Virtual Machines
                             ${node.vm_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.vm_count}</span>` : ''}
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="wolfkube" onclick="selectServerView('${node.id}', 'wolfkube')">
@@ -3411,13 +3411,13 @@ function buildServerTree(nodes) {
                             <span class="badge k8s-pod-badge" data-node="${node.id}" style="font-size:10px; padding:1px 6px; display:none;"></span>
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="wolfnet" onclick="selectServerView('${node.id}', 'wolfnet')">
-                            <span class="icon">🔗</span> WolfNet
+                            <span class="icon"></span> WolfNet
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="wolfusb" onclick="selectServerView('${node.id}', 'wolfusb')">
-                            <span class="icon">🔌</span> WolfUSB
+                            <span class="icon"></span> WolfUSB
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="wolfram" onclick="selectServerView('${node.id}', 'wolfram')">
-                            <span class="icon">🧠</span> Wolfram
+                            <span class="icon"></span> Wolfram
                         </a>
                     </div>
                 </div>`;
@@ -3528,7 +3528,7 @@ function renderDatacenterOverview() {
     const container = document.getElementById('datacenter-servers');
     if (nodes.length === 0) {
         container.innerHTML = '<div style="grid-column:1/-1;">' + renderEmptyState({
-            icon: '🖥️',
+            icon: '',
             title: 'No servers in this datacenter yet',
             body: 'A server is any Linux host running WolfStack — local or remote. Add one to start managing it from here.',
             action: { label: '+ Add server', onclick: 'openAddServerModal()' },
@@ -3596,7 +3596,7 @@ function renderDatacenterOverview() {
         const components = isPve
             ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(99,102,241,0.1);color:var(--accent-light);">${node.vm_count || 0} VMs</span><span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(99,102,241,0.1);color:var(--accent-light);">${node.lxc_count || 0} CTs</span>`
             : (node.components || []).filter(c => c.installed).map(c =>
-                `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'};color:${c.running ? 'var(--success)' : 'var(--danger)'};" ${hasConfigurator(c.component) ? 'title="Configurator available — click Components to configure"' : ''}>${c.component}${hasConfigurator(c.component) ? ' ⚙️' : ''}</span>`
+                `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:${c.running ? 'var(--success-bg)' : 'var(--danger-bg)'};color:${c.running ? 'var(--success)' : 'var(--danger)'};" ${hasConfigurator(c.component) ? 'title="Configurator available — click Components to configure"' : ''}>${c.component}${hasConfigurator(c.component) ? ' ' : ''}</span>`
             ).join('');
 
         if (dcCompact) {
@@ -4399,7 +4399,7 @@ function renderProcessTable(tableId, procs, type) {
                 </div>
             </td>
             <td>
-                <button onclick="killProcess(${p.pid}, '${p.name.replace(/'/g, "\\'")}')" class="btn btn-sm" style="font-size:10px; padding:2px 8px; color:#ef4444; border-color:rgba(239,68,68,0.3);" title="Kill process">✕</button>
+                <button onclick="killProcess(${p.pid}, '${p.name.replace(/'/g, "\\'")}')" class="btn btn-sm" style="font-size:10px; padding:2px 8px; color:#ef4444; border-color:rgba(239,68,68,0.3);" title="Kill process"></button>
             </td>
         </tr>`;
     }).join('');
@@ -5143,8 +5143,8 @@ async function loadComponents() {
 }
 
 const componentIcons = {
-    wolfnet: '🌐', wolfproxy: '🛡️', wolfserve: '📡',
-    wolfdisk: '💾', wolfscale: '⚖️', mariadb: '🗄️', certbot: '🔒'
+    wolfnet: '', wolfproxy: '', wolfserve: '',
+    wolfdisk: '', wolfscale: '', mariadb: '', certbot: ''
 };
 
 const componentDisplayNames = {
@@ -5165,7 +5165,7 @@ const componentDocs = {
 function renderComponents(components) {
     const grid = document.getElementById('components-grid');
     grid.innerHTML = components.map(c => {
-        const icon = componentIcons[c.component] || '📦';
+        const icon = componentIcons[c.component] || '';
         const statusClass = c.running ? 'running' : c.installed ? 'stopped' : 'not-installed';
         const statusText = c.running ? 'Running' : c.installed ? 'Stopped' : 'Not Installed';
         const statusColor = c.running ? 'var(--success)' : c.installed ? 'var(--text-muted)' : 'var(--warning)';
@@ -5173,7 +5173,7 @@ function renderComponents(components) {
         const docLink = docUrl
             ? `<a href="${docUrl}" target="_blank" rel="noopener" onclick="event.stopPropagation()" 
                 style="font-size: 12px; color: var(--accent-light); text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
-                📖 Docs</a>`
+                Docs</a>`
             : '';
 
         return `
@@ -5185,7 +5185,7 @@ function renderComponents(components) {
                         <div class="component-desc">${c.version || ''}</div>
                     </div>
                     ${docLink}
-                    ${hasConfigurator(c.component) ? '<span title="Configurator available" style="font-size:14px; opacity:0.7;">⚙️</span>' : ''}
+                    ${hasConfigurator(c.component) ? '<span title="Configurator available" style="font-size:14px; opacity:0.7;"></span>' : ''}
                     <span class="detail-arrow">→</span>
                 </div>
                 <div class="component-status">
@@ -5213,17 +5213,17 @@ function renderServices(components) {
         const statusColor = c.running ? 'var(--success)' : 'var(--danger)';
         const statusText = c.running ? 'Active' : 'Inactive';
         const configureBtn = hasConfigurator(c.component)
-            ? `<button class="btn btn-sm" onclick="openComponentDetail('${c.component}')" title="Open configurator">⚙️ Configure</button>`
+            ? `<button class="btn btn-sm" onclick="openComponentDetail('${c.component}')" title="Open configurator">Configure</button>`
             : '';
         return `
             <tr>
                 <td>
-                    <span style="margin-right: 8px;">${componentIcons[c.component] || '📦'}</span>
+                    <span style="margin-right: 8px;">${componentIcons[c.component] || ''}</span>
                     ${c.component}
-                    ${hasConfigurator(c.component) ? '<span style="font-size:11px; opacity:0.6;" title="Configurator available">⚙️</span>' : ''}
+                    ${hasConfigurator(c.component) ? '<span style="font-size:11px; opacity:0.6;" title="Configurator available"></span>' : ''}
                 </td>
                 <td><span style="color: ${statusColor};">● ${statusText}</span></td>
-                <td>${c.enabled ? '✓ Yes' : '✗ No'}</td>
+                <td>${c.enabled ? 'Yes' : 'No'}</td>
                 <td style="color: var(--text-muted);">${c.version || '—'}</td>
                 <td>
                     ${configureBtn}
@@ -5263,7 +5263,7 @@ async function installComponent(name) {
             </label>`;
 
     for (const c of containers) {
-        const icon = c.runtime === 'docker' ? '🐳' : '📦';
+        const icon = c.runtime === 'docker' ? '' : '';
         const label = c.image ? `${c.name} (${c.image})` : c.name;
         targetOptions += `
             <label style="display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid var(--border); border-radius:8px; cursor:pointer; margin-bottom:8px;">
@@ -5380,7 +5380,7 @@ function renderVms(vms) {
         const vncText = (vm.running && vm.vnc_port)
             ? (vncBridgePort
                 ? `<a href="/vnc.html?name=${encodeURIComponent(vm.name)}&port=${vncBridgePort}&host=${encodeURIComponent(vncHost)}" target="_blank"
-                    class="badge" style="cursor:pointer; text-decoration:none; background:rgba(234,179,8,0.15); color:#eab308;" title="Open console in browser">🖥️ :${vm.vnc_port}</a>`
+                    class="badge" style="cursor:pointer; text-decoration:none; background:rgba(234,179,8,0.15); color:#eab308;" title="Open console in browser">:${vm.vnc_port}</a>`
                 : `<span class="badge" style="background:rgba(234,179,8,0.15); color:#eab308;" title="Connect with VNC client to port ${vm.vnc_port}">:${vm.vnc_port}</span>`)
             : '—';
 
@@ -5392,7 +5392,7 @@ function renderVms(vms) {
             : '';
         const storageSubRow = `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="7" style="padding:4px 16px 6px 24px;border-top:none;">
             <div style="display:flex;align-items:center;gap:8px;font-size:11px;">
-                <span>💾</span>
+                <span></span>
                 <span>${vm.disk_size_gb} GiB primary</span>
                 ${extraDisksHtml}
             </div>
@@ -5400,26 +5400,26 @@ function renderVms(vms) {
 
         return `
             <tr>
-                <td><strong>${vm.name}</strong>${vm.iso_path ? `<br><small style="color:var(--text-muted);">💿 ${vm.iso_path.split('/').pop()}</small>` : ''}</td>
+                <td><strong>${vm.name}</strong>${vm.iso_path ? `<br><small style="color:var(--text-muted);">${vm.iso_path.split('/').pop()}</small>` : ''}</td>
                 <td><span style="color:${statusColor}">● ${statusText}</span></td>
                 <td>${vm.cpus} vCPU / ${vm.memory_mb} MB</td>
                 <td>${wolfnetIp !== '—' ? `<span class="badge" style="background:var(--accent-bg); color:var(--accent);">${wolfnetIp}</span>` : '—'}</td>
                 <td>${vncText}</td>
                 <td><input type="checkbox" ${autostart} onchange="toggleVmAutostart('${vm.name}', this.checked)"></td>
                 <td><div style="display:flex; flex-wrap:wrap; gap:2px; min-width:0;">
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="showVmLogs('${vm.name}')" title="Logs">📋</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="showVmLogs('${vm.name}')" title="Logs"></button>
                     ${vm.running ?
                 `${vm.vmid
-                    ? `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openPveVmConsole('${vm.vmid}', '${vm.name}')" title="VNC Console">🖥️</button>`
-                    : ((vm.vnc_ws_port || vm.vnc_port) ? `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port || vm.vnc_port})" title="VNC Console">🖥️</button>` : '')}
-                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openVmConsole('${vm.name}')" title="Serial terminal (guest must have serial console enabled)">💻</button>
-                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="vmAction('${vm.name}', 'stop', this)" title="Stop (graceful ACPI shutdown)">⏹️</button>
-                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#b91c1c;" onclick="vmForceStopConfirm('${vm.name}', this)" title="Force Stop (power off immediately)">⛔</button>` :
-                `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="showVmSettings('${vm.name}')" title="Settings">⚙️</button>
-                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#3b82f6;" onclick="migrateVm('${vm.name}')" title="Migrate to another node">🚀</button>
-                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#8b5cf6;" onclick="migrateVmDiskStorage('${vm.name}')" title="Move disk to different storage (same node)">💾</button>
+                    ? `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openPveVmConsole('${vm.vmid}', '${vm.name}')" title="VNC Console"></button>`
+                    : ((vm.vnc_ws_port || vm.vnc_port) ? `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port || vm.vnc_port})" title="VNC Console"></button>` : '')}
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openVmConsole('${vm.name}')" title="Serial terminal (guest must have serial console enabled)"></button>
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="vmAction('${vm.name}', 'stop', this)" title="Stop (graceful ACPI shutdown)"></button>
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#b91c1c;" onclick="vmForceStopConfirm('${vm.name}', this)" title="Force Stop (power off immediately)"></button>` :
+                `<button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="showVmSettings('${vm.name}')" title="Settings"></button>
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#3b82f6;" onclick="migrateVm('${vm.name}')" title="Migrate to another node"></button>
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#8b5cf6;" onclick="migrateVmDiskStorage('${vm.name}')" title="Move disk to different storage (same node)"></button>
                          <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#22c55e;" onclick="vmAction('${vm.name}', 'start', this)" title="Start">▶️</button>
-                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="deleteVm('${vm.name}')" title="Delete">🗑️</button>`
+                         <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="deleteVm('${vm.name}')" title="Delete"></button>`
             }
                 </div></td>
             </tr>${storageSubRow}
@@ -5617,7 +5617,7 @@ async function loadCephStatus() {
             clusterView.style.display = 'none';
             document.getElementById('ceph-install-status').innerHTML = `
                 <div style="display:flex; align-items:center; gap:16px; padding:16px; background:var(--bg-secondary); border-radius:8px; border:1px solid var(--border);">
-                    <span style="font-size:32px;">📦</span>
+                    <span style="font-size:32px;"></span>
                     <div style="flex:1;">
                         <div style="font-weight:600; margin-bottom:4px;">Ceph is not installed</div>
                         <div style="font-size:13px; color:var(--text-muted);">Install Ceph packages to set up a distributed storage cluster on this node.</div>
@@ -6165,7 +6165,7 @@ function renderStorageMounts(mounts) {
     empty.style.display = 'none';
 
     tbody.innerHTML = mounts.map(m => {
-        const icon = MOUNT_TYPE_ICONS[m.type] || '📦';
+        const icon = MOUNT_TYPE_ICONS[m.type] || '';
         const typeLabel = MOUNT_TYPE_LABELS[m.type] || m.type;
         const isMounted = m.status === 'mounted';
         const isError = m.status === 'error';
@@ -6173,22 +6173,22 @@ function renderStorageMounts(mounts) {
         const statusBadge = isMounted
             ? '<span class="badge" style="background:var(--success); color:#fff; font-size:11px;">● Mounted</span>'
             : isError
-                ? `<span class="badge" style="background:#ef4444; color:#fff; font-size:11px;" title="${m.error_message || ''}">✗ Error</span>`
+                ? `<span class="badge" style="background:#ef4444; color:#fff; font-size:11px;" title="${m.error_message || ''}">Error</span>`
                 : '<span class="badge" style="background:var(--bg-tertiary); color:var(--text-muted); font-size:11px;">○ Unmounted</span>';
 
         const globalBadge = m.global
-            ? '<span class="badge" style="background:rgba(59,130,246,0.15); color:#60a5fa; font-size:10px; margin-left:4px;">🌐 Global</span>'
+            ? '<span class="badge" style="background:rgba(59,130,246,0.15); color:#60a5fa; font-size:10px; margin-left:4px;">Global</span>'
             : '';
         const autoBadge = m.auto_mount
-            ? '<span class="badge" style="background:rgba(234,179,8,0.15); color:#fbbf24; font-size:10px; margin-left:4px;">⚡ Auto</span>'
+            ? '<span class="badge" style="background:rgba(234,179,8,0.15); color:#fbbf24; font-size:10px; margin-left:4px;">Auto</span>'
             : '';
 
         const mountBtn = isMounted
-            ? `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="unmountStorage('${m.id}')">⏏ Unmount</button>`
+            ? `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="unmountStorage('${m.id}')">Unmount</button>`
             : `<button class="btn btn-sm btn-success" style="font-size:11px; padding:2px 8px;" onclick="mountStorage('${m.id}')">▶ Mount</button>`;
 
         const syncBtn = m.global
-            ? `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="syncStorageMount('${m.id}')" title="Sync to all cluster nodes">🔄 Sync</button>`
+            ? `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="syncStorageMount('${m.id}')" title="Sync to all cluster nodes">Sync</button>`
             : '';
 
         // Source display — show bucket prominently for S3
@@ -6208,11 +6208,11 @@ function renderStorageMounts(mounts) {
             <td>${statusBadge}</td>
             <td>${globalBadge}${autoBadge}</td>
             <td style="white-space:nowrap;">
-                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="openEditMount('${m.id}')" title="Settings">⚙️</button>
-                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="duplicateStorageMount('${m.id}')" title="Duplicate">📋</button>
+                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="openEditMount('${m.id}')" title="Settings"></button>
+                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="duplicateStorageMount('${m.id}')" title="Duplicate"></button>
                 ${mountBtn}
                 ${syncBtn}
-                <button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;" onclick="deleteStorageMount('${m.id}', '${m.name}')">🗑️</button>
+                <button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;" onclick="deleteStorageMount('${m.id}', '${m.name}')"></button>
             </td>
         </tr>`;
     }).join('');
@@ -6331,8 +6331,8 @@ async function mountStorage(id) {
 
     // Show progress modal
     const modal = document.getElementById('mount-progress-modal');
-    document.getElementById('mount-progress-title').textContent = `💾 Mounting: ${name}`;
-    document.getElementById('mount-progress-spinner').textContent = '⏳';
+    document.getElementById('mount-progress-title').textContent = `Mounting: ${name}`;
+    document.getElementById('mount-progress-spinner').textContent = '';
     document.getElementById('mount-progress-status').textContent = 'Connecting...';
     document.getElementById('mount-progress-status').style.color = '';
     document.getElementById('mount-progress-detail').textContent = mount?.type === 's3'
@@ -6351,7 +6351,7 @@ async function mountStorage(id) {
         if (!resp.ok) throw new Error(data.error || 'Mount failed');
 
         // Success
-        document.getElementById('mount-progress-spinner').textContent = '✅';
+        document.getElementById('mount-progress-spinner').textContent = '';
         document.getElementById('mount-progress-status').textContent = 'Mounted successfully!';
         document.getElementById('mount-progress-status').style.color = 'var(--success)';
         document.getElementById('mount-progress-detail').textContent = data.message || '';
@@ -6370,7 +6370,7 @@ async function mountStorage(id) {
             return;
         }
         // Error
-        document.getElementById('mount-progress-spinner').textContent = '❌';
+        document.getElementById('mount-progress-spinner').textContent = '';
         document.getElementById('mount-progress-status').textContent = 'Mount Failed';
         document.getElementById('mount-progress-status').style.color = '#ef4444';
         document.getElementById('mount-progress-detail').textContent = e.message;
@@ -6516,7 +6516,7 @@ function openEditMount(id) {
     document.getElementById('edit-mount-id').value = m.id;
     document.getElementById('edit-mount-name').value = m.name;
     document.getElementById('edit-mount-type-value').value = m.type;
-    document.getElementById('edit-mount-type-display').value = (MOUNT_TYPE_ICONS[m.type] || '📦') + ' ' + (MOUNT_TYPE_LABELS[m.type] || m.type);
+    document.getElementById('edit-mount-type-display').value = (MOUNT_TYPE_ICONS[m.type] || '') + ' ' + (MOUNT_TYPE_LABELS[m.type] || m.type);
     document.getElementById('edit-mount-point').value = m.mount_point;
     document.getElementById('edit-mount-global').checked = !!m.global;
     document.getElementById('edit-mount-auto').checked = !!m.auto_mount;
@@ -6688,7 +6688,7 @@ async function editContainerConfigFile(type, name) {
     modal.id = 'container-file-edit-modal';
     modal.className = 'modal-overlay';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
-    const typeIcon = type === 'docker' ? '🐳' : '📦';
+    const typeIcon = type === 'docker' ? '' : '';
     modal.innerHTML = `
         <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px;min-width:720px;max-width:90vw;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
             <h3 style="margin:0 0 4px;color:var(--text,#fff);">${typeIcon} Edit config file — ${escapeHtml(name)}</h3>
@@ -6829,11 +6829,11 @@ async function loadFiles(path) {
     const header = document.querySelector('#page-files .card-header h3');
     if (header) {
         if (containerFileMode && containerFileMode.type === 'docker') {
-            header.textContent = `📂 Files — 🐳 ${containerFileMode.name}`;
+            header.textContent = `Files — ${containerFileMode.name}`;
         } else if (containerFileMode && containerFileMode.type === 'lxc') {
-            header.textContent = `📂 Files — 📦 ${containerFileMode.name}`;
+            header.textContent = `Files — ${containerFileMode.name}`;
         } else {
-            header.textContent = '📂 File Manager';
+            header.textContent = 'File Manager';
         }
     }
 
@@ -6876,7 +6876,7 @@ function renderFileBreadcrumb(path) {
     if (!bc) return;
 
     const parts = path.split('/').filter(Boolean);
-    let html = `<a href="#" onclick="navigateToDir('/');return false;" style="color:var(--accent);text-decoration:none;font-weight:600;">🏠 /</a>`;
+    let html = `<a href="#" onclick="navigateToDir('/');return false;" style="color:var(--accent);text-decoration:none;font-weight:600;">/</a>`;
     let accumulated = '';
     for (const part of parts) {
         accumulated += '/' + part;
@@ -6943,7 +6943,7 @@ function renderFilteredFileList(entries, isSearch) {
     if (!table) return;
 
     table.innerHTML = entries.map(e => {
-        const icon = e.is_dir ? '📁' : getFileIcon(e.name);
+        const icon = e.is_dir ? '' : getFileIcon(e.name);
         const sizeStr = e.is_dir ? '—' : formatFileSize(e.size);
         const modStr = e.modified ? new Date(e.modified * 1000).toLocaleString() : '—';
         const nameClick = e.is_dir
@@ -6959,9 +6959,9 @@ function renderFilteredFileList(entries, isSearch) {
             <td style="font-family:var(--font-mono);font-size:13px;cursor:pointer;color:var(--accent);" onclick="changePermissions('${e.path.replace(/'/g, "\\'")}')" title="Click to change permissions">${escapeHtml(e.permissions)}</td>
             <td style="white-space:nowrap;">
                 ${!e.is_dir ? `<button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="downloadFile('${e.path.replace(/'/g, "\\'")}')">⬇️</button>` : ''}
-                ${!e.is_dir && e.size < 2097152 ? `<button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="editFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">📝</button>` : ''}
-                <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="renameFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">✏️</button>
-                <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);" onclick="deleteFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')">🗑️</button>
+                ${!e.is_dir && e.size < 2097152 ? `<button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="editFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')"></button>` : ''}
+                <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="renameFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')"></button>
+                <button class="btn btn-sm" style="font-size:12px;padding:3px 8px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);" onclick="deleteFile('${e.path.replace(/'/g, "\\'")}', '${e.name.replace(/'/g, "\\'")}')"></button>
             </td>
         </tr>`;
     }).join('');
@@ -7097,7 +7097,7 @@ function getFileIcon(name) {
         'zip': '📦', 'tar': '📦', 'gz': '📦', 'bz2': '📦', 'xz': '📦', 'rar': '📦',
         'db': '🗃️', 'sql': '🗃️', 'sqlite': '🗃️',
     };
-    return icons[ext] || '📄';
+    return icons[ext] || '';
 }
 
 function formatFileSize(bytes) {
@@ -7396,22 +7396,22 @@ function renderZfsPools(pools) {
             <td>${escapeHtml(p.fragmentation)}</td>
             <td>${escapeHtml(p.capacity)}</td>
             <td style="white-space:nowrap;">
-                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="expandZfsPool('${escapeHtml(p.name)}')" title="Datasets">📂 Datasets</button>
-                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsSnapshots('${escapeHtml(p.name)}')" title="Snapshots">📸 Snapshots</button>
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="expandZfsPool('${escapeHtml(p.name)}')" title="Datasets">Datasets</button>
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsSnapshots('${escapeHtml(p.name)}')" title="Snapshots">Snapshots</button>
                 ${isScrubbing
-                ? `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);" onclick="zfsPoolScrub('${escapeHtml(p.name)}', true)" title="Stop Scrub">⏹️ Stop Scrub</button>`
-                : `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:rgba(16,185,129,0.1);color:#10b981;border:1px solid rgba(16,185,129,0.3);" onclick="zfsPoolScrub('${escapeHtml(p.name)}', false)" title="Start Scrub">🔍 Scrub</button>`
+                ? `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);" onclick="zfsPoolScrub('${escapeHtml(p.name)}', true)" title="Stop Scrub">Stop Scrub</button>`
+                : `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:rgba(16,185,129,0.1);color:#10b981;border:1px solid rgba(16,185,129,0.3);" onclick="zfsPoolScrub('${escapeHtml(p.name)}', false)" title="Start Scrub">Scrub</button>`
             }
-                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsPoolStatus('${escapeHtml(p.name)}')" title="Detailed Status">📋 Status</button>
-                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsPoolIostat('${escapeHtml(p.name)}')" title="IO Statistics">📊 IO Stats</button>
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsPoolStatus('${escapeHtml(p.name)}')" title="Detailed Status">Status</button>
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsPoolIostat('${escapeHtml(p.name)}')" title="IO Statistics">IO Stats</button>
             </td>
         </tr>
         <tr class="storage-sub-row" style="background:var(--bg-secondary);">
             <td colspan="9" style="padding:4px 16px 6px 24px;border-top:none;">
                 <div style="display:flex;align-items:center;gap:16px;font-size:11px;flex-wrap:wrap;">
-                    <span>🔄 <strong>Scan:</strong> ${escapeHtml(scanInfo.length > 80 ? scanInfo.substring(0, 80) + '…' : scanInfo)}</span>
-                    <span style="color:${errorsColor};">⚠️ <strong>Errors:</strong> ${escapeHtml(errorsInfo)}</span>
-                    <span>🔢 <strong>Dedup:</strong> ${escapeHtml(p.dedup || '1.00x')}</span>
+                    <span><strong>Scan:</strong> ${escapeHtml(scanInfo.length > 80 ? scanInfo.substring(0, 80) + '…' : scanInfo)}</span>
+                    <span style="color:${errorsColor};"><strong>Errors:</strong> ${escapeHtml(errorsInfo)}</span>
+                    <span><strong>Dedup:</strong> ${escapeHtml(p.dedup || '1.00x')}</span>
                 </div>
             </td>
         </tr>`;
@@ -7436,8 +7436,8 @@ async function expandZfsPool(pool) {
         detailSection.innerHTML = `
             <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                    <h4 style="margin:0;font-size:14px;">📁 Datasets — ${escapeHtml(pool)}</h4>
-                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                    <h4 style="margin:0;font-size:14px;">Datasets — ${escapeHtml(pool)}</h4>
+                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">Close</button>
                 </div>
                 <table class="data-table">
                     <thead><tr><th>Name</th><th>Used</th><th>Available</th><th>Refer</th><th>Mountpoint</th><th>Compression</th><th>Ratio</th><th>Actions</th></tr></thead>
@@ -7451,7 +7451,7 @@ async function expandZfsPool(pool) {
                         <td>${escapeHtml(d.compression)}</td>
                         <td>${escapeHtml(d.compressratio)}</td>
                         <td>
-                            <button class="btn btn-sm btn-primary" style="font-size:11px;padding:2px 8px;" onclick="createZfsSnapshot('${escapeHtml(d.name)}')">📸 Snapshot</button>
+                            <button class="btn btn-sm btn-primary" style="font-size:11px;padding:2px 8px;" onclick="createZfsSnapshot('${escapeHtml(d.name)}')">Snapshot</button>
                         </td>
                     </tr>`).join('')}
                     </tbody>
@@ -7476,8 +7476,8 @@ async function showZfsSnapshots(pool) {
             detailSection.innerHTML = `
                 <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                        <h4 style="margin:0;font-size:14px;">📸 Snapshots — ${escapeHtml(pool)}</h4>
-                        <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                        <h4 style="margin:0;font-size:14px;">Snapshots — ${escapeHtml(pool)}</h4>
+                        <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">Close</button>
                     </div>
                     <div style="text-align:center;padding:20px;color:var(--text-muted);">No snapshots found for this pool</div>
                 </div>`;
@@ -7487,8 +7487,8 @@ async function showZfsSnapshots(pool) {
         detailSection.innerHTML = `
             <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                    <h4 style="margin:0;font-size:14px;">📸 Snapshots — ${escapeHtml(pool)} (${snapshots.length})</h4>
-                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                    <h4 style="margin:0;font-size:14px;">Snapshots — ${escapeHtml(pool)} (${snapshots.length})</h4>
+                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">Close</button>
                 </div>
                 <table class="data-table">
                     <thead><tr><th>Snapshot</th><th>Created</th><th>Used</th><th>Refer</th><th>Actions</th></tr></thead>
@@ -7499,7 +7499,7 @@ async function showZfsSnapshots(pool) {
                         <td>${escapeHtml(s.used)}</td>
                         <td>${escapeHtml(s.refer)}</td>
                         <td>
-                            <button class="btn btn-sm btn-danger" style="font-size:11px;padding:2px 8px;" onclick="deleteZfsSnapshot('${escapeHtml(s.name)}')">🗑️ Delete</button>
+                            <button class="btn btn-sm btn-danger" style="font-size:11px;padding:2px 8px;" onclick="deleteZfsSnapshot('${escapeHtml(s.name)}')">Delete</button>
                         </td>
                     </tr>`).join('')}
                     </tbody>
@@ -7596,8 +7596,8 @@ async function showZfsPoolStatus(pool) {
         detailSection.innerHTML = `
             <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                    <h4 style="margin:0;font-size:14px;">📋 Pool Status — ${escapeHtml(pool)}</h4>
-                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                    <h4 style="margin:0;font-size:14px;">Pool Status — ${escapeHtml(pool)}</h4>
+                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">Close</button>
                 </div>
                 <pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;
                     font-family:'JetBrains Mono',monospace;font-size:12px;max-height:400px;overflow-y:auto;
@@ -7626,8 +7626,8 @@ async function showZfsPoolIostat(pool) {
         detailSection.innerHTML = `
             <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                    <h4 style="margin:0;font-size:14px;">📊 IO Statistics — ${escapeHtml(pool)}</h4>
-                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">✕ Close</button>
+                    <h4 style="margin:0;font-size:14px;">IO Statistics — ${escapeHtml(pool)}</h4>
+                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">Close</button>
                 </div>
                 <pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;
                     font-family:'JetBrains Mono',monospace;font-size:12px;max-height:400px;overflow-y:auto;
@@ -7813,7 +7813,7 @@ function renderDiskInfo(devices) {
     }
 
     tbody.innerHTML = devices.map(d => {
-        const typeIcon = d.type === 'disk' ? '🖴' : d.type === 'part' ? '📌' : d.type === 'lvm' ? '🗂️' : '📦';
+        const typeIcon = d.type === 'disk' ? '' : d.type === 'part' ? '' : d.type === 'lvm' ? '' : '';
         const typeLabel = d.type === 'disk' ? 'Disk' : d.type === 'part' ? 'Partition'
             : d.type === 'lvm' ? 'LVM' : d.type === 'loop' ? 'Loop' : d.type || '—';
 
@@ -7869,7 +7869,7 @@ function renderDiskInfo(devices) {
         if (d.type === 'disk' && !d.device.startsWith('/dev/loop')) {
             if (d.fstype || (d.mountpoints && d.mountpoints.length > 0)) {
                 // Whole-disk filesystem — protect it
-                actions = `<span style="font-size:11px; color:var(--text-muted);" title="Whole-disk filesystem — creating a partition table will erase data">🔒 ${escapeHtml(d.fstype || 'in use')}</span>`;
+                actions = `<span style="font-size:11px; color:var(--text-muted);" title="Whole-disk filesystem — creating a partition table will erase data">${escapeHtml(d.fstype || 'in use')}</span>`;
             } else {
                 actions = `<div style="display:flex; gap:4px; flex-wrap:wrap;">
                     <button class="btn btn-sm" onclick="showDiskPartitionTableModal('${esc(d.device)}')" style="font-size:10px; padding:1px 6px;" title="Create partition table">Table</button>
@@ -7878,7 +7878,7 @@ function renderDiskInfo(devices) {
             }
         } else if (d.type === 'part') {
             if (prot) {
-                actions = `<span style="font-size:11px; color:var(--text-muted);" title="Protected mount point">🔒</span>`;
+                actions = `<span style="font-size:11px; color:var(--text-muted);" title="Protected mount point"></span>`;
             } else {
                 actions = `<div style="display:flex; gap:4px; flex-wrap:wrap;">
                     <button class="btn btn-sm" onclick="showDiskResizeModal('${esc(d.device)}')" style="font-size:10px; padding:1px 6px;" title="Grow partition + filesystem to fill available space">Resize</button>
@@ -7893,9 +7893,9 @@ function renderDiskInfo(devices) {
         if (d.type === 'disk' && d.smart) {
             const s = d.smart;
             if (s.passed === true) {
-                healthCell = `<span style="color:#10b981;font-weight:600;font-size:12px;">✓ OK</span>`;
+                healthCell = `<span style="color:#10b981;font-weight:600;font-size:12px;">OK</span>`;
             } else if (s.passed === false) {
-                healthCell = `<span style="color:#ef4444;font-weight:600;font-size:12px;">✗ FAIL</span>`;
+                healthCell = `<span style="color:#ef4444;font-weight:600;font-size:12px;">FAIL</span>`;
             } else {
                 healthCell = `<span style="color:var(--text-muted);font-size:12px;">?</span>`;
             }
@@ -8187,7 +8187,7 @@ function addVmDiskRow() {
             <div style="display:flex; align-items:center; gap:8px;">
                 <span style="font-weight:600; font-size:13px; color:var(--text-primary);">Disk ${id}</span>
             </div>
-            <button class="btn btn-sm btn-danger" onclick="removeVmDiskRow(${id})" style="font-size:11px; padding:2px 8px;">✕</button>
+            <button class="btn btn-sm btn-danger" onclick="removeVmDiskRow(${id})" style="font-size:11px; padding:2px 8px;"></button>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:6px;">
             <div>
@@ -8485,7 +8485,7 @@ function addExtraNicRow(containerId, nic) {
         </div>
         <span style="font-size:10px; color:var(--text-muted); white-space:nowrap;">net${idx + 1}</span>
         <button type="button" class="btn btn-sm" onclick="this.closest('.vm-extra-nic-row').remove()"
-            style="font-size:10px; padding:2px 6px; color:var(--danger); border-color:rgba(239,68,68,0.3);">✕</button>
+            style="font-size:10px; padding:2px 6px; color:var(--danger); border-color:rgba(239,68,68,0.3);"></button>
     `;
     container.appendChild(row);
 
@@ -8862,7 +8862,7 @@ async function loadCertificates() {
                     : '';
                 return `
                 <div style="padding: 10px; margin-bottom: 8px; background: var(--bg-tertiary); border-radius: 8px; display: flex; align-items: center; gap: 12px;">
-                    <span style="font-size: 20px;">${c.valid ? '✅' : '⚠️'}</span>
+                    <span style="font-size: 20px;">${c.valid ? '' : ''}</span>
                     <div style="flex:1;">
                         <strong>${escapeHtml(c.domain)}</strong><br>
                         <span style="font-size: 12px; color: var(--text-muted);">${escapeHtml(c.cert_path)}</span>
@@ -8877,7 +8877,7 @@ async function loadCertificates() {
         if (diagnostics.length > 0) {
             html += `
                 <details style="margin-top: 12px; font-size: 13px;">
-                    <summary style="cursor: pointer; color: var(--text-muted); user-select: none;">🔍 Discovery diagnostics</summary>
+                    <summary style="cursor: pointer; color: var(--text-muted); user-select: none;">Discovery diagnostics</summary>
                     <div style="margin-top: 8px; padding: 10px; background: var(--bg-tertiary); border-radius: 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.8;">
                         ${diagnostics.map(d => `<div>${escapeHtml(d)}</div>`).join('')}
                     </div>
@@ -8932,8 +8932,8 @@ async function loadCronJobs() {
                 '<td style="padding:10px 12px;font-family:var(--font-mono);font-size:12px;color:var(--text);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(e.command) + '">' + escapeHtml(e.command) + '</td>' +
                 '<td style="padding:10px 12px;color:var(--text-muted);font-size:12px;">' + escapeHtml(e.comment || '—') + '</td>' +
                 '<td style="padding:10px 12px;text-align:right;white-space:nowrap;">' +
-                '<button class="btn btn-sm" onclick="toggleCronJob(' + e.index + ', ' + e.enabled + ', \'' + escapeHtml(e.schedule).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.command).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.comment).replace(/'/g, "\\'") + '\')" title="' + (e.enabled ? 'Disable' : 'Enable') + '" style="margin-right:4px;">' + (e.enabled ? '⏸️' : '▶️') + '</button>' +
-                '<button class="btn btn-sm" onclick="deleteCronJob(' + e.index + ')" title="Delete" style="color:var(--danger,#ef4444);">🗑️</button>' +
+                '<button class="btn btn-sm" onclick="toggleCronJob(' + e.index + ', ' + e.enabled + ', \'' + escapeHtml(e.schedule).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.command).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.comment).replace(/'/g, "\\'") + '\')" title="' + (e.enabled ? 'Disable' : 'Enable') + '" style="margin-right:4px;">' + (e.enabled ? '' : '▶️') + '</button>' +
+                '<button class="btn btn-sm" onclick="deleteCronJob(' + e.index + ')" title="Delete" style="color:var(--danger,#ef4444);"></button>' +
                 '</td></tr>';
         });
         html += '</tbody></table></div>';
@@ -9165,7 +9165,7 @@ async function renderPveResourcesView(nodeId) {
     const guests = await loadPveResources(nodeId);
     if (!guests || guests.length === 0) {
         container.innerHTML = `<div class="card"><div class="card-body" style="text-align:center; padding:60px;">
-            <div style="font-size:48px;margin-bottom:16px;">📭</div>
+            <div style="font-size:48px;margin-bottom:16px;"></div>
             <div style="color:var(--text-muted);font-size:14px;">No VMs or containers found on this Proxmox node.</div>
         </div></div>`;
         return;
@@ -9206,7 +9206,7 @@ async function renderPveResourcesView(nodeId) {
         const colors = {
             running: { bg: 'rgba(34,197,94,0.15)', color: 'var(--success)', dot: '●' },
             stopped: { bg: 'rgba(156,163,175,0.15)', color: 'var(--text-muted)', dot: '○' },
-            paused: { bg: 'rgba(234,179,8,0.15)', color: 'var(--warning)', dot: '⏸' },
+            paused: { bg: 'rgba(234,179,8,0.15)', color: 'var(--warning)', dot: '' },
         };
         const s = colors[status] || colors.stopped;
         return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;background:${s.bg};color:${s.color};text-transform:capitalize;">${s.dot} ${status}</span>`;
@@ -9216,13 +9216,13 @@ async function renderPveResourcesView(nodeId) {
         if (g.status !== 'running') return '';
         if (g.guest_type === 'qemu') {
             // QEMU VMs (especially Windows) need VNC, not terminal
-            return `<button class="btn btn-sm" onclick="openPveVmVnc('${nodeId}', ${g.vmid}, '${(g.name || 'VM ' + g.vmid).replace(/'/g, "\\'")}')" style="font-size:11px;padding:3px 10px;">🖥 Console</button>`;
+            return `<button class="btn btn-sm" onclick="openPveVmVnc('${nodeId}', ${g.vmid}, '${(g.name || 'VM ' + g.vmid).replace(/'/g, "\\'")}')" style="font-size:11px;padding:3px 10px;">Console</button>`;
         }
-        return `<button class="btn btn-sm" onclick="openPveConsole('${nodeId}', ${g.vmid}, '${(g.name || 'VMID ' + g.vmid).replace(/'/g, "\\'")}')" style="font-size:11px;padding:3px 10px;">💻 Terminal</button>`;
+        return `<button class="btn btn-sm" onclick="openPveConsole('${nodeId}', ${g.vmid}, '${(g.name || 'VMID ' + g.vmid).replace(/'/g, "\\'")}')" style="font-size:11px;padding:3px 10px;">Terminal</button>`;
     }
 
     function guestCard(g) {
-        const typeIcon = g.guest_type === 'qemu' ? '🖥️' : '📦';
+        const typeIcon = g.guest_type === 'qemu' ? '' : '';
         const typeLabel = g.guest_type === 'qemu' ? 'VM' : 'CT';
         const isRunning = g.status === 'running';
         const isPaused = g.status === 'paused';
@@ -9230,15 +9230,15 @@ async function renderPveResourcesView(nodeId) {
         let actionBtns = '';
         if (isRunning) {
             actionBtns = `
-                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'reboot')" title="Reboot" style="font-size:11px;padding:3px 10px;">🔄 Restart</button>
-                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'shutdown')" title="Graceful shutdown" style="font-size:11px;padding:3px 10px;">⏹ Shutdown</button>
-                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'stop')" title="Force stop" style="font-size:11px;padding:3px 10px;">⛔ Stop</button>
-                ${g.guest_type === 'qemu' ? `<button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'suspend')" title="Suspend" style="font-size:11px;padding:3px 10px;">⏸ Suspend</button>` : ''}
+                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'reboot')" title="Reboot" style="font-size:11px;padding:3px 10px;">Restart</button>
+                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'shutdown')" title="Graceful shutdown" style="font-size:11px;padding:3px 10px;">Shutdown</button>
+                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'stop')" title="Force stop" style="font-size:11px;padding:3px 10px;">Stop</button>
+                ${g.guest_type === 'qemu' ? `<button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'suspend')" title="Suspend" style="font-size:11px;padding:3px 10px;">Suspend</button>` : ''}
                 ${consoleLink(g)}`;
         } else if (isPaused) {
             actionBtns = `
                 <button class="btn btn-sm btn-primary" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'resume')" style="font-size:11px;padding:3px 10px;">▶ Resume</button>
-                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'stop')" title="Force stop" style="font-size:11px;padding:3px 10px;">⛔ Stop</button>`;
+                <button class="btn btn-sm" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'stop')" title="Force stop" style="font-size:11px;padding:3px 10px;">Stop</button>`;
         } else {
             actionBtns = `<button class="btn btn-sm btn-primary" onclick="pveGuestAction('${nodeId}', ${g.vmid}, 'start')" style="font-size:11px;padding:3px 10px;">▶ Start</button>`;
         }
@@ -9273,7 +9273,7 @@ async function renderPveResourcesView(nodeId) {
                 const diskPct = Math.round((g.disk / g.maxdisk) * 100);
                 const diskBarColor = diskPct > 90 ? '#ef4444' : diskPct > 70 ? '#f59e0b' : '#10b981';
                 return `<div style="display:flex;align-items:center;gap:8px;font-size:11px;padding:8px 0 0;border-top:1px solid var(--border);margin-top:4px;">
-                    <span>💾</span>
+                    <span></span>
                     <div style="flex:1;max-width:220px;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">
                         <div style="width:${diskPct}%;height:100%;background:${diskBarColor};border-radius:4px;transition:width 0.3s;"></div>
                     </div>
@@ -9306,8 +9306,8 @@ async function renderPveResourcesView(nodeId) {
     }
 
     let html = '';
-    if (vms.length > 0) html += buildSection(vms, 'Virtual Machines', '🖥️');
-    if (cts.length > 0) html += buildSection(cts, 'LXC Containers', '📦');
+    if (vms.length > 0) html += buildSection(vms, 'Virtual Machines', '');
+    if (cts.length > 0) html += buildSection(cts, 'LXC Containers', '');
 
     container.innerHTML = html;
 }
@@ -9373,7 +9373,7 @@ function openPveClusterSettings(clusterName) {
     modal.innerHTML = `
         <div class="modal">
             <div class="modal-header">
-                <h3>⚙️ ${clusterName} — Cluster Settings</h3>
+                <h3>${clusterName} — Cluster Settings</h3>
                 <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
             </div>
             <div class="modal-body">
@@ -9402,13 +9402,13 @@ function openPveClusterSettings(clusterName) {
 
                 <div style="margin-top:16px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-                        <h4 style="margin:0;font-size:13px;">🌐 WolfNet Cluster Status</h4>
-                        <button class="btn btn-sm" onclick="checkClusterWolfnetStatus()" style="font-size:11px;padding:4px 10px;">🔍 Check Status</button>
+                        <h4 style="margin:0;font-size:13px;">WolfNet Cluster Status</h4>
+                        <button class="btn btn-sm" onclick="checkClusterWolfnetStatus()" style="font-size:11px;padding:4px 10px;">Check Status</button>
                     </div>
                     <div id="pve-wolfnet-status" style="font-size:12px;color:var(--text-muted);">
                         ${clusterNodes.map(n => `
                             <div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);" data-wolfnet-node="${n.id}">
-                                <span style="font-size:14px;">❓</span>
+                                <span style="font-size:14px;"></span>
                                 <strong>${n.pve_node_name || n.hostname}</strong>
                                 <span style="font-family:monospace;color:var(--text-muted);">${n.address}</span>
                                 <span class="wolfnet-badge" style="margin-left:auto;padding:2px 8px;border-radius:4px;font-size:11px;background:var(--bg-secondary);color:var(--text-muted);">Unknown</span>
@@ -9482,7 +9482,7 @@ async function checkClusterWolfnetStatus() {
         const badge = row.querySelector('.wolfnet-badge');
 
         // Show loading
-        icon.textContent = '⏳';
+        icon.textContent = '';
         badge.textContent = 'Checking...';
         badge.style.background = 'var(--bg-secondary)';
         badge.style.color = 'var(--text-muted)';
@@ -9499,24 +9499,24 @@ async function checkClusterWolfnetStatus() {
                     i.name === 'wolfnet0' || (i.name && i.name.startsWith('wolfnet'))
                 );
                 if (wolfnet) {
-                    icon.textContent = '✅';
+                    icon.textContent = '';
                     badge.textContent = 'Connected';
                     badge.style.background = '#10b98122';
                     badge.style.color = '#10b981';
                 } else {
-                    icon.textContent = '❌';
+                    icon.textContent = '';
                     badge.textContent = 'Not Installed';
                     badge.style.background = '#ef444422';
                     badge.style.color = '#ef4444';
                 }
             } else {
-                icon.textContent = '⚠️';
+                icon.textContent = '';
                 badge.textContent = 'Unreachable';
                 badge.style.background = '#f59e0b22';
                 badge.style.color = '#f59e0b';
             }
         } catch (e) {
-            icon.textContent = '⚠️';
+            icon.textContent = '';
             badge.textContent = 'Offline';
             badge.style.background = '#f59e0b22';
             badge.style.color = '#f59e0b';
@@ -9540,7 +9540,7 @@ function openWsClusterSettings(clusterName) {
     modal.innerHTML = `
         <div class="modal">
             <div class="modal-header">
-                <h3>⚙️ ${clusterName} — Cluster Settings</h3>
+                <h3>${clusterName} — Cluster Settings</h3>
                 <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
             </div>
             <div class="modal-body">
@@ -9553,24 +9553,24 @@ function openWsClusterSettings(clusterName) {
                 </div>
                 <hr style="border-color: var(--border); margin: 20px 0;">
                 <div class="form-group">
-                    <label>🔗 WolfNet Mesh Connectivity</label>
+                    <label>WolfNet Mesh Connectivity</label>
                     <p style="color: var(--text-muted); font-size: 12px; margin: 4px 0 12px;">
                         Ensures all nodes in this cluster know about each other's WolfNet connections.<br>
                         Run this after adding new nodes to automatically set up peer-to-peer networking.
                     </p>
                     <button class="btn" id="ws-wolfnet-sync-btn" style="background: var(--accent); color: #fff; font-size: 13px;" onclick="syncWolfNetCluster()">
-                        🔗 Update WolfNet Connections
+                        Update WolfNet Connections
                     </button>
                     <span id="ws-wolfnet-sync-status" style="margin-left: 10px; font-size: 12px; color: var(--text-muted);"></span>
                 </div>
                 <hr style="border-color: var(--border); margin: 20px 0;">
                 <div class="form-group">
-                    <label>🔍 Cluster Check</label>
+                    <label>Cluster Check</label>
                     <p style="color: var(--text-muted); font-size: 12px; margin: 4px 0 12px;">
                         Diagnose connectivity to all nodes — checks WolfStack API reachability and WolfNet tunnel status.
                     </p>
                     <button class="btn" id="ws-diagnose-btn" style="background: var(--accent); color: #fff; font-size: 13px;" onclick="runClusterDiagnostics()">
-                        🔍 Run Diagnostics
+                        Run Diagnostics
                     </button>
                     <div id="ws-diagnose-results" style="margin-top: 12px;"></div>
                 </div>
@@ -9623,7 +9623,7 @@ async function syncWolfNetCluster() {
 
     const btn = document.getElementById('ws-wolfnet-sync-btn');
     const status = document.getElementById('ws-wolfnet-sync-status');
-    if (btn) { btn.disabled = true; btn.textContent = '⏳ Syncing...'; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing...'; }
     if (status) status.textContent = 'Connecting to nodes...';
 
     try {
@@ -9636,12 +9636,12 @@ async function syncWolfNetCluster() {
 
         if (data.error) {
             showToast('WolfNet sync failed: ' + data.error, 'error');
-            if (status) status.textContent = '❌ ' + data.error;
+            if (status) status.textContent = '' + data.error;
         } else if (data.status === 'error') {
             showToast('WolfNet sync: ' + data.message, 'error');
-            if (status) status.textContent = '❌ ' + data.message;
+            if (status) status.textContent = '' + data.message;
         } else {
-            let msg = `✅ ${data.nodes_reached} nodes reached`;
+            let msg = `${data.nodes_reached} nodes reached`;
             if (data.synced > 0) msg += `, ${data.synced} new peer(s) added`;
             if (data.skipped > 0) msg += `, ${data.skipped} already connected`;
             showToast(msg, 'success');
@@ -9652,10 +9652,10 @@ async function syncWolfNetCluster() {
         }
     } catch (e) {
         showToast('WolfNet sync error: ' + e.message, 'error');
-        if (status) status.textContent = '❌ ' + e.message;
+        if (status) status.textContent = '' + e.message;
     }
 
-    if (btn) { btn.disabled = false; btn.textContent = '🔗 Update WolfNet Connections'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Update WolfNet Connections'; }
 }
 
 async function runClusterDiagnostics() {
@@ -9666,7 +9666,7 @@ async function runClusterDiagnostics() {
 
     const btn = document.getElementById('ws-diagnose-btn');
     const resultsDiv = document.getElementById('ws-diagnose-results');
-    if (btn) { btn.disabled = true; btn.textContent = '⏳ Checking...'; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking...'; }
     if (resultsDiv) resultsDiv.innerHTML = '<span style="color:var(--text-muted);font-size:12px;">Polling nodes...</span>';
 
     try {
@@ -9678,8 +9678,8 @@ async function runClusterDiagnostics() {
         const data = await resp.json();
 
         if (data.error) {
-            if (resultsDiv) resultsDiv.innerHTML = `<span style="color:var(--danger);font-size:12px;">❌ ${data.error}</span>`;
-            if (btn) { btn.disabled = false; btn.textContent = '🔍 Run Diagnostics'; }
+            if (resultsDiv) resultsDiv.innerHTML = `<span style="color:var(--danger);font-size:12px;">${data.error}</span>`;
+            if (btn) { btn.disabled = false; btn.textContent = 'Run Diagnostics'; }
             return;
         }
 
@@ -9691,18 +9691,18 @@ async function runClusterDiagnostics() {
         // Show summary in the settings modal
         if (resultsDiv) {
             resultsDiv.innerHTML = failCount === 0
-                ? `<span style="color:#10b981;font-size:12px;">✅ All ${okCount} nodes reachable</span>`
-                : `<span style="color:#ef4444;font-size:12px;">❌ ${failCount} node(s) unreachable, ${okCount} OK</span>`;
+                ? `<span style="color:#10b981;font-size:12px;">All ${okCount} nodes reachable</span>`
+                : `<span style="color:#ef4444;font-size:12px;">${failCount} node(s) unreachable, ${okCount} OK</span>`;
         }
 
         // Open results in a new popup
         showDiagnosticsPopup(results);
 
     } catch (e) {
-        if (resultsDiv) resultsDiv.innerHTML = `<span style="color:var(--danger);font-size:12px;">❌ ${e.message}</span>`;
+        if (resultsDiv) resultsDiv.innerHTML = `<span style="color:var(--danger);font-size:12px;">${e.message}</span>`;
     }
 
-    if (btn) { btn.disabled = false; btn.textContent = '🔍 Run Diagnostics'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Run Diagnostics'; }
 }
 
 function showDiagnosticsPopup(results) {
@@ -9733,24 +9733,24 @@ function showDiagnosticsPopup(results) {
         // API status
         let apiCell;
         if (isSelf) {
-            apiCell = '<span style="color:#10b981;">✅ Self</span>';
+            apiCell = '<span style="color:#10b981;">Self</span>';
         } else if (apiOk) {
-            apiCell = `<span style="color:#10b981;">✅ OK</span> <span style="opacity:0.5;font-size:11px;">(${api.status_code})</span>`;
+            apiCell = `<span style="color:#10b981;">OK</span> <span style="opacity:0.5;font-size:11px;">(${api.status_code})</span>`;
         } else {
             const statusBadge = api.status_code ? ` <span style="opacity:0.7;">(${api.status_code})</span>` : '';
-            apiCell = `<span style="color:#ef4444;">❌ Fail${statusBadge}</span>`;
+            apiCell = `<span style="color:#ef4444;">Fail${statusBadge}</span>`;
         }
 
         // WolfNet status
         let wnCell;
         if (isSelf) {
-            wnCell = '<span style="color:#10b981;">✅ Self</span>';
+            wnCell = '<span style="color:#10b981;">Self</span>';
         } else if (wn.ip === null) {
-            wnCell = '<span style="color:#f59e0b;" title="No WolfNet peer configured for this node">⚠️ No peer</span>';
+            wnCell = '<span style="color:#f59e0b;" title="No WolfNet peer configured for this node">No peer</span>';
         } else if (wnOk) {
-            wnCell = `<span style="color:#10b981;">✅ ${wn.ip}</span>`;
+            wnCell = `<span style="color:#10b981;">${wn.ip}</span>`;
         } else {
-            wnCell = `<span style="color:#ef4444;">❌ ${wn.ip}</span>`;
+            wnCell = `<span style="color:#ef4444;">${wn.ip}</span>`;
         }
 
         // Latency
@@ -9804,7 +9804,7 @@ function showDiagnosticsPopup(results) {
     popup.innerHTML = `
         <div class="modal" style="max-width:900px;width:95%;">
             <div class="modal-header">
-                <h3>🔍 Cluster Diagnostics</h3>
+                <h3>Cluster Diagnostics</h3>
                 <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
             </div>
             <div class="modal-body" style="padding:16px;max-height:70vh;overflow-y:auto;">
@@ -9836,7 +9836,7 @@ function openNodeSettings(nodeId) {
     modal.innerHTML = `
         <div class="modal">
             <div class="modal-header">
-                <h3>⚙️ ${node.hostname} — Node Settings</h3>
+                <h3>${node.hostname} — Node Settings</h3>
                 <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
             </div>
             <div class="modal-body">
@@ -9856,14 +9856,14 @@ function openNodeSettings(nodeId) {
                     <span style="color:var(--text-muted);">Node ID</span>
                     <span style="font-family:'JetBrains Mono',monospace;font-size:12px;">${node.id}</span>
                     <span style="color:var(--text-muted);">Type</span>
-                    <span>${isPve ? '🖥️ Proxmox VE' : '☁️ WolfStack'}</span>
+                    <span>${isPve ? 'Proxmox VE' : 'WolfStack'}</span>
                     <span style="color:var(--text-muted);">Status</span>
                     <span>${node.online ? '<span style="color:var(--success);">● Online</span>' : '<span style="color:var(--danger);">● Offline</span>'}</span>
                 </div>
 
                 <div id="node-version-section" style="background:var(--bg-secondary,#161622);border:1px solid var(--border,#333);border-radius:8px;padding:14px 16px;margin-bottom:16px;">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
-                        <span style="font-weight:600;font-size:13px;color:var(--text,#fff);">📦 WolfStack Version</span>
+                        <span style="font-weight:600;font-size:13px;color:var(--text,#fff);">WolfStack Version</span>
                         <span id="node-version-badge" style="font-size:11px;padding:2px 8px;border-radius:4px;background:var(--bg-primary,#111);color:var(--text-muted,#888);">checking...</span>
                     </div>
                     <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12px;margin-top:8px;">
@@ -9899,9 +9899,9 @@ function openNodeSettings(nodeId) {
                 </div>` : ''}
 
                 ${isSelf ? `<div id="node-ports-section" style="background:var(--bg-secondary,#161622);border:1px solid var(--border,#333);border-radius:8px;padding:14px 16px;margin-top:12px;">
-                    <div style="font-weight:600;font-size:13px;color:var(--text,#fff);margin-bottom:8px;">🔌 Node Ports</div>
+                    <div style="font-weight:600;font-size:13px;color:var(--text,#fff);margin-bottom:8px;">Node Ports</div>
                     <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.4);border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:11px;color:#fca5a5;line-height:1.45;">
-                        ⚠️ Changing the <b>API</b> or <b>inter-node</b> port will disconnect this node from the cluster until peers learn the new port. Only change these if you have a specific reason (firewall conflict, port collision). The <b>status</b> port is safe to change.
+                        Changing the <b>API</b> or <b>inter-node</b> port will disconnect this node from the cluster until peers learn the new port. Only change these if you have a specific reason (firewall conflict, port collision). The <b>status</b> port is safe to change.
                     </div>
                     <div style="display:grid;grid-template-columns:auto 1fr auto;gap:6px 12px;align-items:center;font-size:12px;">
                         <span style="color:var(--text-muted);">API (HTTPS / dashboard)</span>
@@ -9923,7 +9923,7 @@ function openNodeSettings(nodeId) {
                 ${!isSelf ? `<div style="background:var(--bg-secondary,#161622);border:1px solid var(--border,#333);border-radius:8px;padding:14px 16px;margin-top:12px;">
                     <div style="display:flex;align-items:center;justify-content:space-between;">
                         <div>
-                            <span style="font-weight:600;font-size:13px;color:var(--text,#fff);">🔒 Disable Direct Login</span>
+                            <span style="font-weight:600;font-size:13px;color:var(--text,#fff);">Disable Direct Login</span>
                             <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Prevent users from logging in directly. The server will still be accessible via the primary dashboard.</div>
                         </div>
                         <div onclick="(function(el){var cb=el.querySelector('input');cb.checked=!cb.checked;var t=el.querySelector('.toggle-track'),k=el.querySelector('.toggle-knob');t.style.background=cb.checked?'var(--accent,#6366f1)':'var(--bg-input,#1e1e2e)';k.style.left=cb.checked?'22px':'3px';})(this)" style="position:relative;display:inline-block;width:44px;height:24px;flex-shrink:0;margin-left:16px;cursor:pointer;">
@@ -10039,7 +10039,7 @@ async function loadNodeVersionInfo(node) {
     // 3. Compare and show badge + upgrade button
     if (installedVersion && latestVersion) {
         if (installedVersion === latestVersion || !isNewerVersion(latestVersion, installedVersion)) {
-            badgeEl.textContent = '✅ Up to date';
+            badgeEl.textContent = 'Up to date';
             badgeEl.style.background = 'rgba(16,185,129,0.15)';
             badgeEl.style.color = '#10b981';
         } else {
@@ -10051,7 +10051,7 @@ async function loadNodeVersionInfo(node) {
             actionEl.style.display = 'block';
             actionEl.innerHTML = `
                 <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:0.82em;color:#f59e0b;line-height:1.5;">
-                    ⚡ <strong>v${latestVersion}</strong> is available (installed: v${installedVersion}).
+                    <strong>v${latestVersion}</strong> is available (installed: v${installedVersion}).
                     Upgrading will download and install the latest WolfStack binary on <strong>${targetLabel}</strong>.
                     A terminal window will open to show progress.
                 </div>
@@ -10061,7 +10061,7 @@ async function loadNodeVersionInfo(node) {
             `;
         }
     } else {
-        badgeEl.textContent = '❓ Unknown';
+        badgeEl.textContent = 'Unknown';
         badgeEl.style.color = 'var(--text-muted,#888)';
 
         // Still offer upgrade button when version can't be determined
@@ -10085,7 +10085,7 @@ async function upgradeNode(nodeId) {
     if (!node) return;
 
     const machine = node.is_self ? 'this machine (local)' : (node.hostname + ' (' + node.address + ')');
-    if (!(await showConfirm('⚡ Upgrade WolfStack on ' + machine + '?\n\n'
+    if (!(await showConfirm('Upgrade WolfStack on ' + machine + '?\n\n'
         + 'The upgrade runs in the background and may take several minutes '
         + '(up to ~50 minutes on slow hardware like a Raspberry Pi). '
         + 'The server will restart automatically once the new binary is built. '
@@ -10669,9 +10669,9 @@ function renderTaskLog() {
             ? '<span style="display:inline-block; width:12px; height:12px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; vertical-align:middle; margin-right:4px;"></span>'
             : '';
         const statusBadge = isSuccess
-            ? '<span style="color:#22c55e; font-weight:500;">✓ OK</span>'
+            ? '<span style="color:#22c55e; font-weight:500;">OK</span>'
             : isFailed
-                ? '<span style="color:#ef4444; font-weight:500;">✗ Failed</span>'
+                ? '<span style="color:#ef4444; font-weight:500;">Failed</span>'
                 : isRunning
                     ? spinnerHtml + '<span style="color:var(--accent);">Running</span>'
                     : '<span style="color:var(--text-muted);">' + escapeHtml(entry.status) + '</span>';
@@ -10694,8 +10694,8 @@ function renderTaskLog() {
                 <div style="background:#0d1117; color:#c9d1d9; font-family:'JetBrains Mono',Consolas,monospace; font-size:11px; line-height:1.5; padding:8px 12px; max-height:200px; overflow-y:auto; white-space:pre-wrap; word-break:break-word; margin:0 10px 6px;">` +
                 entry.logLines.map(line => {
                     let color = '#c9d1d9';
-                    if (line.includes('✓')) color = '#3fb950';
-                    else if (line.includes('✗') || line.toLowerCase().includes('failed')) color = '#f85149';
+                    if (line.includes('')) color = '#3fb950';
+                    else if (line.includes('') || line.toLowerCase().includes('failed')) color = '#f85149';
                     else if (line.startsWith('[')) color = '#58a6ff';
                     else if (line.startsWith('Cluster:')) color = '#d2a8ff';
                     else if (line.trim().startsWith('INFO:') || line.trim().startsWith('vzdump')) color = '#8b949e';
@@ -10743,7 +10743,7 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
     if (id) toast.id = id;
-    const icons = { success: '✓', error: '✗', warning: '⚠', info: 'ℹ' };
+    const icons = { success: '', error: '', warning: '', info: '' };
     const bgColors = { success: 'linear-gradient(135deg, #1a3a2a, #162b22)', error: 'linear-gradient(135deg, #3b1111, #2d0e0e)', warning: 'linear-gradient(135deg, #3b2e0e, #2d2408)', info: 'linear-gradient(135deg, #1a2a3f, #141f30)' };
     const borderColors = { success: '#34d399', error: '#f87171', warning: '#fbbf24', info: '#60a5fa' };
     Object.assign(toast.style, {
@@ -10852,7 +10852,7 @@ async function refreshComponentDetail(name) {
         const d = await resp.json();
 
         // Header
-        document.getElementById('detail-component-icon').textContent = componentIcons[name] || '📦';
+        document.getElementById('detail-component-icon').textContent = componentIcons[name] || '';
         document.getElementById('detail-component-name').textContent = d.name;
         document.getElementById('detail-component-desc').textContent = d.description;
 
@@ -11382,15 +11382,15 @@ function openContainerConfigurator(runtime, containerName) {
     const title = document.getElementById('container-detail-title');
     const body = document.getElementById('container-detail-body');
 
-    const icon = runtime === 'docker' ? '🐳' : '📦';
+    const icon = runtime === 'docker' ? '' : '';
     title.textContent = `${containerName} — Configure`;
     modal.classList.add('active');
 
     const components = [
-        { id: 'wolfproxy', name: 'WolfProxy / Nginx', desc: 'Nginx reverse proxy & site management', icon: '🔀' },
-        { id: 'wolfserve', name: 'WolfServe / Apache', desc: 'Apache virtual hosts & modules', icon: '🌐' },
-        { id: 'wolfdisk', name: 'WolfDisk', desc: 'Distributed filesystem configuration', icon: '💾' },
-        { id: 'wolfscale', name: 'WolfScale', desc: 'Database replication configuration', icon: '📊' },
+        { id: 'wolfproxy', name: 'WolfProxy / Nginx', desc: 'Nginx reverse proxy & site management', icon: '' },
+        { id: 'wolfserve', name: 'WolfServe / Apache', desc: 'Apache virtual hosts & modules', icon: '' },
+        { id: 'wolfdisk', name: 'WolfDisk', desc: 'Distributed filesystem configuration', icon: '' },
+        { id: 'wolfscale', name: 'WolfScale', desc: 'Database replication configuration', icon: '' },
     ];
 
     body.innerHTML = `
@@ -11443,14 +11443,14 @@ async function buildConfiguratorTargetSelector(componentName) {
     // Add target badge next to title if targeting a container
     let targetBadge = '';
     if (currentConfiguratorTarget) {
-        const icon = currentConfiguratorTarget.runtime === 'docker' ? '🐳' : '📦';
+        const icon = currentConfiguratorTarget.runtime === 'docker' ? '' : '';
         targetBadge = ` <span style="font-size:12px; background:var(--accent); color:#fff; padding:2px 8px; border-radius:10px; font-weight:500; vertical-align:middle;">${icon} ${escapeHtml(currentConfiguratorTarget.target)}</span>`;
     }
 
     // Build dropdown options
     let options = `<option value="host" ${!currentConfiguratorTarget ? 'selected' : ''}>This Host</option>`;
     for (const c of containers) {
-        const icon = c.runtime === 'docker' ? '🐳' : '📦';
+        const icon = c.runtime === 'docker' ? '' : '';
         const val = `${c.runtime}:${c.name}`;
         const selected = currentConfiguratorTarget &&
             currentConfiguratorTarget.runtime === c.runtime &&
@@ -11513,7 +11513,7 @@ async function loadNginxConfigurator() {
         <button class="btn btn-primary btn-sm" onclick="nginxNewSiteForm()">+ New Site</button>
         <button class="btn btn-sm" onclick="nginxTestConfig()">Test Config</button>
         <button class="btn btn-success btn-sm" onclick="nginxReloadService()">Reload</button>
-        <button class="btn btn-sm" onclick="loadCertManager()">🔒 SSL Certificates</button>
+        <button class="btn btn-sm" onclick="loadCertManager()">SSL Certificates</button>
         <button class="btn btn-sm" onclick="loadTomlConfigurator('wolfproxy', 'WolfProxy')">WolfProxy Settings</button>
     `;
 
@@ -11840,7 +11840,7 @@ async function loadCertManager() {
     document.getElementById('configurator-title').textContent = 'SSL Certificates';
     document.getElementById('configurator-header-actions').innerHTML = `
         <button class="btn btn-primary btn-sm" onclick="certIssueDialog()">+ Issue new cert</button>
-        <button class="btn btn-sm" onclick="certConfigDialog()">⚙ Settings</button>
+        <button class="btn btn-sm" onclick="certConfigDialog()">Settings</button>
         <button class="btn btn-sm" onclick="loadNginxConfigurator()">← Back to sites</button>
     `;
     const body = document.getElementById('configurator-body');
@@ -12955,7 +12955,7 @@ async function loadWolfNetRoutesTable() {
         });
 
         let html = `<div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-            <h3 style="margin:0; font-size:14px;">🌐 WolfNet IPs &amp; Routes</h3>
+            <h3 style="margin:0; font-size:14px;">WolfNet IPs &amp; Routes</h3>
             <span style="font-size:11px; color:var(--text-muted);">Cache: ${data.routes_cache_count} · routes.json: ${data.routes_json_count}</span>
         </div><div class="card-body" style="padding:0; overflow-x:auto;">
         <table class="data-table"><thead><tr>
@@ -12963,7 +12963,7 @@ async function loadWolfNetRoutesTable() {
         </tr></thead><tbody>`;
 
         entries.forEach(e => {
-            const typeIcon = e.type === 'host' ? '🖥️' : e.type === 'local' ? '📦' : '🌍';
+            const typeIcon = e.type === 'host' ? '' : e.type === 'local' ? '' : '';
             const typeLabel = e.type === 'host' ? 'Host' : e.type === 'local' ? 'Local' : 'Remote';
             const bg = e.type === 'host' ? 'rgba(59,130,246,0.1)' : e.type === 'local' ? 'rgba(34,197,94,0.08)' : 'rgba(168,85,247,0.08)';
             html += `<tr style="background:${bg};">
@@ -13026,7 +13026,7 @@ function renderNetInterfaces(interfaces) {
             .map(a => {
                 const isV6 = a.family === 'inet6';
                 const label = `${a.address}/${a.prefix}`;
-                const removeBtn = `<span style="cursor:pointer; color:var(--danger); margin-left:4px; font-size:10px;" onclick="removeIpAddress('${iface.name}', '${a.address}', ${a.prefix})" title="Remove">✕</span>`;
+                const removeBtn = `<span style="cursor:pointer; color:var(--danger); margin-left:4px; font-size:10px;" onclick="removeIpAddress('${iface.name}', '${a.address}', ${a.prefix})" title="Remove"></span>`;
                 return `<div style="font-size:12px; font-family:var(--font-mono); ${isV6 ? 'color:var(--text-muted); font-size:11px;' : ''}">
                     ${label}${removeBtn}
                 </div>`;
@@ -13052,13 +13052,13 @@ function renderNetInterfaces(interfaces) {
 
         // Actions
         const toggleBtn = iface.state === 'up'
-            ? `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--danger); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="toggleInterface('${iface.name}', false)" title="Bring down">⏸️</button>`
+            ? `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--danger); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="toggleInterface('${iface.name}', false)" title="Bring down"></button>`
             : `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--success); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="toggleInterface('${iface.name}', true)" title="Bring up">▶️</button>`;
 
-        const addIpBtn = `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="showAddIpModal('${iface.name}')" title="Add IP">➕</button>`;
+        const addIpBtn = `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;" onclick="showAddIpModal('${iface.name}')" title="Add IP"></button>`;
 
         const vlanDeleteBtn = iface.is_vlan
-            ? `<button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;" onclick="deleteVlan('${iface.name}')" title="Delete VLAN">🗑️</button>`
+            ? `<button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;" onclick="deleteVlan('${iface.name}')" title="Delete VLAN"></button>`
             : '';
 
         return `<tr>
@@ -13122,7 +13122,7 @@ function renderWolfNetStatus(wn) {
 
     if (actions) {
         actions.innerHTML = wn.running
-            ? '<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;" onclick="wolfnetAction(\'restart\')">🔄 Restart</button>'
+            ? '<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;" onclick="wolfnetAction(\'restart\')">Restart</button>'
             : '<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--success); border:1px solid var(--border); font-size:11px;" onclick="wolfnetAction(\'start\')">▶️ Start</button>';
     }
 }
@@ -13144,8 +13144,8 @@ function renderDnsConfig(dns) {
     const servers = dns.nameservers.length > 0
         ? dns.nameservers.map((s, i) => `
             <div style="display:flex; align-items:center; gap:8px; font-family:var(--font-mono); font-size:13px; padding:4px 0;">
-                <span>🔹 ${s}</span>
-                ${dns.editable ? `<button onclick="removeDnsNameserver(${i})" title="Remove" style="background:none; border:none; color:var(--danger); cursor:pointer; font-size:14px; padding:0 4px;">✕</button>` : ''}
+                <span>${s}</span>
+                ${dns.editable ? `<button onclick="removeDnsNameserver(${i})" title="Remove" style="background:none; border:none; color:var(--danger); cursor:pointer; font-size:14px; padding:0 4px;"></button>` : ''}
             </div>`).join('')
         : '<span style="color:var(--text-muted);">No nameservers configured</span>';
 
@@ -13153,7 +13153,7 @@ function renderDnsConfig(dns) {
         ? dns.search_domains.map((d, i) => `
             <span class="badge" style="background:var(--bg-tertiary); color:var(--text-primary); font-size:11px; margin-right:4px; display:inline-flex; align-items:center; gap:4px;">
                 ${d}
-                ${dns.editable ? `<button onclick="removeDnsSearchDomain(${i})" style="background:none; border:none; color:var(--danger); cursor:pointer; font-size:12px; padding:0; line-height:1;">✕</button>` : ''}
+                ${dns.editable ? `<button onclick="removeDnsSearchDomain(${i})" style="background:none; border:none; color:var(--danger); cursor:pointer; font-size:12px; padding:0; line-height:1;"></button>` : ''}
             </span>`).join('')
         : '<span style="color:var(--text-muted);">None</span>';
 
@@ -13413,7 +13413,7 @@ function renderIpMappings(mappings) {
             <td style="font-family:var(--font-mono);">${destPorts}</td>
             <td>${protoLabel}</td>
             <td>${statusBadge}</td>
-            <td><button class="btn btn-sm btn-danger" style="font-size:10px; padding:1px 6px;" onclick="removeIpMapping('${m.id}', '${m.public_ip}', '${m.wolfnet_ip}')" title="Remove">🗑️</button></td>
+            <td><button class="btn btn-sm btn-danger" style="font-size:10px; padding:1px 6px;" onclick="removeIpMapping('${m.id}', '${m.public_ip}', '${m.wolfnet_ip}')" title="Remove"></button></td>
         </tr>`;
     }
 
@@ -13526,7 +13526,7 @@ function onMappingPortsInput() {
 
     const ports = parseMappingPorts(portStr);
     if (!ports) {
-        warnDiv.innerHTML = '<div style="color:#ef4444;font-size:12px;margin-top:6px;">⚠️ Invalid port format. Use: 80 or 80,443 or 8000:8100</div>';
+        warnDiv.innerHTML = '<div style="color:#ef4444;font-size:12px;margin-top:6px;">Invalid port format. Use: 80 or 80,443 or 8000:8100</div>';
         return;
     }
 
@@ -13534,7 +13534,7 @@ function onMappingPortsInput() {
     // Check blocked
     for (const p of ports) {
         if (MAPPING_BLOCKED_PORTS[p]) {
-            warnings.push(`🚫 Port <strong>${p}</strong> is used by <strong>${MAPPING_BLOCKED_PORTS[p]}</strong> — mapping will be rejected`);
+            warnings.push(`Port <strong>${p}</strong> is used by <strong>${MAPPING_BLOCKED_PORTS[p]}</strong> — mapping will be rejected`);
         }
     }
     // Check in-use
@@ -13544,7 +13544,7 @@ function onMappingPortsInput() {
             if (MAPPING_BLOCKED_PORTS[p]) continue; // already warned
             const match = listening.find(l => l.port === p);
             if (match) {
-                warnings.push(`⚠️ Port <strong>${p}</strong> is in use by <strong>${match.process || 'unknown'}</strong> — traffic will be intercepted`);
+                warnings.push(`Port <strong>${p}</strong> is in use by <strong>${match.process || 'unknown'}</strong> — traffic will be intercepted`);
             }
         }
     }
@@ -13554,7 +13554,7 @@ function onMappingPortsInput() {
             ${warnings.join('<br>')}
         </div>`;
     } else {
-        warnDiv.innerHTML = '<div style="color:#22c55e;font-size:12px;margin-top:6px;">✅ No port conflicts detected</div>';
+        warnDiv.innerHTML = '<div style="color:#22c55e;font-size:12px;margin-top:6px;">No port conflicts detected</div>';
     }
 }
 
@@ -13712,7 +13712,7 @@ async function wgLoadBridgeDetails(cluster) {
                 <td>${c.created_at ? c.created_at.substring(0, 10) : ''}</td>
                 <td>
                     <button class="btn btn-sm" style="font-size:10px; padding:1px 6px;" onclick="wgDownloadConfig('${cluster}', '${c.id}', '${c.name}')" title="Download .conf">⬇️</button>
-                    <button class="btn btn-sm btn-danger" style="font-size:10px; padding:1px 6px;" onclick="wgRemoveClient('${cluster}', '${c.id}', '${c.name}')" title="Remove">🗑️</button>
+                    <button class="btn btn-sm btn-danger" style="font-size:10px; padding:1px 6px;" onclick="wgRemoveClient('${cluster}', '${c.id}', '${c.name}')" title="Remove"></button>
                 </td>
             </tr>`).join('');
 
@@ -14046,7 +14046,7 @@ function renderWolfNetPage(wn, config, localInfo, fullStatus) {
                     <td>${traffic}</td>
                     <td>
                         <div style="display:flex; gap:4px;">
-                            <button class="btn btn-sm btn-danger" onclick="removeWolfNetPeer('${escapeHtml(p.name)}')" style="font-size:11px; padding:3px 8px;" title="Remove peer">🗑️</button>
+                            <button class="btn btn-sm btn-danger" onclick="removeWolfNetPeer('${escapeHtml(p.name)}')" style="font-size:11px; padding:3px 8px;" title="Remove peer"></button>
                         </div>
                     </td>
                 </tr>
@@ -14469,7 +14469,7 @@ function renderDockerCards(containers) {
     if (banner) {
         if (offenders.length > 0) {
             banner.innerHTML = `<div style="padding:10px 14px;margin:0 0 12px;background:rgba(239,68,68,0.12);border:1px solid #ef4444;border-radius:8px;color:#fca5a5;font-size:13px;">
-                ⚠️ <strong>${offenders.length} container${offenders.length === 1 ? '' : 's'}</strong> requested host ports the Docker daemon never bound — those services are offline.
+                <strong>${offenders.length} container${offenders.length === 1 ? '' : 's'}</strong> requested host ports the Docker daemon never bound — those services are offline.
                 Likely a host-port conflict. Affected: ${offenders.slice(0, 5).map(c => `<code>${escapeHtml(c.name)}</code>`).join(', ')}${offenders.length > 5 ? `, +${offenders.length - 5} more` : ''}.
                 See the Predictive Inbox for the conflict detail.
             </div>`;
@@ -14524,7 +14524,7 @@ function dockerCardHtml(c) {
             if (pm.published) {
                 return `<span style="color:#34d399;" title="Published — daemon confirms this binding is live">${escapeHtml(text)}</span>`;
             }
-            return `<span style="color:#ef4444;text-decoration:line-through;" title="UNPUBLISHED — Docker accepted the container start but never bound this host port. Service is offline. Check the Predictive Inbox for the conflict.">⚠️ ${escapeHtml(text)}</span>`;
+            return `<span style="color:#ef4444;text-decoration:line-through;" title="UNPUBLISHED — Docker accepted the container start but never bound this host port. Service is offline. Check the Predictive Inbox for the conflict.">${escapeHtml(text)}</span>`;
         };
         const shown = c.port_mappings.slice(0, 3).map(formatPm).join(', ');
         const overflow = c.port_mappings.length > 3 ? ` +${c.port_mappings.length - 3}` : '';
@@ -14533,7 +14533,7 @@ function dockerCardHtml(c) {
         ports = c.ports && c.ports.length > 0 ? c.ports.slice(0, 3).map(p => escapeHtml(p)).join(', ') : '-';
     }
     const portWarning = unpublishedCount > 0
-        ? `<div style="grid-column:1/-1;margin-top:4px;padding:4px 8px;background:rgba(239,68,68,0.12);border-left:3px solid #ef4444;font-size:10px;color:#fca5a5;">⚠️ ${unpublishedCount} requested port${unpublishedCount === 1 ? '' : 's'} not bound by the daemon — service is unreachable. Check Predictive Inbox.</div>`
+        ? `<div style="grid-column:1/-1;margin-top:4px;padding:4px 8px;background:rgba(239,68,68,0.12);border-left:3px solid #ef4444;font-size:10px;color:#fca5a5;">${unpublishedCount} requested port${unpublishedCount === 1 ? '' : 's'} not bound by the daemon — service is unreachable. Check Predictive Inbox.</div>`
         : '';
     const svcItems = (c.services && c.services.length > 0) ? c.services.map(sv => {
         const sColor = sv.status === 'running' ? '#10b981' : '#ef4444';
@@ -14547,8 +14547,8 @@ function dockerCardHtml(c) {
 
     return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid ${borderColor};border-radius:10px;overflow:hidden;">
         <div style="display:flex;flex-wrap:wrap;padding:6px 8px;background:var(--bg-secondary);border-bottom:1px solid var(--border);gap:1px;">
-            ${isRunning ? `<button class="btn btn-sm" style="${bd}" disabled>▶️</button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','stop',this)" title="Stop">⏹️</button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','restart',this)" title="Restart">🔄</button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','pause',this)" title="Pause">⏸️</button><button class="btn btn-sm" style="${bs}" onclick="openConsole('docker','${c.name}')" title="Console">💻</button>${_containerVncBtnHtml('docker', c.name, c.name, bs, true)}` : isPaused ? `<button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','unpause',this)">▶️</button>` : `<button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','start',this)">▶️</button><button class="btn btn-sm" style="${bd}" disabled>⏹️</button><button class="btn btn-sm" style="${bd}" disabled>🔄</button>`}
-            <button class="btn btn-sm" style="${bs}" onclick="viewContainerLogs('docker','${c.name}')" title="Logs">📜</button><button class="btn btn-sm" style="${bs}" onclick="viewDockerVolumes('${c.name}')" title="Volumes">📁</button><button class="btn btn-sm" style="${bs}" onclick="browseContainerFiles('docker','${c.name}')" title="Files">📂</button><button class="btn btn-sm" style="${bs}" onclick="openDockerSettings('${c.name}')" title="Settings">⚙️</button><button class="btn btn-sm" style="${bs}" onclick="openContainerConfigurator('docker','${c.name}')" title="Configure">🔧</button><button class="btn btn-sm" style="${bs}" onclick="openContainerUpdates('docker','${c.name}')" title="Updates">📦</button><button class="btn btn-sm" style="${bs}" onclick="openContainerCron('docker','${c.name}')" title="Cron">⏰</button><button class="btn btn-sm" style="${bs}" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button><button class="btn btn-sm" style="${bs}" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>${!isRunning ? `<button class="btn btn-sm" style="${bs}color:#ef4444;" onclick="dockerAction('${c.name}','remove',this)" title="Remove">🗑️</button>` : ''}
+            ${isRunning ? `<button class="btn btn-sm" style="${bd}" disabled>▶️</button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','stop',this)" title="Stop"></button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','restart',this)" title="Restart"></button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','pause',this)" title="Pause"></button><button class="btn btn-sm" style="${bs}" onclick="openConsole('docker','${c.name}')" title="Console"></button>${_containerVncBtnHtml('docker', c.name, c.name, bs, true)}` : isPaused ? `<button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','unpause',this)">▶️</button>` : `<button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','start',this)">▶️</button><button class="btn btn-sm" style="${bd}" disabled></button><button class="btn btn-sm" style="${bd}" disabled></button>`}
+            <button class="btn btn-sm" style="${bs}" onclick="viewContainerLogs('docker','${c.name}')" title="Logs"></button><button class="btn btn-sm" style="${bs}" onclick="viewDockerVolumes('${c.name}')" title="Volumes"></button><button class="btn btn-sm" style="${bs}" onclick="browseContainerFiles('docker','${c.name}')" title="Files"></button><button class="btn btn-sm" style="${bs}" onclick="openDockerSettings('${c.name}')" title="Settings"></button><button class="btn btn-sm" style="${bs}" onclick="openContainerConfigurator('docker','${c.name}')" title="Configure"></button><button class="btn btn-sm" style="${bs}" onclick="openContainerUpdates('docker','${c.name}')" title="Updates"></button><button class="btn btn-sm" style="${bs}" onclick="openContainerCron('docker','${c.name}')" title="Cron"></button><button class="btn btn-sm" style="${bs}" onclick="cloneDockerContainer('${c.name}')" title="Clone"></button><button class="btn btn-sm" style="${bs}" onclick="migrateDockerContainer('${c.name}')" title="Migrate"></button>${!isRunning ? `<button class="btn btn-sm" style="${bs}color:#ef4444;" onclick="dockerAction('${c.name}','remove',this)" title="Remove"></button>` : ''}
         </div>
         ${pies.length > 0 ? `<div style="display:flex;justify-content:space-evenly;padding:12px 8px;border-bottom:1px solid var(--border);">${pies.join('')}</div>` : ''}
         <div style="padding:10px 12px;">
@@ -14558,12 +14558,12 @@ function dockerCardHtml(c) {
             </div>
             ${svcItems ? `<div style="margin-top:4px;">${svcItems}</div>` : ''}
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px;margin-top:8px;font-size:11px;color:var(--text-muted);">
-                <span>🌐 ${c.ip_address || '-'}</span><span>🔌 ${ports}</span>
+                <span>${c.ip_address || '-'}</span><span>${ports}</span>
                 ${c.gateway ? `<span>GW: ${escapeHtml(c.gateway)}</span>` : ''}${c.mac_address ? `<span>MAC: ${escapeHtml(c.mac_address)}</span>` : ''}
-                <span>🔄 ${c.autostart ? 'Autostart' : 'Manual'}</span>
-                ${hasStorage ? `<span>💾 ${formatBytes(c.disk_usage)}/${formatBytes(c.disk_total)}</span>` : ''}
-                ${memPct >= 0 ? `<span>🧠 ${formatBytes(s.memory_usage)}/${formatBytes(s.memory_limit)}</span>` : ''}
-                ${cpuPct >= 0 ? `<span>⚡ ${s.cpu_percent.toFixed(1)}%</span>` : ''}
+                <span>${c.autostart ? 'Autostart' : 'Manual'}</span>
+                ${hasStorage ? `<span>${formatBytes(c.disk_usage)}/${formatBytes(c.disk_total)}</span>` : ''}
+                ${memPct >= 0 ? `<span>${formatBytes(s.memory_usage)}/${formatBytes(s.memory_limit)}</span>` : ''}
+                ${cpuPct >= 0 ? `<span>${s.cpu_percent.toFixed(1)}%</span>` : ''}
                 ${portWarning}
             </div>
             <span data-update-badge="docker:${c.name}"></span>
@@ -14607,23 +14607,23 @@ function lxcCardHtml(c, s) {
         return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid ${borderColor};border-radius:10px;overflow:hidden;">
             <div style="display:flex;flex-wrap:wrap;padding:6px 8px;background:var(--bg-secondary);border-bottom:1px solid var(--border);gap:1px;">
                 <button class="btn btn-sm" style="${isRunning ? bd : bs}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}','start',this)"` : ''} title="Start">▶️</button>
-                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','stop',this)"` : ''} title="Stop">⏹️</button>
-                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','restart',this)"` : ''} title="Restart">🔄</button>
-                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','freeze',this)"` : ''} title="Freeze">⏸️</button>
-                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}','${c.hostname || c.name}')"` : ''} title="Console">💻</button>
+                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','stop',this)"` : ''} title="Stop"></button>
+                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','restart',this)"` : ''} title="Restart"></button>
+                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','freeze',this)"` : ''} title="Freeze"></button>
+                <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}','${c.hostname || c.name}')"` : ''} title="Console"></button>
                 ${_containerVncBtnHtml('lxc', c.name, c.hostname || c.name, bs, isRunning)}
-                <button class="btn btn-sm" style="${isRunning ? bd : bs}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}','destroy',this)"` : ''} title="Destroy">🗑️</button>
-                <button class="btn btn-sm" style="${bs}" onclick="viewContainerLogs('lxc','${c.name}')" title="Logs">📜</button>
-                <button class="btn btn-sm" style="${bs}" onclick="browseContainerFiles('lxc','${c.name}','${(c.storage_path||'').replace(/'/g,"\\'")}')" title="Files">📂</button>
-                <button class="btn btn-sm" style="${bs}" onclick="editContainerConfigFile('lxc','${c.name}')" title="Edit Config File">📝</button>
-                <button class="btn btn-sm" style="${bs}" onclick="openLxcSettings('${c.name}')" title="Settings">⚙️</button>
-                <button class="btn btn-sm" style="${bs}" onclick="openContainerConfigurator('lxc','${c.name}')" title="Configure">🔧</button>
-                <button class="btn btn-sm" style="${bs}" onclick="openContainerUpdates('lxc','${c.name}')" title="Updates">📦</button>
-                <button class="btn btn-sm" style="${bs}" onclick="openContainerCron('lxc','${c.name}')" title="Cron">⏰</button>
-                <button class="btn btn-sm" style="${bs}" onclick="cloneLxcContainer('${c.name}')" title="Clone">📋</button>
-                <button class="btn btn-sm" style="${bs}" onclick="migrateLxcContainer('${c.name}')" title="Migrate">🚀</button>
-                <button class="btn btn-sm" style="${bs}" onclick="openLxcStorage('${escapeHtml(c.name)}')" title="Storage (resize / move)">💾</button>
-                <button class="btn btn-sm" style="${bs}" onclick="exportLxcContainer('${c.name}')" title="Export">🗃️</button>
+                <button class="btn btn-sm" style="${isRunning ? bd : bs}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}','destroy',this)"` : ''} title="Destroy"></button>
+                <button class="btn btn-sm" style="${bs}" onclick="viewContainerLogs('lxc','${c.name}')" title="Logs"></button>
+                <button class="btn btn-sm" style="${bs}" onclick="browseContainerFiles('lxc','${c.name}','${(c.storage_path||'').replace(/'/g,"\\'")}')" title="Files"></button>
+                <button class="btn btn-sm" style="${bs}" onclick="editContainerConfigFile('lxc','${c.name}')" title="Edit Config File"></button>
+                <button class="btn btn-sm" style="${bs}" onclick="openLxcSettings('${c.name}')" title="Settings"></button>
+                <button class="btn btn-sm" style="${bs}" onclick="openContainerConfigurator('lxc','${c.name}')" title="Configure"></button>
+                <button class="btn btn-sm" style="${bs}" onclick="openContainerUpdates('lxc','${c.name}')" title="Updates"></button>
+                <button class="btn btn-sm" style="${bs}" onclick="openContainerCron('lxc','${c.name}')" title="Cron"></button>
+                <button class="btn btn-sm" style="${bs}" onclick="cloneLxcContainer('${c.name}')" title="Clone"></button>
+                <button class="btn btn-sm" style="${bs}" onclick="migrateLxcContainer('${c.name}')" title="Migrate"></button>
+                <button class="btn btn-sm" style="${bs}" onclick="openLxcStorage('${escapeHtml(c.name)}')" title="Storage (resize / move)"></button>
+                <button class="btn btn-sm" style="${bs}" onclick="exportLxcContainer('${c.name}')" title="Export"></button>
             </div>
             ${pies.length > 0 ? `<div style="display:flex;justify-content:space-evenly;padding:12px 8px;border-bottom:1px solid var(--border);">${pies.join('')}</div>` : ''}
             <div style="padding:10px 12px;">
@@ -14633,13 +14633,13 @@ function lxcCardHtml(c, s) {
                 </div>
                 ${svcItems ? `<div style="margin-top:4px;">${svcItems}</div>` : ''}
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px;margin-top:8px;font-size:11px;color:var(--text-muted);">
-                    <span>🌐 ${c.ip_address || '-'}</span>
-                    <span>🔄 ${c.autostart ? 'Autostart' : 'Manual'}</span>
+                    <span>${c.ip_address || '-'}</span>
+                    <span>${c.autostart ? 'Autostart' : 'Manual'}</span>
                     ${c.gateway ? `<span>GW: ${escapeHtml(c.gateway)}</span>` : ''}
                     ${c.mac_address ? `<span>MAC: ${escapeHtml(c.mac_address)}</span>` : ''}
-                    ${hasStorage ? `<span>💾 ${formatBytes(c.disk_usage)}/${formatBytes(c.disk_total)}</span>` : ''}
-                    ${memPct >= 0 ? `<span>🧠 ${formatBytes(s.memory_usage)}/${formatBytes(s.memory_limit)}</span>` : ''}
-                    ${cpuPct >= 0 ? `<span>⚡ ${s.cpu_percent.toFixed(1)}%</span>` : ''}
+                    ${hasStorage ? `<span>${formatBytes(c.disk_usage)}/${formatBytes(c.disk_total)}</span>` : ''}
+                    ${memPct >= 0 ? `<span>${formatBytes(s.memory_usage)}/${formatBytes(s.memory_limit)}</span>` : ''}
+                    ${cpuPct >= 0 ? `<span>${s.cpu_percent.toFixed(1)}%</span>` : ''}
                     ${c.fs_type ? `<span>FS: ${escapeHtml(c.fs_type)}</span>` : ''}
                 </div>
                 <span data-update-badge="lxc:${c.name}"></span>
@@ -14670,15 +14670,15 @@ function vmCardHtml(vm) {
     return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid ${borderColor};border-radius:10px;overflow:hidden;">
         <div style="display:flex;flex-wrap:wrap;padding:6px 8px;background:var(--bg-secondary);border-bottom:1px solid var(--border);gap:1px;">
             <button class="btn btn-sm" style="${isRunning ? bd : bs}" ${isRunning ? 'disabled' : `onclick="vmAction('${vm.name}','start',this)"`} title="Start">▶️</button>
-            <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : `onclick="vmAction('${vm.name}','stop',this)"`} title="Stop (graceful ACPI shutdown)">⏹️</button>
-            <button class="btn btn-sm" style="${!isRunning ? bd : bs}color:#b91c1c;" ${!isRunning ? 'disabled' : `onclick="vmForceStopConfirm('${vm.name}', this)"`} title="Force Stop (power off immediately)">⛔</button>
-            ${vncLink ? `<button class="btn btn-sm" style="${bs}" onclick="window.open('${vncLink}')" title="VNC">🖥️</button>` : ''}
-            <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : `onclick="openVmConsole('${vm.name}')"`} title="Serial terminal (guest must have serial console enabled)">💻</button>
-            <button class="btn btn-sm" style="${bs}" onclick="showVmSettings('${vm.name}')" title="Settings">⚙️</button>
-            <button class="btn btn-sm" style="${bs}" onclick="showVmLogs('${vm.name}')" title="Logs">📜</button>
-            <button class="btn btn-sm" style="${bs}" onclick="migrateVm('${vm.name}')" title="Migrate to another node">🚀</button>
-            <button class="btn btn-sm" style="${bs}" onclick="migrateVmDiskStorage('${vm.name}')" title="Move disk to different storage (same node)">💾</button>
-            ${!isRunning ? `<button class="btn btn-sm" style="${bs}color:#ef4444;" onclick="deleteVm('${vm.name}')" title="Delete">🗑️</button>` : ''}
+            <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : `onclick="vmAction('${vm.name}','stop',this)"`} title="Stop (graceful ACPI shutdown)"></button>
+            <button class="btn btn-sm" style="${!isRunning ? bd : bs}color:#b91c1c;" ${!isRunning ? 'disabled' : `onclick="vmForceStopConfirm('${vm.name}', this)"`} title="Force Stop (power off immediately)"></button>
+            ${vncLink ? `<button class="btn btn-sm" style="${bs}" onclick="window.open('${vncLink}')" title="VNC"></button>` : ''}
+            <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : `onclick="openVmConsole('${vm.name}')"`} title="Serial terminal (guest must have serial console enabled)"></button>
+            <button class="btn btn-sm" style="${bs}" onclick="showVmSettings('${vm.name}')" title="Settings"></button>
+            <button class="btn btn-sm" style="${bs}" onclick="showVmLogs('${vm.name}')" title="Logs"></button>
+            <button class="btn btn-sm" style="${bs}" onclick="migrateVm('${vm.name}')" title="Migrate to another node"></button>
+            <button class="btn btn-sm" style="${bs}" onclick="migrateVmDiskStorage('${vm.name}')" title="Move disk to different storage (same node)"></button>
+            ${!isRunning ? `<button class="btn btn-sm" style="${bs}color:#ef4444;" onclick="deleteVm('${vm.name}')" title="Delete"></button>` : ''}
         </div>
         <div style="padding:10px 12px;">
             <div style="display:flex;justify-content:space-between;align-items:start;">
@@ -14686,16 +14686,16 @@ function vmCardHtml(vm) {
                 <span style="font-size:10px;padding:2px 8px;border-radius:4px;background:${borderColor}22;color:${borderColor};font-weight:600;">${isRunning ? 'Running' : 'Stopped'}</span>
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px;margin-top:8px;font-size:11px;color:var(--text-muted);">
-                <span>⚡ ${vm.cpus} vCPU</span>
-                <span>🧠 ${vm.memory_mb} MB</span>
-                <span>💾 ${vm.disk_size_gb} GB</span>
-                <span>🌐 ${vm.wolfnet_ip || '-'}</span>
-                <span>🔄 ${vm.auto_start ? 'Autostart' : 'Manual'}</span>
-                <span>📡 ${vm.mac_address || '-'}</span>
-                ${vm.iso_path ? `<span>💿 ${escapeHtml(vm.iso_path.split('/').pop())}</span>` : ''}
-                ${vm.extra_nics && vm.extra_nics.length > 0 ? `<span>🔌 ${vm.extra_nics.length} extra NIC${vm.extra_nics.length > 1 ? 's' : ''}</span>` : ''}
-                ${vm.usb_devices && vm.usb_devices.length > 0 ? `<span>🔌 ${vm.usb_devices.length} USB</span>` : ''}
-                ${vm.pci_devices && vm.pci_devices.length > 0 ? `<span>🎮 ${vm.pci_devices.length} PCI</span>` : ''}
+                <span>${vm.cpus} vCPU</span>
+                <span>${vm.memory_mb} MB</span>
+                <span>${vm.disk_size_gb} GB</span>
+                <span>${vm.wolfnet_ip || '-'}</span>
+                <span>${vm.auto_start ? 'Autostart' : 'Manual'}</span>
+                <span>${vm.mac_address || '-'}</span>
+                ${vm.iso_path ? `<span>${escapeHtml(vm.iso_path.split('/').pop())}</span>` : ''}
+                ${vm.extra_nics && vm.extra_nics.length > 0 ? `<span>${vm.extra_nics.length} extra NIC${vm.extra_nics.length > 1 ? 's' : ''}</span>` : ''}
+                ${vm.usb_devices && vm.usb_devices.length > 0 ? `<span>${vm.usb_devices.length} USB</span>` : ''}
+                ${vm.pci_devices && vm.pci_devices.length > 0 ? `<span>${vm.pci_devices.length} PCI</span>` : ''}
             </div>
         </div>
     </div>`;
@@ -14732,7 +14732,7 @@ function renderDockerContainers(containers) {
                 if (pm.published) {
                     return `<span style="color:#34d399;">${escapeHtml(text)}</span>`;
                 }
-                return `<span style="color:#ef4444;text-decoration:line-through;" title="UNPUBLISHED — daemon never bound this host port. Service is offline.">⚠️ ${escapeHtml(text)}</span>`;
+                return `<span style="color:#ef4444;text-decoration:line-through;" title="UNPUBLISHED — daemon never bound this host port. Service is offline.">${escapeHtml(text)}</span>`;
             }).join('<br>');
         } else {
             ports = c.ports.length > 0 ? c.ports.join('<br>') : '-';
@@ -14756,9 +14756,9 @@ function renderDockerContainers(containers) {
         </div>`;
 
         const statsSegs = [];
-        if (cpuPct >= 0) statsSegs.push(barSeg('⚡', cpuPct, cpuColor, s.cpu_percent.toFixed(1) + '%'));
-        if (memPct >= 0) statsSegs.push(barSeg('🧠', memPct, memColor, formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memPct + '%)'));
-        if (hasStorage) statsSegs.push(barSeg('💾', pct, barColor, formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + pct + '%)'));
+        if (cpuPct >= 0) statsSegs.push(barSeg('', cpuPct, cpuColor, s.cpu_percent.toFixed(1) + '%'));
+        if (memPct >= 0) statsSegs.push(barSeg('', memPct, memColor, formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memPct + '%)'));
+        if (hasStorage) statsSegs.push(barSeg('', pct, barColor, formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + pct + '%)'));
 
         const statsSubRow = statsSegs.length > 0 ? `<tr class="storage-sub-row" data-stats="${c.name}" style="background:var(--bg-secondary);"><td colspan="7" style="padding:4px 16px 6px 24px;border-top:none;">
             <div style="display:flex;align-items:center;gap:16px;font-size:11px;">${statsSegs.join('')}</div>
@@ -14780,32 +14780,32 @@ function renderDockerContainers(containers) {
             <td><div style="display:flex; flex-wrap:wrap; gap:2px; min-width:0;">
                 ${isRunning ? `
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Start">▶️</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'stop', this)" title="Stop">⏹️</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'restart', this)" title="Restart">🔄</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'pause', this)" title="Pause">⏸️</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openConsole('docker', '${c.name}')" title="Console">💻</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'stop', this)" title="Stop"></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'restart', this)" title="Restart"></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'pause', this)" title="Pause"></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openConsole('docker', '${c.name}')" title="Console"></button>
                     ${_containerVncBtnHtml('docker', c.name, c.name, 'margin:2px;font-size:20px;line-height:1;padding:4px 6px;', true)}
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Remove">🗑️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Remove"></button>
                 ` : isPaused ? `
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'unpause', this)" title="Unpause">▶️</button>
                 ` : `
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'start', this)" title="Start">▶️</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Stop">⏹️</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Restart">🔄</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Freeze">⏸️</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Console">💻</button>
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="dockerAction('${c.name}', 'remove', this)" title="Remove">🗑️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Stop"></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Restart"></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Freeze"></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Console"></button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;color:#ef4444;" onclick="dockerAction('${c.name}', 'remove', this)" title="Remove"></button>
                 `}
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs">📜</button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewDockerVolumes('${c.name}')" title="Volumes">📁</button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="browseContainerFiles('docker', '${c.name}')" title="Browse Files">📂</button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="editContainerConfigFile('docker', '${c.name}')" title="Edit Config File">📝</button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openDockerSettings('${c.name}')" title="Settings">⚙️</button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerConfigurator('docker', '${c.name}')" title="Configure">🔧</button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerUpdates('docker', '${c.name}')" title="Check Updates">📦</button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerCron('docker', '${c.name}')" title="Cron Jobs">⏰</button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="cloneDockerContainer('${c.name}')" title="Clone">📋</button>
-                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate">🚀</button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewContainerLogs('docker', '${c.name}')" title="Logs"></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="viewDockerVolumes('${c.name}')" title="Volumes"></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="browseContainerFiles('docker', '${c.name}')" title="Browse Files"></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="editContainerConfigFile('docker', '${c.name}')" title="Edit Config File"></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openDockerSettings('${c.name}')" title="Settings"></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerConfigurator('docker', '${c.name}')" title="Configure"></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerUpdates('docker', '${c.name}')" title="Check Updates"></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openContainerCron('docker', '${c.name}')" title="Cron Jobs"></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="cloneDockerContainer('${c.name}')" title="Clone"></button>
+                <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="migrateDockerContainer('${c.name}')" title="Migrate"></button>
             </div></td>
         </tr>${statsSubRow}`;
     }).join('');
@@ -14832,28 +14832,28 @@ function renderDockerStats(stats) {
 
     summary.innerHTML = `
         <div class="stat-card">
-            <div class="stat-icon">🐳</div>
+            <div class="stat-icon"></div>
             <div class="stat-info">
                 <div class="stat-value">${running}</div>
                 <div class="stat-label">Running</div>
             </div>
         </div>
         <div class="stat-card">
-            <div class="stat-icon">⚡</div>
+            <div class="stat-icon"></div>
             <div class="stat-info">
                 <div class="stat-value">${totalCpu.toFixed(1)}%</div>
                 <div class="stat-label">Total CPU</div>
             </div>
         </div>
         <div class="stat-card">
-            <div class="stat-icon">💾</div>
+            <div class="stat-icon"></div>
             <div class="stat-info">
                 <div class="stat-value">${formatBytes(totalMem)}</div>
                 <div class="stat-label">Total Memory</div>
             </div>
         </div>
         <div class="stat-card">
-            <div class="stat-icon">🔧</div>
+            <div class="stat-icon"></div>
             <div class="stat-info">
                 <div class="stat-value">${totalPids}</div>
                 <div class="stat-label">Total PIDs</div>
@@ -14879,7 +14879,7 @@ function renderDockerImages(images) {
             <td>${img.created}</td>
             <td>
                 <button class="btn btn-sm btn-primary" style="margin:2px;font-size:11px;" onclick="selectDockerImage('${imageRef.replace(/'/g, "\\'")}')" title="Create container from this image">▶ Use</button>
-                <button class="btn btn-sm" style="margin:2px;font-size:11px;color:#ef4444;" onclick="deleteDockerImage('${img.id}', '${imageRef.replace(/'/g, "\\'")}')" title="Delete image">🗑 Delete</button>
+                <button class="btn btn-sm" style="margin:2px;font-size:11px;color:#ef4444;" onclick="deleteDockerImage('${img.id}', '${imageRef.replace(/'/g, "\\'")}')" title="Delete image">Delete</button>
             </td>
         </tr>`;
     }).join('');
@@ -14955,7 +14955,7 @@ async function viewDockerVolumes(container) {
         if (mounts.length === 0) {
             body.innerHTML = `
                 <div style="text-align:center; padding:2rem; color:var(--text-muted);">
-                    <div style="font-size:32px; margin-bottom:8px;">📁</div>
+                    <div style="font-size:32px; margin-bottom:8px;"></div>
                     <p>No volumes mounted on this container.</p>
                     <p style="font-size:12px;">Add volumes when creating the container using the Volumes section.</p>
                 </div>
@@ -14964,7 +14964,7 @@ async function viewDockerVolumes(container) {
             body.innerHTML = `
                 <div style="padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
                     <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
-                        <span>📁</span>
+                        <span></span>
                         <strong style="font-size:13px;">Volume Mounts (${mounts.length})</strong>
                     </div>
                     ${mounts.map(m => `
@@ -14978,7 +14978,7 @@ async function viewDockerVolumes(container) {
                     `).join('')}
                 </div>
                 <div style="font-size:11px; color:var(--text-muted); margin-top:8px;">
-                    ⚠️ Docker volumes can only be modified by recreating the container.
+                    Docker volumes can only be modified by recreating the container.
                 </div>
             `;
         }
@@ -15062,7 +15062,7 @@ async function openDockerSettings(name) {
             const ip6gw = netInfo.IPv6Gateway ? `<span>IPv6 GW: ${netInfo.IPv6Gateway}</span>` : '';
             networkRows += `<div style="padding:8px 10px;margin-bottom:4px;background:var(--bg-primary);border-radius:6px;border:1px solid var(--border);">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                    <span style="font-size:14px;">🔌</span>
+                    <span style="font-size:14px;"></span>
                     <span style="font-weight:600;font-size:12px;">${escapeHtml(netName)}</span>
                 </div>
                 <div style="font-size:11px;color:var(--text-muted);font-family:monospace;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:2px 12px;padding-left:24px;">
@@ -15107,19 +15107,19 @@ async function openDockerSettings(name) {
             <div style="display:flex;border-bottom:1px solid var(--border);background:var(--bg-secondary);margin:-24px -24px 16px -24px;">
                 <button class="docker-tab-btn" data-dtab="1" onclick="switchDockerTab(1)"
                     style="${tabBtnStyle}border-bottom:2px solid var(--accent);color:var(--text-primary);">
-                    ⚙️ General
+                    General
                 </button>
                 <button class="docker-tab-btn" data-dtab="2" onclick="switchDockerTab(2)"
                     style="${tabBtnStyle}border-bottom:2px solid transparent;color:var(--text-muted);">
-                    🌐 Network
+                    Network
                 </button>
                 <button class="docker-tab-btn" data-dtab="3" onclick="switchDockerTab(3)"
                     style="${tabBtnStyle}border-bottom:2px solid transparent;color:var(--text-muted);">
-                    💻 Resources
+                    Resources
                 </button>
                 <button class="docker-tab-btn" data-dtab="4" onclick="switchDockerTab(4)"
                     style="${tabBtnStyle}border-bottom:2px solid transparent;color:var(--text-muted);">
-                    🧾 Raw Config
+                    Raw Config
                 </button>
             </div>
 
@@ -15155,7 +15155,7 @@ async function openDockerSettings(name) {
 
                 <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                        <h4 style="margin:0;font-size:13px;color:var(--text-primary);">📦 Environment Variables (${userEnv.length})</h4>
+                        <h4 style="margin:0;font-size:13px;color:var(--text-primary);">Environment Variables (${userEnv.length})</h4>
                         <button class="btn btn-sm" onclick="addDockerEnvRow()" style="font-size:11px;padding:2px 8px;">+ Add</button>
                     </div>
                     <div id="docker-env-list" style="max-height:240px;overflow-y:auto;">
@@ -15163,7 +15163,7 @@ async function openDockerSettings(name) {
                     </div>
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
                         <div style="font-size:11px;color:var(--text-muted);">Saving env changes will recreate the container (volumes and settings preserved).</div>
-                        <button class="btn btn-sm btn-primary" onclick="saveDockerEnv('${escapeHtml(name)}')" style="font-size:11px;padding:4px 12px;">💾 Save Env</button>
+                        <button class="btn btn-sm btn-primary" onclick="saveDockerEnv('${escapeHtml(name)}')" style="font-size:11px;padding:4px 12px;">Save Env</button>
                     </div>
                 </div>
             </div>
@@ -15171,13 +15171,13 @@ async function openDockerSettings(name) {
             <!-- ═══ Tab 2: Network ═══ -->
             <div class="docker-tab-page" id="docker-tab-2" style="display:none;">
                 <div style="padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);margin-bottom:12px;">
-                    <h4 style="margin:0 0 8px 0;font-size:13px;">🔌 Networks</h4>
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">Networks</h4>
                     ${networkRows}
                 </div>
                 <div style="padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);margin-bottom:12px;">
-                    <h4 style="margin:0 0 8px 0;font-size:13px;">🔗 Port Mappings</h4>
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">Port Mappings</h4>
                     ${portRows}
-                    <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">⚠️ Port mappings can only be changed by recreating the container.</div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">Port mappings can only be changed by recreating the container.</div>
                 </div>
                 <div style="padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
                     <h4 style="margin:0 0 8px 0;font-size:13px;">WolfNet</h4>
@@ -15189,7 +15189,7 @@ async function openDockerSettings(name) {
                         </div>
                         <div style="display:flex;gap:4px;padding-bottom:2px;">
                             <button class="btn btn-sm" onclick="findNextWolfnetIp()" title="Find next available WolfNet IP"
-                                style="padding:6px 10px;font-size:11px;">🔍 Next Available</button>
+                                style="padding:6px 10px;font-size:11px;">Next Available</button>
                         </div>
                     </div>
                     <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">WolfNet IP is applied at container start time via host routing.</div>
@@ -15226,7 +15226,7 @@ async function openDockerSettings(name) {
                 <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
                     <details>
                         <summary style="cursor:pointer;color:var(--accent);font-size:12px;margin-bottom:8px;">
-                            📝 Raw Docker Inspect (JSON)
+                            Raw Docker Inspect (JSON)
                         </summary>
                         <pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;
                             font-family:'JetBrains Mono',monospace;font-size:11px;max-height:300px;overflow-y:auto;
@@ -15239,7 +15239,7 @@ async function openDockerSettings(name) {
             <div class="docker-tab-page" id="docker-tab-4" style="display:none;">
                 <div style="display:flex; align-items:flex-start; gap:10px; padding:10px 12px; margin-bottom:12px;
                             background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.3); border-radius:8px;">
-                    <span style="font-size:18px;line-height:1;">⚠️</span>
+                    <span style="font-size:18px;line-height:1;"></span>
                     <div style="font-size:12px; line-height:1.5;">
                         <strong style="color:#fca5a5;">Danger zone.</strong> Saving this tab RECREATES the container — old one is stopped, renamed to <code>${escapeHtml(name)}_wolfstack_old</code>, replaced with a fresh container matching the JSON below, then the old one is removed on success.
                         The JSON's read-only fields (State, NetworkSettings, Created timestamps, etc.) are ignored — we only honour fields that are part of a container spec.
@@ -15257,7 +15257,7 @@ async function openDockerSettings(name) {
                 >${escapeHtml(JSON.stringify(cfg, null, 2))}</textarea>
                 <div style="display:flex; gap:8px; margin-top:10px; align-items:center;">
                     <button class="btn btn-sm btn-primary" onclick="saveDockerRawConfig('${name}')" style="background:#ef4444; border-color:#ef4444;">
-                        💾 Save Raw Config (recreates container)
+                        Save Raw Config (recreates container)
                     </button>
                     <button class="btn btn-sm" onclick="resetDockerRawConfig()">Reset</button>
                     <span id="docker-raw-config-status" style="font-size:12px; color:var(--text-muted);"></span>
@@ -15267,7 +15267,7 @@ async function openDockerSettings(name) {
             <!-- Save/Cancel Bar -->
             <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;padding-top:12px;border-top:1px solid var(--border);">
                 <button class="btn btn-sm" onclick="closeContainerDetail()">Cancel</button>
-                <button class="btn btn-sm btn-primary" onclick="saveDockerSettings('${name}')">💾 Save Settings</button>
+                <button class="btn btn-sm btn-primary" onclick="saveDockerSettings('${name}')">Save Settings</button>
             </div>
         `;
         // Stash the as-loaded JSON so the Reset button can restore it.
@@ -15561,9 +15561,9 @@ function renderLxcContainers(containers, stats) {
         </div>`;
 
         const statsSegs = [];
-        if (cpuPct >= 0) statsSegs.push(barSeg('⚡', cpuPct, cpuColor, s.cpu_percent.toFixed(1) + '%'));
-        if (memPct >= 0) statsSegs.push(barSeg('🧠', memPct, memColor, formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memPct + '%)'));
-        if (hasStorage) statsSegs.push(barSeg('💾', pct, barColor, formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + pct + '%)'));
+        if (cpuPct >= 0) statsSegs.push(barSeg('', cpuPct, cpuColor, s.cpu_percent.toFixed(1) + '%'));
+        if (memPct >= 0) statsSegs.push(barSeg('', memPct, memColor, formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memPct + '%)'));
+        if (hasStorage) statsSegs.push(barSeg('', pct, barColor, formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + pct + '%)'));
 
         const statsSubRow = statsSegs.length > 0 ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="6" style="padding:4px 16px 6px 24px;border-top:none;">
             <div style="display:flex;align-items:center;gap:16px;font-size:11px;">${statsSegs.join('')}</div>
@@ -15583,23 +15583,23 @@ function renderLxcContainers(containers, stats) {
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleLxcAutostart('${c.name}', this.checked)"></td>
             <td><div style="display:flex; flex-wrap:wrap; gap:2px; min-width:0;">
                 <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'start', this)"` : ''} title="Start">▶️</button>
-                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'stop', this)"` : ''} title="Stop">⏹️</button>
-                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'restart', this)"` : ''} title="Restart">🔄</button>
-                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'freeze', this)"` : ''} title="Freeze">⏸️</button>
-                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}', '${c.hostname || c.name}')"` : ''} title="Console">💻</button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'stop', this)"` : ''} title="Stop"></button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'restart', this)"` : ''} title="Restart"></button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'freeze', this)"` : ''} title="Freeze"></button>
+                <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}', '${c.hostname || c.name}')"` : ''} title="Console"></button>
                 ${_containerVncBtnHtml('lxc', c.name, c.hostname || c.name, btnStyle, isRunning)}
-                <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'destroy', this)"` : ''} title="Destroy">🗑️</button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs">📜</button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="browseContainerFiles('lxc', '${c.name}', '${(c.storage_path || '').replace(/'/g, "\\'")}')" title="Browse Files">📂</button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="editContainerConfigFile('lxc', '${c.name}')" title="Edit Config File">📝</button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcSettings('${c.name}')" title="Settings">⚙️</button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerConfigurator('lxc', '${c.name}')" title="Configure">🔧</button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerUpdates('lxc', '${c.name}')" title="Check Updates">📦</button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerCron('lxc', '${c.name}')" title="Cron Jobs">⏰</button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="cloneLxcContainer('${c.name}')" title="Clone">📋</button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="migrateLxcContainer('${c.name}')" title="Migrate">🚀</button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcStorage('${escapeHtml(c.name)}')" title="Storage (resize / move)">💾</button>
-                <button class="btn btn-sm" style="${btnStyle}" onclick="exportLxcContainer('${c.name}')" title="Export">🗃️</button>
+                <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'destroy', this)"` : ''} title="Destroy"></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs"></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="browseContainerFiles('lxc', '${c.name}', '${(c.storage_path || '').replace(/'/g, "\\'")}')" title="Browse Files"></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="editContainerConfigFile('lxc', '${c.name}')" title="Edit Config File"></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcSettings('${c.name}')" title="Settings"></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerConfigurator('lxc', '${c.name}')" title="Configure"></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerUpdates('lxc', '${c.name}')" title="Check Updates"></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerCron('lxc', '${c.name}')" title="Cron Jobs"></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="cloneLxcContainer('${c.name}')" title="Clone"></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="migrateLxcContainer('${c.name}')" title="Migrate"></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcStorage('${escapeHtml(c.name)}')" title="Storage (resize / move)"></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="exportLxcContainer('${c.name}')" title="Export"></button>
             </div></td>
         </tr>${statsSubRow}`;
     }).join('');
@@ -15678,7 +15678,7 @@ async function openContainerUpdates(runtime, container) {
     const modal = document.getElementById('container-detail-modal');
     const title = document.getElementById('container-detail-title');
     const body = document.getElementById('container-detail-body');
-    const icon = runtime === 'docker' ? '🐳' : '📦';
+    const icon = runtime === 'docker' ? '' : '';
 
     title.textContent = `${container} — Package Updates`;
     body.innerHTML = `<p style="color:var(--text-muted);">Checking for updates inside ${icon} ${container}...</p>
@@ -15703,7 +15703,7 @@ async function openContainerUpdates(runtime, container) {
                     <span style="margin-left:12px;font-size:12px;color:var(--text-muted);">Package manager: <strong>${pm}</strong></span>
                 </div>
                 <div style="display:flex;gap:8px;">
-                    <button class="btn btn-sm" onclick="openContainerUpdates('${runtime}', '${container.replace(/'/g, "\\'")}')">🔄 Refresh</button>
+                    <button class="btn btn-sm" onclick="openContainerUpdates('${runtime}', '${container.replace(/'/g, "\\'")}')">Refresh</button>
                     ${count > 0 ? `<button class="btn btn-sm btn-primary" onclick="applyContainerUpdates('${runtime}', '${container.replace(/'/g, "\\'")}')">⬆️ Apply Updates</button>` : ''}
                 </div>
             </div>
@@ -15733,13 +15733,13 @@ async function applyContainerUpdates(runtime, container) {
             body.innerHTML = `
                 <div style="margin-bottom:16px;">
                     <span style="display:inline-block;padding:4px 12px;border-radius:8px;font-size:14px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;">Updates applied successfully</span>
-                    <button class="btn btn-sm" style="margin-left:12px;" onclick="openContainerUpdates('${runtime}', '${container.replace(/'/g, "\\'")}')">🔄 Check Again</button>
+                    <button class="btn btn-sm" style="margin-left:12px;" onclick="openContainerUpdates('${runtime}', '${container.replace(/'/g, "\\'")}')">Check Again</button>
                 </div>
                 <p style="font-size:12px;color:var(--text-muted);">${lineCount} packages processed</p>`;
             showToast('Updates applied to ' + container, 'success');
         } else {
             body.innerHTML = `<p style="color:#ef4444;">Failed to apply updates: ${escapeHtml(data.error || 'Unknown error')}</p>
-                <button class="btn btn-sm" onclick="openContainerUpdates('${runtime}', '${container.replace(/'/g, "\\'")}')">🔄 Check Again</button>`;
+                <button class="btn btn-sm" onclick="openContainerUpdates('${runtime}', '${container.replace(/'/g, "\\'")}')">Check Again</button>`;
         }
     } catch (e) {
         body.innerHTML = `<p style="color:#ef4444;">Failed: ${escapeHtml(e.message)}</p>`;
@@ -15758,7 +15758,7 @@ async function openContainerCron(runtime, container) {
     const modal = document.getElementById('container-detail-modal');
     const title = document.getElementById('container-detail-title');
     const body = document.getElementById('container-detail-body');
-    const icon = runtime === 'docker' ? '🐳' : '📦';
+    const icon = runtime === 'docker' ? '' : '';
 
     title.textContent = `${container} — Cron Jobs`;
     body.innerHTML = `<p style="color:var(--text-muted);">Loading cron jobs from ${icon} ${container}...</p>`;
@@ -15809,12 +15809,12 @@ async function openContainerCron(runtime, container) {
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-header"><h3 style="font-size:14px;">Quick Actions</h3></div>
                 <div class="card-body" style="display:flex;flex-wrap:wrap;gap:8px;">
-                    <button class="btn btn-sm" onclick="addContainerPremadeCron('apt-update')">📦 System Updates (weekly)</button>
-                    <button class="btn btn-sm" onclick="addContainerPremadeCron('log-cleanup')">🗑️ Clean Logs (daily)</button>
-                    <button class="btn btn-sm" onclick="addContainerPremadeCron('tmp-cleanup')">🧹 Clean /tmp (daily)</button>
-                    <button class="btn btn-sm" onclick="addContainerPremadeCron('certbot-renew')">🔒 Renew SSL Certs</button>
-                    <button class="btn btn-sm" onclick="addContainerPremadeCron('disk-usage')">💾 Log Disk Usage (hourly)</button>
-                    <button class="btn btn-sm" onclick="addContainerPremadeCron('health-check')">🏥 Health Check (5 min)</button>
+                    <button class="btn btn-sm" onclick="addContainerPremadeCron('apt-update')">System Updates (weekly)</button>
+                    <button class="btn btn-sm" onclick="addContainerPremadeCron('log-cleanup')">Clean Logs (daily)</button>
+                    <button class="btn btn-sm" onclick="addContainerPremadeCron('tmp-cleanup')">Clean /tmp (daily)</button>
+                    <button class="btn btn-sm" onclick="addContainerPremadeCron('certbot-renew')">Renew SSL Certs</button>
+                    <button class="btn btn-sm" onclick="addContainerPremadeCron('disk-usage')">Log Disk Usage (hourly)</button>
+                    <button class="btn btn-sm" onclick="addContainerPremadeCron('health-check')">Health Check (5 min)</button>
                 </div>
             </div>`;
 
@@ -15842,8 +15842,8 @@ async function openContainerCron(runtime, container) {
                     '<td style="padding:8px 10px;font-family:var(--font-mono);font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(e.command) + '">' + escapeHtml(e.command) + '</td>' +
                     '<td style="padding:8px 10px;color:var(--text-muted);font-size:11px;">' + escapeHtml(e.comment || '—') + '</td>' +
                     '<td style="padding:8px 10px;text-align:right;white-space:nowrap;">' +
-                    '<button class="btn btn-sm" onclick="toggleContainerCronJob(' + e.index + ', ' + e.enabled + ', \'' + escapeHtml(e.schedule).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.command).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.comment).replace(/'/g, "\\'") + '\')" title="' + (e.enabled ? 'Disable' : 'Enable') + '" style="font-size:14px;">' + (e.enabled ? '⏸️' : '▶️') + '</button> ' +
-                    '<button class="btn btn-sm" onclick="deleteContainerCronJob(' + e.index + ')" title="Delete" style="color:var(--danger);font-size:14px;">🗑️</button>' +
+                    '<button class="btn btn-sm" onclick="toggleContainerCronJob(' + e.index + ', ' + e.enabled + ', \'' + escapeHtml(e.schedule).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.command).replace(/'/g, "\\'") + '\', \'' + escapeHtml(e.comment).replace(/'/g, "\\'") + '\')" title="' + (e.enabled ? 'Disable' : 'Enable') + '" style="font-size:14px;">' + (e.enabled ? '' : '▶️') + '</button> ' +
+                    '<button class="btn btn-sm" onclick="deleteContainerCronJob(' + e.index + ')" title="Delete" style="color:var(--danger);font-size:14px;"></button>' +
                     '</td></tr>';
             });
             html += '</tbody></table>';
@@ -16080,7 +16080,7 @@ function addLxcNic() {
         <div class="lxc-nic-item" data-nic-index="${newIdx}" style="margin-bottom:8px;border:1px solid var(--border);border-radius:8px;overflow:hidden;">
             <div class="lxc-nic-summary" onclick="toggleNicEditor(${newIdx})" style="display:flex;align-items:center;gap:12px;padding:10px 14px;cursor:pointer;background:var(--bg-tertiary);transition:background .15s;"
                  onmouseenter="this.style.background='var(--bg-secondary)'" onmouseleave="this.style.background='var(--bg-tertiary)'">
-                <span style="font-size:16px;">🔌</span>
+                <span style="font-size:16px;"></span>
                 <div style="flex:1;min-width:0;">
                     <div style="font-weight:600;font-size:13px;">net${newIdx} — eth${newIdx}</div>
                     <div style="font-size:11px;color:var(--text-muted);font-family:monospace;">New interface</div>
@@ -16089,8 +16089,8 @@ function addLxcNic() {
             </div>
             <div class="lxc-nic-editor" id="lxc-nic-editor-${newIdx}" style="display:none;padding:14px;border-top:1px solid var(--border);background:var(--bg-primary);">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-                    <h4 style="margin:0;font-size:14px;">🔌 Edit net${newIdx} — eth${newIdx}</h4>
-                    <button class="btn btn-sm" onclick="closeNicEditor()" style="font-size:16px;padding:2px 8px;line-height:1;" title="Close">✕</button>
+                    <h4 style="margin:0;font-size:14px;">Edit net${newIdx} — eth${newIdx}</h4>
+                    <button class="btn btn-sm" onclick="closeNicEditor()" style="font-size:16px;padding:2px 8px;line-height:1;" title="Close"></button>
                 </div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
                     <div class="form-group" style="margin:0;">
@@ -16109,7 +16109,7 @@ function addLxcNic() {
                         <label style="font-size:11px;">MAC Address</label>
                         <div style="display:flex;gap:4px;">
                             <input type="text" class="form-control lxc-nic-field" data-nic="${newIdx}" data-field="hwaddr" value="" placeholder="AA:BB:CC:DD:EE:FF" style="flex:1;">
-                            <button class="btn btn-sm" onclick="generateMacFor(${newIdx})" title="Generate MAC" style="padding:4px 6px;font-size:10px;">🎲</button>
+                            <button class="btn btn-sm" onclick="generateMacFor(${newIdx})" title="Generate MAC" style="padding:4px 6px;font-size:10px;"></button>
                         </div>
                     </div>
                     <div class="form-group" style="margin:0;">
@@ -16215,7 +16215,7 @@ async function openLxcSettings(name) {
                 <code style="flex:1;font-size:12px;color:var(--text-primary);">${escapeHtml(m.container_path)}</code>
                 ${m.read_only ? '<span class="badge" style="font-size:10px;">RO</span>' : ''}
                 <button class="btn btn-sm" style="font-size:11px;padding:2px 6px;color:var(--danger);"
-                    onclick="removeLxcMount('${name}','${m.host_path.replace(/'/g, "\\'")}')" title="Remove">✕</button>
+                    onclick="removeLxcMount('${name}','${m.host_path.replace(/'/g, "\\'")}')" title="Remove"></button>
             </div>
         `).join('') : '<div style="color:var(--text-muted);font-size:12px;padding:8px;">No bind mounts configured</div>';
 
@@ -16226,19 +16226,19 @@ async function openLxcSettings(name) {
             <div style="display:flex;border-bottom:1px solid var(--border);background:var(--bg-secondary);margin:-24px -24px 16px -24px;">
                 <button class="lxc-tab-btn" data-ltab="1" onclick="switchLxcTab(1)"
                     style="${tabBtnStyle}border-bottom:2px solid var(--accent);color:var(--text-primary);">
-                    ⚙️ General
+                    General
                 </button>
                 <button class="lxc-tab-btn" data-ltab="2" onclick="switchLxcTab(2)"
                     style="${tabBtnStyle}border-bottom:2px solid transparent;color:var(--text-muted);">
-                    🌐 Network
+                    Network
                 </button>
                 <button class="lxc-tab-btn" data-ltab="3" onclick="switchLxcTab(3)"
                     style="${tabBtnStyle}border-bottom:2px solid transparent;color:var(--text-muted);">
-                    💻 Resources
+                    Resources
                 </button>
                 <button class="lxc-tab-btn" data-ltab="4" onclick="switchLxcTab(4)"
                     style="${tabBtnStyle}border-bottom:2px solid transparent;color:var(--text-muted);">
-                    🔧 Features
+                    Features
                 </button>
             </div>
 
@@ -16274,7 +16274,7 @@ async function openLxcSettings(name) {
                     </div>
                 </div>
                 <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
-                    <h4 style="margin:0 0 8px 0;font-size:13px;color:var(--text-primary);">🚀 Boot Options</h4>
+                    <h4 style="margin:0 0 8px 0;font-size:13px;color:var(--text-primary);">Boot Options</h4>
                     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
                         <div class="form-group" style="margin:0;">
                             <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
@@ -16302,7 +16302,7 @@ async function openLxcSettings(name) {
                     <div class="lxc-nic-item" data-nic-index="${nic.index}" style="margin-bottom:8px;border:1px solid var(--border);border-radius:8px;overflow:hidden;">
                         <div class="lxc-nic-summary" onclick="toggleNicEditor(${nic.index})" style="display:flex;align-items:center;gap:12px;padding:10px 14px;cursor:pointer;background:var(--bg-tertiary);transition:background .15s;"
                              onmouseenter="this.style.background='var(--bg-secondary)'" onmouseleave="this.style.background='var(--bg-tertiary)'">
-                            <span style="font-size:16px;">🔌</span>
+                            <span style="font-size:16px;"></span>
                             <div style="flex:1;min-width:0;">
                                 <div style="font-weight:600;font-size:13px;">net${nic.index} — ${escapeHtml(nic.name || 'eth' + nic.index)}</div>
                                 <div style="font-size:11px;color:var(--text-muted);font-family:monospace;display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:2px 12px;">
@@ -16321,8 +16321,8 @@ async function openLxcSettings(name) {
                         </div>
                         <div class="lxc-nic-editor" id="lxc-nic-editor-${nic.index}" style="display:none;padding:14px;border-top:1px solid var(--border);background:var(--bg-primary);">
                             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-                                <h4 style="margin:0;font-size:14px;">🔌 Edit net${nic.index} — ${escapeHtml(nic.name || 'eth' + nic.index)}</h4>
-                                <button class="btn btn-sm" onclick="closeNicEditor()" style="font-size:16px;padding:2px 8px;line-height:1;" title="Close">✕</button>
+                                <h4 style="margin:0;font-size:14px;">Edit net${nic.index} — ${escapeHtml(nic.name || 'eth' + nic.index)}</h4>
+                                <button class="btn btn-sm" onclick="closeNicEditor()" style="font-size:16px;padding:2px 8px;line-height:1;" title="Close"></button>
                             </div>
                             <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
                                 <div class="form-group" style="margin:0;">
@@ -16341,7 +16341,7 @@ async function openLxcSettings(name) {
                                     <label style="font-size:11px;">MAC Address</label>
                                     <div style="display:flex;gap:4px;">
                                         <input type="text" class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="hwaddr" value="${escapeHtml(nic.hwaddr)}" placeholder="AA:BB:CC:DD:EE:FF" style="flex:1;">
-                                        <button class="btn btn-sm" onclick="generateMacFor(${nic.index})" title="Generate MAC" style="padding:4px 6px;font-size:10px;">🎲</button>
+                                        <button class="btn btn-sm" onclick="generateMacFor(${nic.index})" title="Generate MAC" style="padding:4px 6px;font-size:10px;"></button>
                                     </div>
                                 </div>
                                 <div class="form-group" style="margin:0;">
@@ -16370,7 +16370,7 @@ async function openLxcSettings(name) {
                                 </div>
                             </div>
                             <div style="display:flex;justify-content:flex-end;margin-top:10px;">
-                                <button class="btn btn-sm btn-primary" onclick="saveLxcSettings('${name}')">💾 Save Settings</button>
+                                <button class="btn btn-sm btn-primary" onclick="saveLxcSettings('${name}')">Save Settings</button>
                             </div>
                         </div>
                     </div>
@@ -16389,7 +16389,7 @@ async function openLxcSettings(name) {
                         </div>
                         <div style="display:flex;gap:4px;padding-bottom:2px;">
                             <button class="btn btn-sm" onclick="findNextWolfnetIp()" title="Find next available WolfNet IP"
-                                style="padding:6px 10px;font-size:11px;">🔍 Next Available</button>
+                                style="padding:6px 10px;font-size:11px;">Next Available</button>
                         </div>
                     </div>
                     <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">Gateway is handled automatically by WolfNet — no need to configure it here.</div>
@@ -16422,7 +16422,7 @@ async function openLxcSettings(name) {
 
                 <div style="margin-top:16px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-                        <h4 style="margin:0;font-size:13px;">📁 Bind Mounts (${mounts.length})</h4>
+                        <h4 style="margin:0;font-size:13px;">Bind Mounts (${mounts.length})</h4>
                         <div style="display:flex;gap:4px;">
                             <button class="btn btn-sm" onclick="addMountPoint('${name}')"
                                 style="font-size:11px;padding:4px 8px;">+ Mount</button>
@@ -16437,7 +16437,7 @@ async function openLxcSettings(name) {
             <!-- ═══ Tab 4: Features & Advanced ═══ -->
             <div class="lxc-tab-page" id="lxc-tab-4" style="display:none;">
                 <div style="padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);margin-bottom:12px;">
-                    <h4 style="margin:0 0 12px 0;font-size:13px;color:var(--text-primary);">🔌 Device & Feature Toggles</h4>
+                    <h4 style="margin:0 0 12px 0;font-size:13px;color:var(--text-primary);">Device & Feature Toggles</h4>
                     <div style="display:grid;gap:10px;">
                         <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:8px;border-radius:6px;background:var(--bg-primary);border:1px solid var(--border);">
                             <input type="checkbox" id="lxc-feat-tun" ${cfg.tun_enabled ? 'checked' : ''} style="margin-top:2px;">
@@ -16492,7 +16492,7 @@ async function openLxcSettings(name) {
 
                 <details>
                     <summary style="cursor:pointer;color:var(--accent);font-size:12px;margin-bottom:8px;">
-                        📝 Raw Config Editor
+                        Raw Config Editor
                     </summary>
                     <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">
                         Advanced: Edit the raw LXC config. Changes here override the structured settings above.
@@ -16512,7 +16512,7 @@ async function openLxcSettings(name) {
                  "scroll further down to save" was needed. -->
             <div style="position:sticky;bottom:0;display:flex;justify-content:flex-end;gap:8px;padding:12px 0;border-top:1px solid var(--border);background:var(--bg-primary,#1e1e2e);z-index:10;">
                 <button class="btn btn-sm" onclick="closeContainerDetail()">Cancel</button>
-                <button class="btn btn-sm btn-primary" onclick="saveLxcSettings('${name}')">💾 Save Settings</button>
+                <button class="btn btn-sm btn-primary" onclick="saveLxcSettings('${name}')">Save Settings</button>
             </div>
         `;
     } catch (e) {
@@ -16605,7 +16605,7 @@ async function saveLxcSettings(name) {
                 var conflicts = await cr.json();
                 conflicts.forEach(function (c) {
                     if (c.severity === 'error') {
-                        showToast('⛔ Duplicate MAC ' + c.value + ' on: ' + c.containers.join(', '), 'error');
+                        showToast('Duplicate MAC ' + c.value + ' on: ' + c.containers.join(', '), 'error');
                     } else {
                         showToast('Duplicate IP ' + c.value + ' on: ' + c.containers.join(', '), 'warning');
                     }
@@ -16640,7 +16640,7 @@ function openLxcMountModal(name, opts) {
     overlay.innerHTML = `
         <div class="modal" style="max-width:560px;">
             <div class="modal-header">
-                <h3>📁 Add Bind Mount — ${escapeHtml(name)}</h3>
+                <h3>Add Bind Mount — ${escapeHtml(name)}</h3>
                 <button class="modal-close" onclick="document.getElementById('lxc-mount-modal')?.remove()">×</button>
             </div>
             <div class="modal-body" style="font-size:13px;">
@@ -16894,7 +16894,7 @@ async function migrateDockerContainer(name) {
                     The source container will keep running. The destination will be imported but not started — start it manually when ready.
                 </div>
                 <div style="display:flex; gap:8px;">
-                    <button class="btn btn-primary" onclick="doMigrate('${name}')">🚀 Migrate</button>
+                    <button class="btn btn-primary" onclick="doMigrate('${name}')">Migrate</button>
                     <button class="btn" onclick="closeContainerDetail()">Cancel</button>
                 </div>
             </div>
@@ -16919,7 +16919,7 @@ async function migrateDockerContainer(name) {
                     The source container will keep running. The destination will be imported but not started — start it manually when ready.
                 </div>
                 <div style="display:flex; gap:8px;">
-                    <button class="btn btn-primary" onclick="doMigrate('${name}')">🚀 Migrate</button>
+                    <button class="btn btn-primary" onclick="doMigrate('${name}')">Migrate</button>
                     <button class="btn" onclick="closeContainerDetail()">Cancel</button>
                 </div>
             </div>
@@ -16982,7 +16982,7 @@ async function cloneLxcContainer(name) {
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
     modal.innerHTML = `
         <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:400px;max-width:500px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
-            <h3 style="margin:0 0 16px;color:var(--text,#fff);">📋 Clone Container</h3>
+            <h3 style="margin:0 0 16px;color:var(--text,#fff);">Clone Container</h3>
             <p style="margin:0 0 16px;color:var(--text-muted,#aaa);font-size:0.9em;">Clone <strong>${name}</strong> to a new container.</p>
             <div style="display:flex;flex-direction:column;gap:12px;">
                 <div><label style="font-size:13px;color:var(--text-muted,#aaa);">New Name</label>
@@ -17076,14 +17076,14 @@ async function doCloneLxc(name) {
         document.getElementById('lxc-op-close').style.display = '';
 
         if (resp.ok) {
-            statusEl.textContent = '✅ Clone complete!';
+            statusEl.textContent = 'Clone complete!';
             resultEl.style.display = 'block';
             resultEl.style.background = 'rgba(16,185,129,0.15)';
             resultEl.style.color = '#10b981';
             resultEl.textContent = data.message || `Cloned as '${newName}'`;
             setTimeout(loadLxcContainers, 500);
         } else {
-            statusEl.textContent = '❌ Clone failed';
+            statusEl.textContent = 'Clone failed';
             resultEl.style.display = 'block';
             resultEl.style.background = 'rgba(239,68,68,0.15)';
             resultEl.style.color = '#ef4444';
@@ -17092,7 +17092,7 @@ async function doCloneLxc(name) {
     } catch (e) {
         const resultEl = document.getElementById('lxc-op-result');
         const statusEl = document.getElementById('lxc-op-status');
-        statusEl.textContent = '❌ Clone failed';
+        statusEl.textContent = 'Clone failed';
         resultEl.style.display = 'block';
         resultEl.style.background = 'rgba(239,68,68,0.15)';
         resultEl.style.color = '#ef4444';
@@ -17129,10 +17129,10 @@ async function migrateLxcContainer(name) {
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
     modal.innerHTML = `
         <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
-            <h3 style="margin:0 0 16px;color:var(--text,#fff);">🚀 Migrate Container</h3>
+            <h3 style="margin:0 0 16px;color:var(--text,#fff);">Migrate Container</h3>
             <p style="margin:0 0 12px;color:var(--text-muted,#aaa);font-size:0.9em;">Copy <strong>${name}</strong> to another node. The source stays running — the destination will be imported but not started.</p>
             <div style="background:var(--danger-bg);border:1px solid var(--danger);border-radius:8px;padding:10px 12px;margin-bottom:10px;color:var(--danger);font-size:0.85em;">
-                ⚠️ The container will experience downtime during migration.
+                The container will experience downtime during migration.
             </div>
             <div style="background:var(--warning-bg);border:1px solid var(--warning);border-radius:8px;padding:10px 12px;margin-bottom:16px;color:var(--warning);font-size:0.85em;">
                 Note: After migration you may need to update the container's network settings (IP address, gateway, DNS) on the destination node to match the new network.
@@ -17152,7 +17152,7 @@ async function migrateLxcContainer(name) {
                 </div>
                 <div id="migrate-external-fields" style="display:none;">
                     <div style="background:var(--info-bg);border:1px solid var(--info);border-radius:8px;padding:10px 12px;margin-bottom:12px;color:var(--info);font-size:0.82em;line-height:1.5;">
-                        💡 <strong>Cross-cluster migration</strong> lets you move a container to a WolfStack instance on a different network.
+                        <strong>Cross-cluster migration</strong> lets you move a container to a WolfStack instance on a different network.
                         On the <em>destination</em> cluster, go to <strong>LXC Containers → Generate Transfer Token</strong> to create a one-time token.
                         The token is valid for 30 minutes and authorises this node to push the container to that cluster.
                     </div>
@@ -17193,11 +17193,11 @@ async function migrateLxcContainer(name) {
             const free = typeof formatBytes === 'function' ? formatBytes(s.available_bytes) : Math.round(s.available_bytes / 1073741824) + ' GB';
             const isShared = sharedTypes.some(t => (s.type || '').toLowerCase().includes(t));
             if (isShared) hasShared = true;
-            const badge = isShared ? ' 🟢 shared' : '';
+            const badge = isShared ? ' shared' : '';
             sel.insertAdjacentHTML('beforeend', `<option value="${s.id}">${s.id} (${s.type || ''}, ${free} free${badge})</option>`);
         });
         if (hasShared && info) {
-            info.innerHTML = '<span style="color:#22c55e;">🟢 Shared storage (Ceph/NFS) detected on the target — if you pick it, migration is config-only and takes seconds instead of copying gigabytes.</span>';
+            info.innerHTML = '<span style="color:#22c55e;">Shared storage (Ceph/NFS) detected on the target — if you pick it, migration is config-only and takes seconds instead of copying gigabytes.</span>';
         } else if (info) {
             info.innerHTML = display.length ? '<span style="color:var(--text-muted);">No shared storage with this node — container data will be copied over the network.</span>' : '';
         }
@@ -17490,9 +17490,9 @@ async function doMigrateVm(name) {
     // stage. preflight & stopping count as "before export" (spinner on
     // the export step; it's the first real long step anyway).
     const steps = [
-        { id: 'export', label: 'Creating disk archive', icon: '💾', stages: ['preflight', 'stopping', 'export'] },
-        { id: 'upload', label: isExternal ? `Uploading to ${targetLabel}` : 'Transferring to target node', icon: '📤', stages: ['upload'] },
-        { id: 'import', label: 'Importing on target node (stopped)', icon: '📥', stages: ['import'] },
+        { id: 'export', label: 'Creating disk archive', icon: '', stages: ['preflight', 'stopping', 'export'] },
+        { id: 'upload', label: isExternal ? `Uploading to ${targetLabel}` : 'Transferring to target node', icon: '', stages: ['upload'] },
+        { id: 'import', label: 'Importing on target node (stopped)', icon: '', stages: ['import'] },
     ];
 
     showVmMigrateProgressModal(name, steps);
@@ -17621,7 +17621,7 @@ function vmMigrateStepDone(stepId) {
     if (!el) return;
     el.style.background = 'rgba(16,185,129,0.08)';
     el.style.border = '1px solid rgba(16,185,129,0.2)';
-    el.querySelector('.mstep-status').textContent = '✅';
+    el.querySelector('.mstep-status').textContent = '';
     el.querySelector('span:nth-child(2)').style.color = '#10b981';
 }
 function vmMigrateStepFailed(stepId) {
@@ -17629,7 +17629,7 @@ function vmMigrateStepFailed(stepId) {
     if (!el) return;
     el.style.background = 'rgba(239,68,68,0.1)';
     el.style.border = '1px solid rgba(239,68,68,0.2)';
-    el.querySelector('.mstep-status').textContent = '❌';
+    el.querySelector('.mstep-status').textContent = '';
     el.querySelector('span:nth-child(2)').style.color = '#ef4444';
 }
 
@@ -17822,7 +17822,7 @@ async function doMigrateVmDiskStorage(name, btn) {
 
     const logTaskId = taskLogStart(`Migrating VM '${name}' disks to ${target}`);
     const steps = [
-        { id: 'disk_copy', label: `Copying disks → ${target}`, icon: '💾', stages: ['preflight', 'disk_copy'] },
+        { id: 'disk_copy', label: `Copying disks → ${target}`, icon: '', stages: ['preflight', 'disk_copy'] },
     ];
     showVmMigrateProgressModal(name, steps);
     const startTime = Date.now();
@@ -17966,7 +17966,7 @@ async function openLxcStorage(name) {
     overlay.innerHTML = `
         <div class="modal" style="max-width:560px;">
             <div class="modal-header">
-                <h3>💾 Storage — ${escapeHtml(name)}</h3>
+                <h3>Storage — ${escapeHtml(name)}</h3>
                 <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
             </div>
             <div class="modal-body" style="font-size:13px;">
@@ -17991,7 +17991,7 @@ async function openLxcStorage(name) {
                     <button class="btn btn-primary" onclick="lxcStorageResize(this, '${escapeHtml(name)}')" style="height:34px;">Resize</button>
                 </div>
                 <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">
-                    ${info.backend === 'directory' ? '⚠️ Directory backend has no per-container quota — grow the host filesystem instead.' :
+                    ${info.backend === 'directory' ? 'Directory backend has no per-container quota — grow the host filesystem instead.' :
                       info.proxmox ? 'Proxmox routes via the PVE resize API; absolute size only (no shrink).' :
                       info.backend === 'zfs' ? 'ZFS quota change is online and instant.' :
                       info.backend === 'lvm' ? 'LVM grow is online for ext4/xfs/btrfs.' :
@@ -18112,13 +18112,13 @@ async function generateTransferToken() {
         modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
         modal.innerHTML = `
             <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:400px;max-width:500px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
-                <h3 style="margin:0 0 12px;color:var(--text,#fff);">🔑 Transfer Token Generated</h3>
+                <h3 style="margin:0 0 12px;color:var(--text,#fff);">Transfer Token Generated</h3>
                 <p style="color:var(--text-muted,#aaa);font-size:0.9em;margin-bottom:16px;">
                     Share this token with the source cluster admin. It expires in 30 minutes and can only be used once.
                 </p>
                 <div style="background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:8px;padding:12px;font-family:monospace;font-size:13px;color:var(--text,#fff);word-break:break-all;margin-bottom:12px;">${data.token}</div>
                 <div style="display:flex;gap:8px;justify-content:flex-end;">
-                    <button class="btn" onclick="navigator.clipboard.writeText('${data.token}');showToast('Token copied','success')">📋 Copy</button>
+                    <button class="btn" onclick="navigator.clipboard.writeText('${data.token}');showToast('Token copied','success')">Copy</button>
                     <button class="btn" onclick="document.getElementById('transfer-token-modal')?.remove()">Close</button>
                 </div>
             </div>
@@ -18187,7 +18187,7 @@ async function searchDockerHub() {
                     <thead><tr><th>Image</th><th>Description</th><th>⭐</th><th></th></tr></thead>
                     <tbody>
                         ${data.map(r => `<tr>
-                            <td><strong>${r.name}</strong>${r.official ? ' <span style="color:#10b981; font-size:11px;">✓ Official</span>' : ''}</td>
+                            <td><strong>${r.name}</strong>${r.official ? ' <span style="color:#10b981; font-size:11px;">Official</span>' : ''}</td>
                             <td style="font-size:12px; max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${r.description}</td>
                             <td style="text-align:center;">${r.stars}</td>
                             <td><button class="btn btn-sm btn-primary" onclick="selectDockerImage('${r.name}')" style="font-size:11px;">Select →</button></td>
@@ -18216,7 +18216,7 @@ function selectDockerImage(imageName) {
         <div style="padding: 1rem;">
             <div style="margin-bottom:16px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
                 <div style="display:flex; align-items:center; gap:12px;">
-                    <span style="font-size:24px;">🐳</span>
+                    <span style="font-size:24px;"></span>
                     <div style="flex:1;">
                         <strong style="font-size:15px;">${imageName}</strong>
                         <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">Docker Hub image</div>
@@ -18249,7 +18249,7 @@ function selectDockerImage(imageName) {
             </div>
             <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:12px;">
                 <div>
-                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">🧠 Memory Limit</label>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Memory Limit</label>
                     <select id="docker-create-memory"
                         style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
                         <option value="">Unlimited</option>
@@ -18263,7 +18263,7 @@ function selectDockerImage(imageName) {
                     </select>
                 </div>
                 <div>
-                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">⚡ CPU Cores</label>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">CPU Cores</label>
                     <select id="docker-create-cpus"
                         style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
                         <option value="">Unlimited</option>
@@ -18277,10 +18277,10 @@ function selectDockerImage(imageName) {
             <div style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
                 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
                     <div style="display:flex; align-items:center; gap:8px;">
-                        <span>📁</span>
+                        <span></span>
                         <strong style="font-size:13px;">Volumes / Bind Mounts</strong>
                     </div>
-                    <button class="btn btn-sm" onclick="addDockerVolumeRow()" style="font-size:11px;">➕ Add Mount</button>
+                    <button class="btn btn-sm" onclick="addDockerVolumeRow()" style="font-size:11px;">Add Mount</button>
                 </div>
                 <div id="docker-volumes-list" style="display:flex; flex-direction:column; gap:6px;"></div>
                 <div style="font-size:11px; color:var(--text-muted); margin-top:6px;">Map host directories or named volumes into the container</div>
@@ -18299,7 +18299,7 @@ function selectDockerImage(imageName) {
                 </div>
             </div>
             <div style="display:flex; gap:8px;">
-                <button class="btn btn-primary" onclick="createDockerContainer()">🐳 Pull & Create</button>
+                <button class="btn btn-primary" onclick="createDockerContainer()">Pull & Create</button>
                 <button class="btn" onclick="showDockerCreate()">← Back</button>
                 <button class="btn" onclick="closeContainerDetail()">Cancel</button>
             </div>
@@ -18347,7 +18347,7 @@ function addDockerPortRow(containerId, hostPort, containerPort, protocol) {
             <option value="udp" ${protocol === 'udp' ? 'selected' : ''}>UDP</option>
             <option value="both" ${protocol === 'both' ? 'selected' : ''}>Both</option>
         </select>
-        <button type="button" onclick="this.parentElement.remove()" class="btn btn-sm" style="padding:4px 8px; font-size:11px; color:var(--danger);" title="Remove">✕</button>
+        <button type="button" onclick="this.parentElement.remove()" class="btn btn-sm" style="padding:4px 8px; font-size:11px; color:var(--danger);" title="Remove"></button>
     `;
     list.appendChild(row);
 }
@@ -18457,7 +18457,7 @@ async function fetchAvailableMounts() {
 function buildMountPickerOptions() {
     if (!cachedAvailableMounts || cachedAvailableMounts.length === 0) return '';
     return cachedAvailableMounts.map(m => {
-        const icon = MOUNT_TYPE_ICONS[m.type] || '📦';
+        const icon = MOUNT_TYPE_ICONS[m.type] || '';
         return `<option value="${m.mount_point}">${icon} ${m.name} (${m.mount_point})</option>`;
     }).join('');
 }
@@ -18477,7 +18477,7 @@ async function addDockerVolumeRow() {
     const pickerHtml = mountOptions
         ? `<select class="docker-vol-picker" onchange="fillVolFromPicker(this)"
             style="width:100%; margin-bottom:4px; padding:4px 6px; border-radius:4px; border:1px solid var(--border); background:var(--bg-secondary); color:var(--text-secondary); font-size:11px;">
-            <option value="">📂 Or pick from Storage Manager...</option>
+            <option value="">Or pick from Storage Manager...</option>
             ${mountOptions}
           </select>`
         : '';
@@ -18494,7 +18494,7 @@ async function addDockerVolumeRow() {
         <label style="display:flex; align-items:center; gap:3px; font-size:11px; color:var(--text-muted); white-space:nowrap; cursor:pointer;">
             <input class="docker-vol-ro" type="checkbox" style="margin:0;"> RO
         </label>
-        <button class="btn btn-sm" onclick="removeDockerVolumeRow(this)" style="font-size:11px; padding:4px 8px; color:var(--danger);">✕</button>
+        <button class="btn btn-sm" onclick="removeDockerVolumeRow(this)" style="font-size:11px; padding:4px 8px; color:var(--danger);"></button>
     `;
     list.appendChild(row);
 }
@@ -18527,7 +18527,7 @@ async function addLxcMountRow() {
     const pickerHtml = mountOptions
         ? `<select class="lxc-vol-picker" onchange="fillVolFromPicker(this)"
             style="width:100%; margin-bottom:4px; padding:4px 6px; border-radius:4px; border:1px solid var(--border); background:var(--bg-secondary); color:var(--text-secondary); font-size:11px;">
-            <option value="">📂 Or pick from Storage Manager...</option>
+            <option value="">Or pick from Storage Manager...</option>
             ${mountOptions}
           </select>`
         : '';
@@ -18544,7 +18544,7 @@ async function addLxcMountRow() {
         <label style="display:flex; align-items:center; gap:3px; font-size:11px; color:var(--text-muted); white-space:nowrap; cursor:pointer;">
             <input class="lxc-mount-ro" type="checkbox" style="margin:0;"> RO
         </label>
-        <button class="btn btn-sm" onclick="removeLxcMountRow(this)" style="font-size:11px; padding:4px 8px; color:var(--danger);">✕</button>
+        <button class="btn btn-sm" onclick="removeLxcMountRow(this)" style="font-size:11px; padding:4px 8px; color:var(--danger);"></button>
     `;
     list.appendChild(row);
 }
@@ -18617,15 +18617,15 @@ async function loadLxcTemplates() {
 
 function variantBadge(variant) {
     const v = (variant || 'default').toLowerCase();
-    if (v === 'cloud') return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#3b82f620;color:#3b82f6;">☁ cloud</span>';
-    if (v === 'desktop' || v === 'gui') return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#f59e0b20;color:#f59e0b;">🖥 desktop</span>';
-    return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#10b98120;color:#10b981;">⚙ server</span>';
+    if (v === 'cloud') return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#3b82f620;color:#3b82f6;">cloud</span>';
+    if (v === 'desktop' || v === 'gui') return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#f59e0b20;color:#f59e0b;">desktop</span>';
+    return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#10b98120;color:#10b981;">server</span>';
 }
 
 function variantDescription(variant) {
     const v = (variant || 'default').toLowerCase();
     if (v === 'cloud') return 'Cloud-init enabled image for automated provisioning';
-    if (v === 'desktop' || v === 'gui') return '⚠️ Full desktop environment — heavy, not recommended for containers';
+    if (v === 'desktop' || v === 'gui') return 'Full desktop environment — heavy, not recommended for containers';
     return 'Minimal server image — recommended for containers';
 }
 
@@ -18665,7 +18665,7 @@ function selectLxcTemplate(distro, release, arch, variant) {
         <div style="padding: 1rem;">
             <div style="margin-bottom:16px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
                 <div style="display:flex; align-items:center; gap:12px; margin-bottom:8px;">
-                    <span style="font-size:24px;">📦</span>
+                    <span style="font-size:24px;"></span>
                     <div style="flex:1;">
                         <strong style="font-size:15px;">${distro} ${release}</strong>
                         <span style="margin-left:8px;">${variantBadge(variant)}</span>
@@ -18687,7 +18687,7 @@ function selectLxcTemplate(distro, release, arch, variant) {
                         style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
                 </div>
                 <div>
-                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">🔑 Root Password</label>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Root Password</label>
                     <input id="lxc-create-password" type="password" placeholder="Set root password"
                         style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
                 </div>
@@ -18697,7 +18697,7 @@ function selectLxcTemplate(distro, release, arch, variant) {
             <div style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;">Resources</div>
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px;">
                 <div>
-                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">🧠 Memory Limit</label>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Memory Limit</label>
                     <select id="lxc-create-memory"
                         style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
                         <option value="">Unlimited</option>
@@ -18711,7 +18711,7 @@ function selectLxcTemplate(distro, release, arch, variant) {
                     </select>
                 </div>
                 <div>
-                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">⚡ CPU Cores</label>
+                    <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">CPU Cores</label>
                     <select id="lxc-create-cpus"
                         style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
                         <option value="">Unlimited</option>
@@ -18729,14 +18729,14 @@ function selectLxcTemplate(distro, release, arch, variant) {
                 <summary style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; cursor:pointer; margin-bottom:8px;">Storage <span style="font-weight:400; font-size:11px; text-transform:none;">(defaults are fine for most containers)</span></summary>
                 <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:6px; margin-top:8px;">
                     <div>
-                        <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">📥 Template Storage <span style="font-weight:400; color:var(--text-muted); font-size:11px;">(distro tarball cache)</span></label>
+                        <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Template Storage <span style="font-weight:400; color:var(--text-muted); font-size:11px;">(distro tarball cache)</span></label>
                         <select id="lxc-create-template-storage"
                             style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
                             <option value="">Local (default)</option>
                         </select>
                     </div>
                     <div>
-                        <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">💾 Rootfs Storage <span style="font-weight:400; color:var(--text-muted); font-size:11px;">(where the container lives)</span></label>
+                        <label style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Rootfs Storage <span style="font-weight:400; color:var(--text-muted); font-size:11px;">(where the container lives)</span></label>
                         <select id="lxc-create-storage"
                             style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
                             <option value="/var/lib/lxc">/var/lib/lxc (default)</option>
@@ -18745,23 +18745,23 @@ function selectLxcTemplate(distro, release, arch, variant) {
                 </div>
                 <div style="font-size:11px; color:var(--text-muted); line-height:1.5;">
                     <span id="lxc-storage-info"></span>
-                    <span style="display:block;">💡 You can move a running container's storage later from its detail page → Storage → Move.</span>
+                    <span style="display:block;">You can move a running container's storage later from its detail page → Storage → Move.</span>
                 </div>
             </details>
             <div style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
                 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
                     <div style="display:flex; align-items:center; gap:8px;">
-                        <span>📁</span>
+                        <span></span>
                         <strong style="font-size:13px;">Bind Mounts</strong>
                     </div>
-                    <button class="btn btn-sm" onclick="addLxcMountRow()" style="font-size:11px;">➕ Add Mount</button>
+                    <button class="btn btn-sm" onclick="addLxcMountRow()" style="font-size:11px;">Add Mount</button>
                 </div>
                 <div id="lxc-mounts-list" style="display:flex; flex-direction:column; gap:6px;"></div>
                 <div style="font-size:11px; color:var(--text-muted); margin-top:6px;">Map host directories into the container (applied on start, requires restart)</div>
             </div>
             <div style="margin-bottom:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
                 <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
-                    <span>🌐</span>
+                    <span></span>
                     <strong style="font-size:13px;">Network</strong>
                     <span id="lxc-wolfnet-status" style="font-size:12px; color:var(--text-muted);">Checking...</span>
                 </div>
@@ -18771,11 +18771,11 @@ function selectLxcTemplate(distro, release, arch, variant) {
                         <span style="font-size:10px; color:var(--text-muted);">Recommended — reachable from every cluster node, auto-assigned IP, zero config.</span>
                     </button>
                     <button type="button" class="btn btn-sm lxc-net-preset" data-net="bridge" onclick="lxcSelectNetPreset('bridge')" style="flex:1; min-width:140px; padding:10px 12px; text-align:left; border:2px solid transparent;">
-                        <strong style="display:block; font-size:12px;">🔌 Bridged LAN</strong>
+                        <strong style="display:block; font-size:12px;">Bridged LAN</strong>
                         <span style="font-size:10px; color:var(--text-muted);">Attach to a physical LAN bridge (lxcbr0, vmbr0). Gets a LAN IP via DHCP or static.</span>
                     </button>
                     <button type="button" class="btn btn-sm lxc-net-preset" data-net="host" onclick="lxcSelectNetPreset('host')" style="flex:1; min-width:140px; padding:10px 12px; text-align:left; border:2px solid transparent;">
-                        <strong style="display:block; font-size:12px;">🖥 Host Network</strong>
+                        <strong style="display:block; font-size:12px;">Host Network</strong>
                         <span style="font-size:10px; color:var(--text-muted);">Shares the host's network stack. For special cases (no isolation).</span>
                     </button>
                 </div>
@@ -18816,7 +18816,7 @@ function selectLxcTemplate(distro, release, arch, variant) {
                 <div id="lxc-net-preview" style="margin-top:8px; font-size:11px; padding:6px 8px; background:var(--bg-secondary); border-radius:4px; color:var(--text-muted);"></div>
             </div>
             <div style="display:flex; gap:8px;">
-                <button class="btn btn-primary" onclick="createLxcContainer()">📦 Create Container</button>
+                <button class="btn btn-primary" onclick="createLxcContainer()">Create Container</button>
                 <button class="btn" onclick="showLxcCreate()">← Back</button>
                 <button class="btn" onclick="closeContainerDetail()">Cancel</button>
             </div>
@@ -18868,7 +18868,7 @@ function selectLxcTemplate(distro, release, arch, variant) {
             const isSharedType = (t) => /ceph|rbd|nfs|gluster|cifs/i.test(t || '');
             // Badge + contextual hint per storage type so the user
             // understands the tradeoff BEFORE they pick.
-            const storageBadge = (t) => isSharedType(t) ? '🟢 shared' : '📁 local';
+            const storageBadge = (t) => isSharedType(t) ? 'shared' : 'local';
             const storageHintForType = (t) => {
                 const tl = (t || '').toLowerCase();
                 if (/ceph|rbd/.test(tl))      return 'Shared across the cluster — migrate containers instantly, no data copy. Best for HA.';
@@ -18907,7 +18907,7 @@ function selectLxcTemplate(distro, release, arch, variant) {
                 }
             } else {
                 // Standalone: show filesystem mount points
-                storageSelect.innerHTML = `<option value="/var/lib/lxc">📁 local /var/lib/lxc (default)</option>`;
+                storageSelect.innerHTML = `<option value="/var/lib/lxc">local /var/lib/lxc (default)</option>`;
                 allStorageEntries.push({ value: '/var/lib/lxc', type: 'dir', bytes: 0 });
                 data.storages.forEach(s => {
                     if (s.id !== '/') {
@@ -18944,7 +18944,7 @@ function selectLxcTemplate(distro, release, arch, variant) {
                 const pickedShared = entry && isSharedType(entry.type);
                 if (hasShared && !pickedShared) {
                     const sharedName = allStorageEntries.find(e => isSharedType(e.type))?.value || 'shared storage';
-                    storageInfo.innerHTML += `<br><span style="color:var(--warning,#fbbf24);">⚠ You have shared storage (<strong>${escapeHtml(sharedName)}</strong>) available — picking local means this container can't be live-migrated or used with WolfRun HA.</span>`;
+                    storageInfo.innerHTML += `<br><span style="color:var(--warning,#fbbf24);">You have shared storage (<strong>${escapeHtml(sharedName)}</strong>) available — picking local means this container can't be live-migrated or used with WolfRun HA.</span>`;
                 }
             };
         })
@@ -19097,7 +19097,7 @@ async function createLxcContainer() {
                 Preparing <strong>${name}</strong> (${distribution} ${release})...
             </p>
             <div id="lxc-create-steps" style="text-align:left;font-size:0.85em;color:var(--text-muted,#999);line-height:1.8;margin-bottom:16px;">
-                <div id="step-template" style="opacity:1;">⏳ Downloading template...</div>
+                <div id="step-template" style="opacity:1;">Downloading template...</div>
                 <div id="step-create" style="opacity:0.4;">⬜ Creating container...</div>
                 <div id="step-config" style="opacity:0.4;">⬜ Applying configuration...</div>
             </div>
@@ -19128,8 +19128,8 @@ async function createLxcContainer() {
         const result = document.getElementById('lxc-create-result');
         const closeBtn = document.getElementById('lxc-create-close-btn');
         if (spinner) spinner.innerHTML = success
-            ? '<div style="font-size:48px;">✅</div>'
-            : '<div style="font-size:48px;">❌</div>';
+            ? '<div style="font-size:48px;"></div>'
+            : '<div style="font-size:48px;"></div>';
         if (title) title.textContent = success ? 'Container Created' : 'Creation Failed';
         if (result) {
             result.style.display = 'block';
@@ -19142,7 +19142,7 @@ async function createLxcContainer() {
     };
 
     // Step 1: Template & creation (all happens server-side in one call)
-    updateStep('step-template', '⏳', 'Downloading template (this may take a minute)...', true);
+    updateStep('step-template', '', 'Downloading template (this may take a minute)...', true);
     setStatus(`Creating <strong>${name}</strong> on ${storage_path || 'default storage'}...`);
 
     const _lxcTaskId = taskLogStart('Creating LXC container: ' + name);
@@ -19173,12 +19173,12 @@ async function createLxcContainer() {
         }
 
         if (resp.ok) {
-            updateStep('step-template', '✅', 'Template ready', true);
-            updateStep('step-create', '✅', 'Container created', true);
+            updateStep('step-template', '', 'Template ready', true);
+            updateStep('step-create', '', 'Container created', true);
 
             // Step 3: Apply mounts if any
             if (mounts.length > 0) {
-                updateStep('step-config', '⏳', `Applying ${mounts.length} mount(s)...`, true);
+                updateStep('step-config', '', `Applying ${mounts.length} mount(s)...`, true);
                 for (const mount of mounts) {
                     try {
                         await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/mounts`), {
@@ -19189,20 +19189,20 @@ async function createLxcContainer() {
                     } catch (e) { /* mount warning */ }
                 }
             }
-            updateStep('step-config', '✅', 'Configuration applied', true);
+            updateStep('step-config', '', 'Configuration applied', true);
 
             const msg = data.message || `Container '${name}' created successfully`;
             showResult(true, msg);
             updateTaskLogEntry(_lxcTaskId, { status: 'completed', description: 'Created LXC container: ' + name });
             setTimeout(loadLxcContainers, 500);
         } else {
-            updateStep('step-template', '❌', 'Failed', true);
+            updateStep('step-template', '', 'Failed', true);
             const errMsg = data.error || data.message || `HTTP ${resp.status}: Creation failed`;
             showResult(false, errMsg);
             updateTaskLogEntry(_lxcTaskId, { status: 'failed', description: 'Create LXC container: ' + name });
         }
     } catch (e) {
-        updateStep('step-template', '❌', 'Connection error', true);
+        updateStep('step-template', '', 'Connection error', true);
         let errMsg = e.message || 'Unknown error';
         if (errMsg.includes('Failed to fetch') || errMsg.includes('NetworkError')) {
             errMsg = 'Request timed out or connection lost. The template download may still be running on the server. Check the Proxmox UI or try again in a few minutes.';
@@ -19604,7 +19604,7 @@ function _containerVncBtnHtml(uiRuntime, name, displayName, style, isRunning) {
     const colour = installed ? 'color:#10b981;' : 'color:var(--text-muted);';
     const safeDn = String(displayName || name).replace(/'/g, "\\'");
     const title = installed ? 'VNC desktop' : 'Install VNC desktop';
-    return `<button class="btn btn-sm" style="${style}${colour}" onclick="openContainerVnc('${uiRuntime}','${name}','${safeDn}')" title="${title}">🖥️</button>`;
+    return `<button class="btn btn-sm" style="${style}${colour}" onclick="openContainerVnc('${uiRuntime}','${name}','${safeDn}')" title="${title}"></button>`;
 }
 
 async function openContainerVnc(uiRuntime, name, displayName) {
@@ -19670,7 +19670,7 @@ function _showVncInstallModal(runtime, name, displayName, status) {
     // whichever case applies.
     const isLxc = (runtime === 'lxc' || runtime === 'pct');
     const detectedHtml = detectedBin
-        ? `<div style="margin-bottom:6px;color:#10b981;"><strong>✓ Existing desktop detected:</strong> ${escapeHtml(detectedLabel || detectedBin)} <span style="color:var(--text-muted);">(${escapeHtml(detectedBin)})</span></div>`
+        ? `<div style="margin-bottom:6px;color:#10b981;"><strong>Existing desktop detected:</strong> ${escapeHtml(detectedLabel || detectedBin)} <span style="color:var(--text-muted);">(${escapeHtml(detectedBin)})</span></div>`
         : (isLxc
             ? `<div style="margin-bottom:6px;color:var(--text-muted);">No desktop detected. <strong>LXC template images don't ship with desktops</strong> — only "Full Desktop" gives you one out of the box.</div>`
             : `<div style="margin-bottom:6px;color:var(--text-muted);">No desktop detected — pick "Full Desktop" unless you'll install one yourself.</div>`);
@@ -19871,7 +19871,7 @@ async function showVmLogs(name) {
             <div style="padding: 1rem;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
                     <label style="color:var(--text-muted); font-size:13px;">QEMU output log</label>
-                    <button class="btn btn-sm" onclick="showVmLogs('${name}')">🔄 Refresh</button>
+                    <button class="btn btn-sm" onclick="showVmLogs('${name}')">Refresh</button>
                 </div>
                 <pre style="background:#0d1117; color:#c9d1d9; padding:16px; border-radius:8px; 
                             max-height:400px; overflow:auto; font-size:13px; line-height:1.5;
@@ -19924,9 +19924,9 @@ async function showVmSettings(name) {
                     </div>
                     <div style="display:flex; gap:4px;">
                         <button class="btn btn-sm" onclick="resizeVmVolume('${name}', '${vol.name}', ${vol.size_gb})" 
-                            style="font-size:11px; padding:2px 8px;" title="Resize">📐</button>
+                            style="font-size:11px; padding:2px 8px;" title="Resize"></button>
                         <button class="btn btn-sm btn-danger" onclick="removeVmVolume('${name}', '${vol.name}')" 
-                            style="font-size:11px; padding:2px 8px;" title="Delete">✕</button>
+                            style="font-size:11px; padding:2px 8px;" title="Delete"></button>
                     </div>
                 </div>
             `).join('');
@@ -19939,19 +19939,19 @@ async function showVmSettings(name) {
             <div style="display:flex; border-bottom:1px solid var(--border); background:var(--bg-secondary); margin:-24px -24px 16px -24px;">
                 <button class="vms-tab-btn active" data-stab="1" onclick="switchVmSettingsTab(1)"
                     style="flex:1; padding:10px 16px; border:none; background:none; color:var(--text-primary); font-size:13px; font-weight:600; cursor:pointer; border-bottom:2px solid var(--accent); transition:all .2s;">
-                    ⚙️ General
+                    General
                 </button>
                 <button class="vms-tab-btn" data-stab="2" onclick="switchVmSettingsTab(2)"
                     style="flex:1; padding:10px 16px; border:none; background:none; color:var(--text-muted); font-size:13px; font-weight:600; cursor:pointer; border-bottom:2px solid transparent; transition:all .2s;">
-                    💾 Disks
+                    Disks
                 </button>
                 <button class="vms-tab-btn" data-stab="3" onclick="switchVmSettingsTab(3)"
                     style="flex:1; padding:10px 16px; border:none; background:none; color:var(--text-muted); font-size:13px; font-weight:600; cursor:pointer; border-bottom:2px solid transparent; transition:all .2s;">
-                    🌐 Network & Boot
+                    Network & Boot
                 </button>
                 <button class="vms-tab-btn" data-stab="4" onclick="switchVmSettingsTab(4)"
                     style="flex:1; padding:10px 16px; border:none; background:none; color:var(--text-muted); font-size:13px; font-weight:600; cursor:pointer; border-bottom:2px solid transparent; transition:all .2s;">
-                    🔌 Passthrough
+                    Passthrough
                 </button>
             </div>
 
@@ -19981,7 +19981,7 @@ async function showVmSettings(name) {
             <div class="vms-tab-page" id="vms-tab-2" style="display:none;">
                 <div style="margin-bottom:10px;">
                     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                        <h4 style="margin:0; font-size:14px;">💾 Storage Volumes</h4>
+                        <h4 style="margin:0; font-size:14px;">Storage Volumes</h4>
                     </div>
                     <div id="vm-settings-volumes" style="max-height:200px; overflow-y:auto;">${volumesHtml}</div>
                 </div>
@@ -20020,14 +20020,14 @@ async function showVmSettings(name) {
                             </select>
                         </div>
                     </div>
-                    <button class="btn btn-sm btn-primary" onclick="addVmVolume('${name}')" style="font-size:12px;">➕ Add Volume</button>
+                    <button class="btn btn-sm btn-primary" onclick="addVmVolume('${name}')" style="font-size:12px;">Add Volume</button>
                 </div>
             </div>
 
             <!-- ═══ Tab 3: Network & Boot ═══ -->
             <div class="vms-tab-page" id="vms-tab-3" style="display:none;">
                 <div style="padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);margin-bottom:12px;">
-                    <h4 style="margin:0 0 8px 0;font-size:13px;">🔌 Network Interface</h4>
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">Network Interface</h4>
                     <div style="font-size:11px;color:var(--text-muted);font-family:monospace;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:2px 12px;padding:6px 8px;background:var(--bg-primary);border-radius:6px;border:1px solid var(--border);">
                         <span>MAC: ${escapeHtml(vm.mac_address || 'auto')}</span>
                         <span>Model: ${escapeHtml(vm.net_model || 'virtio')}</span>
@@ -20053,7 +20053,7 @@ async function showVmSettings(name) {
                 <!-- Extra NICs -->
                 <div style="margin-top:12px; padding:12px; background:var(--bg-tertiary); border-radius:8px; border:1px solid var(--border);">
                     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                        <h4 style="margin:0; font-size:13px;">🔌 Additional NICs</h4>
+                        <h4 style="margin:0; font-size:13px;">Additional NICs</h4>
                         <button type="button" class="btn btn-sm" onclick="addExtraNicRow('edit-vm-extra-nics')"
                             style="font-size:11px; padding:2px 10px;">+ Add NIC</button>
                     </div>
@@ -20061,7 +20061,7 @@ async function showVmSettings(name) {
                     <div id="edit-vm-extra-nics"></div>
                 </div>
                 <div style="padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);margin-top:12px;">
-                    <h4 style="margin:0 0 8px 0;font-size:13px;">💿 Boot Options</h4>
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">Boot Options</h4>
                     <div class="form-group">
                         <label>ISO Path</label>
                         <input type="text" class="form-control" id="edit-vm-iso" value="${vm.iso_path || ''}"
@@ -20098,7 +20098,7 @@ async function showVmSettings(name) {
                 <div id="edit-vm-passthrough-preflight"></div>
                 <div style="padding:12px; background:var(--bg-tertiary); border:1px solid var(--border); border-radius:8px; margin-bottom:12px;">
                     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                        <h4 style="margin:0; font-size:13px;">🔌 USB Devices</h4>
+                        <h4 style="margin:0; font-size:13px;">USB Devices</h4>
                         <button type="button" class="btn btn-sm" onclick="reloadHostDevices(this.dataset.vm)"
                             data-vm="${escapeAttr(vm.name)}" style="font-size:11px; padding:2px 10px;">↻ Refresh</button>
                     </div>
@@ -20110,7 +20110,7 @@ async function showVmSettings(name) {
                     </div>
                 </div>
                 <div style="padding:12px; background:var(--bg-tertiary); border:1px solid var(--border); border-radius:8px;">
-                    <h4 style="margin:0 0 8px 0; font-size:13px;">🎮 PCI Devices</h4>
+                    <h4 style="margin:0 0 8px 0; font-size:13px;">PCI Devices</h4>
                     <small style="color:var(--text-muted); display:block; margin-bottom:8px;">
                         GPUs, HBAs, NVMe, etc. Devices in the same IOMMU group must be passed together.
                     </small>
@@ -20122,7 +20122,7 @@ async function showVmSettings(name) {
 
             <!-- Footer (always visible) -->
             <div style="display:flex; gap:8px; margin-top:16px; padding-top:12px; border-top:1px solid var(--border);">
-                <button class="btn btn-primary" onclick="saveVmSettings('${vm.name}')">💾 Save</button>
+                <button class="btn btn-primary" onclick="saveVmSettings('${vm.name}')">Save</button>
                 <button class="btn" onclick="closeContainerDetail()">Cancel</button>
             </div>
         `;
@@ -20177,13 +20177,13 @@ function renderPassthroughPreflight(pre) {
     if (!container) return;
     if (!pre || !pre.warnings || pre.warnings.length === 0) {
         container.innerHTML = `<div style="padding:8px 12px; background:rgba(34,197,94,0.08); border:1px solid rgba(34,197,94,0.3); border-radius:6px; font-size:12px; color:var(--text-secondary); margin-bottom:12px;">
-            ✓ Host ready for passthrough · IOMMU ${pre?.iommu_enabled?'on':'off'} · vfio-pci ${pre?.vfio_pci_loaded?'loaded':'missing'} · backend: ${escapeHtml(pre?.backend||'unknown')}
+            Host ready for passthrough · IOMMU ${pre?.iommu_enabled?'on':'off'} · vfio-pci ${pre?.vfio_pci_loaded?'loaded':'missing'} · backend: ${escapeHtml(pre?.backend||'unknown')}
         </div>`;
         return;
     }
     const items = pre.warnings.map(w => `<li style="margin:4px 0;">${escapeHtml(w)}</li>`).join('');
     container.innerHTML = `<div style="padding:10px 12px; background:rgba(245,158,11,0.08); border:1px solid rgba(245,158,11,0.4); border-radius:6px; font-size:12px; color:var(--text-secondary); margin-bottom:12px;">
-        <div style="font-weight:600; margin-bottom:6px;">⚠️ Passthrough preflight (backend: ${escapeHtml(pre.backend||'unknown')})</div>
+        <div style="font-weight:600; margin-bottom:6px;">Passthrough preflight (backend: ${escapeHtml(pre.backend||'unknown')})</div>
         <ul style="margin:0; padding-left:18px;">${items}</ul>
     </div>`;
 }
@@ -20604,14 +20604,14 @@ async function loadBackups() {
 async function populateStorageDropdown() {
     const sel = document.getElementById('backup-storage-select');
     if (!sel) return;
-    sel.innerHTML = '<option value="local:/var/lib/wolfstack/backups">📁 Local — /var/lib/wolfstack/backups</option>';
+    sel.innerHTML = '<option value="local:/var/lib/wolfstack/backups">Local — /var/lib/wolfstack/backups</option>';
     try {
         const resp = await fetch(apiUrl('/api/storage/mounts'));
         if (resp.ok) {
             const mounts = await resp.json();
-            const ICONS = { s3: '☁️', nfs: '📂', directory: '📁', wolfdisk: '💾', smb: '🖧' };
+            const ICONS = { s3: '', nfs: '', directory: '', wolfdisk: '', smb: '' };
             mounts.filter(m => m.status === 'mounted' && m.mount_point).forEach(m => {
-                const icon = ICONS[m.type] || '📦';
+                const icon = ICONS[m.type] || '';
                 const label = `${icon} ${m.name} — ${m.mount_point}`;
                 // Encode the mount type in the option value so
                 // getSelectedStorage() can map a WolfDisk mount to
@@ -20633,7 +20633,7 @@ async function populateStorageDropdown() {
             const pbs = await pbsResp.json();
             if (pbs.pbs_server) {
                 const pbsVal = `pbs:${pbs.pbs_server}`;
-                sel.innerHTML = `<option value="${escapeHtml(pbsVal)}">📦 PBS — ${escapeHtml(pbs.pbs_server)}/${escapeHtml(pbs.pbs_datastore)}</option>` + sel.innerHTML;
+                sel.innerHTML = `<option value="${escapeHtml(pbsVal)}">PBS — ${escapeHtml(pbs.pbs_server)}/${escapeHtml(pbs.pbs_datastore)}</option>` + sel.innerHTML;
                 sel.value = pbsVal;
             }
         }
@@ -20649,10 +20649,10 @@ function renderBackupTargets(targets) {
         return;
     }
 
-    const EMOJIS = { docker: '🐳', lxc: '📦', vm: '🖥️', config: '⚙️' };
+    const EMOJIS = { docker: '', lxc: '', vm: '', config: '' };
 
     container.innerHTML = targets.map(t => {
-        const emoji = EMOJIS[t.type] || '📄';
+        const emoji = EMOJIS[t.type] || '';
         // Build display name: prefer hostname, fall back to name
         let label = t.type === 'config' ? 'WolfStack Config' : (t.name || t.type);
         const typeLabel = t.type.toUpperCase();
@@ -20854,7 +20854,7 @@ function renderBackupHistory(backups) {
     backups.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
 
     tbody.innerHTML = backups.map(b => {
-        const typeEmoji = { docker: '🐳', lxc: '📦', vm: '🖥️', config: '⚙️' }[b.target?.type] || '📄';
+        const typeEmoji = { docker: '', lxc: '', vm: '', config: '' }[b.target?.type] || '';
         const typeName = (b.target?.type || 'unknown').toUpperCase();
         let targetName = b.target?.name || (b.target?.type === 'config' ? 'WolfStack Config' : 'Unknown');
         if (b.target?.hostname && b.target.hostname !== b.target.name) {
@@ -20867,10 +20867,10 @@ function renderBackupHistory(backups) {
         const errText = (b.error || '').trim();
         const errTitle = errText ? ` title="${escapeHtml(errText)}"` : '';
         const statusBadge = b.status === 'completed'
-            ? '<span class="badge" style="background:#22c55e; color:#fff;">✓ Completed</span>'
+            ? '<span class="badge" style="background:#22c55e; color:#fff;">Completed</span>'
             : b.status === 'failed'
-                ? `<span class="badge" style="background:#ef4444; color:#fff; cursor:help;"${errTitle}>✗ Failed</span>`
-                : '<span class="badge" style="background:#f59e0b; color:#000;">⏳ In Progress</span>';
+                ? `<span class="badge" style="background:#ef4444; color:#fff; cursor:help;"${errTitle}>Failed</span>`
+                : '<span class="badge" style="background:#f59e0b; color:#000;">In Progress</span>';
         const comments = b.comments ? `<div style="font-size:11px; color:var(--text-muted); margin-top:2px;">${escapeHtml(b.comments)}</div>` : '';
         // Volume / bind-mount summary for Docker backups (v20.11.0+).
         // Shows what's actually in this backup beyond the container image.
@@ -20885,11 +20885,11 @@ function renderBackupHistory(backups) {
             if (binds) parts.push(`${binds} bind${binds === 1 ? '' : 's'}`);
             if (parts.length) {
                 const tip = archived.map(m => `${m.mount_type}: ${m.source} → ${m.destination}`).join('\n');
-                mountsBadge += `<span class="badge" title="${escapeHtml(tip)}" style="background:rgba(59,130,246,0.15); color:#60a5fa; font-size:10px; margin-left:6px;">📦 ${parts.join(' + ')}</span>`;
+                mountsBadge += `<span class="badge" title="${escapeHtml(tip)}" style="background:rgba(59,130,246,0.15); color:#60a5fa; font-size:10px; margin-left:6px;">${parts.join(' + ')}</span>`;
             }
             if (skipped.length) {
                 const tip = skipped.map(m => `${m.mount_type} ${m.destination}: ${m.skipped_reason}`).join('\n');
-                mountsBadge += `<span class="badge" title="${escapeHtml(tip)}" style="background:rgba(245,158,11,0.15); color:#f59e0b; font-size:10px; margin-left:4px;">⚠ ${skipped.length} skipped</span>`;
+                mountsBadge += `<span class="badge" title="${escapeHtml(tip)}" style="background:rgba(245,158,11,0.15); color:#f59e0b; font-size:10px; margin-left:4px;">${skipped.length} skipped</span>`;
             }
         }
         const nodeLabel = b.node_hostname ? `<span style="font-size:11px; color:var(--text-muted);">${escapeHtml(b.node_hostname)}</span>` : '';
@@ -20900,7 +20900,7 @@ function renderBackupHistory(backups) {
         const errCell = (b.status === 'failed' && errText)
             ? `<div style="margin-top:4px; font-size:11px; color:#fca5a5; max-width:520px;">
                     <details>
-                        <summary style="cursor:pointer; list-style:none;">⚠ ${escapeHtml(errText.length > 140 ? errText.slice(0, 140) + '…' : errText)}</summary>
+                        <summary style="cursor:pointer; list-style:none;">${escapeHtml(errText.length > 140 ? errText.slice(0, 140) + '…' : errText)}</summary>
                         <pre style="margin:4px 0 0; padding:6px 8px; background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.25); border-radius:4px; color:#fecaca; font-size:11px; white-space:pre-wrap; word-break:break-word; max-height:180px; overflow:auto;">${escapeHtml(errText)}</pre>
                     </details>
                </div>`
@@ -20915,8 +20915,8 @@ function renderBackupHistory(backups) {
             <td>${date}</td>
             <td>${statusBadge}</td>
             <td style="text-align:right; white-space:nowrap;">
-                ${b.status === 'completed' ? `<button class="btn btn-sm btn-primary" onclick="restoreBackup('${b.id}')" style="margin-right:4px;">🔄 Restore</button>` : ''}
-                <button class="btn btn-sm" onclick="deleteBackup('${b.id}')" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);">🗑️</button>
+                ${b.status === 'completed' ? `<button class="btn btn-sm btn-primary" onclick="restoreBackup('${b.id}')" style="margin-right:4px;">Restore</button>` : ''}
+                <button class="btn btn-sm" onclick="deleteBackup('${b.id}')" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"></button>
             </td>
         </tr>`;
     }).join('');
@@ -20935,7 +20935,7 @@ function renderSchedules(schedules) {
     if (empty) empty.style.display = 'none';
 
     tbody.innerHTML = schedules.map(s => {
-        const targets = s.backup_all ? '🌐 All' : (s.targets || []).map(t => `${t.type}:${t.name}`).join(', ');
+        const targets = s.backup_all ? 'All' : (s.targets || []).map(t => `${t.type}:${t.name}`).join(', ');
         const storageLabel = formatStorageLabel(s.storage);
         const retention = s.retention > 0 ? `Keep ${s.retention}` : 'Unlimited';
         const enabled = s.enabled
@@ -20951,7 +20951,7 @@ function renderSchedules(schedules) {
             <td>${retention}</td>
             <td>${enabled}</td>
             <td style="text-align:right;">
-                <button class="btn btn-sm" onclick="deleteSchedule('${s.id}')" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);">🗑️</button>
+                <button class="btn btn-sm" onclick="deleteSchedule('${s.id}')" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"></button>
             </td>
         </tr>`;
     }).join('');
@@ -20960,13 +20960,13 @@ function renderSchedules(schedules) {
 function formatStorageLabel(storage) {
     if (!storage) return '—';
     switch (storage.type) {
-        case 'local': return `📁 ${storage.path || '/var/lib/wolfstack/backups'}`;
-        case 's3': return `☁️ s3://${storage.bucket || '?'}`;
-        case 'remote': return `🌐 ${storage.remote_url || '?'}`;
+        case 'local': return `${storage.path || '/var/lib/wolfstack/backups'}`;
+        case 's3': return `s3://${storage.bucket || '?'}`;
+        case 'remote': return `${storage.remote_url || '?'}`;
         case 'wolfdisk': {
             const sub = (storage.wolfdisk_subpath || '').trim().replace(/^\/+|\/+$/g, '');
             const base = (storage.path || '?').replace(/\/+$/, '');
-            return sub ? `💾 ${base}/${sub}` : `💾 ${base}`;
+            return sub ? `${base}/${sub}` : `${base}`;
         }
         default: return storage.type || '—';
     }
@@ -21000,8 +21000,8 @@ function appendBackupLog(line) {
     if (!log) return;
     // Color code lines
     let color = '#c9d1d9';
-    if (line.includes('✓')) color = '#3fb950';
-    else if (line.includes('✗') || line.includes('Failed') || line.includes('failed')) color = '#f85149';
+    if (line.includes('')) color = '#3fb950';
+    else if (line.includes('') || line.includes('Failed') || line.includes('failed')) color = '#f85149';
     else if (line.startsWith('[')) color = '#58a6ff';
     else if (line.startsWith('  vzdump') || line.startsWith('  INFO:')) color = '#8b949e';
     else if (line.startsWith('Done:')) color = '#d2a8ff';
@@ -21041,7 +21041,7 @@ async function backupSelected() {
     const clusterLabel = cluster_name || 'WolfStack';
 
     const backupBtn = document.querySelector('[onclick="backupSelected()"]');
-    if (backupBtn) { backupBtn.disabled = true; backupBtn.textContent = '⏳ Backing up...'; }
+    if (backupBtn) { backupBtn.disabled = true; backupBtn.textContent = 'Backing up...'; }
 
     const tbody = document.getElementById('backups-table');
     const allTargets = targets.length === document.querySelectorAll('.backup-target-cb').length;
@@ -21071,10 +21071,10 @@ async function backupSelected() {
 
     stopBackupProgressSpinner();
     const titleEl = document.getElementById('backup-progress-title');
-    if (titleEl) titleEl.textContent = '✅ Backup complete';
+    if (titleEl) titleEl.textContent = 'Backup complete';
     updateTaskLogEntry(taskId, { status: failed ? 'failed' : 'completed' });
 
-    if (backupBtn) { backupBtn.disabled = false; backupBtn.textContent = '⚡ Backup Now'; }
+    if (backupBtn) { backupBtn.disabled = false; backupBtn.textContent = 'Backup Now'; }
     setTimeout(() => loadBackups(), 3000);
 }
 
@@ -21183,7 +21183,7 @@ async function restoreBackup(id, overwrite) {
             showToast(`Restore failed: ${resultMsg}`, 'error');
             updateTaskLogEntry(taskId, { status: 'failed', description: resultMsg });
         } else {
-            showToast(resultMsg || '✅ Restore completed!', 'success');
+            showToast(resultMsg || 'Restore completed!', 'success');
             updateTaskLogEntry(taskId, { status: 'completed', description: resultMsg || 'Restore completed' });
         }
     } catch (e) {
@@ -21356,7 +21356,7 @@ function showPbsConfigSaved(cfg) {
             setS('pbs-saved-server', cfg.pbs_server);
             setS('pbs-saved-datastore', cfg.pbs_datastore);
             setS('pbs-saved-user', cfg.pbs_user);
-            var authType = cfg.has_token_secret ? '🔑 API Token' : (cfg.has_password ? '🔒 Password' : '⚠️ None');
+            var authType = cfg.has_token_secret ? 'API Token' : (cfg.has_password ? 'Password' : 'None');
             if (cfg.pbs_token_name) authType += ' (' + cfg.pbs_token_name + ')';
             setS('pbs-saved-auth', authType);
         }
@@ -21584,7 +21584,7 @@ async function loadPbsSnapshots() {
             }
         });
 
-        const TYPE_EMOJIS = { vm: '🖥️', ct: '📦', host: '🏠' };
+        const TYPE_EMOJIS = { vm: '', ct: '', host: '' };
         const TYPE_LABELS = { vm: 'VM', ct: 'Container', host: 'Host' };
 
         // Sort newest first by backup-time
@@ -21601,7 +21601,7 @@ async function loadPbsSnapshots() {
             var btime = s['backup-time'] || s.backup_time || '';
             var size = s.size || 0;
             var comment = s.comment || s.notes || '';
-            var emoji = TYPE_EMOJIS[btype] || '📄';
+            var emoji = TYPE_EMOJIS[btype] || '';
             var typeLabel = TYPE_LABELS[btype] || btype;
 
             var timeStr = '—';
@@ -21888,7 +21888,7 @@ function renderClusterBackupHistory(backups) {
     backups.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
 
     tbody.innerHTML = backups.slice(0, 100).map(b => {
-        const typeEmoji = { docker: '🐳', lxc: '📦', vm: '🖥️', config: '⚙️' }[b.target?.type] || '📄';
+        const typeEmoji = { docker: '', lxc: '', vm: '', config: '' }[b.target?.type] || '';
         const typeName = (b.target?.type || 'unknown').toUpperCase();
         let targetName = b.target?.name || (b.target?.type === 'config' ? 'WolfStack Config' : 'Unknown');
         if (b.target?.hostname && b.target.hostname !== b.target.name) {
@@ -22156,7 +22156,7 @@ function renderClusterScheduleTargets() {
     const container = document.getElementById('cb-schedule-targets-list');
     if (!container) return;
 
-    const EMOJIS = { docker: '🐳', lxc: '📦', vm: '🖥️', config: '⚙️' };
+    const EMOJIS = { docker: '', lxc: '', vm: '', config: '' };
     const sorted = sortNodesByClusterThenName(Object.values(_clusterScheduleTargets).map(v => v.node));
 
     let html = '';
@@ -22183,7 +22183,7 @@ function renderClusterScheduleTargets() {
             html += `<span style="color:var(--text-muted); font-size:12px; grid-column:1/-1;">No backup targets found</span>`;
         } else {
             for (const t of targets) {
-                const emoji = EMOJIS[t.type] || '📄';
+                const emoji = EMOJIS[t.type] || '';
                 const label = t.type === 'config' ? 'WolfStack Config' : (t.name || t.type);
                 const val = JSON.stringify({ type: t.type, name: t.name || '' }).replace(/"/g, '&quot;');
                 html += `<label style="display:flex; align-items:center; gap:8px; padding:6px 10px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); cursor:pointer; font-size:12px;"
@@ -22352,7 +22352,7 @@ async function loadPbsConfigFromNode() {
     modal.innerHTML = `
         <div class="modal" style="max-width:560px;">
             <div class="modal-header">
-                <h3>📥 Pull PBS Config from Node</h3>
+                <h3>Pull PBS Config from Node</h3>
                 <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">&times;</button>
             </div>
             <div class="modal-body">
@@ -22532,7 +22532,7 @@ function toggleAiChatFullscreen() {
         panel.style.right = '0';
         panel.style.bottom = '0';
         panel.style.borderRadius = '0';
-        if (btn) { btn.textContent = '❐'; btn.title = 'Exit fullscreen (Esc)'; }
+        if (btn) { btn.textContent = ''; btn.title = 'Exit fullscreen (Esc)'; }
     } else {
         panel.style.width = _aiChatFsPrev.width;
         panel.style.height = _aiChatFsPrev.height;
@@ -22542,7 +22542,7 @@ function toggleAiChatFullscreen() {
         panel.style.bottom = _aiChatFsPrev.bottom;
         panel.style.borderRadius = _aiChatFsPrev.borderRadius;
         _aiChatFsPrev = null;
-        if (btn) { btn.textContent = '⛶'; btn.title = 'Toggle fullscreen (Esc to exit)'; }
+        if (btn) { btn.textContent = ''; btn.title = 'Toggle fullscreen (Esc to exit)'; }
     }
 }
 
@@ -22655,7 +22655,7 @@ async function _aiCreateProposedAgent(cardEl) {
         });
         var data = await resp.json();
         if (resp.ok && data.id) {
-            cardEl.innerHTML = '<div style="color:#10b981;">✅ Agent <strong>' + escapeHtml(data.name) + '</strong> created. <a href="#" onclick="selectView(\'wolfagents\'); return false;">Open WolfAgents →</a></div>';
+            cardEl.innerHTML = '<div style="color:#10b981;">Agent <strong>' + escapeHtml(data.name) + '</strong> created. <a href="#" onclick="selectView(\'wolfagents\'); return false;">Open WolfAgents →</a></div>';
             if (typeof wolfAgentsLoad === 'function') wolfAgentsLoad();
         } else {
             showToast('Create failed: ' + (data.error || ('HTTP ' + resp.status)), 'error');
@@ -22713,7 +22713,7 @@ async function sendAiMessage() {
             } else {
                 var errDiv = document.createElement('div');
                 errDiv.style.cssText = 'background:var(--bg-tertiary);border-radius:12px;padding:12px 16px;max-width:85%;align-self:flex-start;font-size:13px;color:var(--text);';
-                errDiv.innerHTML = '<span style="color:var(--danger);">⚠️ Could not draft agent: ' + escapeHtml(pd.error || ('HTTP ' + p.status)) + '</span>';
+                errDiv.innerHTML = '<span style="color:var(--danger);">Could not draft agent: ' + escapeHtml(pd.error || ('HTTP ' + p.status)) + '</span>';
                 messages.appendChild(errDiv);
             }
             messages.scrollTop = messages.scrollHeight;
@@ -22755,7 +22755,7 @@ async function sendAiMessage() {
         aiDiv.style.cssText = 'background:var(--bg-tertiary);border-radius:12px;padding:12px 16px;max-width:85%;align-self:flex-start;font-size:13px;line-height:1.5;color:var(--text);';
 
         if (data.error) {
-            aiDiv.innerHTML = '<span style="color:var(--danger);">⚠️ ' + escapeHtml(data.error) + '</span>';
+            aiDiv.innerHTML = '<span style="color:var(--danger);">' + escapeHtml(data.error) + '</span>';
         } else {
             aiDiv.innerHTML = formatAiResponse(data.response || '');
         }
@@ -22774,7 +22774,7 @@ async function sendAiMessage() {
         if (t) t.remove();
         var errDiv = document.createElement('div');
         errDiv.style.cssText = 'background:var(--bg-tertiary);border-radius:12px;padding:12px 16px;max-width:85%;align-self:flex-start;font-size:13px;color:var(--danger);';
-        errDiv.textContent = '⚠️ ' + e.message;
+        errDiv.textContent = '' + e.message;
         messages.appendChild(errDiv);
         if (statusEl) statusEl.textContent = 'Error';
     }
@@ -23058,9 +23058,9 @@ async function loadAiStatus() {
         var detailEl = document.getElementById('ai-status-detail');
         if (textEl) {
             if (status.configured) {
-                textEl.textContent = '✅ AI Agent Active — ' + status.provider + ' (' + status.model + ')';
+                textEl.textContent = 'AI Agent Active — ' + status.provider + ' (' + status.model + ')';
             } else {
-                textEl.textContent = '⚠️ Not Configured — add an API key to enable';
+                textEl.textContent = 'Not Configured — add an API key to enable';
             }
         }
         if (detailEl) {
@@ -23069,7 +23069,7 @@ async function loadAiStatus() {
             parts.push('Alerts: ' + status.alert_count);
             parts.push('Messages: ' + status.chat_message_count);
             if (status.last_health_check) {
-                parts.push('Last check: ' + (status.last_health_check === 'ALL_OK' ? '✅ OK' : '⚠️ Issues found'));
+                parts.push('Last check: ' + (status.last_health_check === 'ALL_OK' ? 'OK' : 'Issues found'));
             }
             detailEl.textContent = parts.join(' • ');
         }
@@ -23089,7 +23089,7 @@ async function loadAiAlerts() {
             return;
         }
         container.innerHTML = alerts.slice(-20).reverse().map(function (a) {
-            var icon = a.severity === 'critical' ? '🔴' : a.severity === 'warning' ? '🟡' : '🔵';
+            var icon = a.severity === 'critical' ? '' : a.severity === 'warning' ? '' : '';
             var time = new Date(a.timestamp * 1000).toLocaleString();
             return '<div style="padding:8px;border-bottom:1px solid var(--border);">' +
                 '<div style="display:flex;justify-content:space-between;">' +
@@ -23179,7 +23179,7 @@ async function testAiConnection() {
         var data = await resp.json();
 
         if (data.ok) {
-            finish(true, '✅ AI connection successful',
+            finish(true, 'AI connection successful',
                 'Provider: ' + (data.provider || '?')
                 + '\nModel:    ' + (data.model || '?')
                 + '\nURL:      ' + (data.url || '?')
@@ -23192,7 +23192,7 @@ async function testAiConnection() {
                 request: 'Request failed',
                 timeout: 'Request timed out',
             };
-            finish(false, '❌ ' + (stageMap[data.stage] || 'Test failed'),
+            finish(false, '' + (stageMap[data.stage] || 'Test failed'),
                 'Provider: ' + (data.provider || '?')
                 + '\nModel:    ' + (data.model || '?')
                 + '\nURL:      ' + (data.url || '?')
@@ -23201,7 +23201,7 @@ async function testAiConnection() {
             );
         }
     } catch (e) {
-        finish(false, '❌ Test failed', 'Browser-side error: ' + (e.message || String(e)));
+        finish(false, 'Test failed', 'Browser-side error: ' + (e.message || String(e)));
     }
 }
 
@@ -23210,9 +23210,9 @@ async function sendTestEmail() {
         var resp = await fetch('/api/ai/test-email', { method: 'POST' });
         var data = await resp.json();
         if (data.error) {
-            showModal('❌ ' + data.error, 'Email Error');
+            showModal('' + data.error, 'Email Error');
         } else {
-            showModal('✅ ' + (data.message || 'Test email sent!'), 'Email Sent');
+            showModal('' + (data.message || 'Test email sent!'), 'Email Sent');
         }
     } catch (e) {
         showModal('Failed to send test email: ' + e.message, 'Email Error');
@@ -23356,7 +23356,7 @@ function loadMySQLEditor() {
 
             containerSelect.innerHTML = '<option value="">Manual connection</option>';
             containers.forEach((c, i) => {
-                const label = `🐳 ${c.name} (${c.image}) — ${c.host}:${c.port}`;
+                const label = `${c.name} (${c.image}) — ${c.host}:${c.port}`;
                 containerSelect.innerHTML += `<option value="${i}">${label}</option>`;
             });
             containerSelect.style.display = 'inline-block';
@@ -23403,7 +23403,7 @@ async function mysqlConnect() {
 
     const btn = document.getElementById('mysql-connect-btn');
     btn.disabled = true;
-    btn.textContent = '⏳ Connecting...';
+    btn.textContent = 'Connecting...';
 
     const badge = document.getElementById('mysql-status-badge');
     badge.textContent = 'Connecting...';
@@ -23484,7 +23484,7 @@ async function mysqlConnect() {
         showToast(msg, 'error');
     } finally {
         btn.disabled = false;
-        btn.textContent = '🔌 Connect';
+        btn.textContent = 'Connect';
     }
 }
 
@@ -23563,10 +23563,10 @@ async function mysqlLoadDatabases() {
                      onmouseover="this.style.background='var(--bg-tertiary)'" onmouseout="this.style.background='none'">
                     <span onclick="mysqlToggleDb('${db}')" style="display:flex; align-items:center; gap:6px; flex:1;">
                         <span class="mysql-db-arrow" id="mysql-arrow-${db}" style="font-size:10px; transition:transform 0.2s; display:inline-block;">▶</span>
-                        <span style="font-size:14px;">${isSystem ? '🔧' : '📁'}</span>
+                        <span style="font-size:14px;">${isSystem ? '' : ''}</span>
                         <span style="color:var(--text-primary); font-size:12px; ${isSystem ? 'opacity:0.6;' : ''}">${db}</span>
                     </span>
-                    <button onclick="event.stopPropagation(); mysqlDumpDatabase('${db}')" style="background:none; border:none; cursor:pointer; font-size:12px; opacity:0.5; padding:2px 4px;" title="Dump SQL" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">💾</button>
+                    <button onclick="event.stopPropagation(); mysqlDumpDatabase('${db}')" style="background:none; border:none; cursor:pointer; font-size:12px; opacity:0.5; padding:2px 4px;" title="Dump SQL" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'"></button>
                 </div>
                 <div id="mysql-tables-${db}" style="display:none; padding-left:28px;"></div>
             </div>`;
@@ -23621,7 +23621,7 @@ async function mysqlToggleDb(db) {
 
         let html = '';
         for (const t of tables) {
-            const icon = t.type === 'VIEW' ? '👁️' : '📄';
+            const icon = t.type === 'VIEW' ? '' : '';
             const rows = t.rows != null ? ` (${Number(t.rows).toLocaleString()})` : '';
             const isActive = (mysqlCurrentDb === db && mysqlCurrentTable === t.name);
             html += `<div onclick="mysqlSelectTable('${db}', '${t.name.replace(/'/g, "\\'")}')"
@@ -23648,7 +23648,7 @@ async function mysqlSelectTable(db, table) {
 
     // Update table info in header
     document.getElementById('mysql-table-info').innerHTML =
-        `<span style="font-size:14px;">📄</span> <strong>${db}</strong>.<strong>${table}</strong>`;
+        `<span style="font-size:14px;"></span> <strong>${db}</strong>.<strong>${table}</strong>`;
 
     // Highlight active table in tree
     document.querySelectorAll('.mysql-table-item').forEach(el => {
@@ -23755,7 +23755,7 @@ function mysqlRenderGrid(columns, rows, container) {
         const bgColor = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
         html += `<tr style="background:${bgColor}; transition:background 0.1s; cursor:pointer;" onmouseover="this.style.background='var(--bg-card-hover,rgba(255,255,255,0.04))'" onmouseout="this.style.background='${bgColor}'" ondblclick="mysqlEditRow(${i})">`;
         html += `<td style="padding:4px 6px; border-bottom:1px solid var(--border); text-align:center;">
-            <button class="btn btn-sm" onclick="event.stopPropagation(); mysqlEditRow(${i})" style="font-size:10px; padding:2px 5px; background:var(--bg-tertiary); color:var(--text-muted); border:1px solid var(--border);" title="Edit row">✏️</button>
+            <button class="btn btn-sm" onclick="event.stopPropagation(); mysqlEditRow(${i})" style="font-size:10px; padding:2px 5px; background:var(--bg-tertiary); color:var(--text-muted); border:1px solid var(--border);" title="Edit row"></button>
         </td>`;
         for (let j = 0; j < columns.length; j++) {
             const val = j < row.length ? row[j] : null;
@@ -23839,7 +23839,7 @@ function mysqlShowEditForm(rowIndex) {
                         const inputId = 'mysql-edit-' + j;
                         const nullId = 'mysql-null-' + j;
                         return `<div style="display:grid; grid-template-columns:140px 1fr auto; gap:8px; align-items:start;">
-                            <label style="font-size:12px; font-weight:600; color:var(--text-secondary); padding-top:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(col)}${isPK ? ' (Primary Key)' : ''}">${isPK ? '🔑 ' : ''}${escapeHtml(col)}</label>
+                            <label style="font-size:12px; font-weight:600; color:var(--text-secondary); padding-top:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(col)}${isPK ? ' (Primary Key)' : ''}">${isPK ? '' : ''}${escapeHtml(col)}</label>
                             ${isLong
                                 ? `<textarea id="${inputId}" class="form-control" rows="3" style="font-size:12px; font-family:var(--font-mono); resize:vertical;${isPK ? ' opacity:0.6;' : ''}" ${isNull ? 'disabled placeholder="NULL"' : ''} ${isPK ? 'readonly' : ''}>${escapeHtml(displayVal)}</textarea>`
                                 : `<input id="${inputId}" type="text" class="form-control" value="${escapeHtml(displayVal)}" style="font-size:12px; font-family:var(--font-mono);${isPK ? ' opacity:0.6;' : ''}" ${isNull ? 'disabled placeholder="NULL"' : ''} ${isPK ? 'readonly' : ''}>`
@@ -24024,8 +24024,8 @@ async function mysqlLoadStructure() {
 
         // Toolbar
         let html = `<div style="padding:10px 14px; display:flex; gap:8px; border-bottom:1px solid var(--border); align-items:center;">
-            <button onclick="mysqlAddColumnDialog()" style="background:var(--accent-primary); color:#fff; border:none; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px; font-weight:500;">➕ Add Column</button>
-            <button onclick="mysqlRenameTableDialog()" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px;">✏️ Rename Table</button>
+            <button onclick="mysqlAddColumnDialog()" style="background:var(--accent-primary); color:#fff; border:none; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px; font-weight:500;">Add Column</button>
+            <button onclick="mysqlRenameTableDialog()" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px;">Rename Table</button>
             <div style="flex:1;"></div>
             <span style="color:var(--text-muted); font-size:11px;">${cols.length} column${cols.length !== 1 ? 's' : ''} · ${mysqlCurrentDb}.${mysqlCurrentTable}</span>
         </div>`;
@@ -24057,13 +24057,13 @@ async function mysqlLoadStructure() {
             html += `<tr style="background:${bgColor};">
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); font-weight:500; color:var(--text-primary);">${escapeHtml(c.name)}</td>
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:#e67e22;">${escapeHtml(c.type)}</td>
-                <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">${c.nullable ? '✅' : '❌'}</td>
+                <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">${c.nullable ? '' : ''}</td>
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border);">${keyBadge}</td>
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:var(--text-muted);">${c.default != null ? escapeHtml(String(c.default)) : '<span style="font-style:italic;">NULL</span>'}</td>
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:var(--text-muted);">${escapeHtml(c.extra || '')}</td>
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">
-                    <button onclick='mysqlModifyColumnDialog(${colJson})' style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px; margin-right:4px;" title="Modify column">✏️</button>
-                    <button onclick="mysqlDropColumn('${escapeHtml(c.name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop column">🗑️</button>
+                    <button onclick='mysqlModifyColumnDialog(${colJson})' style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px; margin-right:4px;" title="Modify column"></button>
+                    <button onclick="mysqlDropColumn('${escapeHtml(c.name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop column"></button>
                 </td>
             </tr>`;
         }
@@ -24080,7 +24080,7 @@ async function mysqlLoadStructure() {
             <div style="font-size:14px; font-weight:500; margin-bottom:8px;">${isTimeout ? 'Request Timed Out' : 'Connection Error'}</div>
             <div style="font-size:12px; color:var(--text-muted); margin-bottom:12px;">${detail}</div>
             <div style="font-size:11px; color:var(--text-muted); font-family:var(--font-mono);">URL: ${escapeHtml(url)}</div>
-            <button onclick="mysqlLoadStructure()" style="margin-top:12px; background:var(--accent-primary); color:#fff; border:none; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px;">🔄 Retry</button>
+            <button onclick="mysqlLoadStructure()" style="margin-top:12px; background:var(--accent-primary); color:#fff; border:none; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px;">Retry</button>
         </div>`;
     }
 }
@@ -24130,7 +24130,7 @@ async function mysqlLoadIndexes() {
         }
 
         let html = `<div style="padding:10px 14px; display:flex; gap:8px; border-bottom:1px solid var(--border); align-items:center;">
-            <button onclick="mysqlAddIndexDialog()" style="background:var(--accent-primary); color:#fff; border:none; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px; font-weight:500;">➕ Add Index</button>
+            <button onclick="mysqlAddIndexDialog()" style="background:var(--accent-primary); color:#fff; border:none; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px; font-weight:500;">Add Index</button>
             <div style="flex:1;"></div>
             <span style="color:var(--text-muted); font-size:11px;">${Object.keys(indexes).length} index${Object.keys(indexes).length !== 1 ? 'es' : ''}</span>
         </div>`;
@@ -24158,7 +24158,7 @@ async function mysqlLoadIndexes() {
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center; color:var(--text-muted);">${escapeHtml(idx.type)}</td>
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">${badge || '—'}</td>
                 <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">
-                    ${isPrimary ? '' : `<button onclick="mysqlDropIndex('${escapeHtml(name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop index">🗑️</button>`}
+                    ${isPrimary ? '' : `<button onclick="mysqlDropIndex('${escapeHtml(name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop index"></button>`}
                 </td>
             </tr>`;
             i++;
@@ -24174,7 +24174,7 @@ function mysqlAddIndexDialog() {
     const modal = document.createElement('div');
     modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:10000;';
     modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:24px; width:420px; max-width:90vw;">
-        <h3 style="margin:0 0 16px; font-size:16px; color:var(--text-primary);">🔑 Add Index to ${escapeHtml(mysqlCurrentTable)}</h3>
+        <h3 style="margin:0 0 16px; font-size:16px; color:var(--text-primary);">Add Index to ${escapeHtml(mysqlCurrentTable)}</h3>
         <div style="display:flex; flex-direction:column; gap:12px;">
             <div>
                 <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">Index Name</label>
@@ -24277,7 +24277,7 @@ async function mysqlLoadTriggers() {
         const rows = data.rows || [];
 
         let html = `<div style="padding:10px 14px; display:flex; gap:8px; border-bottom:1px solid var(--border); align-items:center;">
-            <button onclick="mysqlAddTriggerDialog()" style="background:var(--accent-primary); color:#fff; border:none; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px; font-weight:500;">➕ Add Trigger</button>
+            <button onclick="mysqlAddTriggerDialog()" style="background:var(--accent-primary); color:#fff; border:none; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px; font-weight:500;">Add Trigger</button>
             <div style="flex:1;"></div>
             <span style="color:var(--text-muted); font-size:11px;">${rows.length} trigger${rows.length !== 1 ? 's' : ''}</span>
         </div>`;
@@ -24306,7 +24306,7 @@ async function mysqlLoadTriggers() {
                     <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:#e67e22;">${escapeHtml(event)}</td>
                     <td style="padding:8px 14px; border-bottom:1px solid var(--border); font-family:var(--font-mono); color:var(--text-muted); font-size:12px; max-width:400px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(stmt)}">${escapeHtml(stmt)}</td>
                     <td style="padding:8px 14px; border-bottom:1px solid var(--border); text-align:center;">
-                        <button onclick="mysqlDropTrigger('${escapeHtml(name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop trigger">🗑️</button>
+                        <button onclick="mysqlDropTrigger('${escapeHtml(name)}')" style="background:rgba(231,76,60,0.1); border:1px solid rgba(231,76,60,0.3); color:#e74c3c; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;" title="Drop trigger"></button>
                     </td>
                 </tr>`;
             });
@@ -24322,7 +24322,7 @@ function mysqlAddTriggerDialog() {
     const modal = document.createElement('div');
     modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:10000;';
     modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:24px; width:500px; max-width:90vw;">
-        <h3 style="margin:0 0 16px; font-size:16px; color:var(--text-primary);">⚡ Create Trigger on ${escapeHtml(mysqlCurrentTable)}</h3>
+        <h3 style="margin:0 0 16px; font-size:16px; color:var(--text-primary);">Create Trigger on ${escapeHtml(mysqlCurrentTable)}</h3>
         <div style="display:flex; flex-direction:column; gap:12px;">
             <div>
                 <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">Trigger Name</label>
@@ -24417,7 +24417,7 @@ function mysqlConfirmDestructive(message, detail) {
         modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:10001;';
         modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:24px; width:420px; max-width:90vw;">
             <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
-                <span style="font-size:28px;">⚠️</span>
+                <span style="font-size:28px;"></span>
                 <h3 style="margin:0; font-size:16px; color:#e74c3c;">Confirm Destructive Operation</h3>
             </div>
             <p style="color:var(--text-primary); font-size:13px; margin:0 0 8px; line-height:1.5;">${message}</p>
@@ -24467,7 +24467,7 @@ function confirmTypedYes(options) {
         modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:10001;';
         modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:24px; width:460px; max-width:92vw;">
             <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
-                <span style="font-size:28px;">⚠️</span>
+                <span style="font-size:28px;"></span>
                 <h3 style="margin:0; font-size:16px; color:#e74c3c;">${escapeHtml(title)}</h3>
             </div>
             <p style="color:var(--text-primary); font-size:13px; margin:0 0 8px; line-height:1.5;">${message}</p>
@@ -24807,7 +24807,7 @@ function mysqlCreateTableAddCol(name, type, nullable, pk, ai) {
         <label style="display:flex; align-items:center; gap:3px; font-size:11px; color:var(--text-muted); cursor:pointer; white-space:nowrap;" title="Auto Increment">
             <input type="checkbox" class="ct-col-ai" ${ai ? 'checked' : ''}> AI
         </label>
-        <button onclick="this.parentElement.remove(); mysqlCreateTableUpdatePreview()" style="background:none; border:none; color:#e74c3c; cursor:pointer; font-size:14px; padding:2px 6px;" title="Remove column">✕</button>
+        <button onclick="this.parentElement.remove(); mysqlCreateTableUpdatePreview()" style="background:none; border:none; color:#e74c3c; cursor:pointer; font-size:14px; padding:2px 6px;" title="Remove column"></button>
     `;
     container.appendChild(row);
 }
@@ -24900,15 +24900,15 @@ function mysqlDumpDatabase(db) {
     const modal = document.createElement('div');
     modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:10000;';
     modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:24px; width:380px; max-width:90vw;">
-        <h3 style="margin:0 0 16px; font-size:16px; color:var(--text-primary);">💾 Dump Database: ${escapeHtml(db)}</h3>
+        <h3 style="margin:0 0 16px; font-size:16px; color:var(--text-primary);">Dump Database: ${escapeHtml(db)}</h3>
         <p style="color:var(--text-muted); font-size:12px; margin:0 0 16px;">Choose what to include in the SQL dump file:</p>
         <div style="display:flex; flex-direction:column; gap:8px;">
             <button onclick="mysqlDoDump('${db}', false, this.closest('div[style*=fixed]'))" style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:14px 16px; border-radius:8px; cursor:pointer; text-align:left; transition:background 0.15s;" onmouseover="this.style.background='var(--bg-primary)'" onmouseout="this.style.background='var(--bg-tertiary)'">
-                <div style="font-size:13px; font-weight:500;">📐 Structure Only</div>
+                <div style="font-size:13px; font-weight:500;">Structure Only</div>
                 <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">CREATE TABLE statements only — no row data</div>
             </button>
             <button onclick="mysqlDoDump('${db}', true, this.closest('div[style*=fixed]'))" style="background:var(--bg-tertiary); border:1px solid var(--border); color:var(--text-primary); padding:14px 16px; border-radius:8px; cursor:pointer; text-align:left; transition:background 0.15s;" onmouseover="this.style.background='var(--bg-primary)'" onmouseout="this.style.background='var(--bg-tertiary)'">
-                <div style="font-size:13px; font-weight:500;">📦 Structure + Data</div>
+                <div style="font-size:13px; font-weight:500;">Structure + Data</div>
                 <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Full dump with CREATE TABLE and INSERT statements</div>
             </button>
         </div>
@@ -25023,7 +25023,7 @@ async function mysqlExecuteQuery() {
             // Modification result
             resultDiv.innerHTML = `<div style="padding:20px;">
                 <div style="padding:12px 16px; background:rgba(46,204,113,0.1); border:1px solid rgba(46,204,113,0.3); border-radius:6px; font-size:13px; color:#2ecc71;">
-                    ✅ ${escapeHtml(data.message || 'Query executed successfully')}
+                    ${escapeHtml(data.message || 'Query executed successfully')}
                     ${data.last_insert_id ? `<br><span style="font-size:12px; color:var(--text-muted);">Last insert ID: ${data.last_insert_id}</span>` : ''}
                 </div>
                 <div style="margin-top:8px; font-size:11px; color:var(--text-muted);">Executed in ${elapsed}s</div>
@@ -25164,7 +25164,7 @@ async function scanForIssues() {
             scaffoldHtml += '<div class="card" style="margin-bottom:16px;">';
             // Cluster header
             scaffoldHtml += '<div style="padding:12px 16px; background:linear-gradient(90deg, rgba(99,102,241,0.06), transparent); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px;">';
-            scaffoldHtml += '<span style="font-size:18px;">☁️</span>';
+            scaffoldHtml += '<span style="font-size:18px;"></span>';
             scaffoldHtml += '<span style="font-weight:600; font-size:14px; color:var(--text-primary);">' + escapeHtml(clusterName) + '</span>';
             scaffoldHtml += '<span style="font-size:12px; color:var(--text-muted);">' + clusterNodes.length + ' node' + (clusterNodes.length !== 1 ? 's' : '') + '</span>';
             scaffoldHtml += '</div>';
@@ -25183,7 +25183,7 @@ async function scanForIssues() {
                 scaffoldHtml += '<tr id="' + safeId + '" style="border-bottom:1px solid var(--border);">';
                 scaffoldHtml += '<td style="padding:12px 16px; white-space:nowrap;">';
                 scaffoldHtml += '<div style="display:flex; align-items:center; gap:8px;">';
-                scaffoldHtml += '<span style="font-size:16px;">🖥️</span>';
+                scaffoldHtml += '<span style="font-size:16px;"></span>';
                 scaffoldHtml += '<div>';
                 scaffoldHtml += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(node.hostname || node.id || 'local') + '</div>';
                 if (node.is_self) scaffoldHtml += '<div style="font-size:11px; color:var(--text-muted);">local</div>';
@@ -25206,7 +25206,7 @@ async function scanForIssues() {
         var bar = document.getElementById('issues-progress-bar');
         var text = document.getElementById('issues-progress-text');
         if (bar) bar.style.width = pct + '%';
-        if (text) text.textContent = completedNodes < totalNodes ? ('Scanning ' + completedNodes + '/' + totalNodes + ' nodes...') : (totalNodes + ' nodes scanned ✓');
+        if (text) text.textContent = completedNodes < totalNodes ? ('Scanning ' + completedNodes + '/' + totalNodes + ' nodes...') : (totalNodes + ' nodes scanned ');
     }
 
     // Helper to update summary counters
@@ -25238,17 +25238,17 @@ async function scanForIssues() {
         var nodeVersion = data.version || '?';
 
         var severityBadge = function (sev) {
-            var colors = { critical: { bg: 'rgba(239,68,68,0.15)', text: '#ef4444', icon: '🔴' }, warning: { bg: 'rgba(234,179,8,0.15)', text: '#eab308', icon: '🟡' }, info: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', icon: '🔵' } };
+            var colors = { critical: { bg: 'rgba(239,68,68,0.15)', text: '#ef4444', icon: '' }, warning: { bg: 'rgba(234,179,8,0.15)', text: '#eab308', icon: '' }, info: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', icon: '' } };
             var c = colors[sev] || colors.info;
             return '<span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:' + c.bg + '; color:' + c.text + ';">' + c.icon + ' ' + sev.toUpperCase() + '</span>';
         };
-        var categoryIcons = { cpu: '⚡', memory: '🧠', disk: '💾', swap: '🔄', load: '📈', service: '⚙️', container: '📦', scan: '🔍' };
+        var categoryIcons = { cpu: '', memory: '', disk: '', swap: '', load: '', service: '', container: '', scan: '' };
 
         var html = '';
         // Node
         html += '<td style="padding:12px 16px; white-space:nowrap;">';
         html += '<div style="display:flex; align-items:center; gap:8px;">';
-        html += '<span style="font-size:16px;">🖥️</span><div>';
+        html += '<span style="font-size:16px;"></span><div>';
         html += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(data.hostname || 'Unknown') + '</div>';
         if (data.is_self) html += '<div style="font-size:11px; color:var(--text-muted);">local</div>';
         html += '</div></div></td>';
@@ -25261,12 +25261,12 @@ async function scanForIssues() {
         // Issues
         html += '<td style="padding:12px 16px;">';
         if (issues.length === 0) {
-            html += '<span style="color:#10b981; font-weight:500;">✅ All clear</span>';
+            html += '<span style="color:#10b981; font-weight:500;">All clear</span>';
         } else {
             var order = { critical: 0, warning: 1, info: 2 };
             var sorted = issues.slice().sort(function (a, b) { return (order[a.severity] || 9) - (order[b.severity] || 9); });
             sorted.forEach(function (issue) {
-                var catIcon = categoryIcons[issue.category] || '❓';
+                var catIcon = categoryIcons[issue.category] || '';
                 html += '<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">';
                 html += severityBadge(issue.severity);
                 html += '<span style="font-size:14px;">' + catIcon + '</span>';
@@ -25329,7 +25329,7 @@ async function scanForIssues() {
     // Upgrade All button — always visible after scan
     if (upgradeAllBtn) {
         upgradeAllBtn.style.display = 'inline-block';
-        upgradeAllBtn.innerHTML = '⚡ Upgrade All (' + results.length + ')';
+        upgradeAllBtn.innerHTML = 'Upgrade All (' + results.length + ')';
     }
 
     // AI analysis
@@ -25343,7 +25343,7 @@ async function scanForIssues() {
         if (aiContent) aiContent.innerHTML = aiTexts.map(function (t) { return formatAiResponse(t); }).join('<hr style="border-color:var(--border); margin:16px 0;">');
     }
 
-    if (btn) { btn.disabled = false; btn.innerHTML = '🔄 Scan Now'; }
+    if (btn) { btn.disabled = false; btn.innerHTML = 'Scan Now'; }
 }
 
 function compareVersions(a, b) {
@@ -25367,11 +25367,11 @@ function renderIssueResults(results, latestVersion, clusters, clusterKeys) {
     results.forEach(function (r) { resultMap[r.node_id] = r; });
 
     var severityBadge = function (sev) {
-        var colors = { critical: { bg: 'rgba(239,68,68,0.15)', text: '#ef4444', icon: '🔴' }, warning: { bg: 'rgba(234,179,8,0.15)', text: '#eab308', icon: '🟡' }, info: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', icon: '🔵' } };
+        var colors = { critical: { bg: 'rgba(239,68,68,0.15)', text: '#ef4444', icon: '' }, warning: { bg: 'rgba(234,179,8,0.15)', text: '#eab308', icon: '' }, info: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', icon: '' } };
         var c = colors[sev] || colors.info;
         return '<span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:' + c.bg + '; color:' + c.text + ';">' + c.icon + ' ' + sev.toUpperCase() + '</span>';
     };
-    var categoryIcons = { cpu: '⚡', memory: '🧠', disk: '💾', swap: '🔄', load: '📈', service: '⚙️', container: '📦', scan: '🔍' };
+    var categoryIcons = { cpu: '', memory: '', disk: '', swap: '', load: '', service: '', container: '', scan: '' };
 
     var html = '';
     // If no cluster info, fall back to a simple list
@@ -25391,11 +25391,11 @@ function renderIssueResults(results, latestVersion, clusters, clusterKeys) {
         html += '<div class="card" style="margin-bottom:16px;">';
         // Cluster header
         html += '<div style="padding:12px 16px; background:linear-gradient(90deg, rgba(99,102,241,0.06), transparent); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px;">';
-        html += '<span style="font-size:18px;">☁️</span>';
+        html += '<span style="font-size:18px;"></span>';
         html += '<span style="font-weight:600; font-size:14px; color:var(--text-primary);">' + escapeHtml(clusterName) + '</span>';
         html += '<span style="font-size:12px; color:var(--text-muted);">' + clusterNodes.length + ' node' + (clusterNodes.length !== 1 ? 's' : '') + '</span>';
         if (clusterIssueCount === 0) {
-            html += '<span style="margin-left:auto; font-size:12px; color:#10b981; font-weight:500;">✅ All clear</span>';
+            html += '<span style="margin-left:auto; font-size:12px; color:#10b981; font-weight:500;">All clear</span>';
         } else {
             html += '<span style="margin-left:auto; font-size:12px; color:#eab308; font-weight:500;">' + clusterIssueCount + ' issue' + (clusterIssueCount !== 1 ? 's' : '') + '</span>';
         }
@@ -25424,7 +25424,7 @@ function renderIssueResults(results, latestVersion, clusters, clusterKeys) {
             // Node
             html += '<td style="padding:12px 16px; white-space:nowrap;">';
             html += '<div style="display:flex; align-items:center; gap:8px;">';
-            html += '<span style="font-size:16px;">🖥️</span><div>';
+            html += '<span style="font-size:16px;"></span><div>';
             html += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(r.hostname || 'Unknown') + '</div>';
             if (r.is_self) html += '<div style="font-size:11px; color:var(--text-muted);">local</div>';
             html += '</div></div></td>';
@@ -25435,19 +25435,19 @@ function renderIssueResults(results, latestVersion, clusters, clusterKeys) {
                 html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(234,179,8,0.15); color:#eab308; border:1px solid rgba(234,179,8,0.3);">v' + escapeHtml(nodeVersion) + ' ↑</span>';
                 html += '<div style="font-size:10px; color:var(--text-muted); margin-top:2px;">latest: v' + escapeHtml(latestVersion) + '</div>';
             } else {
-                html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3);">v' + escapeHtml(nodeVersion) + ' ✓</span>';
+                html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3);">v' + escapeHtml(nodeVersion) + ' </span>';
             }
             html += '</td>';
 
             // Issues
             html += '<td style="padding:12px 16px;">';
             if (issues.length === 0) {
-                html += '<span style="color:#10b981; font-weight:500;">✅ All clear</span>';
+                html += '<span style="color:#10b981; font-weight:500;">All clear</span>';
             } else {
                 var order = { critical: 0, warning: 1, info: 2 };
                 var sorted = issues.slice().sort(function (a, b) { return (order[a.severity] || 9) - (order[b.severity] || 9); });
                 sorted.forEach(function (issue) {
-                    var catIcon = categoryIcons[issue.category] || '❓';
+                    var catIcon = categoryIcons[issue.category] || '';
                     html += '<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">';
                     html += severityBadge(issue.severity);
                     html += '<span style="font-size:14px;">' + catIcon + '</span>';
@@ -25463,7 +25463,7 @@ function renderIssueResults(results, latestVersion, clusters, clusterKeys) {
             if (isBehind) {
                 html += '<button class="btn" onclick="issuesUpgradeNode(\'' + escapeHtml(r.node_id) + '\')" ';
                 html += 'style="padding:6px 14px; font-size:12px; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3); border-radius:6px; cursor:pointer;">';
-                html += '⚡ Upgrade WolfStack</button>';
+                html += 'Upgrade WolfStack</button>';
             } else {
                 html += '<span style="color:var(--text-muted); font-size:12px;">Up to date</span>';
             }
@@ -26126,11 +26126,11 @@ async function loadFleetContainers() {
     var clusterNames = Object.keys(clusters);
     clusterNames.forEach(function (cn) {
         if (clusterNames.length > 1) {
-            html += '<tr class="fleet-cluster-header"><td colspan="5" style="background:var(--bg-tertiary);font-weight:bold;padding:10px 16px;font-size:14px;border-bottom:2px solid var(--border);">🏢 ' + escapeHtml(cn) + '</td></tr>';
+            html += '<tr class="fleet-cluster-header"><td colspan="5" style="background:var(--bg-tertiary);font-weight:bold;padding:10px 16px;font-size:14px;border-bottom:2px solid var(--border);">' + escapeHtml(cn) + '</td></tr>';
         }
         clusters[cn].forEach(function (n) {
             var safeId = (n.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
-            html += '<tr class="fleet-server-header" id="fleet-server-' + safeId + '"><td colspan="5" style="background:var(--bg-secondary);padding:8px 16px' + (clusterNames.length > 1 ? ' 8px 32px' : '') + ';font-weight:600;border-bottom:1px solid var(--border);">🖥️ ' + escapeHtml(n.hostname || n.id || 'local') + (n.address ? ' <span style="color:var(--text-muted);font-weight:normal;font-size:12px;">(' + escapeHtml(n.address) + ')</span>' : '') + '</td></tr>';
+            html += '<tr class="fleet-server-header" id="fleet-server-' + safeId + '"><td colspan="5" style="background:var(--bg-secondary);padding:8px 16px' + (clusterNames.length > 1 ? ' 8px 32px' : '') + ';font-weight:600;border-bottom:1px solid var(--border);">' + escapeHtml(n.hostname || n.id || 'local') + (n.address ? ' <span style="color:var(--text-muted);font-weight:normal;font-size:12px;">(' + escapeHtml(n.address) + ')</span>' : '') + '</td></tr>';
             html += '<tr id="fleet-ph-' + safeId + '" style="color:var(--text-muted);"><td colspan="5" style="padding:12px 16px 12px 48px;"><span style="display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,0.15);border-top-color:var(--text-muted);border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:6px;"></span> Loading containers &amp; VMs...</td></tr>';
         });
     });
@@ -26154,15 +26154,15 @@ async function loadFleetContainers() {
         var segs = [];
         if (cpuPct >= 0) {
             var cc = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#f59e0b' : '#10b981';
-            segs.push(barSeg('⚡', cpuPct, cc, cpuLabel));
+            segs.push(barSeg('', cpuPct, cc, cpuLabel));
         }
         if (memPct >= 0) {
             var mc = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
-            segs.push(barSeg('🧠', memPct, mc, memLabel));
+            segs.push(barSeg('', memPct, mc, memLabel));
         }
         if (diskPct >= 0) {
             var dc = diskPct > 90 ? '#ef4444' : diskPct > 70 ? '#f59e0b' : '#10b981';
-            segs.push(barSeg('💾', diskPct, dc, diskLabel));
+            segs.push(barSeg('', diskPct, dc, diskLabel));
         }
         if (segs.length === 0) return '';
         return '<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="5" style="padding:4px 16px 6px 48px;border-top:none;">' +
@@ -26178,29 +26178,29 @@ async function loadFleetContainers() {
         // Control buttons
         if (r) {
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'stop\',this)" title="Stop">⏹️</button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'restart\',this)" title="Restart">🔄</button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'pause\',this)" title="Pause">⏸️</button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenConsole(\'' + nid + '\',\'docker\',\'' + eName + '\')" title="Console">💻</button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Remove">🗑️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'stop\',this)" title="Stop"></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'restart\',this)" title="Restart"></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'pause\',this)" title="Pause"></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenConsole(\'' + nid + '\',\'docker\',\'' + eName + '\')" title="Console"></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Remove"></button>';
         } else if (p) {
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'unpause\',this)" title="Unpause">▶️</button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console">💻</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console"></button>';
         } else {
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop">⏹️</button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart">🔄</button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console">💻</button>';
-            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'remove\',this)" title="Remove">🗑️</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop"></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart"></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console"></button>';
+            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'remove\',this)" title="Remove"></button>';
         }
         // Management buttons
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetViewLogs(\'' + nid + '\',\'docker\',\'' + eName + '\')" title="Logs">📜</button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');viewDockerVolumes(\'' + eName + '\')" title="Volumes">📁</button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');browseContainerFiles(\'docker\',\'' + eName + '\')" title="Browse Files">📂</button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openDockerSettings(\'' + eName + '\')" title="Settings">⚙️</button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openContainerConfigurator(\'docker\',\'' + eName + '\')" title="Configure">🔧</button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');cloneDockerContainer(\'' + eName + '\')" title="Clone">📋</button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');migrateDockerContainer(\'' + eName + '\')" title="Migrate">🚀</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetViewLogs(\'' + nid + '\',\'docker\',\'' + eName + '\')" title="Logs"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');viewDockerVolumes(\'' + eName + '\')" title="Volumes"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');browseContainerFiles(\'docker\',\'' + eName + '\')" title="Browse Files"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openDockerSettings(\'' + eName + '\')" title="Settings"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openContainerConfigurator(\'docker\',\'' + eName + '\')" title="Configure"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');cloneDockerContainer(\'' + eName + '\')" title="Clone"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');migrateDockerContainer(\'' + eName + '\')" title="Migrate"></button>';
         return h;
     }
 
@@ -26213,26 +26213,26 @@ async function loadFleetContainers() {
         // Control buttons
         if (r) {
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'stop\',this)" title="Stop">⏹️</button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'restart\',this)" title="Restart">🔄</button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'freeze\',this)" title="Freeze">⏸️</button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenConsole(\'' + nid + '\',\'lxc\',\'' + eName + '\')" title="Console">💻</button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Destroy">🗑️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'stop\',this)" title="Stop"></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'restart\',this)" title="Restart"></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'freeze\',this)" title="Freeze"></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenConsole(\'' + nid + '\',\'lxc\',\'' + eName + '\')" title="Console"></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Destroy"></button>';
         } else {
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop">⏹️</button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart">🔄</button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console">💻</button>';
-            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'destroy\',this)" title="Destroy">🗑️</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop"></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart"></button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console"></button>';
+            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'destroy\',this)" title="Destroy"></button>';
         }
         // Management buttons
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetViewLogs(\'' + nid + '\',\'lxc\',\'' + eName + '\')" title="Logs">📜</button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');browseContainerFiles(\'lxc\',\'' + eName + '\',\'' + ePath + '\')" title="Browse Files">📂</button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openLxcSettings(\'' + eName + '\')" title="Settings">⚙️</button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openContainerConfigurator(\'lxc\',\'' + eName + '\')" title="Configure">🔧</button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');cloneLxcContainer(\'' + eName + '\')" title="Clone">📋</button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');migrateLxcContainer(\'' + eName + '\')" title="Migrate">🚀</button>';
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');exportLxcContainer(\'' + eName + '\')" title="Export">📦</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetViewLogs(\'' + nid + '\',\'lxc\',\'' + eName + '\')" title="Logs"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');browseContainerFiles(\'lxc\',\'' + eName + '\',\'' + ePath + '\')" title="Browse Files"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openLxcSettings(\'' + eName + '\')" title="Settings"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openContainerConfigurator(\'lxc\',\'' + eName + '\')" title="Configure"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');cloneLxcContainer(\'' + eName + '\')" title="Clone"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');migrateLxcContainer(\'' + eName + '\')" title="Migrate"></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');exportLxcContainer(\'' + eName + '\')" title="Export"></button>';
         return h;
     }
 
@@ -26242,18 +26242,18 @@ async function loadFleetContainers() {
         var h = '';
         if (vm.running) {
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>';
-            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'stop\',this)" title="Stop">⏹️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'stop\',this)" title="Stop"></button>';
             var fleetVncPort = vm.vnc_ws_port || vm.vnc_port;
             if (fleetVncPort) {
-                h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenVnc(\'' + nid + '\',\'' + eName + '\',' + fleetVncPort + ')" title="VNC Console">🖥️</button>';
+                h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenVnc(\'' + nid + '\',\'' + eName + '\',' + fleetVncPort + ')" title="VNC Console"></button>';
             }
         } else {
             h += '<button class="btn btn-sm" style="' + BS + 'color:#22c55e;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>';
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop">⏹️</button>';
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');showVmSettings(\'' + eName + '\')" title="Settings">⚙️</button>';
-            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetDeleteVm(\'' + nid + '\',\'' + eName + '\')" title="Delete">🗑️</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop"></button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');showVmSettings(\'' + eName + '\')" title="Settings"></button>';
+            h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetDeleteVm(\'' + nid + '\',\'' + eName + '\')" title="Delete"></button>';
         }
-        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetShowVmLogs(\'' + nid + '\',\'' + eName + '\')" title="Logs">📋</button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetShowVmLogs(\'' + nid + '\',\'' + eName + '\')" title="Logs"></button>';
         return h;
     }
 
@@ -26289,7 +26289,7 @@ async function loadFleetContainers() {
                     );
                     var dSvcBadges = (c.services && c.services.length > 0) ? '<div style="margin-top:3px;">' + c.services.map(function(s) { var sc = s.status === 'running' ? '#10b981' : '#ef4444'; return '<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:' + sc + '22;color:' + sc + ';border:1px solid ' + sc + '44;margin-right:4px;">' + escapeHtml(s.name) + '</span>'; }).join('') + '</div>' : '';
                     var dNetExtra = (c.gateway ? '<div style="font-size:10px;color:var(--text-muted);">GW: ' + escapeHtml(c.gateway) + '</div>' : '') + (c.mac_address ? '<div style="font-size:10px;color:var(--text-muted);">MAC: ' + escapeHtml(c.mac_address) + '</div>' : '');
-                    rowsHtml += '<tr><td>🐳 Docker</td><td><strong>' + escapeHtml(c.name) + '</strong>' + dSvcBadges + '</td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || c.status || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + dNetExtra + '</td><td>' + dockerButtons(nodeId, c.name, c.state) + '</td></tr>' + sub;
+                    rowsHtml += '<tr><td>Docker</td><td><strong>' + escapeHtml(c.name) + '</strong>' + dSvcBadges + '</td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || c.status || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + dNetExtra + '</td><td>' + dockerButtons(nodeId, c.name, c.state) + '</td></tr>' + sub;
                 });
             }
         } catch (e) { }
@@ -26317,7 +26317,7 @@ async function loadFleetContainers() {
                     );
                     var lSvcBadges = (c.services && c.services.length > 0) ? '<div style="margin-top:3px;">' + c.services.map(function(s) { var sc = s.status === 'running' ? '#10b981' : '#ef4444'; return '<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:' + sc + '22;color:' + sc + ';border:1px solid ' + sc + '44;margin-right:4px;">' + escapeHtml(s.name) + '</span>'; }).join('') + '</div>' : '';
                     var lNetExtra = (c.gateway ? '<div style="font-size:10px;color:var(--text-muted);">GW: ' + escapeHtml(c.gateway) + '</div>' : '') + (c.mac_address ? '<div style="font-size:10px;color:var(--text-muted);">MAC: ' + escapeHtml(c.mac_address) + '</div>' : '');
-                    rowsHtml += '<tr><td>📦 LXC</td><td><strong>' + escapeHtml(c.hostname || c.name) + '</strong>' + lSvcBadges + (c.hostname ? '<div style="font-size:11px;color:var(--text-muted);">CT ' + escapeHtml(c.name) + '</div>' : '') + '</td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + lNetExtra + '</td><td>' + lxcButtons(nodeId, c.name, c.state, c.storage_path) + '</td></tr>' + sub;
+                    rowsHtml += '<tr><td>LXC</td><td><strong>' + escapeHtml(c.hostname || c.name) + '</strong>' + lSvcBadges + (c.hostname ? '<div style="font-size:11px;color:var(--text-muted);">CT ' + escapeHtml(c.name) + '</div>' : '') + '</td><td><span style="color:' + stateColor + '">●</span> ' + escapeHtml(c.state || '?') + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(c.ip_address || '-') + lNetExtra + '</td><td>' + lxcButtons(nodeId, c.name, c.state, c.storage_path) + '</td></tr>' + sub;
                 });
             }
         } catch (e) { }
@@ -26333,11 +26333,11 @@ async function loadFleetContainers() {
                     var ip = v.wolfnet_ip || '-';
                     var vmSub = '<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="5" style="padding:4px 16px 6px 48px;border-top:none;">' +
                         '<div style="display:flex;align-items:center;gap:16px;font-size:11px;">' +
-                            '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span>⚡</span><span>' + v.cpus + ' vCPU</span></div>' +
-                            '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span>🧠</span><span>' + v.memory_mb + ' MB</span></div>' +
-                            '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span>💾</span><span>' + (v.disk_size_gb || '?') + ' GiB</span></div>' +
+                            '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span></span><span>' + v.cpus + ' vCPU</span></div>' +
+                            '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span></span><span>' + v.memory_mb + ' MB</span></div>' +
+                            '<div style="flex:1;display:flex;align-items:center;gap:6px;"><span></span><span>' + (v.disk_size_gb || '?') + ' GiB</span></div>' +
                         '</div></td></tr>';
-                    rowsHtml += '<tr><td>🖥️ VM</td><td><strong>' + escapeHtml(v.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + statusText + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(ip) + '</td><td>' + vmButtons(nodeId, v) + '</td></tr>' + vmSub;
+                    rowsHtml += '<tr><td>VM</td><td><strong>' + escapeHtml(v.name) + '</strong></td><td><span style="color:' + stateColor + '">●</span> ' + statusText + '</td><td style="font-size:12px;font-family:monospace;">' + escapeHtml(ip) + '</td><td>' + vmButtons(nodeId, v) + '</td></tr>' + vmSub;
                 });
             }
         } catch (e) { }
@@ -26354,7 +26354,7 @@ async function loadFleetContainers() {
     }
 
     await Promise.all(wsNodes.map(function (node) { return scanNodeContainers(node); }));
-    if (btn) { btn.disabled = false; btn.innerHTML = '🔄 Refresh'; }
+    if (btn) { btn.disabled = false; btn.innerHTML = 'Refresh'; }
 }
 
 
@@ -26367,14 +26367,14 @@ let appStoreInstallAppId = null;
 let appStoreInstallTarget = 'docker';
 
 const APP_ICONS = {
-    'wordpress': '📝', 'nextcloud': '☁️', 'gitea': '🦊', 'grafana': '📊',
-    'prometheus': '🔥', 'postgresql': '🐘', 'mariadb': '🗄️', 'redis': '⚡',
-    'nginx': '🌐', 'traefik': '🔀', 'pihole': '🛡️', 'jellyfin': '🎬',
-    'portainer': '🐳', 'minio': '💾', 'code-server': '💻', 'homeassistant': '🏠',
-    'minecraft-java': '⛏️', 'minecraft-bedrock': '🧱', 'valheim': '⚔️',
-    'terraria': '🌳', 'palworld': '🦎', 'factorio': '🏭', 'cs2': '🔫',
-    'rust-game': '🪓', 'ark-survival': '🦖', 'satisfactory': '🔧',
-    'project-zomboid': '🧟', '7dtd': '💀',
+    'wordpress': '', 'nextcloud': '', 'gitea': '', 'grafana': '',
+    'prometheus': '', 'postgresql': '', 'mariadb': '', 'redis': '',
+    'nginx': '', 'traefik': '', 'pihole': '', 'jellyfin': '',
+    'portainer': '', 'minio': '', 'code-server': '', 'homeassistant': '',
+    'minecraft-java': '', 'minecraft-bedrock': '', 'valheim': '',
+    'terraria': '', 'palworld': '', 'factorio': '', 'cs2': '',
+    'rust-game': '', 'ark-survival': '', 'satisfactory': '',
+    'project-zomboid': '', '7dtd': '',
 };
 
 let appStoreViewMode = 'grid';
@@ -26412,14 +26412,14 @@ function renderAppStoreGrid() {
     filtered.sort((a, b) => a.name.localeCompare(b.name));
 
     grid.innerHTML = filtered.map(app => {
-        const icon = APP_ICONS[app.id] || '📦';
+        const icon = APP_ICONS[app.id] || '';
         const targets = [];
         if (app.docker) targets.push('Docker');
         if (app.lxc) targets.push('LXC');
         if (app.bare_metal) targets.push('Host');
         if (app.vm) targets.push('VM');
 
-        const docsLink = app.website ? `<a href="${escapeHtml(app.website)}" target="_blank" rel="noopener" title="Documentation" style="color:var(--text-muted); font-size:16px; text-decoration:none; padding:4px 6px; border-radius:6px; transition:color 0.2s, background 0.2s;" onmouseover="this.style.color='var(--accent-light)'; this.style.background='var(--accent-glow)'" onmouseout="this.style.color='var(--text-muted)'; this.style.background='none'">🔗</a>` : '';
+        const docsLink = app.website ? `<a href="${escapeHtml(app.website)}" target="_blank" rel="noopener" title="Documentation" style="color:var(--text-muted); font-size:16px; text-decoration:none; padding:4px 6px; border-radius:6px; transition:color 0.2s, background 0.2s;" onmouseover="this.style.color='var(--accent-light)'; this.style.background='var(--accent-glow)'" onmouseout="this.style.color='var(--text-muted)'; this.style.background='none'"></a>` : '';
 
         return `<div class="appstore-card">
             <div class="appstore-card-header">
@@ -26494,14 +26494,14 @@ function renderAppStoreTable() {
     html += '</tr></thead><tbody>';
 
     html += filtered.map(app => {
-        const icon = APP_ICONS[app.id] || '📦';
+        const icon = APP_ICONS[app.id] || '';
         const targets = [];
         if (app.docker) targets.push('<span class="appstore-target-badge">Docker</span>');
         if (app.lxc) targets.push('<span class="appstore-target-badge">LXC</span>');
         if (app.bare_metal) targets.push('<span class="appstore-target-badge">Host</span>');
         if (app.vm) targets.push('<span class="appstore-target-badge">VM</span>');
         if (app.docker && k8sClusters.length > 0) targets.push('<span class="appstore-target-badge" style="background:rgba(50,108,229,0.12);color:#326ce5;border-color:rgba(50,108,229,0.3);">K8s</span>');
-        const docsLink = app.website ? `<a href="${escapeHtml(app.website)}" target="_blank" rel="noopener" title="Docs" style="color:var(--text-muted); font-size:14px; text-decoration:none; margin-right:6px;">🔗</a>` : '';
+        const docsLink = app.website ? `<a href="${escapeHtml(app.website)}" target="_blank" rel="noopener" title="Docs" style="color:var(--text-muted); font-size:14px; text-decoration:none; margin-right:6px;"></a>` : '';
 
         return `<tr>
             <td style="white-space:nowrap;"><span style="font-size:18px; margin-right:8px;">${icon}</span><strong>${escapeHtml(app.name)}</strong></td>
@@ -26574,7 +26574,7 @@ function openAppStoreInstallModal(appId) {
         const status = n.online ? '' : ' [offline]';
         const self = n.is_self ? ' — this server' : '';
         const hasK8s = k8sNodeIds.has(n.id);
-        const k8sBadge = hasK8s ? ' ⎈ k8s' : '';
+        const k8sBadge = hasK8s ? ' k8s' : '';
         const label = `${n.hostname} (${n.address})${self}${k8sBadge}${status}`;
         return `<option value="${n.id}" data-k8s="${hasK8s}" ${n.is_self ? 'selected' : ''}>${escapeHtml(label)}</option>`;
     }).join('');
@@ -26652,11 +26652,11 @@ function rebuildAppStoreTargets(app) {
         // K8s node — only offer WolfKube (no raw Docker/LXC)
         if (app.docker) targets.push({ key: 'kubernetes', label: '&#9784; WolfKube' });
     } else {
-        if (app.docker) targets.push({ key: 'docker', label: '🐳 Docker' });
-        if (app.lxc) targets.push({ key: 'lxc', label: '📦 LXC' });
+        if (app.docker) targets.push({ key: 'docker', label: 'Docker' });
+        if (app.lxc) targets.push({ key: 'lxc', label: 'LXC' });
     }
-    if (app.bare_metal) targets.push({ key: 'bare_metal', label: '🖥️ Host' });
-    if (app.vm) targets.push({ key: 'vm', label: '💿 VM' });
+    if (app.bare_metal) targets.push({ key: 'bare_metal', label: 'Host' });
+    if (app.vm) targets.push({ key: 'vm', label: 'VM' });
 
     // Keep current target if still valid, else default to first
     if (!targets.some(t => t.key === appStoreInstallTarget)) {
@@ -26823,9 +26823,9 @@ async function populateAppStoreStorage() {
         const mountResp = await fetch(mountUrl);
         if (mountResp.ok) {
             const mounts = await mountResp.json();
-            const ICONS = { s3: '☁️', nfs: '📂', directory: '📁', wolfdisk: '💾', smb: '🖧' };
+            const ICONS = { s3: '', nfs: '', directory: '', wolfdisk: '', smb: '' };
             mounts.filter(m => m.status === 'mounted' && m.mount_point).forEach(m => {
-                const icon = ICONS[m.type] || '📦';
+                const icon = ICONS[m.type] || '';
                 sel.innerHTML += `<option value="${escapeHtml(m.mount_point)}">${icon} ${escapeHtml(m.name)} — ${escapeHtml(m.mount_point)}</option>`;
             });
         }
@@ -27202,7 +27202,7 @@ async function loadInstalledApps() {
         }
 
         listEl.innerHTML = installed.map(app => {
-            const icon = APP_ICONS[app.app_id] || '📦';
+            const icon = APP_ICONS[app.app_id] || '';
             const date = new Date(app.installed_at).toLocaleString();
             // InstalledApp uses `install_id` and `app_name` in the
             // backend JSON. Older code read `app.id` / `app.name` and
@@ -27222,11 +27222,11 @@ async function loadInstalledApps() {
             const jNm = JSON.stringify(displayName);
             const jNode = JSON.stringify(nodeId);
             const composeBadge = isCompose
-                ? `<span title="Deployed with Docker Compose" style="font-size:10px;font-weight:600;letter-spacing:0.4px;text-transform:uppercase;padding:2px 7px;border-radius:999px;background:rgba(59,130,246,0.18);color:#60a5fa;margin-left:6px;">🐙 compose</span>`
+                ? `<span title="Deployed with Docker Compose" style="font-size:10px;font-weight:600;letter-spacing:0.4px;text-transform:uppercase;padding:2px 7px;border-radius:999px;background:rgba(59,130,246,0.18);color:#60a5fa;margin-left:6px;">compose</span>`
                 : '';
             const composeButtons = isCompose
-                ? `<button class="btn btn-sm" onclick='appstoreViewCompose(${jId}, ${jNm}, ${jNode})' title="View compose file">📄 View</button>
-                   <button class="btn btn-sm" onclick='appstoreEditCompose(${jId}, ${jNm}, ${jNode})' title="Edit compose file">✏️ Edit</button>`
+                ? `<button class="btn btn-sm" onclick='appstoreViewCompose(${jId}, ${jNm}, ${jNode})' title="View compose file">View</button>
+                   <button class="btn btn-sm" onclick='appstoreEditCompose(${jId}, ${jNm}, ${jNode})' title="Edit compose file">Edit</button>`
                 : '';
             const nodeLabel = nodeHost ? ` · ${escapeHtml(nodeHost)}` : '';
             return `<div class="appstore-installed-card">
@@ -27239,7 +27239,7 @@ async function loadInstalledApps() {
                 </div>
                 <div style="display:flex;gap:6px;">
                     ${composeButtons}
-                    <button class="btn btn-danger btn-sm" onclick='uninstallApp(${jId}, ${jNm}, ${isCompose}, ${jNode})'>🗑️ Uninstall</button>
+                    <button class="btn btn-danger btn-sm" onclick='uninstallApp(${jId}, ${jNm}, ${isCompose}, ${jNode})'>Uninstall</button>
                 </div>
             </div>`;
         }).join('');
@@ -27341,7 +27341,7 @@ function appstoreShowComposeModal(installId, name, yaml, readOnly, nodeId) {
     modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.65); display:flex; align-items:center; justify-content:center; z-index:10001;';
     modal.innerHTML = `<div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; padding:20px; width:780px; max-width:94vw; max-height:88vh; display:flex; flex-direction:column;">
         <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
-            <span style="font-size:24px;">📄</span>
+            <span style="font-size:24px;"></span>
             <h3 style="margin:0; font-size:15px;">${escapeHtml(readOnly ? 'View' : 'Edit')} compose — ${escapeHtml(name)}</h3>
             <span style="font-size:10px;font-weight:600;letter-spacing:0.4px;text-transform:uppercase;padding:2px 7px;border-radius:999px;background:rgba(59,130,246,0.18);color:#60a5fa;">Beta</span>
         </div>
@@ -27403,7 +27403,7 @@ async function loadNodeSecurity() {
         container.innerHTML = renderSecurityComponents(node, data);
         loadSecurityConfigFiles();
     } catch (e) {
-        container.innerHTML = `<div class="card" style="border-color:rgba(239,68,68,0.3); grid-column:1/-1;"><div class="card-body" style="padding:24px;"><div style="color:#ef4444; font-size:14px;">⚠️ Failed to retrieve security status: ${escapeHtml(e.message)}</div></div></div>`;
+        container.innerHTML = `<div class="card" style="border-color:rgba(239,68,68,0.3); grid-column:1/-1;"><div class="card-body" style="padding:24px;"><div style="color:#ef4444; font-size:14px;">Failed to retrieve security status: ${escapeHtml(e.message)}</div></div></div>`;
     }
 }
 
@@ -27426,18 +27426,18 @@ function renderFail2banCard(node, f2b, nodePrefix) {
     let actions = '';
     if (installed) {
         actions = `
-            <button class="btn btn-sm" onclick="showFail2banSettings('${nodePrefix}')" style="flex:1;">⚙️ Settings</button>
-            <button class="btn btn-sm" onclick="showFail2banBanned('${nodePrefix}')" style="flex:1;">🚫 Banned (${bannedCount})</button>
-            <button class="btn btn-sm" onclick="showFail2banEditor('${nodePrefix}')" style="flex:1;">📝 jail.local</button>
+            <button class="btn btn-sm" onclick="showFail2banSettings('${nodePrefix}')" style="flex:1;">Settings</button>
+            <button class="btn btn-sm" onclick="showFail2banBanned('${nodePrefix}')" style="flex:1;">Banned (${bannedCount})</button>
+            <button class="btn btn-sm" onclick="showFail2banEditor('${nodePrefix}')" style="flex:1;">jail.local</button>
         `;
     } else {
-        actions = `<button class="btn btn-sm btn-primary" onclick="securityAction('${nodePrefix}security/fail2ban/install', 'POST', {}, this)" style="flex:1;">📥 Install</button>`;
+        actions = `<button class="btn btn-sm btn-primary" onclick="securityAction('${nodePrefix}security/fail2ban/install', 'POST', {}, this)" style="flex:1;">Install</button>`;
     }
     return `
     <div class="card" style="background:linear-gradient(135deg, rgba(34,197,94,0.08), rgba(59,130,246,0.04)); border-color:rgba(34,197,94,0.2);">
         <div class="card-body">
             <div style="display:flex; align-items:flex-start; gap:16px;">
-                <div style="font-size:40px; line-height:1;">🛡️</div>
+                <div style="font-size:40px; line-height:1;"></div>
                 <div style="flex:1;">
                     <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
                         <h3 style="margin:0; font-size:16px; font-weight:700;">Fail2ban</h3>
@@ -27462,17 +27462,17 @@ function renderUfwCard(node, ufw, nodePrefix) {
     let actions = '';
     if (installed) {
         actions = `
-            <button class="btn btn-sm" onclick="showUfwRules('${nodePrefix}')" style="flex:1;">📋 Manage Rules</button>
-            <button class="btn btn-sm" onclick="securityAction('${nodePrefix}security/ufw/toggle', 'POST', {enable: ${!isActive}}, this)" style="flex:1;">${isActive ? '⏸️ Disable' : '▶️ Enable'}</button>
+            <button class="btn btn-sm" onclick="showUfwRules('${nodePrefix}')" style="flex:1;">Manage Rules</button>
+            <button class="btn btn-sm" onclick="securityAction('${nodePrefix}security/ufw/toggle', 'POST', {enable: ${!isActive}}, this)" style="flex:1;">${isActive ? 'Disable' : '▶️ Enable'}</button>
         `;
     } else {
-        actions = `<button class="btn btn-sm btn-primary" onclick="securityAction('${nodePrefix}security/ufw/install', 'POST', {}, this)" style="flex:1;">📥 Install</button>`;
+        actions = `<button class="btn btn-sm btn-primary" onclick="securityAction('${nodePrefix}security/ufw/install', 'POST', {}, this)" style="flex:1;">Install</button>`;
     }
     return `
     <div class="card" style="background:linear-gradient(135deg, rgba(255,107,53,0.08), rgba(59,130,246,0.04)); border-color:rgba(255,107,53,0.2);">
         <div class="card-body">
             <div style="display:flex; align-items:flex-start; gap:16px;">
-                <div style="font-size:40px; line-height:1;">🔥</div>
+                <div style="font-size:40px; line-height:1;"></div>
                 <div style="flex:1;">
                     <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
                         <h3 style="margin:0; font-size:16px; font-weight:700;">UFW Firewall</h3>
@@ -27498,7 +27498,7 @@ function renderUpdatesCard(node, updates, nodePrefix) {
     <div class="card" style="background:linear-gradient(135deg, rgba(34,197,94,0.08), rgba(59,130,246,0.04)); border-color:rgba(34,197,94,0.2);">
         <div class="card-body">
             <div style="display:flex; align-items:flex-start; gap:16px;">
-                <div style="font-size:40px; line-height:1;">📦</div>
+                <div style="font-size:40px; line-height:1;"></div>
                 <div style="flex:1;">
                     <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
                         <h3 style="margin:0; font-size:16px; font-weight:700;">System Updates</h3>
@@ -27507,7 +27507,7 @@ function renderUpdatesCard(node, updates, nodePrefix) {
                     </div>
                     <p style="margin:0 0 12px; color:var(--text-secondary); font-size:13px;">Keep your system secure and stable by installing available security patches and updates.</p>
                     <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                        <button class="btn btn-sm" onclick="securityAction('${nodePrefix}security/updates/check', 'POST', {}, this)" style="flex:1;">🔍 Check</button>
+                        <button class="btn btn-sm" onclick="securityAction('${nodePrefix}security/updates/check', 'POST', {}, this)" style="flex:1;">Check</button>
                         ${hasUpdates ? `<button class="btn btn-sm btn-primary" onclick="securityAction('${nodePrefix}security/updates/apply', 'POST', {}, this)" style="flex:1;">⬆️ Install All</button>` : ''}
                     </div>
                 </div>
@@ -27523,7 +27523,7 @@ function renderIptablesCard(iptables) {
     <div class="card" style="background:linear-gradient(135deg, rgba(59,130,246,0.08), rgba(168,85,247,0.04)); border-color:rgba(59,130,246,0.2);">
         <div class="card-body">
             <div style="display:flex; align-items:flex-start; gap:16px;">
-                <div style="font-size:40px; line-height:1;">📋</div>
+                <div style="font-size:40px; line-height:1;"></div>
                 <div style="flex:1;">
                     <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
                         <h3 style="margin:0; font-size:16px; font-weight:700;">iptables Rules</h3>
@@ -27563,7 +27563,7 @@ function showDialog(config) {
         <div class="ws-dialog-shell" style="background:var(--bg-card); border:1px solid var(--border); border-radius:12px; width:640px; max-width:90vw; max-height:85vh; display:flex; flex-direction:column; box-shadow:0 20px 60px rgba(0,0,0,0.4); overflow:hidden;">
             <div style="padding:20px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between;">
                 <h3 style="margin:0; font-size:16px; font-weight:600;">${config.title || 'Dialog'}</h3>
-                <button class="ws-dialog-x" style="background:none; border:none; color:var(--text-muted); font-size:20px; cursor:pointer; padding:4px;">✕</button>
+                <button class="ws-dialog-x" style="background:none; border:none; color:var(--text-muted); font-size:20px; cursor:pointer; padding:4px;"></button>
             </div>
             <div style="padding:20px 24px; flex:1; overflow-y:auto;">
                 ${config.html || ''}
@@ -27607,8 +27607,8 @@ function showDialog(config) {
 
 function showFail2banSettings(nodePrefix) {
     showDialog({
-        title: '⚙️ Fail2ban Settings',
-        html: `<div style="display:grid; gap:16px; color:var(--text-secondary); font-size:13px;"><p>To modify fail2ban settings, edit the jail.local configuration file. Click the "📝 jail.local" button to open the editor.</p><p style="color:var(--text-muted); font-size:12px;">Common settings: bantime (how long to ban), findtime (failure window), maxretry (failures before ban), ignoreip (never ban).</p></div>`,
+        title: 'Fail2ban Settings',
+        html: `<div style="display:grid; gap:16px; color:var(--text-secondary); font-size:13px;"><p>To modify fail2ban settings, edit the jail.local configuration file. Click the "jail.local" button to open the editor.</p><p style="color:var(--text-muted); font-size:12px;">Common settings: bantime (how long to ban), findtime (failure window), maxretry (failures before ban), ignoreip (never ban).</p></div>`,
         buttons: [{ label: 'Close', onclick: (dlg) => dlg.close() }]
     });
 }
@@ -27619,7 +27619,7 @@ function showFail2banBanned(nodePrefix) {
     const banned = (data.fail2ban.banned || '').trim();
     const lines = banned ? banned.split('\n').filter(l => l.trim()) : [];
     showDialog({
-        title: '🚫 Banned IPs (' + lines.length + ')',
+        title: 'Banned IPs (' + lines.length + ')',
         html: `<div style="font-size:13px; max-height:400px; overflow-y:auto;">${lines.length === 0 ? '<p style="color:var(--text-muted); text-align:center; padding:20px;">No IPs currently banned</p>' : ''} ${lines.map((ip) => `<div style="padding:10px 12px; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;"><code style="color:#ef4444; font-weight:600;">${escapeHtml(ip)}</code><button class="btn btn-sm" onclick="unbanIp('${nodePrefix}', '${escapeHtml(ip)}', this)" style="font-size:11px;">Unban</button></div>`).join('')}</div>`,
         buttons: [{ label: 'Close', onclick: (dlg) => dlg.close() }]
     });
@@ -27634,7 +27634,7 @@ function showUfwRules(nodePrefix) {
     const { data } = window._securityData;
     const status = (data.ufw.status || '').trim();
     showDialog({
-        title: '📋 UFW Rules',
+        title: 'UFW Rules',
         html: `<div><div style="font-size:12px; max-height:400px; overflow-y:auto; background:var(--bg-primary); border:1px solid var(--border); border-radius:8px; padding:12px; font-family:monospace; white-space:pre-wrap; color:var(--text-secondary); margin-bottom:16px;">${escapeHtml(status) || 'No rules configured'}</div><input type="text" id="new-ufw-rule" placeholder="e.g., allow 443/tcp" class="form-control" style="padding:10px 12px; margin-bottom:8px;"><small style="color:var(--text-muted); display:block;">Examples: allow 22/tcp | deny 80/tcp | allow from 192.168.1.0/24</small></div>`,
         buttons: [
             { label: 'Add Rule', onclick: (dlg) => addUfwRuleModal(dlg, nodePrefix) },
@@ -27671,7 +27671,7 @@ function showIptablesDetail() {
     const { data } = window._securityData;
     const rules = (data.iptables.rules || '').trim();
     showDialog({
-        title: '📋 iptables Rules',
+        title: 'iptables Rules',
         html: `<div style="font-size:11px; max-height:500px; overflow-y:auto; background:var(--bg-primary); border:1px solid var(--border); border-radius:8px; padding:12px; font-family:monospace; white-space:pre-wrap; color:var(--text-secondary);">${escapeHtml(rules) || 'No rules'}</div>`,
         buttons: [{ label: 'Close', onclick: (dlg) => dlg.close() }]
     });
@@ -27737,8 +27737,8 @@ function renderNodeSecurity(node, data) {
                 ${settingRow('Ignore IPs', data.fail2ban.ignoreip, 'IPs that are never banned')}
             </div>
             <div style="display:flex; gap:8px; margin-top:12px;">
-                <button onclick="editJailLocal('${nodePrefix}')" class="btn btn-sm" style="font-size:12px;">📝 Edit jail.local</button>
-                <button onclick="securityAction('${nodePrefix}security/fail2ban/rebuild', 'POST', {}, this)" class="btn btn-sm" style="font-size:12px;">🔄 Rebuild jail.local</button>
+                <button onclick="editJailLocal('${nodePrefix}')" class="btn btn-sm" style="font-size:12px;">Edit jail.local</button>
+                <button onclick="securityAction('${nodePrefix}security/fail2ban/rebuild', 'POST', {}, this)" class="btn btn-sm" style="font-size:12px;">Rebuild jail.local</button>
             </div>` : `
             <div style="margin-top:12px; padding:12px; background:var(--bg-primary); border-radius:8px; border:1px solid var(--border);">
                 <div style="display:flex; align-items:center; justify-content:space-between;">
@@ -27796,11 +27796,11 @@ function renderNodeSecurity(node, data) {
         <div class="card" style="margin-bottom:16px;">
             <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
                 <div style="display:flex; align-items:center; gap:8px;">
-                    <span style="font-size:20px;">🔥</span>
+                    <span style="font-size:20px;"></span>
                     <h3 style="margin:0;">UFW Firewall</h3>
                     ${statusBadge}
                 </div>
-                <button onclick="securityAction('${nodePrefix}security/ufw/toggle', 'POST', {enable: ${!isActive}}, this)" class="btn btn-sm" style="font-size:12px;">${isActive ? '⏸️ Disable' : '▶️ Enable'}</button>
+                <button onclick="securityAction('${nodePrefix}security/ufw/toggle', 'POST', {enable: ${!isActive}}, this)" class="btn btn-sm" style="font-size:12px;">${isActive ? 'Disable' : '▶️ Enable'}</button>
             </div>
             <div class="card-body">
                 <pre style="font-size:11px; color:var(--text-secondary); background:var(--bg-primary); padding:10px; border-radius:6px; max-height:180px; overflow-y:auto; white-space:pre-wrap; margin:0 0 12px; border:1px solid var(--border);">${escapeHtml(ufwStatus)}</pre>
@@ -27815,7 +27815,7 @@ function renderNodeSecurity(node, data) {
         <div class="card" style="margin-bottom:16px;">
             <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
                 <div style="display:flex; align-items:center; gap:8px;">
-                    <span style="font-size:20px;">🔥</span>
+                    <span style="font-size:20px;"></span>
                     <h3 style="margin:0;">UFW Firewall</h3>
                     <span style="background:#ef444420; color:#ef4444; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">Not Installed</span>
                 </div>
@@ -27832,7 +27832,7 @@ function renderNodeSecurity(node, data) {
     const iptHtml = `
     <div class="card">
         <div class="card-header" style="display:flex; align-items:center; gap:8px;">
-            <span style="font-size:20px;">📋</span>
+            <span style="font-size:20px;"></span>
             <h3 style="margin:0;">iptables Rules</h3>
             <span style="background:#3b82f620; color:#3b82f6; padding:2px 10px; border-radius:6px; font-size:11px; font-weight:600;">System</span>
         </div>
@@ -27854,13 +27854,13 @@ function renderNodeSecurity(node, data) {
     <div class="card" style="margin-bottom:16px;">
         <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
             <div style="display:flex; align-items:center; gap:8px;">
-                <span style="font-size:20px;">📦</span>
+                <span style="font-size:20px;"></span>
                 <h3 style="margin:0;">System Updates</h3>
                 ${updBadge}
                 <span style="color:var(--text-muted); font-size:11px;">(${pkgMgr})</span>
             </div>
             <div style="display:flex; gap:6px;">
-                <button onclick="securityAction('${nodePrefix}security/updates/check', 'POST', {}, this)" class="btn btn-sm" style="font-size:12px;">🔍 Check</button>
+                <button onclick="securityAction('${nodePrefix}security/updates/check', 'POST', {}, this)" class="btn btn-sm" style="font-size:12px;">Check</button>
                 ${updCount > 0 ? `<button onclick="securityAction('${nodePrefix}security/updates/apply', 'POST', {}, this)" class="btn btn-sm btn-primary" style="font-size:12px;">⬆️ Update All</button>` : ''}
             </div>
         </div>
@@ -27872,7 +27872,7 @@ function renderNodeSecurity(node, data) {
 
 async function securityAction(path, method, body, btn) {
     const orig = btn.textContent;
-    btn.textContent = '⏳ Working...';
+    btn.textContent = 'Working...';
     btn.disabled = true;
     try {
         const opts = { method, headers: { 'Content-Type': 'application/json' } };
@@ -27927,17 +27927,17 @@ async function editJailLocal(nodePrefix) {
             <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; width:640px; max-width:90vw; max-height:85vh; display:flex; flex-direction:column; box-shadow:0 20px 60px rgba(0,0,0,0.4);">
                 <div style="padding:20px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between;">
                     <div style="display:flex; align-items:center; gap:10px;">
-                        <span style="font-size:20px;">📝</span>
+                        <span style="font-size:20px;"></span>
                         <h3 style="margin:0; font-size:16px;">Edit jail.local</h3>
                     </div>
-                    <button onclick="this.closest('div[style*=fixed]').remove()" style="background:none; border:none; color:var(--text-muted); font-size:20px; cursor:pointer; padding:4px;">✕</button>
+                    <button onclick="this.closest('div[style*=fixed]').remove()" style="background:none; border:none; color:var(--text-muted); font-size:20px; cursor:pointer; padding:4px;"></button>
                 </div>
                 <div style="padding:16px 24px; flex:1; overflow:auto;">
                     <textarea id="jail-local-editor" spellcheck="false" style="width:100%; height:400px; font-family:'JetBrains Mono','Fira Code',monospace; font-size:13px; line-height:1.6; background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border); border-radius:8px; padding:12px; resize:vertical; outline:none; tab-size:4;">${escapeHtml(content)}</textarea>
                 </div>
                 <div style="padding:16px 24px; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:8px;">
                     <button onclick="this.closest('div[style*=fixed]').remove()" class="btn btn-sm" style="font-size:13px;">Cancel</button>
-                    <button onclick="saveFail2banConfig('${nodePrefix}', this)" class="btn btn-sm btn-primary" style="font-size:13px;">💾 Save & Restart</button>
+                    <button onclick="saveFail2banConfig('${nodePrefix}', this)" class="btn btn-sm btn-primary" style="font-size:13px;">Save & Restart</button>
                 </div>
             </div>`;
         document.body.appendChild(modal);
@@ -27952,7 +27952,7 @@ async function saveFail2banConfig(nodePrefix, btn) {
     const content = editor?.value || '';
     if (!content.trim()) { showToast('Config cannot be empty', 'error'); return; }
     const orig = btn.textContent;
-    btn.textContent = '⏳ Saving...';
+    btn.textContent = 'Saving...';
     btn.disabled = true;
     try {
         const res = await fetch(`/api/${nodePrefix}security/fail2ban/config`, {
@@ -28571,11 +28571,11 @@ function renderSystemCheckResults(data) {
     const counts = { ok: 0, warning: 0, missing: 0, unsupported: 0, auto_install: 0 };
     for (const c of checks) counts[c.status] = (counts[c.status] || 0) + 1;
     const statusMeta = {
-        ok:           { label: 'OK',           colour: '#22c55e', icon: '✅' },
-        warning:      { label: 'Warning',      colour: '#fbbf24', icon: '⚠️' },
-        missing:      { label: 'Missing',      colour: '#ef4444', icon: '❌' },
-        unsupported:  { label: 'Unsupported',  colour: '#94a3b8', icon: '➖' },
-        auto_install: { label: 'On demand',    colour: '#60a5fa', icon: '⚙️' },
+        ok:           { label: 'OK',           colour: '#22c55e', icon: '' },
+        warning:      { label: 'Warning',      colour: '#fbbf24', icon: '' },
+        missing:      { label: 'Missing',      colour: '#ef4444', icon: '' },
+        unsupported:  { label: 'Unsupported',  colour: '#94a3b8', icon: '' },
+        auto_install: { label: 'On demand',    colour: '#60a5fa', icon: '' },
     };
 
     const pills = Object.entries(counts).filter(([_, n]) => n > 0).map(([k, n]) => {
@@ -28612,14 +28612,14 @@ function renderSystemCheckResults(data) {
             const aiTarget = `sc-ai-${key}`;
             const installTarget = `sc-install-${key}`;
             const aiBtn = (aiEnabled && (c.status === 'warning' || c.status === 'missing') && c.ai_helpful)
-                ? `<button class="btn btn-sm" style="font-size:11px; white-space:nowrap;" data-sc-key="${escapeHtml(key)}" onclick="askAiAboutCheck('${aiTarget}', window._systemCheckCache['${escapeHtml(key)}'], '${escapeHtml(targetNodeId)}')">🤖 Ask AI</button>`
+                ? `<button class="btn btn-sm" style="font-size:11px; white-space:nowrap;" data-sc-key="${escapeHtml(key)}" onclick="askAiAboutCheck('${aiTarget}', window._systemCheckCache['${escapeHtml(key)}'], '${escapeHtml(targetNodeId)}')">Ask AI</button>`
                 : '';
             // One-click install — only shown when the dependency check
             // marks itself install_package: <name> and the status is
             // missing. Routes through the node proxy when looking at a
             // remote node, otherwise hits the local API.
             const installBtn = (c.status === 'missing' && c.install_package)
-                ? `<button class="btn btn-sm btn-primary" style="font-size:11px; white-space:nowrap;" onclick="installSystemPackage('${escapeAttr(c.install_package)}', '${installTarget}', '${escapeAttr(targetNodeId)}')">📦 Install</button>`
+                ? `<button class="btn btn-sm btn-primary" style="font-size:11px; white-space:nowrap;" onclick="installSystemPackage('${escapeAttr(c.install_package)}', '${installTarget}', '${escapeAttr(targetNodeId)}')">Install</button>`
                 : '';
             return `<div style="display:flex; align-items:flex-start; gap:12px; padding:10px 12px; border-bottom:1px solid var(--border);">
                 <div style="flex-shrink:0; width:28px; text-align:center; font-size:16px;">${m.icon}</div>
@@ -28644,8 +28644,8 @@ function renderSystemCheckResults(data) {
     }).join('');
 
     const aiBanner = aiEnabled
-        ? `<div style="padding:8px 12px; background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.3); border-radius:6px; font-size:12px; color:var(--text-secondary); margin-bottom:12px;">🤖 AI is enabled — click <em>Ask AI</em> on any warning/missing row for tailored remediation.</div>`
-        : `<div style="padding:8px 12px; background:rgba(251,191,36,0.08); border:1px solid rgba(251,191,36,0.3); border-radius:6px; font-size:12px; color:var(--text-secondary); margin-bottom:12px;">💡 Tip: enable the AI agent in Settings → AI Agent to get context-aware remediation hints.</div>`;
+        ? `<div style="padding:8px 12px; background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.3); border-radius:6px; font-size:12px; color:var(--text-secondary); margin-bottom:12px;">AI is enabled — click <em>Ask AI</em> on any warning/missing row for tailored remediation.</div>`
+        : `<div style="padding:8px 12px; background:rgba(251,191,36,0.08); border:1px solid rgba(251,191,36,0.3); border-radius:6px; font-size:12px; color:var(--text-secondary); margin-bottom:12px;">Tip: enable the AI agent in Settings → AI Agent to get context-aware remediation hints.</div>`;
 
     const hostPill = data._targetLabel
         ? `<span style="margin-left:auto; font-size:12px; color:var(--text-muted);">Scanned: <code>${escapeHtml(data._targetLabel)}</code>${data.hostname ? ` (${escapeHtml(data.hostname)})` : ''}</span>`
@@ -28664,7 +28664,7 @@ async function installSystemPackage(packageName, targetId, nodeId) {
     const target = document.getElementById(targetId);
     if (!target) return;
     target.style.display = 'block';
-    target.textContent = `📦 Installing ${packageName}…`;
+    target.textContent = `Installing ${packageName}…`;
     // Route through the node proxy when scanning a remote node, so the
     // install runs on the node that actually has the missing package.
     const url = nodeId
@@ -28682,14 +28682,14 @@ async function installSystemPackage(packageName, targetId, nodeId) {
             const svc = data.service_started === true ? ' (service started)'
                       : data.service_started === false ? ' (install ok, but service did not start — start it manually)'
                       : '';
-            target.textContent = `✅ ${data.message || 'Installed'}${svc}\nRe-run the System Check to verify.`;
+            target.textContent = `${data.message || 'Installed'}${svc}\nRe-run the System Check to verify.`;
         } else {
             target.style.background = 'rgba(239,68,68,0.12)';
-            target.textContent = `❌ Install failed: ${data.error || `HTTP ${r.status}`}`;
+            target.textContent = `Install failed: ${data.error || `HTTP ${r.status}`}`;
         }
     } catch (e) {
         target.style.background = 'rgba(239,68,68,0.12)';
-        target.textContent = `❌ ${e.message || String(e)}`;
+        target.textContent = `${e.message || String(e)}`;
     }
 }
 
@@ -28697,7 +28697,7 @@ async function askAiAboutCheck(targetId, check, nodeId) {
     const target = document.getElementById(targetId);
     if (!target) return;
     target.style.display = 'block';
-    target.textContent = '🤖 Asking the AI agent…';
+    target.textContent = 'Asking the AI agent…';
     // Route through the node proxy so the AI gets the remote node's
     // distro/arch context — otherwise it'd answer as if the local
     // node is the one with the problem.
@@ -28716,12 +28716,12 @@ async function askAiAboutCheck(targetId, check, nodeId) {
         });
         const data = await r.json();
         if (!r.ok) {
-            target.textContent = '⚠️ ' + (data.error || `HTTP ${r.status}`);
+            target.textContent = '' + (data.error || `HTTP ${r.status}`);
             return;
         }
         target.textContent = data.advice || '(AI returned no advice)';
     } catch (e) {
-        target.textContent = '⚠️ ' + (e.message || String(e));
+        target.textContent = '' + (e.message || String(e));
     }
 }
 
@@ -28735,33 +28735,33 @@ async function askAiAboutCheck(targetId, check, nodeId) {
 
 const SIDEBAR_FEATURES = [
     { group: 'Datacenter Views', items: [
-        { key: 'appstore',         label: '🛍️ App Store' },
-        { key: 'issues',           label: '⚠️ Issues' },
-        { key: 'global-wolfnet',   label: '🌐 Global WolfNet View' },
-        { key: 'topology',         label: '🖥️ 3D Server Room' },
-        { key: 'wolfflow',         label: '⚡ WolfFlow' },
-        { key: 'cluster-browser',  label: '🌐 Cluster Browser' },
+        { key: 'appstore',         label: 'App Store' },
+        { key: 'issues',           label: 'Issues' },
+        { key: 'global-wolfnet',   label: 'Global WolfNet View' },
+        { key: 'topology',         label: '3D Server Room' },
+        { key: 'wolfflow',         label: 'WolfFlow' },
+        { key: 'cluster-browser',  label: 'Cluster Browser' },
     ]},
     { group: 'Per-Server Features', items: [
-        { key: 'backups',       label: '💾 Backups' },
-        { key: 'ceph',          label: '🔵 Ceph' },
-        { key: 'certificates',  label: '🔒 Certificates' },
-        { key: 'compose',       label: '📋 Compose' },
-        { key: 'cron',          label: '🕐 Cron Jobs' },
-        { key: 'containers',    label: '🐳 Docker' },
-        { key: 'files',         label: '📂 Files' },
-        { key: 'lxc',           label: '📦 LXC' },
-        { key: 'networking',    label: '🌐 Networking' },
-        { key: 'security',      label: '🛡️ Security' },
-        { key: 'services',      label: '⚡ Services' },
-        { key: 'storage',       label: '💾 Storage' },
-        { key: 'syslogs',       label: '📋 System Logs' },
-        { key: 'terminal',      label: '💻 Terminal' },
-        { key: 'vms',           label: '🖥️ Virtual Machines' },
-        { key: 'wolfkube',      label: '☸ WolfKube (Kubernetes)' },
-        { key: 'wolfnet',       label: '🔗 WolfNet' },
-        { key: 'wolfusb',       label: '🔌 WolfUSB' },
-        { key: 'wolfram',       label: '🧠 Wolfram' },
+        { key: 'backups',       label: 'Backups' },
+        { key: 'ceph',          label: 'Ceph' },
+        { key: 'certificates',  label: 'Certificates' },
+        { key: 'compose',       label: 'Compose' },
+        { key: 'cron',          label: 'Cron Jobs' },
+        { key: 'containers',    label: 'Docker' },
+        { key: 'files',         label: 'Files' },
+        { key: 'lxc',           label: 'LXC' },
+        { key: 'networking',    label: 'Networking' },
+        { key: 'security',      label: 'Security' },
+        { key: 'services',      label: 'Services' },
+        { key: 'storage',       label: 'Storage' },
+        { key: 'syslogs',       label: 'System Logs' },
+        { key: 'terminal',      label: 'Terminal' },
+        { key: 'vms',           label: 'Virtual Machines' },
+        { key: 'wolfkube',      label: 'WolfKube (Kubernetes)' },
+        { key: 'wolfnet',       label: 'WolfNet' },
+        { key: 'wolfusb',       label: 'WolfUSB' },
+        { key: 'wolfram',       label: 'Wolfram' },
     ]},
 ];
 
@@ -28866,7 +28866,7 @@ async function loadPlugins() {
             const statusColors = { active: 'var(--success)', disabled: 'var(--text-muted)', error: 'var(--danger)', requires_license: 'var(--warning)', stopped: 'var(--text-muted)' };
             const statusColor = statusColors[p.status] || 'var(--text-muted)';
             return `<div style="display:flex;align-items:center;gap:14px;padding:14px 16px;background:var(--bg-tertiary);border-radius:10px;border:1px solid var(--border);">
-                <span style="font-size:28px;">${m.icon || '🔌'}</span>
+                <span style="font-size:28px;">${m.icon || ''}</span>
                 <div style="flex:1;">
                     <div style="font-weight:600;font-size:14px;">${escapeHtml(m.name)} <span style="font-size:11px;color:var(--text-muted);font-weight:400;">v${escapeHtml(m.version)}</span>
                         ${m.enterprise_only ? '<span style="font-size:10px;background:rgba(220,38,38,0.15);color:#ef4444;padding:1px 6px;border-radius:3px;margin-left:6px;">Enterprise</span>' : ''}
@@ -29072,7 +29072,7 @@ function addPluginNavItem(manifest) {
             const btn = document.createElement('button');
             btn.className = 'settings-tab-btn';
             btn.setAttribute('onclick', `switchSettingsTab('${tabId}')`);
-            btn.textContent = `${manifest.icon || '🔌'} ${menu.label}`;
+            btn.textContent = `${manifest.icon || ''} ${menu.label}`;
             tabBar.parentElement.insertBefore(btn, tabBar);
         }
         // Add tab panel
@@ -29217,7 +29217,7 @@ async function loadApiKeysTab() {
         const lic = await resp.json();
         if (lic.valid) {
             banner.innerHTML = `<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3);border-radius:8px;margin-bottom:16px;font-size:13px;">
-                <span style="font-size:18px;">✅</span>
+                <span style="font-size:18px;"></span>
                 <div><strong>Enterprise License</strong> — ${escapeHtml(lic.customer)} (expires ${escapeHtml(lic.expires)})</div>
             </div>`;
             content.style.display = '';
@@ -29227,7 +29227,7 @@ async function loadApiKeysTab() {
         } else {
             banner.innerHTML = `<div style="max-width:600px;">
                 <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
-                    <span style="font-size:28px;">🔑</span>
+                    <span style="font-size:28px;"></span>
                     <div>
                         <h3 style="margin:0;font-size:17px;font-weight:700;">Enterprise License</h3>
                         <p style="margin:2px 0 0;font-size:12px;color:var(--text-muted);">Paste your enterprise key below to unlock API key management and scoped access tokens.</p>
@@ -29971,7 +29971,7 @@ async function loadUsers() {
         const users = await resp.json();
         if (users.length === 0) {
             container.innerHTML = renderEmptyState({
-                icon: '👤',
+                icon: '',
                 title: 'No WolfStack users yet',
                 body: 'WolfStack users sign in with their own credentials. Add one to give a teammate access without sharing your login.',
                 action: { label: '+ Add user', onclick: 'showCreateUserForm()' },
@@ -29996,7 +29996,7 @@ async function loadUsers() {
                 const label = ac.length === 0 ? 'ALL CLUSTERS' : ac.join(', ');
                 const tone = ac.length === 0 ? 'rgba(234,179,8,0.12);color:#eab308;border:1px solid rgba(234,179,8,0.35)'
                                                : 'rgba(59,130,246,0.12);color:#60a5fa;border:1px solid rgba(59,130,246,0.35)';
-                html += ' <span style="padding:2px 6px;border-radius:4px;background:' + tone + ';font-size:10px;font-weight:600;" title="Clusters this user can see">🌐 ' + escapeHtml(label) + '</span>';
+                html += ' <span style="padding:2px 6px;border-radius:4px;background:' + tone + ';font-size:10px;font-weight:600;" title="Clusters this user can see">' + escapeHtml(label) + '</span>';
             }
             if (user.created_at) html += ' <span style="margin-left:8px;">Created: ' + escapeHtml(user.created_at) + '</span>';
             html += '</div></div><div style="display:flex;gap:6px;">';
@@ -30436,8 +30436,8 @@ async function testGithubBackup() {
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
         const branchNote = data.configured_branch_exists
-            ? `✓ branch <code>${escapeHtml(data.configured_branch)}</code> exists`
-            : `⚠ branch <code>${escapeHtml(data.configured_branch)}</code> NOT found — create a commit on it first`;
+            ? `branch <code>${escapeHtml(data.configured_branch)}</code> exists`
+            : `branch <code>${escapeHtml(data.configured_branch)}</code> NOT found — create a commit on it first`;
         setStatus(
             `Authenticated as <b>${escapeHtml(data.authenticated_as || '?')}</b> · target <code>${escapeHtml(data.target)}</code> · ${branchNote}`,
             data.configured_branch_exists ? 'var(--success,#10b981)' : '#f59e0b'
@@ -30635,10 +30635,10 @@ async function loadPasskeys() {
             const id = encodeURIComponent(pk.credential_id);
             return `<div style="display:flex;align-items:center;gap:12px;padding:12px 14px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;margin-bottom:8px;">
                 <div style="flex:1;">
-                    <div style="font-weight:600;font-size:13px;">🔑 ${label}</div>
+                    <div style="font-weight:600;font-size:13px;">${label}</div>
                     <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Registered ${reg} &middot; Last used ${used}</div>
                 </div>
-                <button class="btn btn-sm" onclick="passkeyDelete('${id}', this)" style="background:var(--bg-tertiary);border:1px solid var(--border);color:var(--text-primary);font-size:11px;">🗑 Remove</button>
+                <button class="btn btn-sm" onclick="passkeyDelete('${id}', this)" style="background:var(--bg-tertiary);border:1px solid var(--border);color:var(--text-primary);font-size:11px;">Remove</button>
             </div>`;
         }).join('');
     } catch (e) {
@@ -30716,7 +30716,7 @@ async function passkeyDelete(credentialId, btn) {
         loadPasskeys();
     } catch (err) {
         showToast('Failed to remove passkey: ' + (err.message || err), 'error');
-        if (btn) { btn.disabled = false; btn.innerHTML = '🗑 Remove'; }
+        if (btn) { btn.disabled = false; btn.innerHTML = 'Remove'; }
     }
 }
 
@@ -30821,7 +30821,7 @@ function tiRenderProviders(providers) {
         const keyField = needsKey
             ? `<input type="password" id="ti-prov-key-${id}" placeholder="API key" value="${keyVal}" style="flex:1; min-width:160px; padding:5px 8px; font-family:var(--font-mono); font-size:12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:4px; color:var(--text);">`
             : '';
-        const linkText = needsKey ? '🔑 Get key' : '🔗 Source';
+        const linkText = needsKey ? 'Get key' : 'Source';
         return `<div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:10px 12px; border:1px solid var(--border); border-radius:8px; margin-bottom:8px; background:var(--bg-secondary);">
             <label style="display:flex; align-items:center; gap:8px; min-width:280px; cursor:pointer; flex:1;">
                 <input type="checkbox" id="ti-prov-en-${id}" ${enabledChecked}>
@@ -30829,7 +30829,7 @@ function tiRenderProviders(providers) {
             </label>
             ${keyField}
             <a href="${tiEsc(url)}" target="_blank" rel="noopener" style="font-size:11px; color:var(--accent-primary); text-decoration:none; white-space:nowrap;">${linkText}</a>
-            <button class="btn btn-sm" onclick="tiSaveProvider('${id}', ${needsKey})">💾 Save</button>
+            <button class="btn btn-sm" onclick="tiSaveProvider('${id}', ${needsKey})">Save</button>
         </div>`;
     }).join('');
 }
@@ -30957,8 +30957,8 @@ function tiRenderSelfBanner(self_blacklisted) {
                 <div style="font-weight:600; font-size:13px; margin-bottom:4px;">${tiEsc(info.name)}</div>
                 <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px; line-height:1.55;">${tiEsc(info.notes)}</div>
                 <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                    <a href="${tiEsc(lookupUrl)}" target="_blank" rel="noopener" class="btn btn-sm" style="text-decoration:none;">🔍 Check this IP</a>
-                    <a href="${tiEsc(info.delisting)}" target="_blank" rel="noopener" class="btn btn-sm" style="text-decoration:none;">📤 Submit delisting</a>
+                    <a href="${tiEsc(lookupUrl)}" target="_blank" rel="noopener" class="btn btn-sm" style="text-decoration:none;">Check this IP</a>
+                    <a href="${tiEsc(info.delisting)}" target="_blank" rel="noopener" class="btn btn-sm" style="text-decoration:none;">Submit delisting</a>
                 </div>
             </div>`;
         }).join('');
@@ -30974,7 +30974,7 @@ function tiRenderSelfBanner(self_blacklisted) {
 
     banner.innerHTML = `
         <div style="display:flex; align-items:flex-start; gap:12px;">
-            <div style="font-size:24px; line-height:1;">⚠️</div>
+            <div style="font-size:24px; line-height:1;"></div>
             <div style="flex:1;">
                 <div style="font-weight:700; font-size:14px; color:#fca5a5; margin-bottom:4px;">One of your own server IPs is on a public blocklist</div>
                 <div style="font-size:13px; color:var(--text-secondary); line-height:1.55;">
@@ -30987,7 +30987,7 @@ function tiRenderSelfBanner(self_blacklisted) {
         </div>
         ${rows}
         <details style="margin-top:12px; padding:10px 12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
-            <summary style="cursor:pointer; font-weight:600; font-size:13px; user-select:none;">⚡ Faster path — request a clean IP from your hosting provider</summary>
+            <summary style="cursor:pointer; font-weight:600; font-size:13px; user-select:none;">Faster path — request a clean IP from your hosting provider</summary>
             <div style="margin-top:8px; font-size:12px; color:var(--text-secondary); line-height:1.7;">
                 Most major hosts will swap you to a different IP on request &mdash; usually faster than waiting for delisting.
                 <ul style="margin:6px 0 0 18px; padding:0;">
@@ -31027,7 +31027,7 @@ async function tiLoadStatus() {
         const last = s.last_refresh_secs ? new Date(s.last_refresh_secs * 1000).toLocaleString() : 'never';
         const summary = document.getElementById('ti-status-summary');
         if (summary) {
-            const ipsetMsg = s.ipset_available ? '' : ' <span style="color:var(--warning);">⚠ <code>ipset</code> isn\'t installed yet — WolfStack will try to install it automatically the first time you flip to enforce mode.</span>';
+            const ipsetMsg = s.ipset_available ? '' : ' <span style="color:var(--warning);"><code>ipset</code> isn\'t installed yet — WolfStack will try to install it automatically the first time you flip to enforce mode.</span>';
             summary.innerHTML = `Blocklist size: <strong>${s.blocklist_size.toLocaleString()}</strong> entries
                 (${s.blocklist_v4_count.toLocaleString()} IPv4 / ${s.blocklist_v6_count.toLocaleString()} IPv6).
                 Last refresh: <strong>${last}</strong>.${ipsetMsg}`;
@@ -31054,7 +31054,7 @@ async function tiLoadStatus() {
             }
             const when = ps.last_attempt_secs ? new Date(ps.last_attempt_secs * 1000).toLocaleString() : 'never';
             if (ps.last_error) {
-                line.innerHTML = `<span style="color:var(--danger);">⚠ ${tiEsc(ps.last_error)}</span> &middot; last attempt ${when}`;
+                line.innerHTML = `<span style="color:var(--danger);">${tiEsc(ps.last_error)}</span> &middot; last attempt ${when}`;
             } else if (ps.last_count) {
                 line.textContent = `Last fetch: ${ps.last_count.toLocaleString()} entries at ${when}`;
             } else {
@@ -31203,9 +31203,9 @@ async function tiLookup() {
         if (!resp.ok) { out.innerHTML = '<span style="color:var(--danger);">' + tiEsc(data.error || 'Lookup failed') + '</span>'; return; }
         if (data.blocked) {
             const m = data.matches.map(tiEsc).join(', ');
-            out.innerHTML = `<span style="color:var(--danger); font-weight:600;">🚫 BLOCKED</span> by: <code>${m}</code>`;
+            out.innerHTML = `<span style="color:var(--danger); font-weight:600;">BLOCKED</span> by: <code>${m}</code>`;
         } else {
-            out.innerHTML = `<span style="color:var(--success); font-weight:600;">✓ Not blocked</span>`;
+            out.innerHTML = `<span style="color:var(--success); font-weight:600;">Not blocked</span>`;
         }
     } catch (e) { out.innerHTML = '<span style="color:var(--danger);">' + tiEsc(e.message) + '</span>'; }
 }
@@ -31385,7 +31385,7 @@ async function saveAlertingConfig() {
     const btn = event && event.target ? event.target.closest('button') : null;
     const origBtnHtml = btn ? btn.innerHTML : '';
     if (btn) {
-        btn.innerHTML = '⏳ Saving…';
+        btn.innerHTML = 'Saving…';
         btn.disabled = true;
     }
 
@@ -31420,9 +31420,9 @@ async function saveAlertingConfig() {
             body: JSON.stringify(payload)
         });
         if (resp.ok) {
-            showToast('Alerting settings saved ✓', 'success');
+            showToast('Alerting settings saved ', 'success');
             if (btn) {
-                btn.innerHTML = '✓ Saved!';
+                btn.innerHTML = 'Saved!';
                 btn.style.background = 'var(--success)';
                 btn.style.borderColor = 'var(--success)';
                 setTimeout(() => {
@@ -31606,7 +31606,7 @@ function renderWolfRunServices(services) {
         }
 
         // Runtime badge
-        const runtimeIcon = svc.runtime === 'Lxc' ? '📦' : '🐳';
+        const runtimeIcon = svc.runtime === 'Lxc' ? '' : '';
         const runtimeLabel = svc.runtime === 'Lxc' ? 'LXC' : 'Docker';
 
         // Nodes — find hostnames from allNodes
@@ -31651,7 +31651,7 @@ function renderWolfRunServices(services) {
                 : '<span style="color:var(--text-muted);font-size:11px;">—</span>';
             // Runtime-aware icon: Docker 🐳, Proxmox LXC 🖥️, standalone LXC 📦
             const isPve = instNode && instNode.is_proxmox;
-            const instIcon = svc.runtime === 'Docker' ? '🐳' : (isPve ? '🖥️' : '📦');
+            const instIcon = svc.runtime === 'Docker' ? '' : (isPve ? '' : '');
             const instType = svc.runtime === 'Docker' ? 'Docker' : (isPve ? 'Proxmox LXC' : 'LXC');
             const rowOpacity = isStandby ? 'opacity:0.6;' : '';
             return `<tr class="wolfrun-inst-row wolfrun-inst-${svc.id}" style="background:var(--bg-input);${rowOpacity}">
@@ -31694,13 +31694,13 @@ function renderWolfRunServices(services) {
             <td>${vipHtml}</td>
             <td style="text-align:right; white-space:nowrap;" onclick="event.stopPropagation();">
                 <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'start')" title="Start All" style="padding:4px 8px; font-size:12px; color:#10b981;">▶️</button>
-                <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'stop')" title="Stop All" style="padding:4px 8px; font-size:12px; color:#eab308;">⏹️</button>
-                <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'restart')" title="Restart All" style="padding:4px 8px; font-size:12px; color:#3b82f6;">🔄</button>
-                <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired - 1})" ${desired <= minR ? 'disabled' : ''} title="Scale down" style="padding:4px 8px; font-size:12px;">➖</button>
-                <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired + 1})" ${desired >= maxR ? 'disabled' : ''} title="Scale up" style="padding:4px 8px; font-size:12px;">➕</button>
-                <button class="btn btn-sm" onclick="wolfrunSettings('${svc.id}', '${svc.name}', ${desired}, ${minR}, ${maxR}, '${svc.lb_policy || 'round_robin'}', ${JSON.stringify(svc.allowed_nodes || [])}, '${svc.cluster_name || ''}', ${!!svc.failover})" title="Settings" style="padding:4px 8px; font-size:12px; color:#a78bfa;">⚙️</button>
-                <button class="btn btn-sm" onclick="openWolfRunPortForward('${svc.id}', '${svc.name}', '${vip || ''}')" title="Port Forward" style="padding:4px 8px; font-size:12px; color:#818cf8;" ${!vip ? 'disabled' : ''}>🔀</button>
-                <button class="btn btn-sm" onclick="wolfrunDelete('${svc.id}', '${svc.name}')" title="Remove" style="padding:4px 8px; font-size:12px; color:#ef4444;">🗑️</button>
+                <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'stop')" title="Stop All" style="padding:4px 8px; font-size:12px; color:#eab308;"></button>
+                <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'restart')" title="Restart All" style="padding:4px 8px; font-size:12px; color:#3b82f6;"></button>
+                <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired - 1})" ${desired <= minR ? 'disabled' : ''} title="Scale down" style="padding:4px 8px; font-size:12px;"></button>
+                <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired + 1})" ${desired >= maxR ? 'disabled' : ''} title="Scale up" style="padding:4px 8px; font-size:12px;"></button>
+                <button class="btn btn-sm" onclick="wolfrunSettings('${svc.id}', '${svc.name}', ${desired}, ${minR}, ${maxR}, '${svc.lb_policy || 'round_robin'}', ${JSON.stringify(svc.allowed_nodes || [])}, '${svc.cluster_name || ''}', ${!!svc.failover})" title="Settings" style="padding:4px 8px; font-size:12px; color:#a78bfa;"></button>
+                <button class="btn btn-sm" onclick="openWolfRunPortForward('${svc.id}', '${svc.name}', '${vip || ''}')" title="Port Forward" style="padding:4px 8px; font-size:12px; color:#818cf8;" ${!vip ? 'disabled' : ''}></button>
+                <button class="btn btn-sm" onclick="wolfrunDelete('${svc.id}', '${svc.name}')" title="Remove" style="padding:4px 8px; font-size:12px; color:#ef4444;"></button>
             </td>
         </tr>${instanceRows}`;
     }).join('');
@@ -31772,7 +31772,7 @@ async function executeWolfRunDeploy() {
 
     const btn = document.getElementById('wolfrun-deploy-btn');
     btn.disabled = true;
-    btn.textContent = '⏳ Deploying...';
+    btn.textContent = 'Deploying...';
 
     // Show progress log box
     let logBox = document.getElementById('wolfrun-deploy-log');
@@ -31799,7 +31799,7 @@ async function executeWolfRunDeploy() {
     logStep('<span class="ws-icon-clean-wrap" data-icon="package"></span>', runtime === 'docker'
         ? `Image: <b>${payload.image}</b>`
         : `Template: <b>${payload.lxc_distribution}/${payload.lxc_release}</b>`, 'var(--accent-light)');
-    logStep('🔢', `Replicas: <b>${replicas}</b> | Restart: <b>${restart}</b>`, 'var(--text-secondary)');
+    logStep('', `Replicas: <b>${replicas}</b> | Restart: <b>${restart}</b>`, 'var(--text-secondary)');
     await new Promise(r => setTimeout(r, 200));
 
     logStep('<span class="ws-icon-clean-wrap" data-icon="satellite"></span>', 'Sending deployment request to API...', 'var(--warning)');
@@ -31813,7 +31813,7 @@ async function executeWolfRunDeploy() {
         const data = await resp.json();
         if (resp.ok) {
             logStep('<span class="ws-icon-clean-wrap" data-icon="check-circle"></span>', `Service <b>"${name}"</b> created`, 'var(--success)');
-            logStep('⏳', `Scheduling ${replicas} replica(s) on available nodes...`, 'var(--info)');
+            logStep('', `Scheduling ${replicas} replica(s) on available nodes...`, 'var(--info)');
 
             // Poll for instance status a few times
             const serviceId = data.id;
@@ -31834,7 +31834,7 @@ async function executeWolfRunDeploy() {
                             break;
                         }
                         if (i === 5 && running < replicas) {
-                            logStep('⏳', `Still scheduling — ${running}/${replicas} running. Check services list for updates.`, 'var(--warning)');
+                            logStep('', `Still scheduling — ${running}/${replicas} running. Check services list for updates.`, 'var(--warning)');
                         }
                     } catch { break; }
                 }
@@ -31860,7 +31860,7 @@ async function executeWolfRunDeploy() {
         updateTaskLogEntry(_wrTaskId, { status: 'failed', description: 'WolfRun deploy: ' + name });
     } finally {
         btn.disabled = false;
-        btn.textContent = '🚀 Deploy';
+        btn.textContent = 'Deploy';
     }
 }
 
@@ -31888,7 +31888,7 @@ function wolfrunSettings(serviceId, name, currentDesired, currentMin, currentMax
     if (clusterNodes.length > 0) {
         container.innerHTML = clusterNodes.map(n => {
             const checked = allowed.length === 0 ? '' : (allowed.includes(n.id) ? 'checked' : '');
-            const statusDot = n.online ? '🟢' : '🔴';
+            const statusDot = n.online ? '' : '';
             return `<label style="display:flex; align-items:center; gap:6px; padding:4px 0; cursor:pointer; font-size:13px; border-bottom:1px solid var(--bg-tertiary);">
                 <input type="checkbox" value="${n.id}" class="wolfrun-node-check" ${checked}>
                 ${statusDot} ${n.hostname || n.id}
@@ -31939,7 +31939,7 @@ async function saveWolfRunSettings() {
             if (desired > currentRunning) {
                 showScaleProgress(wolfrunSettingsServiceId, desired);
             } else {
-                showToast(`⚡ Settings saved — desired=${data.replicas}, min=${data.min_replicas}, max=${data.max_replicas}`, 'success');
+                showToast(`Settings saved — desired=${data.replicas}, min=${data.min_replicas}, max=${data.max_replicas}`, 'success');
                 loadWolfRunServices();
             }
         } else {
@@ -32042,10 +32042,10 @@ async function showScaleProgress(serviceId, targetReplicas) {
 
     const log = document.getElementById('wolfrun-scale-log');
     document.getElementById('wolfrun-scale-name').textContent = svcName;
-    log.innerHTML = `<div>🔄 Scaling <strong>${svcName}</strong> to <strong>${targetReplicas}</strong> replicas...</div>
-        <div>⏳ Provisioning containers on available nodes...</div>
+    log.innerHTML = `<div>Scaling <strong>${svcName}</strong> to <strong>${targetReplicas}</strong> replicas...</div>
+        <div>Provisioning containers on available nodes...</div>
         <div id="wolfrun-scale-nodes"></div>
-        <div id="wolfrun-scale-status">📊 Checking...</div>`;
+        <div id="wolfrun-scale-status">Checking...</div>`;
     document.getElementById('wolfrun-scale-modal').classList.add('active');
 
     const seenInstances = new Set(prevInstances);
@@ -32068,7 +32068,7 @@ async function showScaleProgress(serviceId, targetReplicas) {
                         seenInstances.add(inst.container_name);
                         const nodeName = (window.allNodes || []).find(n => n.id === inst.node_id);
                         const hostname = nodeName ? nodeName.hostname : inst.node_id.substring(0, 12);
-                        const statusIcon = inst.status === 'running' ? '✅' : '🔄';
+                        const statusIcon = inst.status === 'running' ? '' : '';
                         const div = document.createElement('div');
                         div.id = `scale-inst-${inst.container_name}`;
                         div.innerHTML = `${statusIcon} <strong>DEPLOYING</strong> <code style="font-size:11px;">${inst.container_name}</code> → <span style="padding:2px 8px;border-radius:6px;font-size:11px;background:var(--bg-secondary);border:1px solid var(--border);">${hostname}</span>`;
@@ -32076,22 +32076,22 @@ async function showScaleProgress(serviceId, targetReplicas) {
                     } else {
                         // Update status of existing instances
                         const el = document.getElementById(`scale-inst-${inst.container_name}`);
-                        if (el && inst.status === 'running' && el.innerHTML.includes('🔄')) {
-                            el.innerHTML = el.innerHTML.replace('🔄', '✅').replace('DEPLOYING', 'RUNNING');
+                        if (el && inst.status === 'running' && el.innerHTML.includes('')) {
+                            el.innerHTML = el.innerHTML.replace('', '').replace('DEPLOYING', 'RUNNING');
                         }
                     }
                 }
 
                 const el = document.getElementById('wolfrun-scale-status');
-                if (el) el.innerHTML = `📊 Instances: <strong>${running}/${targetReplicas}</strong> running (${total} total)`;
+                if (el) el.innerHTML = `Instances: <strong>${running}/${targetReplicas}</strong> running (${total} total)`;
                 loadWolfRunServices();
 
                 if (running >= targetReplicas || attempts >= maxAttempts) {
                     clearInterval(poll);
                     if (running >= targetReplicas) {
-                        log.innerHTML += `<div><br>✅ <strong>Scaling complete!</strong> ${running} replicas running across ${[...new Set(instances.map(i => i.node_id))].length} node(s).</div>`;
+                        log.innerHTML += `<div><br><strong>Scaling complete!</strong> ${running} replicas running across ${[...new Set(instances.map(i => i.node_id))].length} node(s).</div>`;
                     } else {
-                        log.innerHTML += `<div><br>⏰ Still provisioning — ${running}/${targetReplicas} running. LXC template downloads can take a minute. Check back shortly.</div>`;
+                        log.innerHTML += `<div><br>Still provisioning — ${running}/${targetReplicas} running. LXC template downloads can take a minute. Check back shortly.</div>`;
                     }
                     setTimeout(() => { closeWolfRunScaleModal(); loadWolfRunServices(); }, 3000);
                 }
@@ -32124,7 +32124,7 @@ async function wolfrunDelete(serviceId, serviceName) {
                 instDiv.innerHTML = svc.instances.map(inst => {
                     const isClone = inst.container_name.includes('wolfrun');
                     return `<div style="padding:4px 0; border-bottom:1px solid var(--border-color);">
-                        ${isClone ? '🗑️' : '🛡️'} <strong>${inst.container_name}</strong>
+                        ${isClone ? '' : ''} <strong>${inst.container_name}</strong>
                         <span style="color:var(--text-muted);">on ${inst.node_id.slice(0, 8)}…</span>
                         ${isClone
                             ? '<span style="color:#ef4444; float:right;">WILL BE DESTROYED</span>'
@@ -32157,20 +32157,20 @@ async function executeWolfRunDelete() {
         log.scrollTop = log.scrollHeight;
     }
 
-    addLog('🔄 Starting service deletion...', 'var(--text-muted)');
+    addLog('Starting service deletion...', 'var(--text-muted)');
 
     try {
         const resp = await fetch(wolfrunApiUrl(`/api/wolfrun/services/${wolfrunDeleteServiceId}`), { method: 'DELETE' });
         if (resp.ok) {
             const data = await resp.json();
             if (data.destroyed && data.destroyed.length > 0) {
-                data.destroyed.forEach(c => addLog(`🗑️ Destroyed clone: ${c}`, '#ef4444'));
+                data.destroyed.forEach(c => addLog(`Destroyed clone: ${c}`, '#ef4444'));
             }
             if (data.kept && data.kept.length > 0) {
-                data.kept.forEach(c => addLog(`🛡️ Kept template: ${c}`, '#10b981'));
+                data.kept.forEach(c => addLog(`Kept template: ${c}`, '#10b981'));
             }
             addLog('', '');
-            addLog('✅ Service deleted successfully!', '#10b981');
+            addLog('Service deleted successfully!', '#10b981');
             taskLog('WolfRun delete: ' + (document.getElementById('wolfrun-delete-name')?.textContent || wolfrunDeleteServiceId));
             setTimeout(() => {
                 closeWolfRunDeleteModal();
@@ -32178,11 +32178,11 @@ async function executeWolfRunDelete() {
             }, 1500);
         } else {
             const data = await resp.json().catch(() => ({}));
-            addLog(`❌ Delete failed: ${data.error || resp.statusText}`, '#ef4444');
+            addLog(`Delete failed: ${data.error || resp.statusText}`, '#ef4444');
             taskLog('WolfRun delete: ' + wolfrunDeleteServiceId, 'failed');
         }
     } catch (e) {
-        addLog(`❌ Error: ${e.message}`, '#ef4444');
+        addLog(`Error: ${e.message}`, '#ef4444');
         taskLog('WolfRun delete: ' + wolfrunDeleteServiceId, 'failed');
     }
 }
@@ -32340,7 +32340,7 @@ async function openWolfRunAdoptModal() {
 
     if (allContainers.length === 0) {
         listEl.innerHTML = `<div style="padding:32px; text-align:center; color:var(--text-muted);">
-            <div style="font-size:32px; margin-bottom:8px;">🔍</div>
+            <div style="font-size:32px; margin-bottom:8px;"></div>
             <p style="margin:0;">No containers found, or all containers are already managed by WolfRun.</p>
             <p style="margin:4px 0 0; font-size:12px;">Create a container or Docker on the Containers page first, then come back here to orchestrate it.</p>
         </div>`;
@@ -32357,7 +32357,7 @@ function renderWolfRunAdoptItems(containers) {
     const listEl = document.getElementById('wolfrun-adopt-list');
     listEl.innerHTML = containers.map((c) => {
         const idx = window._wolfrunAdoptContainers.indexOf(c);
-        const runtimeIcon = c.runtime === 'lxc' ? '📦' : '🐳';
+        const runtimeIcon = c.runtime === 'lxc' ? '' : '';
         const statusColor = c.status === 'running' ? '#10b981' : (c.status === 'exited' || c.status === 'stopped') ? '#ef4444' : '#eab308';
         const selected = wolfrunAdoptSelected === idx;
         return `<div class="wolfrun-adopt-item" data-idx="${idx}" onclick="selectWolfrunAdopt(${idx})"
@@ -32416,7 +32416,7 @@ async function executeWolfRunAdopt() {
 
     const btn = document.getElementById('wolfrun-adopt-btn');
     btn.disabled = true;
-    btn.textContent = '⏳ Adding...';
+    btn.textContent = 'Adding...';
 
     try {
         const resp = await fetch(wolfrunApiUrl('/api/wolfrun/services/adopt'), {
@@ -32443,7 +32443,7 @@ async function executeWolfRunAdopt() {
         showToast('Failed: ' + e.message, 'error');
     } finally {
         btn.disabled = false;
-        btn.textContent = '📦 Add to WolfRun';
+        btn.textContent = 'Add to WolfRun';
     }
 }
 
@@ -32484,10 +32484,10 @@ async function loadWolfRunPortForwards(serviceId) {
                 const srcPorts = f.ports ? `:${f.ports}` : '';
                 const dstPorts = f.dest_ports ? `:${f.dest_ports}` : srcPorts;
                 return `<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg-secondary);border-radius:8px;margin-bottom:6px;border:1px solid var(--border);">
-                    <span style="font-size:14px;">${f.protocol === 'tcp' ? '🌐' : f.protocol === 'udp' ? '📡' : '🔗'}</span>
+                    <span style="font-size:14px;">${f.protocol === 'tcp' ? '' : f.protocol === 'udp' ? '' : ''}</span>
                     <code style="font-size:12px; flex:1; color:var(--text-primary);">${f.public_ip}${srcPorts} → VIP${dstPorts}</code>
                     <span style="font-size:10px; padding:2px 6px; border-radius:4px; background:rgba(99,102,241,0.12); color:#818cf8;">${f.protocol}</span>
-                    <button class="btn btn-sm" onclick="deleteWolfRunPortForward('${serviceId}', '${f.id}')" style="padding:2px 6px; font-size:11px; color:#ef4444;">✕</button>
+                    <button class="btn btn-sm" onclick="deleteWolfRunPortForward('${serviceId}', '${f.id}')" style="padding:2px 6px; font-size:11px; color:#ef4444;"></button>
                 </div>`;
             }).join('');
     } catch (e) {
@@ -32562,7 +32562,7 @@ async function loadStorageProviders() {
         const grid = document.getElementById('storage-providers-grid');
         grid.innerHTML = providers.map(p => {
             const statusColor = p.status === 'running' ? '#10b981' : p.status === 'stopped' ? '#ef4444' : p.status === 'failed' ? '#ef4444' : '#6b7280';
-            const statusLabel = p.status === 'running' ? '🟢 Running' : p.status === 'stopped' ? '🔴 Stopped' : p.status === 'failed' ? '⚠️ Failed' : p.status === 'no-service' ? '✅ Installed' : '⭕ Not Installed';
+            const statusLabel = p.status === 'running' ? 'Running' : p.status === 'stopped' ? 'Stopped' : p.status === 'failed' ? 'Failed' : p.status === 'no-service' ? 'Installed' : '⭕ Not Installed';
             const hasService = p.service && p.status !== 'not-installed' && p.status !== 'no-service';
             const wd = p.wolfdisk_info;
             let wdHtml = '';
@@ -32604,9 +32604,9 @@ async function loadStorageProviders() {
                     <div style="display:flex; gap:4px; flex-wrap:wrap;">
                         ${!p.installed ? `<button class="btn btn-sm btn-primary" style="font-size:11px;" onclick="installProvider('${p.name}')">Install</button>` : ''}
                         ${hasService && p.status !== 'running' ? `<button class="btn btn-sm" style="font-size:11px; color:#10b981;" onclick="providerAction('${p.name}','start')">▶ Start</button>` : ''}
-                        ${hasService && p.status === 'running' ? `<button class="btn btn-sm" style="font-size:11px; color:#ef4444;" onclick="providerAction('${p.name}','stop')">⏹ Stop</button>` : ''}
-                        ${hasService && p.status === 'running' ? `<button class="btn btn-sm" style="font-size:11px; color:#3b82f6;" onclick="providerAction('${p.name}','restart')">🔄 Restart</button>` : ''}
-                        ${p.installed ? `<button class="btn btn-sm" style="font-size:11px; color:#a78bfa;" onclick="openProviderSettings('${p.name}','${p.icon}','${p.label}','${p.config_path || ''}')">⚙️ Settings</button>` : ''}
+                        ${hasService && p.status === 'running' ? `<button class="btn btn-sm" style="font-size:11px; color:#ef4444;" onclick="providerAction('${p.name}','stop')">Stop</button>` : ''}
+                        ${hasService && p.status === 'running' ? `<button class="btn btn-sm" style="font-size:11px; color:#3b82f6;" onclick="providerAction('${p.name}','restart')">Restart</button>` : ''}
+                        ${p.installed ? `<button class="btn btn-sm" style="font-size:11px; color:#a78bfa;" onclick="openProviderSettings('${p.name}','${p.icon}','${p.label}','${p.config_path || ''}')">Settings</button>` : ''}
                     </div>
                 </div>
             </div>`;
@@ -32626,7 +32626,7 @@ async function installProvider(name) {
             showToast(data.message || `${name} installed`, 'success');
             await loadStorageProviders();
             if (name === 'wolfdisk') {
-                openProviderSettings('wolfdisk', '💾', 'WolfDisk', '/etc/wolfdisk/config.toml');
+                openProviderSettings('wolfdisk', '', 'WolfDisk', '/etc/wolfdisk/config.toml');
             }
         } else {
             showToast(data.error || 'Install failed', 'error');
@@ -33058,7 +33058,7 @@ function renderWolfDiskUnassignedSection(nodes) {
 
     var html = '<div class="card" style="margin-bottom:16px;">';
     html += '<div style="padding:16px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px;">';
-    html += '<span style="font-size:18px;">📦</span>';
+    html += '<span style="font-size:18px;"></span>';
     html += '<span style="font-size:16px; font-weight:700; color:var(--text-primary);">Not in a WolfDisk cluster</span>';
     html += '<span style="font-size:12px; color:var(--text-muted);">' + nodes.length + ' member' + (nodes.length !== 1 ? 's' : '') + '</span>';
     html += '</div>';
@@ -33992,7 +33992,7 @@ function renderStatusPages(pages) {
     }
     if (!pages || !pages.length) {
         el.innerHTML = `<div style="text-align:center; padding:50px; color:var(--text-muted);">
-            <div style="font-size:48px; margin-bottom:16px;">🛡️</div>
+            <div style="font-size:48px; margin-bottom:16px;"></div>
             <div style="font-size:16px; font-weight:600; margin-bottom:8px;">No Status Pages Yet</div>
             <div style="font-size:13px; margin-bottom:20px;">Create a public status page to monitor your services and share uptime with your users.</div>
             <button class="btn btn-primary" onclick="showStatusPageForm()" style="font-size:13px;">+ Create Your First Status Page</button>
@@ -34036,10 +34036,10 @@ function renderStatusPages(pages) {
                     ${(p.page?.monitor_ids || []).length} monitor(s) &bull; ${(p.page?.incident_ids || []).length} incident(s) assigned
                 </div>
                 <div style="display:flex; gap:6px;">
-                    <button class="btn btn-sm" onclick="showIncidentForm(null, '${p.page.id}')" style="font-size:11px;">🚨 Report Incident</button>
-                    <button class="btn btn-sm" onclick="editStatusPage('${p.page.id}')" style="font-size:11px;">✏️ Edit</button>
-                    <button class="btn btn-sm" onclick="window.open('${pageUrl}', '_blank')" style="font-size:11px;">👁️ View</button>
-                    <button class="btn btn-sm" onclick="deleteStatusPage('${p.page.id}')" style="font-size:11px; color:#ef4444;">🗑️</button>
+                    <button class="btn btn-sm" onclick="showIncidentForm(null, '${p.page.id}')" style="font-size:11px;">Report Incident</button>
+                    <button class="btn btn-sm" onclick="editStatusPage('${p.page.id}')" style="font-size:11px;">Edit</button>
+                    <button class="btn btn-sm" onclick="window.open('${pageUrl}', '_blank')" style="font-size:11px;">View</button>
+                    <button class="btn btn-sm" onclick="deleteStatusPage('${p.page.id}')" style="font-size:11px; color:#ef4444;"></button>
                 </div>
             </div>
         </div>`;
@@ -34055,7 +34055,7 @@ function renderStatusMonitors(monitors) {
     }
     if (!monitors || !monitors.length) {
         el.innerHTML = `<div style="text-align:center; padding:50px; color:var(--text-muted);">
-            <div style="font-size:48px; margin-bottom:16px;">🔍</div>
+            <div style="font-size:48px; margin-bottom:16px;"></div>
             <div style="font-size:16px; font-weight:600; margin-bottom:8px;">No Monitors Yet</div>
             <div style="font-size:13px; margin-bottom:20px;">Create monitors to check the health of your services, containers, and endpoints.</div>
             <button class="btn btn-primary" onclick="showMonitorForm()" style="font-size:13px;">+ Create Your First Monitor</button>
@@ -34089,9 +34089,9 @@ function renderStatusMonitors(monitors) {
                         <div style="font-size:10px; color:var(--text-muted);">30-day uptime</div>
                     </div>
                     <div style="display:flex; gap:4px; margin-left:12px;">
-                        <button class="btn btn-sm" onclick="showMonitorDetails('${mon.id}')" style="font-size:11px;" title="View Details">📈</button>
-                        <button class="btn btn-sm" onclick="editMonitor('${mon.id}')" style="font-size:11px;" title="Edit">✏️</button>
-                        <button class="btn btn-sm" onclick="deleteMonitor('${mon.id}')" style="font-size:11px; color:#ef4444;" title="Delete">🗑️</button>
+                        <button class="btn btn-sm" onclick="showMonitorDetails('${mon.id}')" style="font-size:11px;" title="View Details"></button>
+                        <button class="btn btn-sm" onclick="editMonitor('${mon.id}')" style="font-size:11px;" title="Edit"></button>
+                        <button class="btn btn-sm" onclick="deleteMonitor('${mon.id}')" style="font-size:11px; color:#ef4444;" title="Delete"></button>
                     </div>
                 </div>
             </div>
@@ -34159,7 +34159,7 @@ async function showMonitorDetails(monitorId) {
         const time = new Date(chk.timestamp).toLocaleString();
         const statusColor = chk.success ? colors.up : colors.down;
         return `<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--border);">
-            <span style="color:${statusColor};">${chk.success ? '✓' : '✗'}</span>
+            <span style="color:${statusColor};">${chk.success ? '' : ''}</span>
             <span style="font-size:11px; color:var(--text-muted);">${time}</span>
             <span style="font-size:11px;">${chk.latency_ms}ms</span>
         </div>`;
@@ -34355,7 +34355,7 @@ function showStatusPageForm(existing) {
     const incidents = (spConfig?.incidents || []).filter(i => i.cluster === spCurrentCluster);
     if (monitors.length === 0 && !existing) {
         container.innerHTML = `<div style="background:var(--bg-tertiary); border:1px dashed var(--border); border-radius:8px; padding:20px; text-align:center; color:var(--text-muted);">
-            <div style="font-size:24px; margin-bottom:8px;">🔍</div>
+            <div style="font-size:24px; margin-bottom:8px;"></div>
             <div style="font-size:13px; margin-bottom:12px;">You need to create monitors in this cluster before adding them to a status page.</div>
             <button class="btn btn-sm btn-primary" onclick="switchStatusTab('monitors'); showMonitorForm();" style="font-size:12px;">+ Create Your First Monitor</button>
         </div>`;
@@ -34453,7 +34453,7 @@ function renderIncidentsList() {
 
     if (!spAllIncidents.length) {
         el.innerHTML = `<div style="text-align:center; padding:40px; color:var(--text-muted);">
-            <div style="font-size:32px; margin-bottom:12px;">✅</div>
+            <div style="font-size:32px; margin-bottom:12px;"></div>
             <div style="font-size:14px;">No incidents reported</div>
             <div style="font-size:12px; margin-top:4px;">All systems operational</div>
         </div>`;
@@ -34467,7 +34467,7 @@ function renderIncidentsList() {
     const pageIncidents = spAllIncidents.slice(start, start + SP_INCIDENTS_PER_PAGE);
 
     const impactColors = { none: '#6b7280', minor: '#eab308', major: '#f97316', critical: '#ef4444' };
-    const statusIcons = { investigating: '🔍', identified: '🎯', monitoring: '👀', resolved: '✅' };
+    const statusIcons = { investigating: '', identified: '', monitoring: '', resolved: '' };
 
     const cardsHtml = pageIncidents.map(inc => {
         const impact = inc.impact || 'none';
@@ -34496,9 +34496,9 @@ function renderIncidentsList() {
                     </div>
                 </div>
                 <div style="display:flex; gap:6px;">
-                    ${status !== 'resolved' ? `<button class="btn btn-sm" onclick="updateIncident('${inc.id}')" style="font-size:11px;">📝 Update</button>` : ''}
-                    <button class="btn btn-sm" onclick="editIncident('${inc.id}')" style="font-size:11px;">✏️</button>
-                    <button class="btn btn-sm" onclick="deleteIncident('${inc.id}')" style="font-size:11px; color:#ef4444;">🗑️</button>
+                    ${status !== 'resolved' ? `<button class="btn btn-sm" onclick="updateIncident('${inc.id}')" style="font-size:11px;">Update</button>` : ''}
+                    <button class="btn btn-sm" onclick="editIncident('${inc.id}')" style="font-size:11px;"></button>
+                    <button class="btn btn-sm" onclick="deleteIncident('${inc.id}')" style="font-size:11px; color:#ef4444;"></button>
                 </div>
             </div>
             ${updates.length > 0 ? `
@@ -34728,7 +34728,7 @@ function renderContainerPicker(existingCheck) {
     const c = existingCheck || {};
     const containerOptions = spAvailableContainers.map(ct => {
         const selected = c.name === ct.name && c.runtime === ct.runtime ? 'selected' : '';
-        const stateIcon = ct.state === 'running' ? '🟢' : '🔴';
+        const stateIcon = ct.state === 'running' ? '' : '';
         return `<option value="${ct.runtime}:${escapeHtml(ct.name)}:${ct.node_id}" ${selected}>${stateIcon} ${escapeHtml(ct.name)} (${ct.runtime} @ ${escapeHtml(ct.node)})</option>`;
     }).join('');
 
@@ -34767,7 +34767,7 @@ function renderWolfrunServicePicker(existingCheck) {
         const selected = c.service_id === svc.id ? 'selected' : '';
         const running = svc.instances?.filter(i => i.status === 'running').length || 0;
         const total = svc.instances?.length || 0;
-        const statusIcon = running === total && total > 0 ? '🟢' : running > 0 ? '🟡' : '🔴';
+        const statusIcon = running === total && total > 0 ? '' : running > 0 ? '' : '';
         return `<option value="${svc.id}" ${selected}>${statusIcon} ${escapeHtml(svc.name)} (${running}/${total} running)</option>`;
     }).join('');
 
@@ -34876,7 +34876,7 @@ function updateK8sPodBadges() {
             badge.style.display = '';
         } else if (counts[nodeId] !== undefined) {
             // Node is part of a k8s cluster but no pod count yet — show cluster indicator
-            badge.textContent = '⎈';
+            badge.textContent = '';
             badge.style.display = '';
         } else {
             badge.style.display = 'none';
@@ -38751,7 +38751,7 @@ function topoRenderDiagnostics(topoData) {
 
     const diagnostics = topoData?.peer_diagnostics || [];
     if (diagnostics.length === 0) {
-        diagnosticsDiv.innerHTML = '<div style="color:rgba(255,255,255,0.5);">All nodes connected successfully ✓</div>';
+        diagnosticsDiv.innerHTML = '<div style="color:rgba(255,255,255,0.5);">All nodes connected successfully </div>';
         return;
     }
 
@@ -38761,7 +38761,7 @@ function topoRenderDiagnostics(topoData) {
     const skipped = diagnostics.filter(d => d.result === 'skipped');
 
     if (succeeded.length > 0) {
-        html += '<div style="margin-bottom:12px;"><div style="color:#22c55e;margin-bottom:6px;font-weight:600;">✓ Connected</div>';
+        html += '<div style="margin-bottom:12px;"><div style="color:#22c55e;margin-bottom:6px;font-weight:600;">Connected</div>';
         succeeded.forEach(d => {
             html += `<div style="margin-left:12px;color:rgba(255,255,255,0.6);">${d.node_id} (${d.hostname})</div>`;
         });
@@ -38769,7 +38769,7 @@ function topoRenderDiagnostics(topoData) {
     }
 
     if (failed.length > 0) {
-        html += '<div style="margin-bottom:12px;"><div style="color:#ef4444;margin-bottom:6px;font-weight:600;">✗ Connection Failed</div>';
+        html += '<div style="margin-bottom:12px;"><div style="color:#ef4444;margin-bottom:6px;font-weight:600;">Connection Failed</div>';
         failed.forEach(d => {
             html += `<div style="margin-left:12px;color:rgba(255,255,255,0.6);"><div style="color:#ef4444;">• ${d.node_id}</div><div style="font-size:11px;color:rgba(255,255,255,0.4);margin-left:8px;">${d.reason || 'Unknown error'}</div></div>`;
         });
@@ -40137,8 +40137,8 @@ const wfActionIcons = {
     truenas_action:     '\u{1F4BE}',
     unifi_action:       '\u{1F4F6}',
     integration_action: '\u{1F517}',
-    sql_query:          '\u{1F5C4}',  // 🗄️
-    send_email:         '\u{1F4E7}',  // 📧
+    sql_query:          '\u{1F5C4}',  // 
+    send_email:         '\u{1F4E7}',  // 
 };
 
 // ═══ Cluster Browser ═══════════════════════════════════════════════════════
@@ -40194,7 +40194,7 @@ async function loadClusterBrowserSessions() {
         const sessions = resp.ok ? await resp.json() : [];
         if (!Array.isArray(sessions) || sessions.length === 0) {
             grid.innerHTML = renderEmptyState({
-                icon: '🌐',
+                icon: '',
                 title: 'No browser sessions running',
                 body: 'Start a session to control a remote browser headlessly — useful for scripted automation or scraping behind a login.',
             });
@@ -40206,14 +40206,14 @@ async function loadClusterBrowserSessions() {
             return `
             <div style="border:1px solid var(--border);border-radius:10px;padding:14px;background:var(--bg-card);">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-                    <span style="font-size:22px;">🦊</span>
+                    <span style="font-size:22px;"></span>
                     <strong style="flex:1;">Browser ${escapeHtml(s.id)}</strong>
                 </div>
                 <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Started: ${escapeHtml(started)}</div>
                 <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">User: ${escapeHtml(s.user)}</div>
                 <div style="display:flex;gap:6px;">
-                    <button class="btn btn-sm btn-primary" onclick="window.open('${escapeAttr(url)}', '_blank', 'width=1280,height=800')">🖥️ Open</button>
-                    <button class="btn btn-sm" onclick="clusterBrowserStop('${escapeAttr(s.id)}')">⏹️ Stop</button>
+                    <button class="btn btn-sm btn-primary" onclick="window.open('${escapeAttr(url)}', '_blank', 'width=1280,height=800')">Open</button>
+                    <button class="btn btn-sm" onclick="clusterBrowserStop('${escapeAttr(s.id)}')">Stop</button>
                 </div>
             </div>`;
         }).join('');
@@ -40235,7 +40235,7 @@ function clusterBrowserConnectUrl(session) {
 
 async function clusterBrowserStart() {
     const btn = event?.target;
-    if (btn) { btn.disabled = true; btn.textContent = '⏳ Starting…'; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
 
     // Open the popup SYNCHRONOUSLY inside the click handler. If we wait
     // until the session is ready (awaits on fetch + SSE stream, plus the
@@ -40250,7 +40250,7 @@ async function clusterBrowserStart() {
             popup.document.body.innerHTML = `
                 <div style="background:#0d0f14;color:#e8eaf0;font-family:system-ui,-apple-system,sans-serif;min-height:100vh;margin:0;display:flex;align-items:center;justify-content:center;">
                     <div style="text-align:center;padding:48px;">
-                        <div style="font-size:56px;margin-bottom:12px;">🦊</div>
+                        <div style="font-size:56px;margin-bottom:12px;"></div>
                         <h2 style="margin:0 0 8px;font-weight:600;">Starting Cluster Browser…</h2>
                         <p style="color:#9ba0ad;font-size:14px;margin:0;max-width:420px;">Launching Firefox on a cluster node. First run downloads the browser image (~700 MB); subsequent sessions start in seconds. This window will navigate automatically when ready.</p>
                     </div>
@@ -40317,7 +40317,7 @@ async function clusterBrowserStart() {
                     popup.document.body.innerHTML = `
                         <div style="background:#0d0f14;color:#e8eaf0;font-family:system-ui,sans-serif;min-height:100vh;margin:0;display:flex;align-items:center;justify-content:center;">
                             <div style="text-align:center;padding:48px;max-width:480px;">
-                                <div style="font-size:56px;margin-bottom:12px;">❌</div>
+                                <div style="font-size:56px;margin-bottom:12px;"></div>
                                 <h2 style="margin:0 0 8px;color:#ef4444;">Failed to start session</h2>
                                 <pre style="background:#161922;border:1px solid #2a2e3c;padding:12px;border-radius:8px;text-align:left;white-space:pre-wrap;word-break:break-word;font-size:12px;color:#cbd2de;">${escapeHtml(failed)}</pre>
                             </div>
@@ -40357,7 +40357,7 @@ async function clusterBrowserStart() {
             try { popup.close(); } catch (err) {}
         }
     } finally {
-        if (btn) { btn.disabled = false; btn.textContent = '🚀 Start browser session'; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Start browser session'; }
     }
 }
 
@@ -40370,7 +40370,7 @@ function clusterBrowserProgressModal() {
     overlay.innerHTML = `
         <div class="modal" style="max-width:560px;">
             <div class="modal-header">
-                <h3>🌐 Starting Cluster Browser</h3>
+                <h3>Starting Cluster Browser</h3>
             </div>
             <div class="modal-body" style="font-size:13px;line-height:1.5;">
                 <div style="display:flex;align-items:center;gap:10px;background:var(--bg-secondary);padding:14px 16px;border-radius:8px;margin-bottom:12px;">
@@ -40437,7 +40437,7 @@ function renderClusterServices(grouped) {
     if (!grid) return;
     if (grouped.length === 0) {
         grid.innerHTML = renderEmptyState({
-            icon: '🔎',
+            icon: '',
             title: 'No services discovered yet',
             body: 'WolfStack sweeps the cluster every 5 minutes for HTTP/SSH services. Trigger an immediate pass or pin one manually.',
         });
@@ -40466,9 +40466,9 @@ function renderClusterServices(grouped) {
 
 async function clusterServicesSweep() {
     const btn = event?.target;
-    if (btn) { btn.disabled = true; btn.textContent = '⏳ Scanning…'; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
     await triggerClusterServicesSweep({ silent: false });
-    if (btn) { btn.disabled = false; btn.textContent = '🔄 Rescan services'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Rescan services'; }
 }
 
 async function clusterServiceDelete(id) {
@@ -40506,7 +40506,7 @@ function openAddManualServiceDialog() {
                 </div>
                 <div class="form-group">
                     <label>Icon (emoji, optional)</label>
-                    <input type="text" class="form-control" id="add-svc-icon" placeholder="🌐">
+                    <input type="text" class="form-control" id="add-svc-icon" placeholder="">
                 </div>
             </div>
             <div class="modal-footer">
@@ -40867,10 +40867,10 @@ function renderWolfFlowCanvas() {
     const targetLabel = hasTarget ? wfTargetLabel(wfEditorTarget) : 'Not Set';
     const btnColor = hasTarget ? 'background:var(--bg-card);border-color:var(--border);color:var(--text-primary);' : 'background:rgba(239,68,68,0.15);border-color:#ef4444;color:#ef4444;';
     html += `<div style="margin-bottom:14px;display:flex;align-items:center;gap:10px;">
-        <span style="font-size:12px;font-weight:600;color:var(--text-secondary);">🎯 Target:</span>
+        <span style="font-size:12px;font-weight:600;color:var(--text-secondary);">Target:</span>
         <span style="font-size:13px;font-weight:700;color:var(--text-primary);">${escapeHtml(targetLabel)}</span>
         <button onclick="selectWfWorkflowTarget()" class="btn btn-sm" style="padding:5px 14px;font-size:11px;font-weight:600;border-radius:6px;cursor:pointer;${btnColor}">
-            ${hasTarget ? '✏️ Change' : '⚠️ Set Target'}
+            ${hasTarget ? 'Change' : 'Set Target'}
         </button>
     </div>`;
 
@@ -41883,7 +41883,7 @@ async function loadComposeStacks() {
 
             const servicesList = s.services.length
                 ? s.services.map(svc => {
-                    const dot = svc.state === 'running' ? '🟢' : '🔴';
+                    const dot = svc.state === 'running' ? '' : '';
                     return `<span style="font-size:12px; margin-right:6px;" title="${svc.image}">${dot} ${svc.name}</span>`;
                 }).join('')
                 : '<span style="color:var(--text-muted); font-size:12px;">No services</span>';
@@ -41896,12 +41896,12 @@ async function loadComposeStacks() {
                     <div style="display:flex; gap:4px; flex-wrap:wrap;">
                         ${s.status === 'stopped'
                             ? `<button class="btn btn-sm btn-primary" onclick="composeAction('${escapeHtml(s.name)}', 'up')" style="font-size:11px; padding:2px 8px;">▶ Up</button>`
-                            : `<button class="btn btn-sm" onclick="composeAction('${escapeHtml(s.name)}', 'down')" style="font-size:11px; padding:2px 8px;">⏹ Down</button>
-                               <button class="btn btn-sm" onclick="composeAction('${escapeHtml(s.name)}', 'restart')" style="font-size:11px; padding:2px 8px;">🔄 Restart</button>`}
+                            : `<button class="btn btn-sm" onclick="composeAction('${escapeHtml(s.name)}', 'down')" style="font-size:11px; padding:2px 8px;">Down</button>
+                               <button class="btn btn-sm" onclick="composeAction('${escapeHtml(s.name)}', 'restart')" style="font-size:11px; padding:2px 8px;">Restart</button>`}
                         <button class="btn btn-sm" onclick="composeAction('${escapeHtml(s.name)}', 'pull')" style="font-size:11px; padding:2px 8px;">⬇ Pull</button>
-                        <button class="btn btn-sm" onclick="openComposeEditor('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px;">✏️ Edit</button>
-                        <button class="btn btn-sm" onclick="showComposeLogs('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px;">📄 Logs</button>
-                        <button class="btn btn-sm" onclick="deleteComposeStack('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px; color:var(--danger-color, #ef4444);">🗑</button>
+                        <button class="btn btn-sm" onclick="openComposeEditor('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px;">Edit</button>
+                        <button class="btn btn-sm" onclick="showComposeLogs('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px;">Logs</button>
+                        <button class="btn btn-sm" onclick="deleteComposeStack('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px; color:var(--danger-color, #ef4444);"></button>
                     </div>
                 </td>
             </tr>`;
@@ -42060,11 +42060,11 @@ async function validateComposeYaml() {
         const resp = await fetch(apiUrl(`/api/compose/stacks/${encodeURIComponent(name)}/validate`), { method: 'POST' });
         const data = await resp.json();
         if (data.valid) {
-            resultEl.innerHTML = '<span style="color:#22c55e;">✓ Valid</span>';
+            resultEl.innerHTML = '<span style="color:#22c55e;">Valid</span>';
             // Clear any previous error highlight on the gutter.
             attachLineNumberGutter('compose-yaml-editor');
         } else {
-            resultEl.innerHTML = `<span style="color:var(--danger-color, #ef4444);">✗ ${escapeHtml(data.error || 'Invalid')}</span>`;
+            resultEl.innerHTML = `<span style="color:var(--danger-color, #ef4444);">${escapeHtml(data.error || 'Invalid')}</span>`;
             // Pull out 1-indexed line number(s) the validator named so
             // we can colour those rows in the gutter — operators
             // shouldn't have to count down to find the line referenced
@@ -42184,12 +42184,12 @@ async function loadSecrets() {
             return `<tr data-secret-key="${safeKey}">
             <td><code style="background:var(--bg-secondary); padding:2px 6px; border-radius:4px; font-size:12px;">${escapeHtml(s.key)}</code></td>
             <td><span style="font-family:var(--font-mono); font-size:12px; color:var(--text-muted);">${escapeHtml(s.value_masked)}</span>
-                <button class="btn btn-sm secret-reveal-btn" style="font-size:10px; padding:1px 6px; margin-left:4px;">👁</button></td>
+                <button class="btn btn-sm secret-reveal-btn" style="font-size:10px; padding:1px 6px; margin-left:4px;"></button></td>
             <td style="font-size:12px; color:var(--text-muted);">${escapeHtml(s.description || '—')}</td>
             <td style="font-size:11px; color:var(--text-muted);">${escapeHtml(s.updated || s.created || '—')}</td>
             <td>
-                <button class="btn btn-sm secret-edit-btn" style="font-size:11px; padding:2px 8px;">✏️</button>
-                <button class="btn btn-sm secret-delete-btn" style="font-size:11px; padding:2px 8px; color:var(--danger-color, #ef4444);">🗑</button>
+                <button class="btn btn-sm secret-edit-btn" style="font-size:11px; padding:2px 8px;"></button>
+                <button class="btn btn-sm secret-delete-btn" style="font-size:11px; padding:2px 8px; color:var(--danger-color, #ef4444);"></button>
             </td>
         </tr>`;
         }).join('');
@@ -42291,11 +42291,11 @@ async function revealSecret(key, btn) {
         if (span.dataset.revealed === 'true') {
             span.textContent = data.value.length > 4 ? data.value.substring(0, 4) + '****' : '****';
             span.dataset.revealed = 'false';
-            btn.textContent = '👁';
+            btn.textContent = '';
         } else {
             span.textContent = data.value;
             span.dataset.revealed = 'true';
-            btn.textContent = '🙈';
+            btn.textContent = '';
         }
     } catch (e) {
         showToast('Failed to reveal secret', 'error');
@@ -42317,7 +42317,7 @@ async function loadWolframStatus() {
             runningView.style.display = 'none';
             document.getElementById('wolfram-install-status').innerHTML = `
                 <div style="display:flex; align-items:center; gap:16px; padding:16px; background:var(--bg-secondary); border-radius:8px; border:1px solid var(--border);">
-                    <span style="font-size:32px;">🧠</span>
+                    <span style="font-size:32px;"></span>
                     <div style="flex:1;">
                         <div style="font-weight:600; margin-bottom:4px;">Wolfram is not installed</div>
                         <div style="font-size:13px; color:var(--text-muted);">Wolfram is a proactive memory compression daemon that saves RAM by compressing cold pages into zram, deduplicating with KSM, and optionally hibernating idle processes.</div>
@@ -42333,7 +42333,7 @@ async function loadWolframStatus() {
             runningView.style.display = 'none';
             document.getElementById('wolfram-install-status').innerHTML = `
                 <div style="display:flex; align-items:center; gap:16px; padding:16px; background:var(--bg-secondary); border-radius:8px; border:1px solid var(--border);">
-                    <span style="font-size:32px;">⏸️</span>
+                    <span style="font-size:32px;"></span>
                     <div style="flex:1;">
                         <div style="font-weight:600; margin-bottom:4px;">Wolfram is installed but not running</div>
                         <div style="font-size:13px; color:var(--text-muted);">Version: ${data.version || 'unknown'}</div>
@@ -42539,7 +42539,7 @@ async function loadWolfUsbPage() {
 
         if (!status.wolfusb_available) {
             html += '<div class="card" style="margin-bottom:16px;"><div class="card-header">WolfUSB Unavailable</div><div class="card-body" style="text-align:center;padding:2rem;">'
-                + '<div style="font-size:2.5rem;margin-bottom:12px;">🔌</div>'
+                + '<div style="font-size:2.5rem;margin-bottom:12px;"></div>'
                 + '<h3 style="margin-bottom:8px;">WolfUSB not installed</h3>'
                 + '<p style="color:var(--text-secondary);margin-bottom:12px;max-width:500px;margin-left:auto;margin-right:auto;">WolfUSB is installed automatically with WolfStack. Run the WolfStack installer or update to install it on this node.</p>'
                 + '<p style="color:var(--text-muted);font-size:11px;">Manual: <code>curl -fsSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash</code></p>'
@@ -42553,7 +42553,7 @@ async function loadWolfUsbPage() {
         var statusText = status.enabled ? 'Enabled' : 'Disabled';
         var versionText = status.version ? ' <span style="font-size:10px;color:var(--text-muted);font-weight:400;">(' + escapeHtml(status.version) + ')</span>' : '';
         html += '<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding:12px 16px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);">'
-            + '<span style="font-size:1.5rem;">🔌</span>'
+            + '<span style="font-size:1.5rem;"></span>'
             + '<div style="flex:1;"><strong style="font-size:14px;">WolfUSB</strong>' + versionText + '<br><span style="font-size:12px;color:var(--text-muted);">Share USB devices across your cluster</span></div>'
             + '<div style="display:flex;align-items:center;gap:12px;">'
             + '<span style="font-size:11px;color:' + statusColor + ';font-weight:600;">' + statusText + '</span>'
@@ -42570,7 +42570,7 @@ async function loadWolfUsbPage() {
             if (!status.kernel_modules.vhci_hcd_loaded) missing.push('vhci_hcd (mount remote devices)');
             if (!status.kernel_modules.usbip_host_loaded) missing.push('usbip_host (share local devices)');
             html += '<div class="card" style="margin-bottom:16px;border-left:4px solid #f59e0b;">'
-                + '<div class="card-header" style="color:#f59e0b;">⚠ USB/IP Kernel Modules Missing</div>'
+                + '<div class="card-header" style="color:#f59e0b;">USB/IP Kernel Modules Missing</div>'
                 + '<div class="card-body" style="font-size:13px;line-height:1.5;">'
                 + '<p style="margin:0 0 8px 0;">This node is missing: <strong>' + missing.map(escapeHtml).join(', ') + '</strong>. WolfUSB will not work until the required kernel modules are loaded.</p>'
                 + '<p style="margin:0;color:var(--text-secondary);">' + escapeHtml(status.kernel_modules.install_hint || '') + '</p>'
@@ -42688,11 +42688,11 @@ async function refreshWolfUsbDevices() {
                 msgs.push('<strong>Unreachable:</strong> ' + unreachable.map(function(n) { return escapeHtml(n.hostname); }).join(', '));
             }
             warningHtml = '<div style="background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.3);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:var(--text-secondary);">'
-                + '⚠ ' + msgs.join(' · ') + '</div>';
+                + '' + msgs.join(' · ') + '</div>';
         }
 
         if (rows.length === 0) {
-            body.innerHTML = warningHtml + '<div style="text-align:center;padding:24px;"><span style="font-size:2rem;display:block;margin-bottom:8px;">🔌</span><span style="color:var(--text-muted);font-size:13px;">No USB devices detected in the cluster.<br><span style="font-size:11px;">Plug in a USB device on any node and click Refresh.</span></span></div>';
+            body.innerHTML = warningHtml + '<div style="text-align:center;padding:24px;"><span style="font-size:2rem;display:block;margin-bottom:8px;"></span><span style="color:var(--text-muted);font-size:13px;">No USB devices detected in the cluster.<br><span style="font-size:11px;">Plug in a USB device on any node and click Refresh.</span></span></div>';
         } else {
             var targetOpts = await _wolfusbGetClusterTargets();
 
@@ -42733,15 +42733,15 @@ async function refreshWolfUsbDevices() {
             } else {
                 var ahtml = '<table class="data-table" style="width:100%;font-size:12px;"><thead><tr><th>Device</th><th>Bus ID</th><th>From</th><th>To</th><th></th></tr></thead><tbody>';
                 assignments.forEach(function(a) {
-                    var icon = a.target_type === 'docker' ? '🐳' : a.target_type === 'lxc' ? '📦' : '🖥️';
+                    var icon = a.target_type === 'docker' ? '' : a.target_type === 'lxc' ? '' : '';
                     ahtml += '<tr>'
                         + '<td>' + escapeHtml(a.label || a.usb_id || 'USB') + '</td>'
                         + '<td style="font-family:monospace;">' + escapeHtml(a.busid) + '</td>'
                         + '<td>' + escapeHtml(a.source_hostname || '?') + '</td>'
                         + '<td>' + icon + ' ' + escapeHtml(a.target_name) + ' <span style="color:var(--text-muted);font-size:10px;">on ' + escapeHtml(a.target_hostname || '?') + '</span></td>'
                         + '<td style="white-space:nowrap;">'
-                        + '<button class="btn btn-sm" onclick="wolfusbDiagnose(\'' + escapeAttr(a.busid) + '\')" style="padding:3px 8px;font-size:10px;margin-right:4px;" title="Walk the passthrough chain and show exactly where it broke">🔍 Diagnose</button>'
-                        + '<button class="btn btn-sm" onclick="wolfusbReattach(\'' + escapeAttr(a.busid) + '\')" style="padding:3px 8px;font-size:10px;margin-right:4px;background:rgba(59,130,246,0.12);color:#3b82f6;border-color:rgba(59,130,246,0.3);" title="Re-run the full attach chain — use after a migration breaks passthrough">🔄 Re-attach</button>'
+                        + '<button class="btn btn-sm" onclick="wolfusbDiagnose(\'' + escapeAttr(a.busid) + '\')" style="padding:3px 8px;font-size:10px;margin-right:4px;" title="Walk the passthrough chain and show exactly where it broke">Diagnose</button>'
+                        + '<button class="btn btn-sm" onclick="wolfusbReattach(\'' + escapeAttr(a.busid) + '\')" style="padding:3px 8px;font-size:10px;margin-right:4px;background:rgba(59,130,246,0.12);color:#3b82f6;border-color:rgba(59,130,246,0.3);" title="Re-run the full attach chain — use after a migration breaks passthrough">Re-attach</button>'
                         + '<button class="btn btn-sm" onclick="wolfusbUnassign(\'' + escapeAttr(a.busid) + '\',\'' + escapeAttr(a.source_node_id) + '\')" style="padding:3px 8px;font-size:10px;background:rgba(239,68,68,0.1);color:#ef4444;border-color:rgba(239,68,68,0.3);">Remove</button>'
                         + '</td></tr>';
                 });
@@ -42773,13 +42773,13 @@ async function _wolfusbGetClusterTargets() {
 
                 opts += '<optgroup label="' + escapeAttr(nh) + '">';
                 docker.forEach(function(c) {
-                    opts += '<option value="docker|' + escapeAttr(c.name) + '|' + escapeAttr(nid) + '|' + escapeAttr(nh) + '">🐳 ' + escapeHtml(c.name) + '</option>';
+                    opts += '<option value="docker|' + escapeAttr(c.name) + '|' + escapeAttr(nid) + '|' + escapeAttr(nh) + '">' + escapeHtml(c.name) + '</option>';
                 });
                 lxc.forEach(function(c) {
-                    opts += '<option value="lxc|' + escapeAttr(c.name) + '|' + escapeAttr(nid) + '|' + escapeAttr(nh) + '">📦 ' + escapeHtml(c.name) + '</option>';
+                    opts += '<option value="lxc|' + escapeAttr(c.name) + '|' + escapeAttr(nid) + '|' + escapeAttr(nh) + '">' + escapeHtml(c.name) + '</option>';
                 });
                 vms.forEach(function(v) {
-                    opts += '<option value="vm|' + escapeAttr(v.name) + '|' + escapeAttr(nid) + '|' + escapeAttr(nh) + '">🖥️ ' + escapeHtml(v.name) + '</option>';
+                    opts += '<option value="vm|' + escapeAttr(v.name) + '|' + escapeAttr(nid) + '|' + escapeAttr(nh) + '">' + escapeHtml(v.name) + '</option>';
                 });
                 opts += '</optgroup>';
             });
@@ -42866,7 +42866,7 @@ function _wolfusbRenderSteps(steps, overallOk) {
         return;
     }
     const rows = steps.map(s => {
-        const icon = s.ok ? '✅' : '❌';
+        const icon = s.ok ? '' : '';
         const color = s.ok ? '#22c55e' : '#ef4444';
         return `<div style="display:flex; gap:10px; padding:8px 0; border-bottom:1px solid var(--border);">
             <div style="width:22px; font-size:16px;">${icon}</div>
@@ -42877,13 +42877,13 @@ function _wolfusbRenderSteps(steps, overallOk) {
         </div>`;
     }).join('');
     const banner = overallOk
-        ? `<div style="background:rgba(34,197,94,0.1); border:1px solid rgba(34,197,94,0.3); border-radius:6px; padding:8px 12px; margin-bottom:10px; color:#22c55e; font-size:13px;">✅ All checks passed</div>`
-        : `<div style="background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.3); border-radius:6px; padding:8px 12px; margin-bottom:10px; color:#ef4444; font-size:13px;">❌ One or more checks failed — see the red row below for the fix.</div>`;
+        ? `<div style="background:rgba(34,197,94,0.1); border:1px solid rgba(34,197,94,0.3); border-radius:6px; padding:8px 12px; margin-bottom:10px; color:#22c55e; font-size:13px;">All checks passed</div>`
+        : `<div style="background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.3); border-radius:6px; padding:8px 12px; margin-bottom:10px; color:#ef4444; font-size:13px;">One or more checks failed — see the red row below for the fix.</div>`;
     body.innerHTML = banner + rows;
 }
 
 async function wolfusbDiagnose(busid) {
-    _wolfusbOpenStepsModal('🔍 USB passthrough diagnostics', busid);
+    _wolfusbOpenStepsModal('USB passthrough diagnostics', busid);
     try {
         const resp = await fetch(apiUrl('/api/wolfusb/diagnose/' + encodeURIComponent(busid)));
         const data = await resp.json();
@@ -42902,7 +42902,7 @@ async function wolfusbReattach(busid) {
         'Re-attach will stop any stale USB mount unit, re-bind the device on ' +
         'the source node, and re-run the passthrough chain. Safe to run on a ' +
         'healthy assignment (idempotent). Continue?')) return;
-    _wolfusbOpenStepsModal('🔄 USB re-attach', busid);
+    _wolfusbOpenStepsModal('USB re-attach', busid);
     try {
         const resp = await fetch(apiUrl('/api/wolfusb/reattach/' + encodeURIComponent(busid)), {
             method: 'POST',
@@ -43135,7 +43135,7 @@ function wolfAgentsToggleFullscreen() {
             log.style.maxHeight = 'calc(100vh - 260px - var(--ws-trust-footer-height, 0px))';
             log.style.height = 'calc(100vh - 260px - var(--ws-trust-footer-height, 0px))';
         }
-        if (btn) { btn.textContent = '❐'; btn.title = 'Exit fullscreen (Esc)'; }
+        if (btn) { btn.textContent = ''; btn.title = 'Exit fullscreen (Esc)'; }
     } else {
         var p = _wolfAgentsChatFsPrev;
         card.style.position = p.position;
@@ -43150,7 +43150,7 @@ function wolfAgentsToggleFullscreen() {
             log.style.height = p.logHeight || '';
         }
         _wolfAgentsChatFsPrev = null;
-        if (btn) { btn.textContent = '⛶'; btn.title = 'Toggle fullscreen (Esc)'; }
+        if (btn) { btn.textContent = ''; btn.title = 'Toggle fullscreen (Esc)'; }
     }
 }
 
@@ -43303,7 +43303,7 @@ async function wolfAgentsSendMessage() {
     const nowSec = Math.floor(Date.now() / 1000);
     log.insertAdjacentHTML('beforeend', wolfAgentsMessageHtml('user', msg, nowSec));
     const thinking = document.createElement('div');
-    thinking.innerHTML = wolfAgentsMessageHtml('assistant', '⏳ thinking…', nowSec);
+    thinking.innerHTML = wolfAgentsMessageHtml('assistant', 'thinking…', nowSec);
     log.appendChild(thinking);
     log.scrollTop = log.scrollHeight;
     try {
@@ -43318,12 +43318,12 @@ async function wolfAgentsSendMessage() {
         if (resp.ok && data.response) {
             log.insertAdjacentHTML('beforeend', wolfAgentsMessageHtml('assistant', data.response, Math.floor(Date.now() / 1000)));
         } else {
-            log.insertAdjacentHTML('beforeend', wolfAgentsMessageHtml('assistant', `⚠️ ${data.error || ('HTTP ' + resp.status)}`, Math.floor(Date.now() / 1000)));
+            log.insertAdjacentHTML('beforeend', wolfAgentsMessageHtml('assistant', `${data.error || ('HTTP ' + resp.status)}`, Math.floor(Date.now() / 1000)));
         }
         log.scrollTop = log.scrollHeight;
     } catch (e) {
         thinking.remove();
-        log.insertAdjacentHTML('beforeend', wolfAgentsMessageHtml('assistant', `⚠️ ${e.message}`, Math.floor(Date.now() / 1000)));
+        log.insertAdjacentHTML('beforeend', wolfAgentsMessageHtml('assistant', `${e.message}`, Math.floor(Date.now() / 1000)));
     } finally {
         inp.disabled = false;
         inp.focus();
@@ -43764,7 +43764,7 @@ async function wolfAgentsLoadPending() {
         _wolfAgentsUpdatePendingBadge(openCount);
         if (entries.length === 0) {
             list.innerHTML = renderEmptyState({
-                icon: '✅',
+                icon: '',
                 title: 'No pending actions',
                 body: 'The agent hasn\'t asked for any approvals yet. Anything that needs your sign-off will appear here.',
             });
@@ -43772,10 +43772,10 @@ async function wolfAgentsLoadPending() {
         }
         list.innerHTML = entries.map(e => {
             const badge = {
-                pending:  '<span style="background:rgba(234,179,8,0.15); color:#eab308; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">⏳ PENDING</span>',
-                approved: '<span style="background:rgba(34,197,94,0.15); color:#22c55e; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">✅ APPROVED</span>',
-                denied:   '<span style="background:rgba(239,68,68,0.15); color:#ef4444; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">❌ DENIED</span>',
-                expired:  '<span style="background:rgba(156,163,175,0.15); color:#9ca3af; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">⌛ EXPIRED</span>',
+                pending:  '<span style="background:rgba(234,179,8,0.15); color:#eab308; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PENDING</span>',
+                approved: '<span style="background:rgba(34,197,94,0.15); color:#22c55e; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">APPROVED</span>',
+                denied:   '<span style="background:rgba(239,68,68,0.15); color:#ef4444; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">DENIED</span>',
+                expired:  '<span style="background:rgba(156,163,175,0.15); color:#9ca3af; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">EXPIRED</span>',
             }[e.status] || e.status;
             const args = JSON.stringify(e.arguments, null, 2);
             const decidedBy = e.decided_by ? `<div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Decided by <b>${escapeHtml(e.decided_by)}</b>${e.decision_note ? ' — ' + escapeHtml(e.decision_note) : ''}</div>` : '';
@@ -43784,8 +43784,8 @@ async function wolfAgentsLoadPending() {
                 : '';
             const actions = e.status === 'pending'
                 ? `<div style="display:flex; gap:6px; margin-top:8px;">
-                       <button class="btn btn-sm btn-primary" onclick="wolfAgentsApprovePending(${e.seq})">✅ Approve + Run</button>
-                       <button class="btn btn-sm" style="background:rgba(239,68,68,0.15); color:#ef4444; border-color:rgba(239,68,68,0.3);" onclick="wolfAgentsDenyPending(${e.seq})">❌ Deny</button>
+                       <button class="btn btn-sm btn-primary" onclick="wolfAgentsApprovePending(${e.seq})">Approve + Run</button>
+                       <button class="btn btn-sm" style="background:rgba(239,68,68,0.15); color:#ef4444; border-color:rgba(239,68,68,0.3);" onclick="wolfAgentsDenyPending(${e.seq})">Deny</button>
                    </div>`
                 : '';
             return `<div style="border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:10px; background:var(--bg-card);">
@@ -44058,7 +44058,7 @@ function cpRender() {
         if (_cpErrors.length > 0) {
             const names = _cpErrors.map(e => `${e.node_hostname}·${e.kind}`).slice(0, 3).join(', ');
             const moreErr = _cpErrors.length > 3 ? ` (+${_cpErrors.length - 3} more)` : '';
-            txt += ` — ⚠ ${_cpErrors.length} node fetch${_cpErrors.length === 1 ? '' : 'es'} failed: ${names}${moreErr}`;
+            txt += ` — ${_cpErrors.length} node fetch${_cpErrors.length === 1 ? '' : 'es'} failed: ${names}${moreErr}`;
         }
         statusLine.textContent = txt;
     }
@@ -44127,11 +44127,11 @@ function cpBuildDerivedRows(items, mode) {
 
 function cpTitleForKey(mode, key) {
     if (mode === 'type') {
-        const labels = { docker: '🐳 Docker', lxc: '📦 LXC', vm: '💻 Virtual Machines' };
+        const labels = { docker: 'Docker', lxc: 'LXC', vm: 'Virtual Machines' };
         return labels[key] || key;
     }
     if (mode === 'status') {
-        const labels = { running: '🟢 Running', stopped: '⭕ Stopped', paused: '⏸ Paused', unknown: '❔ Unknown' };
+        const labels = { running: 'Running', stopped: '⭕ Stopped', paused: 'Paused', unknown: 'Unknown' };
         return labels[key] || key;
     }
     return key;
@@ -44149,7 +44149,7 @@ function cpBuildCustomRows(filteredItems) {
     const rows = [];
     rows.push({
         id: '__all__',
-        name: '🌐 ALL',
+        name: 'ALL',
         isAll: true,
         items: filteredItems.slice(),
     });
@@ -44222,9 +44222,9 @@ function cpRenderRow(row, idx, mode) {
         ? `<span style="display:flex;gap:4px;margin-left:8px;">
                 <button class="btn btn-sm" onclick="cpMoveGroup('${row.id}',-1)" title="Move up">↑</button>
                 <button class="btn btn-sm" onclick="cpMoveGroup('${row.id}',1)" title="Move down">↓</button>
-                <button class="btn btn-sm" onclick="cpRecolourGroup('${row.id}')" title="Change colour">🎨</button>
-                <button class="btn btn-sm" onclick="cpRenameGroup('${row.id}')" title="Rename">✏️</button>
-                <button class="btn btn-sm" onclick="cpDeleteGroup('${row.id}')" title="Delete group">🗑</button>
+                <button class="btn btn-sm" onclick="cpRecolourGroup('${row.id}')" title="Change colour"></button>
+                <button class="btn btn-sm" onclick="cpRenameGroup('${row.id}')" title="Rename"></button>
+                <button class="btn btn-sm" onclick="cpDeleteGroup('${row.id}')" title="Delete group"></button>
             </span>`
         : '';
 
@@ -44238,7 +44238,7 @@ function cpRenderRow(row, idx, mode) {
            </div>`
         : '';
     const errorHtml = row.error
-        ? `<div style="padding:8px 0;color:var(--danger,#ef4444);font-size:12px;">⚠ fetch failed — see status line</div>`
+        ? `<div style="padding:8px 0;color:var(--danger,#ef4444);font-size:12px;">fetch failed — see status line</div>`
         : '';
     const tiles = row.items.length > 0
         ? row.items.map(it => cpRenderTile(it, row.id, mode)).join('')
@@ -44260,7 +44260,7 @@ function cpRenderRow(row, idx, mode) {
 }
 
 function cpRenderTile(it, rowId, mode) {
-    const kindBadge = { docker: '🐳', lxc: '📦', vm: '💻' }[it.kind] || '•';
+    const kindBadge = { docker: '', lxc: '', vm: '' }[it.kind] || '•';
     const statusColour = cpStatusColour(it.status);
     const draggable = mode === 'custom' && !it._stale;
     const dragAttrs = draggable
@@ -44350,7 +44350,7 @@ function cpContextMenu(ev, key) {
         if (running)  items.push({ label: '■ Stop', fn: () => cpAction(key, 'stop') });
         if (running)  items.push({ label: '↻ Restart', fn: () => cpAction(key, 'restart') });
         items.push({ separator: true });
-        items.push({ label: '🖥 Open console', fn: () => cpOpenConsole(it) });
+        items.push({ label: 'Open console', fn: () => cpOpenConsole(it) });
         items.push({ label: '↗ Go to node view', fn: () => cpGoToNode(it) });
     }
     items.push({ separator: true });
@@ -44491,9 +44491,9 @@ async function cpOpenItemModal(key) {
                     <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${it.kind.toUpperCase()} · ${escapeHtml(it.node_hostname || it.node_id)}</div>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center;">
-                    <button class="btn btn-sm" title="Refresh" onclick="cpModalRefresh()">🔄</button>
+                    <button class="btn btn-sm" title="Refresh" onclick="cpModalRefresh()"></button>
                     <button class="btn btn-sm" title="Open full node view" onclick="cpModalGoToNode()">↗</button>
-                    <button class="btn btn-sm" title="Close" onclick="cpCloseItemModal()">✕</button>
+                    <button class="btn btn-sm" title="Close" onclick="cpCloseItemModal()"></button>
                 </div>
             </div>
             <div id="cp-modal-status" style="font-size:11px;color:var(--text-muted);padding:6px 18px;border-bottom:1px solid var(--border);">Loading…</div>
@@ -44920,7 +44920,7 @@ function sqlConnRender() {
 }
 
 function sqlConnRow(c) {
-    const kindIcon = c.kind === 'postgres' ? '🐘' : (c.kind === 'mariadb' ? '🦭' : '🐬');
+    const kindIcon = c.kind === 'postgres' ? '' : (c.kind === 'mariadb' ? '' : '');
     const kindLabel = { postgres: 'PostgreSQL', mariadb: 'MariaDB', mysql: 'MySQL' }[c.kind] || c.kind;
     // Resolve node_id → node hostname for display. Falls back to the
     // raw id if we can't match (happens if the node has been removed
@@ -44931,10 +44931,10 @@ function sqlConnRow(c) {
         if (n) nodeLabel = n.hostname || n.id;
     }
     const target = (c.cluster || c.node_id)
-        ? `<div style="font-size:11px; color:var(--text-muted); margin-top:2px;">🎯 ${escapeHtml(c.cluster || '?')} / ${escapeHtml(nodeLabel || '?')}</div>`
+        ? `<div style="font-size:11px; color:var(--text-muted); margin-top:2px;">${escapeHtml(c.cluster || '?')} / ${escapeHtml(nodeLabel || '?')}</div>`
         : '';
     const acl = (c.allowed_users && c.allowed_users.length)
-        ? `<div style="font-size:11px; color:var(--accent, #a855f7); margin-top:2px;">🔒 users: ${escapeHtml(c.allowed_users.join(', '))}</div>`
+        ? `<div style="font-size:11px; color:var(--accent, #a855f7); margin-top:2px;">users: ${escapeHtml(c.allowed_users.join(', '))}</div>`
         : '';
     return `<div style="border:1px solid var(--border); border-radius:8px; padding:12px 14px; background:var(--bg-card);">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
@@ -45059,7 +45059,7 @@ function sqlConnShowEditor(existing) {
                     </label>
                     ` : `
                     <div style="font-size:11px; color:var(--text-muted); border:1px dashed var(--border); border-radius:6px; padding:8px 10px;">
-                        🔒 Per-user access limits are an Enterprise feature. On the free tier, every logged-in user can use every configured connection.
+                        Per-user access limits are an Enterprise feature. On the free tier, every logged-in user can use every configured connection.
                     </div>
                     `}
                 </div>
@@ -45132,7 +45132,7 @@ async function sqlConnNodeChanged(preHost) {
         sqlConnSyncShorthand();
         return;
     }
-    ipSel.innerHTML = '<option value="">⏳ Loading IPs…</option>';
+    ipSel.innerHTML = '<option value="">Loading IPs…</option>';
     ipSel.disabled = true;
     try {
         const resp = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/ips`);
@@ -45167,7 +45167,7 @@ async function sqlConnNodeChanged(preHost) {
         // If the pre-set host wasn't in the list, leave ipSel at none
         // and let the host field stand on its own.
     } catch (e) {
-        ipSel.innerHTML = `<option value="">⚠ failed: ${escapeHtml(e.message)}</option>`;
+        ipSel.innerHTML = `<option value="">failed: ${escapeHtml(e.message)}</option>`;
     }
     sqlConnSyncShorthand();
 }
@@ -45197,7 +45197,7 @@ function sqlConnSyncShorthand() {
     if (!shorthand) return;
     if (cluster && nodeLabel && nodeLabel !== '— node —' && host) {
         shorthand.value = `${cluster}:${nodeLabel}:${host}`;
-        if (status) { status.textContent = '✓ in sync'; status.style.color = 'var(--success)'; }
+        if (status) { status.textContent = 'in sync'; status.style.color = 'var(--success)'; }
     } else if (status) {
         status.textContent = '';
     }
@@ -45238,7 +45238,7 @@ function sqlConnShorthandChanged() {
     document.getElementById('sql-e-cluster').value = wantCluster;
     sqlConnClusterChanged(node.id, wantIp);
     document.getElementById('sql-e-host').value = wantIp;
-    if (status) { status.textContent = '✓ parsed'; status.style.color = 'var(--success)'; }
+    if (status) { status.textContent = 'parsed'; status.style.color = 'var(--success)'; }
 }
 
 function sqlConnKindChanged() {
@@ -45323,12 +45323,12 @@ async function sqlConnTest(id, btn) {
         const resp = await fetch(`/api/sql-connections/${encodeURIComponent(id)}/test`, { method: 'POST' });
         const data = await resp.json();
         if (data.ok) {
-            if (statusEl) statusEl.innerHTML = `<span style="color:var(--success);">✅ OK — ${escapeHtml(data.version || 'connected')}</span>`;
+            if (statusEl) statusEl.innerHTML = `<span style="color:var(--success);">OK — ${escapeHtml(data.version || 'connected')}</span>`;
         } else {
-            if (statusEl) statusEl.innerHTML = `<span style="color:var(--danger);">❌ ${escapeHtml(data.error || 'failed')}</span>`;
+            if (statusEl) statusEl.innerHTML = `<span style="color:var(--danger);">${escapeHtml(data.error || 'failed')}</span>`;
         }
     } catch (e) {
-        if (statusEl) statusEl.innerHTML = `<span style="color:var(--danger);">❌ ${escapeHtml(e.message)}</span>`;
+        if (statusEl) statusEl.innerHTML = `<span style="color:var(--danger);">${escapeHtml(e.message)}</span>`;
     } finally {
         if (btn) btn.disabled = false;
     }
@@ -45529,12 +45529,12 @@ function dbRenderConnections() {
     for (const cluster of Object.keys(groups).sort()) {
         html += `<div style="font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin:10px 0 4px; padding:0 4px;">${escapeHtml(cluster)}</div>`;
         for (const node of Object.keys(groups[cluster]).sort()) {
-            html += `<div style="font-size:12px; color:var(--text-muted); padding:2px 8px;">🎯 ${escapeHtml(node)}</div>`;
+            html += `<div style="font-size:12px; color:var(--text-muted); padding:2px 8px;">${escapeHtml(node)}</div>`;
             for (const c of groups[cluster][node]) {
-                const kindIcon = c.kind === 'postgres' ? '🐘' : (c.kind === 'mariadb' ? '🦭' : '🐬');
+                const kindIcon = c.kind === 'postgres' ? '' : (c.kind === 'mariadb' ? '' : '');
                 const isActive = c.id === _dbCurrentId;
                 const acl = (c.allowed_users && c.allowed_users.length)
-                    ? '<span title="Enterprise ACL active" style="color:var(--accent,#a855f7);">🔒</span> ' : '';
+                    ? '<span title="Enterprise ACL active" style="color:var(--accent,#a855f7);"></span> ' : '';
                 html += `<div onclick="dbOpenConnection('${escapeHtml(c.id)}')"
                     style="cursor:pointer; padding:8px 10px; margin:2px 0; border-radius:6px; background:${isActive ? 'var(--accent-bg, rgba(168,85,247,0.15))' : 'transparent'};
                            border:1px solid ${isActive ? 'var(--accent, #a855f7)' : 'transparent'}; transition:background 0.15s;"
@@ -45574,7 +45574,7 @@ function dbOpenConnection(id) {
     if (!conn) return;
     const ws = document.getElementById('db-workspace');
     if (!ws) return;
-    const kindIcon = conn.kind === 'postgres' ? '🐘' : (conn.kind === 'mariadb' ? '🦭' : '🐬');
+    const kindIcon = conn.kind === 'postgres' ? '' : (conn.kind === 'mariadb' ? '' : '');
     const kindLabel = { postgres: 'PostgreSQL', mariadb: 'MariaDB', mysql: 'MySQL' }[conn.kind] || conn.kind;
     let nodeLabel = conn.node_id || '';
     if (conn.node_id) {
@@ -45599,7 +45599,7 @@ function dbOpenConnection(id) {
         <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px; padding:6px 10px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:6px;">
             <div style="display:flex; align-items:center; gap:10px; font-size:13px; min-width:0; flex:1;">
                 <button class="btn btn-sm" onclick="dbCloseConnection()" title="Back to connection list" style="padding:3px 8px; font-size:12px;">← Connections</button>
-                <button class="btn btn-sm" onclick="dbToggleFullscreen()" title="Toggle fullscreen (Esc exits)" style="padding:3px 8px; font-size:12px;">⛶ Fullscreen</button>
+                <button class="btn btn-sm" onclick="dbToggleFullscreen()" title="Toggle fullscreen (Esc exits)" style="padding:3px 8px; font-size:12px;">Fullscreen</button>
                 <span>${kindIcon} <strong>${escapeHtml(conn.label)}</strong></span>
                 <span style="color:var(--text-muted); font-size:11px;">${kindLabel}</span>
                 <code style="font-size:11px; color:var(--text-muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(conn.username)}@${escapeHtml(conn.host)}:${conn.port}${conn.database ? '/' + escapeHtml(conn.database) : ''}${conn.cluster ? ' · ' + escapeHtml(conn.cluster) + (nodeLabel ? '/' + escapeHtml(nodeLabel) : '') : ''}</code>
@@ -45611,9 +45611,9 @@ function dbOpenConnection(id) {
             <!-- Tree: databases + tables -->
             <div id="db-mgr-tree-panel" style="border:1px solid var(--border); border-radius:8px; overflow:hidden; display:${_dbTreeCollapsed ? 'none' : 'flex'}; flex-direction:column; background:var(--bg-secondary);">
                 <div style="padding:8px 10px; border-bottom:1px solid var(--border); font-size:12px; font-weight:600; display:flex; justify-content:space-between; align-items:center;">
-                    <span>📁 Schema</span>
+                    <span>Schema</span>
                     <div style="display:flex; gap:4px;">
-                        <button class="btn btn-sm" onclick="dbMgrLoadTree(true)" title="Refresh" style="padding:2px 6px;">🔄</button>
+                        <button class="btn btn-sm" onclick="dbMgrLoadTree(true)" title="Refresh" style="padding:2px 6px;"></button>
                         <button class="btn btn-sm" onclick="dbToggleTree()" title="Hide the schema tree" style="padding:2px 6px;">◀</button>
                     </div>
                 </div>
@@ -45621,22 +45621,22 @@ function dbOpenConnection(id) {
                     <div style="padding:16px; color:var(--text-muted); text-align:center; font-size:12px;">Loading…</div>
                 </div>
             </div>
-            ${_dbTreeCollapsed ? `<button onclick="dbToggleTree()" title="Show the schema tree" style="position:absolute; left:0; top:8px; z-index:3; padding:6px 8px; background:var(--bg-secondary); border:1px solid var(--border); border-left:none; border-radius:0 6px 6px 0; cursor:pointer; font-size:12px;">📁 ▶</button>` : ''}
+            ${_dbTreeCollapsed ? `<button onclick="dbToggleTree()" title="Show the schema tree" style="position:absolute; left:0; top:8px; z-index:3; padding:6px 8px; background:var(--bg-secondary); border:1px solid var(--border); border-left:none; border-radius:0 6px 6px 0; cursor:pointer; font-size:12px;">▶</button>` : ''}
             <!-- Right: tabs -->
             <div style="border:1px solid var(--border); border-radius:8px; overflow:hidden; display:flex; flex-direction:column; background:var(--bg-secondary);">
                 <div style="display:flex; border-bottom:1px solid var(--border); overflow-x:auto;">
                     <button class="btn-sm db-mgr-tab" data-tab="data" onclick="dbMgrSwitchTab('data')"
-                        style="padding:9px 14px; border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; white-space:nowrap;">📊 Data</button>
+                        style="padding:9px 14px; border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; white-space:nowrap;">Data</button>
                     <button class="btn-sm db-mgr-tab" data-tab="structure" onclick="dbMgrSwitchTab('structure')"
-                        style="padding:9px 14px; border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; white-space:nowrap;">🏗️ Structure</button>
+                        style="padding:9px 14px; border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; white-space:nowrap;">Structure</button>
                     <button class="btn-sm db-mgr-tab" data-tab="diagram" onclick="dbMgrSwitchTab('diagram')"
-                        style="padding:9px 14px; border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; white-space:nowrap;">🗺️ Diagram</button>
+                        style="padding:9px 14px; border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; white-space:nowrap;">Diagram</button>
                     <button class="btn-sm db-mgr-tab" data-tab="builder" onclick="dbMgrSwitchTab('builder')"
-                        style="padding:9px 14px; border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; white-space:nowrap;">🧱 Build</button>
+                        style="padding:9px 14px; border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; white-space:nowrap;">Build</button>
                     <button class="btn-sm db-mgr-tab" data-tab="query" onclick="dbMgrSwitchTab('query')"
-                        style="padding:9px 14px; border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; white-space:nowrap;">⚡ Query</button>
+                        style="padding:9px 14px; border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; white-space:nowrap;">Query</button>
                     <button class="btn-sm db-mgr-tab" data-tab="server" onclick="dbMgrSwitchTab('server')"
-                        style="padding:9px 14px; border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; white-space:nowrap;">🖥️ Server</button>
+                        style="padding:9px 14px; border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; white-space:nowrap;">Server</button>
                     <div style="flex:1;"></div>
                     <div id="db-mgr-info" style="padding:9px 12px; font-size:11px; color:var(--text-muted); white-space:nowrap;"></div>
                 </div>
@@ -45779,7 +45779,7 @@ function dbMgrRenderTree(tree) {
                         const safeT = escapeHtml(e.name).replace(/'/g, "\\'");
                         html += `<div onclick="dbMgrPickTable('${safe}','${safeT}')"
                             style="cursor:pointer; padding:4px 28px; font-size:13px; background:${active ? 'var(--accent-bg, rgba(168,85,247,0.15))' : 'transparent'};">
-                            📋 ${escapeHtml(e.name)}
+                            ${escapeHtml(e.name)}
                         </div>`;
                     }
                 }
@@ -45790,7 +45790,7 @@ function dbMgrRenderTree(tree) {
                         const safeT = escapeHtml(e.name).replace(/'/g, "\\'");
                         html += `<div onclick="dbMgrPickTable('${safe}','${safeT}')"
                             style="cursor:pointer; padding:4px 28px; font-size:13px; background:${active ? 'var(--accent-bg, rgba(168,85,247,0.15))' : 'transparent'};">
-                            👁️ ${escapeHtml(e.name)}
+                            ${escapeHtml(e.name)}
                         </div>`;
                     }
                 }
@@ -45801,7 +45801,7 @@ function dbMgrRenderTree(tree) {
                 for (const kind of ['procedures', 'functions', 'triggers']) {
                     const list = routines[kind];
                     if (!list || !list.length) continue;
-                    const icon = kind === 'procedures' ? '⚙️' : kind === 'functions' ? 'ƒ' : '⚡';
+                    const icon = kind === 'procedures' ? '' : kind === 'functions' ? 'ƒ' : '';
                     const singular = kind.replace(/s$/, '');
                     html += `<div style="padding:6px 28px 2px; font-size:10px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px;">${kind.charAt(0).toUpperCase() + kind.slice(1)} (${list.length})</div>`;
                     for (const name of list) {
@@ -45872,7 +45872,7 @@ function dbWizAddRow(seed) {
         <td style="padding:3px; text-align:center;"><input type="checkbox" class="db-wiz-col-null" ${seed && seed.nullable === false ? '' : 'checked'}></td>
         <td style="padding:3px; text-align:center;"><input type="checkbox" class="db-wiz-col-pk" ${seed && seed.pk ? 'checked' : ''}></td>
         <td style="padding:3px;"><input class="form-control db-wiz-col-default" placeholder="(none)" style="font-size:12px; padding:4px 6px;"></td>
-        <td style="padding:3px; text-align:right;"><button class="btn btn-sm" onclick="this.closest('tr').remove(); dbWizUpdatePreview()" style="padding:2px 8px; font-size:11px;">✕</button></td>
+        <td style="padding:3px; text-align:right;"><button class="btn btn-sm" onclick="this.closest('tr').remove(); dbWizUpdatePreview()" style="padding:2px 8px; font-size:11px;"></button></td>
     `;
     body.appendChild(row);
     // Live preview
@@ -46291,10 +46291,10 @@ async function dbShowRoutineDefinition(schema, name, kind) {
         modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10000; display:flex; align-items:center; justify-content:center;';
         modal.innerHTML = `
             <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:10px; padding:16px; width:840px; max-width:95vw; max-height:85vh; display:flex; flex-direction:column;">
-                <h3 style="margin:0 0 10px;">${kind === 'trigger' ? '⚡' : kind === 'function' ? 'ƒ' : '⚙️'} ${escapeHtml(name)} <span style="color:var(--text-muted); font-weight:normal; font-size:13px;">— ${kind}</span></h3>
+                <h3 style="margin:0 0 10px;">${kind === 'trigger' ? '' : kind === 'function' ? 'ƒ' : ''} ${escapeHtml(name)} <span style="color:var(--text-muted); font-weight:normal; font-size:13px;">— ${kind}</span></h3>
                 <pre style="flex:1; overflow:auto; background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; padding:10px; font-family:monospace; font-size:12px; white-space:pre-wrap; margin:0;">${escapeHtml(definition)}</pre>
                 <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:10px;">
-                    <button class="btn btn-sm" onclick="navigator.clipboard.writeText(this.closest('div').parentElement.querySelector('pre').textContent)">📋 Copy</button>
+                    <button class="btn btn-sm" onclick="navigator.clipboard.writeText(this.closest('div').parentElement.querySelector('pre').textContent)">Copy</button>
                     <button class="btn btn-sm" onclick="this.closest('div').parentElement.remove()">Close</button>
                 </div>
             </div>
@@ -46454,7 +46454,7 @@ async function dbDataEditRow(rowIdx) {
     modal.innerHTML = `
         <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:10px; padding:18px; width:760px; max-width:95vw; max-height:85vh; display:flex; flex-direction:column;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                <h3 style="margin:0;">✏️ Edit row in <code>${escapeHtml(_dbMgrCurrentDb + '.' + _dbMgrCurrentTable)}</code></h3>
+                <h3 style="margin:0;">Edit row in <code>${escapeHtml(_dbMgrCurrentDb + '.' + _dbMgrCurrentTable)}</code></h3>
                 <button class="btn btn-sm" onclick="document.getElementById('db-edit-row-modal').remove()">Close</button>
             </div>
             <div style="overflow-y:auto; flex:1; padding-right:6px;">${fieldsHtml}</div>
@@ -46606,7 +46606,7 @@ function dbSchemaCompareOpen() {
     modal.innerHTML = `
         <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:10px; padding:18px; width:900px; max-width:95vw; max-height:90vh; display:flex; flex-direction:column;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-                <h3 style="margin:0;">🧭 Compare schemas</h3>
+                <h3 style="margin:0;">Compare schemas</h3>
                 <button class="btn btn-sm" onclick="document.getElementById('db-cmp-modal').remove()">Close</button>
             </div>
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
@@ -46623,7 +46623,7 @@ function dbSchemaCompareOpen() {
             </div>
             <div style="display:flex; gap:8px; margin-top:10px; align-items:center;">
                 <button class="btn btn-primary btn-sm" onclick="dbCmpRun()">▶ Run compare</button>
-                <button class="btn btn-sm" id="db-cmp-migrate" onclick="dbCmpEmitMigration()" disabled>📜 Generate target→source migration SQL</button>
+                <button class="btn btn-sm" id="db-cmp-migrate" onclick="dbCmpEmitMigration()" disabled>Generate target→source migration SQL</button>
                 <span id="db-cmp-stat" style="margin-left:auto; font-size:11px; color:var(--text-muted);"></span>
             </div>
             <div id="db-cmp-result" style="flex:1; overflow:auto; margin-top:10px; border:1px solid var(--border); border-radius:6px; padding:10px; background:var(--bg-primary); font-size:12px;">Pick source + target and click Run compare.</div>
@@ -46785,7 +46785,7 @@ function dbCmpRender(el, diff, srcSchema, dstSchema) {
         <div style="background:var(--bg-secondary); padding:8px 10px; border-radius:6px;"><strong>Target:</strong> ${escapeHtml(dstSchema)}</div>
     </div>`;
     if (!diff.onlyInSrc.length && !diff.onlyInDst.length && !diff.changed.length) {
-        h += '<div style="color:#22c55e; font-weight:600;">✓ Schemas are identical.</div>';
+        h += '<div style="color:#22c55e; font-weight:600;">Schemas are identical.</div>';
         el.innerHTML = h;
         return;
     }
@@ -46803,7 +46803,7 @@ function dbCmpRender(el, diff, srcSchema, dstSchema) {
         h += `<h4 style="margin:14px 0 6px; color:#eab308;">Tables with differences (~${diff.changed.length})</h4>`;
         for (const t of diff.changed) {
             h += `<details style="margin-bottom:8px; border:1px solid var(--border); border-radius:6px; padding:8px 10px;">
-                <summary style="cursor:pointer; font-weight:600;">📋 ${escapeHtml(t.name)}</summary>
+                <summary style="cursor:pointer; font-weight:600;">${escapeHtml(t.name)}</summary>
                 <div style="margin-top:6px; padding-left:10px;">`;
             if (t.colOnlySrc.length) h += `<div style="color:#22c55e;">+ columns: ${t.colOnlySrc.map(c => escapeHtml(c.name)).join(', ')}</div>`;
             if (t.colOnlyDst.length) h += `<div style="color:#ef4444;">− columns: ${t.colOnlyDst.map(c => escapeHtml(c.name)).join(', ')}</div>`;
@@ -46849,7 +46849,7 @@ function dbCmpEmitMigration() {
     const el = document.getElementById('db-cmp-result');
     el.innerHTML = `<div style="margin-bottom:8px; display:flex; gap:8px; align-items:center;">
         <strong>Migration SQL</strong>
-        <button class="btn btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('db-cmp-migration-sql').textContent); showToast('Copied to clipboard', 'success')">📋 Copy</button>
+        <button class="btn btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('db-cmp-migration-sql').textContent); showToast('Copied to clipboard', 'success')">Copy</button>
         <button class="btn btn-sm" onclick="dbCmpRun()">← Back to diff</button>
     </div>
     <pre id="db-cmp-migration-sql" style="background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; padding:10px; font-family:monospace; font-size:12px; white-space:pre-wrap; margin:0;">${escapeHtml(sql)}</pre>`;
@@ -46991,7 +46991,7 @@ function dbAcShowPopup(ta) {
 function dbAcRenderItems(popup) {
     let h = '';
     _dbAcState.items.forEach((c, i) => {
-        const icon = c.kind === 'table' ? '📋' : c.kind === 'column' ? '·' : '🔑';
+        const icon = c.kind === 'table' ? '' : c.kind === 'column' ? '·' : '';
         h += `<div onclick="dbAcAccept(${i})" onmouseover="dbAcState(${i})"
             style="padding:5px 10px; cursor:pointer; background:${i === _dbAcState.active ? 'var(--bg-secondary)' : 'transparent'}; display:flex; gap:8px; align-items:center; justify-content:space-between;">
             <span style="display:flex; gap:6px; align-items:center; min-width:0;">
@@ -47126,7 +47126,7 @@ function dbUpdateSchemaBadge() {
     // propagates, and the explicit rebind button does too.
     const b = document.getElementById('db-schema-badge');
     const active = _dbQueryTabs[_dbQueryActive];
-    if (b && active) b.textContent = `📂 ${active.schema || '(default)'}`;
+    if (b && active) b.textContent = `${active.schema || '(default)'}`;
 }
 
 function dbRebindTabSchema() {
@@ -47198,16 +47198,16 @@ async function dbMgrRenderDataTab(body) {
             <button class="btn btn-sm" onclick="dbDataPrev()">◀ Prev</button>
             <span id="db-data-page-label" style="font-size:12px; color:var(--text-muted);">Page ${st.page + 1}</span>
             <button class="btn btn-sm" onclick="dbDataNext()">Next ▶</button>
-            <button class="btn btn-sm" onclick="dbMgrRenderDataTab(document.getElementById('db-mgr-body'))">🔄 Reload</button>
-            <button class="btn btn-sm" onclick="dbDataInsertRow()" title="Insert a new row (prompts for each column)">➕ Row</button>
-            <button class="btn btn-sm" onclick="dbImportCsv()" title="Upload a CSV and INSERT its rows into this table">📥 Import CSV</button>
+            <button class="btn btn-sm" onclick="dbMgrRenderDataTab(document.getElementById('db-mgr-body'))">Reload</button>
+            <button class="btn btn-sm" onclick="dbDataInsertRow()" title="Insert a new row (prompts for each column)">Row</button>
+            <button class="btn btn-sm" onclick="dbImportCsv()" title="Upload a CSV and INSERT its rows into this table">Import CSV</button>
             <div style="flex:1;"></div>
             <div class="btn-group" style="position:relative;">
-                <button class="btn btn-sm" onclick="document.getElementById('db-data-export-menu').style.display=(document.getElementById('db-data-export-menu').style.display==='block'?'none':'block')">📤 Export ▾</button>
+                <button class="btn btn-sm" onclick="document.getElementById('db-data-export-menu').style.display=(document.getElementById('db-data-export-menu').style.display==='block'?'none':'block')">Export ▾</button>
                 <div id="db-data-export-menu" style="display:none; position:absolute; right:0; top:100%; background:var(--bg-card); border:1px solid var(--border); border-radius:6px; z-index:10; min-width:160px; box-shadow:0 4px 12px rgba(0,0,0,0.2);">
-                    <div onclick="dbDataExport('csv')" style="padding:8px 12px; cursor:pointer; font-size:13px;">📄 CSV</div>
-                    <div onclick="dbDataExport('json')" style="padding:8px 12px; cursor:pointer; font-size:13px;">🧾 JSON</div>
-                    <div onclick="dbDataExport('sql')" style="padding:8px 12px; cursor:pointer; font-size:13px;">🗃️ SQL INSERTs</div>
+                    <div onclick="dbDataExport('csv')" style="padding:8px 12px; cursor:pointer; font-size:13px;">CSV</div>
+                    <div onclick="dbDataExport('json')" style="padding:8px 12px; cursor:pointer; font-size:13px;">JSON</div>
+                    <div onclick="dbDataExport('sql')" style="padding:8px 12px; cursor:pointer; font-size:13px;">SQL INSERTs</div>
                 </div>
             </div>
         </div>
@@ -47273,8 +47273,8 @@ function dbDataRenderGrid(wrap, data, st) {
         const origIdx = data.rows.indexOf(rows[ri]);
         html += '<tr>';
         html += `<td style="padding:4px 6px; white-space:nowrap; ${stickyActCss} border-bottom:1px solid var(--border);">
-            <button class="btn btn-sm" onclick="dbDataEditRow(${origIdx})" title="Edit row" style="padding:1px 6px; font-size:10px;">✏️</button>
-            <button class="btn btn-sm" onclick="dbDataDeleteRow(${origIdx})" title="Delete row" style="padding:1px 6px; font-size:10px;">🗑️</button>
+            <button class="btn btn-sm" onclick="dbDataEditRow(${origIdx})" title="Edit row" style="padding:1px 6px; font-size:10px;"></button>
+            <button class="btn btn-sm" onclick="dbDataDeleteRow(${origIdx})" title="Delete row" style="padding:1px 6px; font-size:10px;"></button>
         </td>`;
         for (let ci = 0; ci < rows[ri].length; ci++) {
             const v = rows[ri][ci];
@@ -47372,11 +47372,11 @@ async function dbMgrRenderDiagramTab(body) {
     body.innerHTML = `
         <div style="display:flex; gap:6px; align-items:center; margin-bottom:6px; flex-wrap:wrap;">
             <span style="font-size:13px;"><strong>Schema:</strong> ${escapeHtml(schema)}</span>
-            <button class="btn btn-sm" onclick="dbDiagAutoLayout()">🗂️ Auto-layout</button>
-            <button class="btn btn-sm" onclick="dbDiagZoom(1.2)">🔍+</button>
-            <button class="btn btn-sm" onclick="dbDiagZoom(1/1.2)">🔍−</button>
+            <button class="btn btn-sm" onclick="dbDiagAutoLayout()">Auto-layout</button>
+            <button class="btn btn-sm" onclick="dbDiagZoom(1.2)">+</button>
+            <button class="btn btn-sm" onclick="dbDiagZoom(1/1.2)">−</button>
             <button class="btn btn-sm" onclick="dbDiagReset()">Reset view</button>
-            <button class="btn btn-sm" onclick="dbDiagExportSvg()">💾 Save SVG</button>
+            <button class="btn btn-sm" onclick="dbDiagExportSvg()">Save SVG</button>
             <div style="flex:1;"></div>
             <span id="db-diag-stat" style="font-size:11px; color:var(--text-muted);"></span>
         </div>
@@ -47570,11 +47570,11 @@ function dbDiagRender() {
         svgContent += `<g class="db-diag-box" data-table="${escapeHtml(t.name)}" style="cursor:move;" transform="translate(${p.x},${p.y})">`;
         svgContent += `<rect width="${boxW}" height="${h}" rx="6" fill="#1a1a24" stroke="${stroke}" stroke-width="${active ? 2 : 1}"/>`;
         svgContent += `<rect width="${boxW}" height="${headerH}" rx="6" fill="#2a2538" stroke="none"/>`;
-        svgContent += `<text x="10" y="20" fill="#e4e4e7" font-size="13" font-weight="600" font-family="ui-monospace, monospace">📋 ${escapeHtml(t.name)}</text>`;
+        svgContent += `<text x="10" y="20" fill="#e4e4e7" font-size="13" font-weight="600" font-family="ui-monospace, monospace">${escapeHtml(t.name)}</text>`;
         for (let i = 0; i < n; i++) {
             const c = t.columns[i];
             const y = headerH + i * rowH + 14;
-            const pk = c.is_pk ? '🔑 ' : '';
+            const pk = c.is_pk ? '' : '';
             const line = `${pk}${c.name} : ${c.type}`;
             svgContent += `<text x="10" y="${y}" fill="#a1a1aa" font-size="11" font-family="ui-monospace, monospace">${escapeHtml(line.length > 38 ? line.slice(0, 38) + '…' : line)}</text>`;
         }
@@ -47741,7 +47741,7 @@ function dbMgrRenderBuilderTab(body) {
             <select id="db-bld-add" class="form-control" style="display:inline-block; width:auto; font-size:12px;">
                 <option value="">— Add table… —</option>
             </select>
-            <button class="btn btn-sm" onclick="dbBldReset()" title="Clear everything">🗑️ Clear</button>
+            <button class="btn btn-sm" onclick="dbBldReset()" title="Clear everything">Clear</button>
             <button class="btn btn-sm" onclick="dbBldSendToQuery()" title="Open the generated SQL in a new Query tab">▶ Send to Query</button>
         </div>
         <div style="display:grid; grid-template-columns:1fr; gap:10px;">
@@ -47821,8 +47821,8 @@ function dbBldRenderCanvas() {
         box.dataset.table = `${t.schema}.${t.name}`;
         box.style.cssText = `position:absolute; left:${t.x}px; top:${t.y}px; width:220px; background:#1a1a24; border:1px solid #4a4a6a; border-radius:6px; z-index:2; font-size:12px; user-select:none;`;
         let ih = `<div class="db-bld-header" style="padding:6px 10px; background:#2a2538; border-bottom:1px solid #4a4a6a; border-radius:6px 6px 0 0; cursor:move; display:flex; justify-content:space-between; align-items:center;">
-            <span>📋 <strong>${escapeHtml(t.name)}</strong> <span style="color:#888; font-size:10px;">· ${escapeHtml(t.schema)}</span></span>
-            <span onclick="dbBldRemoveTable('${escapeHtml(t.schema).replace(/'/g, "\\'")}','${escapeHtml(t.name).replace(/'/g, "\\'")}')" style="cursor:pointer; color:#888;" title="Remove from canvas">✕</span>
+            <span><strong>${escapeHtml(t.name)}</strong> <span style="color:#888; font-size:10px;">· ${escapeHtml(t.schema)}</span></span>
+            <span onclick="dbBldRemoveTable('${escapeHtml(t.schema).replace(/'/g, "\\'")}','${escapeHtml(t.name).replace(/'/g, "\\'")}')" style="cursor:pointer; color:#888;" title="Remove from canvas"></span>
         </div>`;
         for (let i = 0; i < t.columns.length; i++) {
             const c = t.columns[i];
@@ -47930,7 +47930,7 @@ function dbBldRenderJoinLines() {
         const mx = (from.x + to.x) / 2;
         content += `<path d="M ${from.x} ${from.y} C ${mx} ${from.y}, ${mx} ${to.y}, ${to.x} ${to.y}" fill="none" stroke="#a855f7" stroke-width="1.5" marker-end="url(#db-bld-arrow)"/>`;
         // Clickable "X" label to remove the join.
-        content += `<g onclick="dbBldRemoveJoin(${i})" style="cursor:pointer;"><circle cx="${mx}" cy="${(from.y + to.y) / 2}" r="9" fill="#2a2538" stroke="#a855f7"/><text x="${mx}" y="${(from.y + to.y) / 2 + 4}" text-anchor="middle" font-size="11" fill="#ef4444">✕</text></g>`;
+        content += `<g onclick="dbBldRemoveJoin(${i})" style="cursor:pointer;"><circle cx="${mx}" cy="${(from.y + to.y) / 2}" r="9" fill="#2a2538" stroke="#a855f7"/><text x="${mx}" y="${(from.y + to.y) / 2 + 4}" text-anchor="middle" font-size="11" fill="#ef4444"></text></g>`;
     }
     svg.innerHTML = content;
 }
@@ -47977,7 +47977,7 @@ function dbBldRenderWhere() {
             <select onchange="_dbBldWhere[${i}].col=this.value; dbBldRenderSql()" class="form-control" style="display:inline-block; width:auto; font-size:12px;">${colOpts}</select>
             <select onchange="_dbBldWhere[${i}].op=this.value; dbBldRenderSql()" class="form-control" style="display:inline-block; width:auto; font-size:12px;">${opOpts.replace(`<option>${w.op}</option>`, `<option selected>${w.op}</option>`)}</select>
             <input value="${escapeHtml(w.value || '')}" oninput="_dbBldWhere[${i}].value=this.value; dbBldRenderSql()" class="form-control" placeholder="value" style="flex:1; font-size:12px;">
-            <button class="btn btn-sm" onclick="_dbBldWhere.splice(${i},1); dbBldRenderWhere(); dbBldRenderSql()" style="padding:2px 6px; font-size:10px;">✕</button>
+            <button class="btn btn-sm" onclick="_dbBldWhere.splice(${i},1); dbBldRenderWhere(); dbBldRenderSql()" style="padding:2px 6px; font-size:10px;"></button>
         </div>`;
     }
     el.innerHTML = html;
@@ -48106,7 +48106,7 @@ async function dbSrvLoadVersion() {
         const v = conn.kind === 'postgres'
             ? await dbMgrRunSql('SELECT version() AS version, current_database() AS db, current_user AS "user", inet_server_addr()::text AS host, inet_server_port() AS port')
             : await dbMgrRunSql("SELECT VERSION() AS version, DATABASE() AS db, USER() AS user, @@hostname AS host, @@port AS port");
-        el.innerHTML = '<h4 style="margin:0 0 6px; font-size:13px; display:flex; gap:8px; align-items:center;"><span>Server</span> <button class="btn btn-sm" onclick="dbSrvLoadVersion()" style="padding:2px 8px; font-size:10px;">🔄</button></h4>' + renderKvTable(v);
+        el.innerHTML = '<h4 style="margin:0 0 6px; font-size:13px; display:flex; gap:8px; align-items:center;"><span>Server</span> <button class="btn btn-sm" onclick="dbSrvLoadVersion()" style="padding:2px 8px; font-size:10px;"></button></h4>' + renderKvTable(v);
     } catch (e) { el.innerHTML = `<div style="color:var(--danger);">Version: ${escapeHtml(e.message)}</div>`; }
 }
 
@@ -48122,8 +48122,8 @@ async function dbSrvLoadVars() {
         // Custom row renderer so we can add an Edit button per variable.
         let html = `<h4 style="margin:0 0 6px; font-size:13px; display:flex; gap:8px; align-items:center;">
             <span>Key variables</span>
-            <button class="btn btn-sm" onclick="dbSrvLoadVars()" style="padding:2px 8px; font-size:10px;">🔄</button>
-            <span style="font-size:11px; color:var(--text-muted);">Click ✏️ to change — requires Schema permission</span>
+            <button class="btn btn-sm" onclick="dbSrvLoadVars()" style="padding:2px 8px; font-size:10px;"></button>
+            <span style="font-size:11px; color:var(--text-muted);">Click to change — requires Schema permission</span>
         </h4>`;
         html += '<div style="overflow:auto; border:1px solid var(--border); border-radius:6px;"><table style="width:100%; font-size:12px; border-collapse:collapse;"><thead><tr style="background:var(--bg-tertiary);">';
         for (const c of vars.columns) html += `<th style="padding:6px 8px; text-align:left; border-bottom:1px solid var(--border); white-space:nowrap;">${escapeHtml(c)}</th>`;
@@ -48136,7 +48136,7 @@ async function dbSrvLoadVars() {
             html += '<tr>';
             for (const v of row) html += `<td style="padding:5px 8px; border-bottom:1px solid var(--border);">${v == null ? '<span style="color:var(--text-muted);">NULL</span>' : escapeHtml(String(v))}</td>`;
             html += `<td style="padding:5px 8px; border-bottom:1px solid var(--border); text-align:right;">
-                ${readOnly ? '<span style="color:var(--text-muted); font-size:10px;">read-only</span>' : `<button class="btn btn-sm" onclick="dbSrvEditVar('${escapeHtml(name).replace(/'/g, "\\'")}', '${escapeHtml(value).replace(/'/g, "\\'")}')" title="Change this variable" style="padding:1px 8px; font-size:10px;">✏️</button>`}
+                ${readOnly ? '<span style="color:var(--text-muted); font-size:10px;">read-only</span>' : `<button class="btn btn-sm" onclick="dbSrvEditVar('${escapeHtml(name).replace(/'/g, "\\'")}', '${escapeHtml(value).replace(/'/g, "\\'")}')" title="Change this variable" style="padding:1px 8px; font-size:10px;"></button>`}
             </td></tr>`;
         }
         html += '</tbody></table></div>';
@@ -48155,8 +48155,8 @@ async function dbSrvLoadProcs() {
             : await dbMgrRunSql("SHOW FULL PROCESSLIST");
         let html = `<h4 style="margin:0 0 6px; font-size:13px; display:flex; gap:8px; align-items:center;">
             <span>Active sessions (${procs.row_count})</span>
-            <button class="btn btn-sm" onclick="dbSrvLoadProcs()" style="padding:2px 8px; font-size:10px;">🔄</button>
-            <span style="font-size:11px; color:var(--text-muted);">Click ✕ to kill a session — requires Schema permission</span>
+            <button class="btn btn-sm" onclick="dbSrvLoadProcs()" style="padding:2px 8px; font-size:10px;"></button>
+            <span style="font-size:11px; color:var(--text-muted);">Click to kill a session — requires Schema permission</span>
         </h4>`;
         html += '<div style="overflow:auto; border:1px solid var(--border); border-radius:6px;"><table style="width:100%; font-size:12px; border-collapse:collapse;"><thead><tr style="background:var(--bg-tertiary);">';
         for (const c of procs.columns) html += `<th style="padding:6px 8px; text-align:left; border-bottom:1px solid var(--border); white-space:nowrap;">${escapeHtml(c)}</th>`;
@@ -48167,7 +48167,7 @@ async function dbSrvLoadProcs() {
             html += '<tr>';
             for (const v of row) html += `<td style="padding:5px 8px; border-bottom:1px solid var(--border); max-width:360px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${v == null ? '' : escapeHtml(String(v))}">${v == null ? '<span style="color:var(--text-muted);">NULL</span>' : escapeHtml(String(v))}</td>`;
             html += `<td style="padding:5px 8px; border-bottom:1px solid var(--border); text-align:right;">
-                <button class="btn btn-sm" onclick="dbSrvKillSession('${escapeHtml(String(pid))}')" title="Kill session ${pid}" style="padding:1px 8px; font-size:10px;">✕</button>
+                <button class="btn btn-sm" onclick="dbSrvKillSession('${escapeHtml(String(pid))}')" title="Kill session ${pid}" style="padding:1px 8px; font-size:10px;"></button>
             </td></tr>`;
         }
         html += '</tbody></table></div>';
@@ -48186,7 +48186,7 @@ async function dbSrvEditVar(name, currentValue) {
         : `<option value="session" selected>Session only (SET SESSION)</option><option value="global">Cluster-wide (SET GLOBAL)</option>`;
     modal.innerHTML = `
         <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:10px; padding:18px; width:520px; max-width:95vw;">
-            <h3 style="margin:0 0 10px;">✏️ Change ${escapeHtml(name)}</h3>
+            <h3 style="margin:0 0 10px;">Change ${escapeHtml(name)}</h3>
             <label style="display:block; font-size:13px;">New value
                 <input id="db-var-val" class="form-control" value="${escapeHtml(currentValue)}" autocomplete="off">
             </label>
@@ -48290,9 +48290,9 @@ async function dbMgrRenderStructureTab(body) {
     if (!conn) return;
     body.innerHTML = `
         <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px;">
-            <button class="btn btn-sm" onclick="dbStructAddColumn()">➕ Add column</button>
-            <button class="btn btn-sm" onclick="dbStructAddIndex()">➕ Add index</button>
-            <button class="btn btn-sm" onclick="dbStructAddFk()">➕ Add foreign key</button>
+            <button class="btn btn-sm" onclick="dbStructAddColumn()">Add column</button>
+            <button class="btn btn-sm" onclick="dbStructAddIndex()">Add index</button>
+            <button class="btn btn-sm" onclick="dbStructAddFk()">Add foreign key</button>
             <div style="flex:1;"></div>
             <span style="font-size:11px; color:var(--text-muted); align-self:center;">Structural changes require <strong>Schema</strong> permission — the operator who submits them is audit-logged.</span>
         </div>
@@ -48619,7 +48619,7 @@ function dbCloseConnection() {
     const ws = document.getElementById('db-workspace');
     if (ws) ws.innerHTML = `
         <div style="color:var(--text-muted); text-align:center; padding:60px 20px;">
-            <div style="font-size:36px; margin-bottom:8px;">🗄️</div>
+            <div style="font-size:36px; margin-bottom:8px;"></div>
             <div style="font-size:14px;">Pick a connection on the left to start querying.</div>
             <div style="font-size:12px; margin-top:4px;">Queries are executed on the node that owns the connection — cross-node access is proxied automatically.</div>
         </div>
@@ -48748,7 +48748,7 @@ function dbMgrRenderQueryTab(body) {
         tabsHtml += `<div onclick="dbQuerySwitchTab(${i})" ondblclick="dbQueryRenameTab(${i})"
             style="padding:5px 10px; cursor:pointer; display:flex; align-items:center; gap:6px; border-right:1px solid var(--border); background:${isActive ? 'var(--bg-card)' : 'transparent'}; font-size:12px; ${isActive ? 'border-bottom:2px solid var(--accent, #a855f7);' : ''}">
             <span>${escapeHtml(t.title)}</span>
-            <span onclick="dbQueryCloseTab(${i}, event)" style="color:var(--text-muted); font-size:11px; padding:0 2px;">✕</span>
+            <span onclick="dbQueryCloseTab(${i}, event)" style="color:var(--text-muted); font-size:11px; padding:0 2px;"></span>
         </div>`;
     }
     tabsHtml += `<div onclick="dbQueryNewTab()" style="padding:5px 12px; cursor:pointer; font-size:12px; color:var(--accent, #a855f7);" title="New query tab">+</div>`;
@@ -48769,7 +48769,7 @@ function dbMgrRenderQueryTab(body) {
             <label style="font-size:13px; margin:0;">Timeout (s):
                 <input id="db-timeout" type="number" min="1" max="300" value="30" class="form-control" style="display:inline-block; width:90px; margin-left:6px;">
             </label>
-            <span id="db-schema-badge" title="This tab's working schema — snapshot when the tab was created. New tabs inherit the currently-selected tree schema; existing tabs stay with theirs so clicking around doesn't change their context. Click to rebind to the current tree selection." onclick="dbRebindTabSchema()" style="cursor:pointer; font-size:12px; padding:3px 8px; border-radius:5px; background:rgba(168,85,247,0.15); color:#c084fc; margin-left:auto;">📂 ${escapeHtml(active.schema || '(default)')}</span>
+            <span id="db-schema-badge" title="This tab's working schema — snapshot when the tab was created. New tabs inherit the currently-selected tree schema; existing tabs stay with theirs so clicking around doesn't change their context. Click to rebind to the current tree selection." onclick="dbRebindTabSchema()" style="cursor:pointer; font-size:12px; padding:3px 8px; border-radius:5px; background:rgba(168,85,247,0.15); color:#c084fc; margin-left:auto;">${escapeHtml(active.schema || '(default)')}</span>
             <span id="db-validate" style="font-size:12px; padding:3px 8px; border-radius:5px; background:var(--bg-tertiary); color:var(--text-muted);">type to validate…</span>
         </div>
         <div id="db-editor-wrap" style="position:relative; width:100%; height:${_dbEditorHeight || 260}px; min-height:120px;">
@@ -48783,19 +48783,19 @@ function dbMgrRenderQueryTab(body) {
             style="height:8px; margin:4px 0; cursor:ns-resize; background:linear-gradient(var(--border), var(--border)) center/40px 2px no-repeat; border-radius:3px;"></div>
         <div style="display:flex; gap:6px; margin-top:8px; align-items:center; flex-wrap:wrap;">
             <button class="btn btn-primary btn-sm" onclick="dbRunQuery()">▶ Run</button>
-            <button class="btn btn-sm" onclick="dbExplainQuery()" title="Prepend EXPLAIN and run">🔍 Explain</button>
+            <button class="btn btn-sm" onclick="dbExplainQuery()" title="Prepend EXPLAIN and run">Explain</button>
             <button class="btn btn-sm" onclick="dbFormatQuery()" title="Pretty-print SQL keywords">Format</button>
-            <button class="btn btn-sm" onclick="dbSaveCurrentQuery()">💾 Save…</button>
+            <button class="btn btn-sm" onclick="dbSaveCurrentQuery()">Save…</button>
             <select id="db-saved-select" onchange="dbLoadSavedSelected()" class="form-control" style="display:inline-block; width:auto; font-size:12px; padding:4px 8px;">
                 <option value="">— Saved queries —</option>
             </select>
             <select id="db-hist-select" onchange="dbLoadHistSelected()" class="form-control" style="display:inline-block; width:auto; font-size:12px; padding:4px 8px;">
                 <option value="">— Recent —</option>
             </select>
-            <button class="btn btn-sm" onclick="dbUploadSqlFile()" title="Upload a .sql file and run every statement">📂 Run SQL file…</button>
+            <button class="btn btn-sm" onclick="dbUploadSqlFile()" title="Upload a .sql file and run every statement">Run SQL file…</button>
             <div style="flex:1;"></div>
-            <button class="btn btn-sm" id="db-copy-csv" onclick="dbCopyCsv()" disabled>📋 CSV</button>
-            <button class="btn btn-sm" id="db-copy-md" onclick="dbCopyMarkdown()" disabled>📋 Markdown</button>
+            <button class="btn btn-sm" id="db-copy-csv" onclick="dbCopyCsv()" disabled>CSV</button>
+            <button class="btn btn-sm" id="db-copy-md" onclick="dbCopyMarkdown()" disabled>Markdown</button>
         </div>
         <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Ctrl/Cmd + Enter runs. Tab indents. Double-click a tab name to rename.</div>
         <div id="db-result" style="margin-top:14px;"></div>
@@ -48998,7 +48998,7 @@ async function dbRunValidate() {
                 : data.tier === 'update' ? '#eab308' : '#22c55e';
             badge.style.background = `${tierColor}22`;
             badge.style.color = tierColor;
-            badge.textContent = `✓ ${data.tier} tier`;
+            badge.textContent = `${data.tier} tier`;
             // Auto-advance the permission selector up to the detected
             // tier — queries need the matching permission or higher or
             // the server rejects them even if the classifier accepted.
@@ -49011,7 +49011,7 @@ async function dbRunValidate() {
         } else {
             badge.style.background = 'rgba(239,68,68,0.15)';
             badge.style.color = '#ef4444';
-            badge.textContent = `✗ ${data.error}`;
+            badge.textContent = `${data.error}`;
         }
     } catch (e) {
         badge.style.background = 'var(--bg-tertiary)';
@@ -49071,7 +49071,7 @@ async function dbSaveCurrentQuery() {
     modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10000; display:flex; align-items:center; justify-content:center;';
     modal.innerHTML = `
         <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:10px; padding:18px; width:520px; max-width:95vw;">
-            <h3 style="margin:0 0 12px;">💾 Save query</h3>
+            <h3 style="margin:0 0 12px;">Save query</h3>
             <label style="display:block; font-size:13px;">Name
                 <input id="db-save-name" class="form-control" placeholder="Nightly active users" autocomplete="off">
             </label>
@@ -49156,7 +49156,7 @@ async function dbManageSavedQueries() {
     modal.innerHTML = `
         <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:10px; padding:18px; width:700px; max-width:95vw; max-height:80vh; display:flex; flex-direction:column;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                <h3 style="margin:0;">💾 Saved queries (${saved.length})</h3>
+                <h3 style="margin:0;">Saved queries (${saved.length})</h3>
                 <button class="btn btn-sm" onclick="document.getElementById('db-manage-modal').remove()">Close</button>
             </div>
             <div style="overflow:auto; border:1px solid var(--border); border-radius:6px;">${rows}</div>
@@ -49327,10 +49327,10 @@ async function dbTestConnection(id, btn) {
     try {
         const resp = await fetch(`/api/sql-connections/${encodeURIComponent(id)}/test`, { method: 'POST' });
         const data = await resp.json();
-        if (data.ok) showToast(`✅ ${data.version || 'Connected'}`, 'success');
-        else showToast(`❌ ${data.error || 'Connection failed'}`, 'error');
+        if (data.ok) showToast(`${data.version || 'Connected'}`, 'success');
+        else showToast(`${data.error || 'Connection failed'}`, 'error');
     } catch (e) {
-        showToast(`❌ ${e.message}`, 'error');
+        showToast(`${e.message}`, 'error');
     } finally {
         if (btn) btn.disabled = false;
     }
@@ -49459,7 +49459,7 @@ function renderPredictiveInbox() {
             <div class="predictive-shell" style="padding:20px 24px;max-width:1600px;margin:0 auto;height:100%;display:flex;flex-direction:column;min-height:0;">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;gap:16px;flex-wrap:wrap;flex-shrink:0;">
                     <div style="flex:1;min-width:280px;">
-                        <h2 style="margin:0 0 6px 0;font-size:22px;color:var(--text-primary);">🔮 Predictive Inbox</h2>
+                        <h2 style="margin:0 0 6px 0;font-size:22px;color:var(--text-primary);">Predictive Inbox</h2>
                         <div style="font-size:13px;color:var(--text-muted);line-height:1.5;">
                             Forward-looking findings the analyzer surfaces before they become incidents.
                             Every proposal carries the evidence used to produce it; nothing here executes
@@ -49467,7 +49467,7 @@ function renderPredictiveInbox() {
                         </div>
                     </div>
                     <div style="display:flex;gap:8px;">
-                        <button class="btn btn-sm" onclick="predictiveRunNow()" id="predictive-run-now">🔄 Run analyzer now</button>
+                        <button class="btn btn-sm" onclick="predictiveRunNow()" id="predictive-run-now">Run analyzer now</button>
                     </div>
                 </div>
                 <div class="predictive-split" style="display:flex;align-items:stretch;flex:1;min-height:0;gap:0;">
@@ -49488,7 +49488,7 @@ function renderPredictiveInbox() {
                             </div>
                         </details>
                         <details style="margin-top:8px;background:rgba(168,85,247,0.04);border:1px solid rgba(168,85,247,0.2);border-radius:8px;padding:0;margin-bottom:8px;">
-                            <summary style="padding:10px 14px;cursor:pointer;font-size:12px;color:#c084fc;font-weight:600;">📡 What's currently watched</summary>
+                            <summary style="padding:10px 14px;cursor:pointer;font-size:12px;color:#c084fc;font-weight:600;">What's currently watched</summary>
                             <div style="padding:0 14px 12px 14px;font-size:12px;color:var(--text-secondary);line-height:1.55;">
                                 Every analyzer item from the original roadmap is live: host filesystem usage,
                                 Docker / LXC container storage and memory pressure, restart-loops, host CPU/memory
@@ -49508,17 +49508,17 @@ function renderPredictiveInbox() {
                         <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border,#2d2f3a);background:var(--bg-secondary,#16181f);flex-shrink:0;gap:8px;">
                             <div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;min-width:0;">
                                 <span id="predictive-term-spinner" style="display:none;width:14px;height:14px;border:2px solid rgba(96,165,250,0.25);border-top-color:#60a5fa;border-radius:50%;animation:predTermSpin 0.7s linear infinite;flex-shrink:0;"></span>
-                                <span id="predictive-term-icon" style="font-size:16px;flex-shrink:0;">💻</span>
+                                <span id="predictive-term-icon" style="font-size:16px;flex-shrink:0;"></span>
                                 <span id="predictive-term-status" style="color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">No active terminal</span>
                             </div>
                             <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-                                <button class="btn btn-sm" onclick="predictiveToggleMaximize()" id="predictive-term-max" title="Maximize terminal" style="font-size:11px;padding:2px 8px;">⛶</button>
-                                <button class="btn btn-sm" onclick="predTermClose()" id="predictive-term-close" style="display:none;font-size:11px;padding:2px 8px;">✕ Close</button>
+                                <button class="btn btn-sm" onclick="predictiveToggleMaximize()" id="predictive-term-max" title="Maximize terminal" style="font-size:11px;padding:2px 8px;"></button>
+                                <button class="btn btn-sm" onclick="predTermClose()" id="predictive-term-close" style="display:none;font-size:11px;padding:2px 8px;">Close</button>
                             </div>
                         </div>
                         <div id="predictive-term-container" style="flex:1;background:#0a0a0a;padding:8px 8px 14px 8px;overflow:hidden;min-height:0;">
                             <div style="color:var(--text-muted);padding:24px;text-align:center;font-size:13px;line-height:1.6;">
-                                Click <strong>▶ Run</strong> or <strong>💻 Open terminal</strong> on a proposal.<br>
+                                Click <strong>▶ Run</strong> or <strong>Open terminal</strong> on a proposal.<br>
                                 <span style="font-size:11px;opacity:0.7;">Multiple commands on the same proposal share the session — no more 3-popup workflows.</span>
                             </div>
                         </div>
@@ -49753,7 +49753,7 @@ function predictiveToggleMaximize() {
     split.classList.toggle('maximized', becomingMax);
     if (btn) {
         btn.title = becomingMax ? 'Restore split' : 'Maximize terminal';
-        btn.textContent = becomingMax ? '⊟' : '⛶';
+        btn.textContent = becomingMax ? '⊟' : '';
     }
     // Two refits: one synchronous so xterm reflows immediately, one
     // after a frame so the post-layout final width is also picked up
@@ -49839,7 +49839,7 @@ function predictiveRender() {
         ).join(' · ');
         html += `
             <div style="background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.3);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:var(--text-secondary);line-height:1.5;">
-                <strong style="color:#fbbf24;">⚠ Inbox may be incomplete</strong> — ${responded} of ${total} cluster node${total === 1 ? '' : 's'} responded. Unreachable: ${summary}.
+                <strong style="color:#fbbf24;">Inbox may be incomplete</strong> — ${responded} of ${total} cluster node${total === 1 ? '' : 's'} responded. Unreachable: ${summary}.
             </div>
         `;
     }
@@ -49897,15 +49897,15 @@ function predictiveRender() {
                        title="Select all visible"
                        style="margin:0;cursor:pointer;width:16px;height:16px;">
                 <label for="predictive-bulk-master" style="font-size:11px;color:var(--text-muted);cursor:pointer;">Select all (${filtered.length})</label>
-                <button class="btn btn-sm" onclick="osvSettingsOpen()" title="Tune the OSV CVE scanner — severity floor, KEV-only mode, suppress findings with no upstream patch" style="margin-left:8px;">⚙ OSV scanner</button>
+                <button class="btn btn-sm" onclick="osvSettingsOpen()" title="Tune the OSV CVE scanner — severity floor, KEV-only mode, suppress findings with no upstream patch" style="margin-left:8px;">OSV scanner</button>
                 <div id="predictive-bulk-bar" style="display:none;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap;">
                     <span class="pred-bulk-count" style="font-size:12px;color:var(--text-secondary);font-weight:500;">0 selected</span>
-                    <button id="predictive-autofix-btn" class="btn btn-sm" style="display:none;background:#10b981;color:#fff;border-color:#059669;" onclick="predictiveAutofixSelected()" title="Run package updates on every selected target — opens a terminal for each one in turn, runs ONLY the update command, then moves to the next. Nothing else is touched.">🔧 AUTOFIX (updates)</button>
-                    <button class="btn btn-sm btn-primary" onclick="predictiveBulkApprove()" title="Mark every selected proposal as applied">✓ Mark applied</button>
-                    <button class="btn btn-sm" onclick="predictiveBulkSnooze(24)">⏰ Snooze 24h</button>
-                    <button class="btn btn-sm" onclick="predictiveBulkSnooze(168)">⏰ Snooze 1w</button>
-                    <button class="btn btn-sm" onclick="predictiveBulkDismiss()">✗ Dismiss…</button>
-                    <button class="btn btn-sm" onclick="predictiveClearSelection()" title="Clear selection without acting">✕</button>
+                    <button id="predictive-autofix-btn" class="btn btn-sm" style="display:none;background:#10b981;color:#fff;border-color:#059669;" onclick="predictiveAutofixSelected()" title="Run package updates on every selected target — opens a terminal for each one in turn, runs ONLY the update command, then moves to the next. Nothing else is touched.">AUTOFIX (updates)</button>
+                    <button class="btn btn-sm btn-primary" onclick="predictiveBulkApprove()" title="Mark every selected proposal as applied">Mark applied</button>
+                    <button class="btn btn-sm" onclick="predictiveBulkSnooze(24)">Snooze 24h</button>
+                    <button class="btn btn-sm" onclick="predictiveBulkSnooze(168)">Snooze 1w</button>
+                    <button class="btn btn-sm" onclick="predictiveBulkDismiss()">Dismiss…</button>
+                    <button class="btn btn-sm" onclick="predictiveClearSelection()" title="Clear selection without acting"></button>
                 </div>
             </div>
         `;
@@ -49913,7 +49913,7 @@ function predictiveRender() {
         // No findings — still expose the OSV settings button so
         // operators with quiet inboxes can change the noise floor.
         html += `<div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
-            <button class="btn btn-sm" onclick="osvSettingsOpen()" title="Tune the OSV CVE scanner — severity floor, KEV-only mode, suppress findings with no upstream patch">⚙ OSV scanner</button>
+            <button class="btn btn-sm" onclick="osvSettingsOpen()" title="Tune the OSV CVE scanner — severity floor, KEV-only mode, suppress findings with no upstream patch">OSV scanner</button>
         </div>`;
     }
 
@@ -49923,7 +49923,7 @@ function predictiveRender() {
             : `<div style="font-size:13px;line-height:1.55;max-width:520px;margin:0 auto;">This is the correct state for a healthy cluster — see the <em>How this works</em> note above. Analyzers run every 5 minutes; the inbox will populate here when a resource enters a worth-surfacing state.</div>`;
         html += `
             <div style="text-align:center;padding:48px 20px;color:var(--text-muted);">
-                <div style="font-size:48px;margin-bottom:12px;color:#34d399;">✓</div>
+                <div style="font-size:48px;margin-bottom:12px;color:#34d399;"></div>
                 <div style="font-size:16px;color:var(--text-primary);margin-bottom:6px;">No predictions right now.</div>
                 ${filterMsg}
             </div>
@@ -50004,7 +50004,7 @@ async function osvSettingsOpen() {
     overlay.innerHTML = `
         <div style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:22px 26px;max-width:560px;width:94%;max-height:92vh;overflow-y:auto;color:var(--text-primary,#e4e4e7);font-family:inherit;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
             <div style="font-size:16px;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:10px;color:var(--text-primary,#e4e4e7);">
-                <span style="font-size:22px;">⚙</span>OSV scanner settings
+                <span style="font-size:22px;"></span>OSV scanner settings
             </div>
             <div style="font-size:12px;color:var(--text-secondary,#a1a1aa);line-height:1.55;margin-bottom:18px;">
                 Tune the noise floor for OSV.dev CVE findings. These knobs apply <strong>after</strong> the scan — the scanner still queries OSV the same way; it just decides what to show in the inbox.
@@ -50112,20 +50112,20 @@ async function osvSettingsSave(btn) {
 function predictiveRuntimeBadge(p) {
     const ft = p.finding_type || '';
     const rid = (p.scope && p.scope.resource_id) || '';
-    if (ft.startsWith('docker_'))         return { label: 'DOCKER',   icon: '🐳', color: '#06b6d4' };
-    if (ft.startsWith('lxc_'))            return { label: 'LXC',      icon: '📦', color: '#a855f7' };
-    if (ft === 'vm_disk_fill')            return { label: 'VM',       icon: '💻', color: '#f59e0b' };
-    if (ft === 'cert_expiry_window')      return { label: 'CERT',     icon: '🔒', color: '#10b981' };
-    if (ft === 'backup_stale')            return { label: 'BACKUP',   icon: '💾', color: '#8b5cf6' };
-    if (ft.startsWith('sshd_'))           return { label: 'SSH',      icon: '🔑', color: '#ef4444' };
-    if (ft === 'service_bound_publicly')  return { label: 'NETWORK',  icon: '🌐', color: '#ef4444' };
-    if (ft === 'systemd_unit_failed')     return { label: 'SERVICE',  icon: '⚙️', color: '#f97316' };
-    if (ft.startsWith('host_'))           return { label: 'HOST',     icon: '🖥️', color: '#64748b' };
-    if (ft === 'disk_fill_eta')           return { label: 'HOST',     icon: '🖥️', color: '#64748b' };
+    if (ft.startsWith('docker_'))         return { label: 'DOCKER',   icon: '', color: '#06b6d4' };
+    if (ft.startsWith('lxc_'))            return { label: 'LXC',      icon: '', color: '#a855f7' };
+    if (ft === 'vm_disk_fill')            return { label: 'VM',       icon: '', color: '#f59e0b' };
+    if (ft === 'cert_expiry_window')      return { label: 'CERT',     icon: '', color: '#10b981' };
+    if (ft === 'backup_stale')            return { label: 'BACKUP',   icon: '', color: '#8b5cf6' };
+    if (ft.startsWith('sshd_'))           return { label: 'SSH',      icon: '', color: '#ef4444' };
+    if (ft === 'service_bound_publicly')  return { label: 'NETWORK',  icon: '', color: '#ef4444' };
+    if (ft === 'systemd_unit_failed')     return { label: 'SERVICE',  icon: '', color: '#f97316' };
+    if (ft.startsWith('host_'))           return { label: 'HOST',     icon: '', color: '#64748b' };
+    if (ft === 'disk_fill_eta')           return { label: 'HOST',     icon: '', color: '#64748b' };
     // Fallback: surface the resource_id prefix so unknown finding
     // types still get *some* attribution — better than a blank.
-    if (rid.includes(':')) return { label: rid.split(':')[0].toUpperCase(), icon: '📌', color: '#64748b' };
-    return { label: 'FINDING', icon: '📌', color: '#64748b' };
+    if (rid.includes(':')) return { label: rid.split(':')[0].toUpperCase(), icon: '', color: '#64748b' };
+    return { label: 'FINDING', icon: '', color: '#64748b' };
 }
 
 /// Per-proposal severity colour + label. Used by both the compact
@@ -50184,7 +50184,7 @@ function predictiveRowHtml(p) {
                 <div style="min-width:0;display:flex;flex-direction:column;gap:2px;">
                     <div style="font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:6px;flex-wrap:nowrap;overflow:hidden;">
                         ${cluster ? `<span style="color:#c084fc;font-weight:500;flex-shrink:0;">${escapeHtml(cluster)}</span><span style="opacity:0.5;flex-shrink:0;">·</span>` : ''}
-                        <span title="${escapeAttr(p.scope.node_id)}" style="color:var(--text-secondary);font-weight:500;flex-shrink:0;">🖥️ ${escapeHtml(host)}</span>
+                        <span title="${escapeAttr(p.scope.node_id)}" style="color:var(--text-secondary);font-weight:500;flex-shrink:0;">${escapeHtml(host)}</span>
                         ${resource ? `<span style="opacity:0.5;flex-shrink:0;">·</span><code style="background:var(--bg-tertiary,#2d2f3a);padding:1px 6px;border-radius:4px;font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">${escapeHtml(resource)}</code>` : ''}
                     </div>
                     <div style="font-size:13px;color:var(--text-primary);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(p.title)}${snoozedBadge}</div>
@@ -50202,7 +50202,7 @@ function predictiveRowHtml(p) {
 /// it's now hidden behind a click on the compact row.
 function predictiveExpandedBody(p) {
     const sourceBadge = p.source === 'ai'
-        ? '<span style="background:rgba(168,85,247,0.18);color:#c084fc;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:600;margin-left:6px;">🤖 AI</span>'
+        ? '<span style="background:rgba(168,85,247,0.18);color:#c084fc;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:600;margin-left:6px;">AI</span>'
         : '';
     const runtime = predictiveRuntimeBadge(p);
     const evidence = (p.evidence || []).map(e => {
@@ -50272,7 +50272,7 @@ function predictiveExpandedBody(p) {
     if (p.status && p.status.kind === 'snoozed') {
         const until = new Date(p.status.until);
         const untilStr = isNaN(until.getTime()) ? p.status.until : until.toLocaleString();
-        snoozeNotice = `<div style="background:rgba(96,165,250,0.1);padding:8px 12px;border-radius:6px;font-size:12px;color:#60a5fa;margin-bottom:12px;">⏰ Snoozed until ${escapeHtml(untilStr)} — will re-fire after.</div>`;
+        snoozeNotice = `<div style="background:rgba(96,165,250,0.1);padding:8px 12px;border-radius:6px;font-size:12px;color:#60a5fa;margin-bottom:12px;">Snoozed until ${escapeHtml(untilStr)} — will re-fire after.</div>`;
     }
 
     return `
@@ -50287,11 +50287,11 @@ function predictiveExpandedBody(p) {
         ${evidence ? `<div style="margin-bottom:12px;">${evidence}</div>` : ''}
         ${remediation}
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <button class="btn btn-sm btn-primary" onclick="predictiveApprove('${escapeAttr(p.id)}')">✓ Mark applied</button>
-            <button class="btn btn-sm" onclick="predictiveOpenTerm('${escapeAttr(p.id)}')" title="Open an interactive shell on this proposal's target — host, container, or VM">💻 Open terminal</button>
-            <button class="btn btn-sm" onclick="predictiveSnoozeMenu('${escapeAttr(p.id)}', this)">⏰ Snooze</button>
-            <button class="btn btn-sm" onclick="predictiveDismiss('${escapeAttr(p.id)}')">✗ Dismiss</button>
-            <button class="btn btn-sm" onclick="predictiveAck('${escapeAttr(p.finding_type)}', '${escapeAttr(p.scope.node_id)}', '${escapeAttr(p.scope.resource_id || '')}')">🛡 Ack as intentional</button>
+            <button class="btn btn-sm btn-primary" onclick="predictiveApprove('${escapeAttr(p.id)}')">Mark applied</button>
+            <button class="btn btn-sm" onclick="predictiveOpenTerm('${escapeAttr(p.id)}')" title="Open an interactive shell on this proposal's target — host, container, or VM">Open terminal</button>
+            <button class="btn btn-sm" onclick="predictiveSnoozeMenu('${escapeAttr(p.id)}', this)">Snooze</button>
+            <button class="btn btn-sm" onclick="predictiveDismiss('${escapeAttr(p.id)}')">Dismiss</button>
+            <button class="btn btn-sm" onclick="predictiveAck('${escapeAttr(p.finding_type)}', '${escapeAttr(p.scope.node_id)}', '${escapeAttr(p.scope.resource_id || '')}')">Ack as intentional</button>
         </div>
     `;
 }
@@ -50363,7 +50363,7 @@ function predictiveUpdateBulkBar() {
         const eligible = predictiveSelectedAutofixable();
         if (eligible.length > 0) {
             autofixBtn.style.display = '';
-            autofixBtn.textContent = `🔧 AUTOFIX updates (${eligible.length})`;
+            autofixBtn.textContent = `AUTOFIX updates (${eligible.length})`;
         } else {
             autofixBtn.style.display = 'none';
         }
@@ -50580,7 +50580,7 @@ function predictiveRemediationHtml(r, proposalId) {
                 <div style="display:flex;align-items:center;gap:8px;background:var(--bg-tertiary,#2d2f3a);padding:6px 10px;border-radius:6px;margin-bottom:4px;">
                     <code style="flex:1;font-family:var(--font-mono,monospace);font-size:12px;color:var(--text-primary);overflow-x:auto;white-space:nowrap;">${escapeHtml(cmd)}</code>
                     ${runBtn}
-                    <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;flex-shrink:0;" onclick="predictiveCopyCmd(this)" data-cmd="${escapeAttr(cmd)}">📋 Copy</button>
+                    <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;flex-shrink:0;" onclick="predictiveCopyCmd(this)" data-cmd="${escapeAttr(cmd)}">Copy</button>
                 </div>
             `;
         }).join('');
@@ -51243,7 +51243,7 @@ async function predictiveApprove(id) {
     predictiveState.pendingUndoIds.add(id);
     let undone = false;
     showUndoToast(
-        '✓ Marked applied',
+        'Marked applied',
         'Undo',
         undoWindowMs,
         () => {
@@ -51337,7 +51337,7 @@ async function predictiveBulkApprove() {
     const undoWindowMs = 6000;
     let undone = false;
     showUndoToast(
-        `✓ Marked ${ids.length} applied`,
+        `Marked ${ids.length} applied`,
         'Undo',
         undoWindowMs,
         () => {
@@ -51477,7 +51477,7 @@ async function predictiveAutofixSelected() {
         return `  ${i + 1}. ${host}  ·  ${truncCmd}`;
     }).join('\n');
     const ok = confirm(
-        `🔧 AUTOFIX — run package updates on ${eligible.length} target${eligible.length === 1 ? '' : 's'}\n\n` +
+        `AUTOFIX — run package updates on ${eligible.length} target${eligible.length === 1 ? '' : 's'}\n\n` +
         `WHAT WILL HAPPEN\n` +
         `  • Each target's terminal opens in turn (you can watch).\n` +
         `  • Only the analyzer's first remediation command runs — \n` +
@@ -51686,7 +51686,7 @@ async function predictiveAck(findingType, nodeId, resourceId) {
 
 async function predictiveRunNow() {
     const btn = document.getElementById('predictive-run-now');
-    if (btn) { btn.disabled = true; btn.textContent = '⏳ Running…'; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
     const before = (predictiveState.proposals || []).length;
     try {
         const r = await fetch('/api/proposals/run-now', { method: 'POST' });
@@ -51711,7 +51711,7 @@ async function predictiveRunNow() {
     } catch (e) {
         showToast(`Run errored: ${e.message || String(e)}`, 'error');
     } finally {
-        if (btn) { btn.disabled = false; btn.textContent = '🔄 Run analyzer now'; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Run analyzer now'; }
     }
 }
 
@@ -51800,19 +51800,19 @@ window.predTermClose = predTermClose;
 
 const APP_DRAWER_TILES = [
     {
-        id: 'control-panel', icon: '🎛️', name: 'Control Panel',
+        id: 'control-panel', icon: '', name: 'Control Panel',
         desc: 'Every VM, LXC and Docker across the cluster, one view.',
     },
     {
-        id: 'global-wolfnet', icon: '🌐', name: 'Global View',
+        id: 'global-wolfnet', icon: '', name: 'Global View',
         desc: 'World map of every cluster you manage.',
     },
     {
-        id: 'topology', icon: '🖥️', name: '3D Server Room',
+        id: 'topology', icon: '', name: '3D Server Room',
         desc: 'Immersive 3D topology of every host.',
     },
     {
-        id: 'wolfflow', icon: '⚡', name: 'WolfFlow',
+        id: 'wolfflow', icon: '', name: 'WolfFlow',
         desc: 'Build and run automation flows across the cluster.',
     },
     {
@@ -51820,31 +51820,31 @@ const APP_DRAWER_TILES = [
         desc: 'Named AI agents with persistent memory.',
     },
     {
-        id: 'cluster-browser', icon: '🔗', name: 'Cluster Browser',
+        id: 'cluster-browser', icon: '', name: 'Cluster Browser',
         desc: 'Open cluster web apps without a VPN.',
     },
     {
-        id: 'xopools', icon: '🦊', name: 'XO Pools',
+        id: 'xopools', icon: '', name: 'XO Pools',
         desc: 'Drive XCP-ng pools through Xen Orchestra — pools, hosts, VMs, templates.',
     },
     {
-        id: 'tenants', icon: '🏢', name: 'Tenants',
+        id: 'tenants', icon: '', name: 'Tenants',
         desc: 'Aggregator dashboard across every customer cluster you federate to.',
     },
     {
-        id: 'databases', icon: '🗄️', name: 'Databases',
+        id: 'databases', icon: '', name: 'Databases',
         desc: 'Query any configured SQL connection across the cluster.',
     },
     {
-        id: 'appstore', icon: '🛍️', name: 'App Store',
+        id: 'appstore', icon: '', name: 'App Store',
         desc: 'Browse and install applications onto any host.',
     },
     {
-        id: 'shares', icon: '📂', name: 'Shares',
+        id: 'shares', icon: '', name: 'Shares',
         desc: 'Universal SMB/NFS gateway — share any storage to your LAN.',
     },
     {
-        id: 'array', icon: '💽', name: 'Storage Array',
+        id: 'array', icon: '', name: 'Storage Array',
         desc: 'mdadm / NoNRAID parity arrays. Status, parity checks, drive alerts.',
     },
 ];
@@ -51855,7 +51855,7 @@ function appDrawerTileHtml(t) {
             style="background:var(--bg-secondary,#16181f);border:1px solid var(--border-color,#2d2f3a);border-radius:10px;padding:14px 12px;cursor:pointer;text-align:left;color:var(--text-primary);font-family:inherit;display:flex;flex-direction:column;gap:6px;transition:transform 0.12s ease, border-color 0.12s ease, background 0.12s ease;"
             onmouseenter="this.style.borderColor='var(--accent,#3b82f6)';this.style.background='var(--bg-tertiary,#2d2f3a)';this.style.transform='translateY(-1px)';"
             onmouseleave="this.style.borderColor='var(--border-color,#2d2f3a)';this.style.background='var(--bg-secondary,#16181f)';this.style.transform='translateY(0)';">
-            <div style="font-size:28px;line-height:1;">${escapeHtml(t.icon || '🧩')}</div>
+            <div style="font-size:28px;line-height:1;">${escapeHtml(t.icon || '')}</div>
             <div style="font-size:14px;font-weight:600;">${escapeHtml(t.name)}</div>
             <div style="font-size:11px;color:var(--text-muted);line-height:1.4;">${escapeHtml(t.desc || '')}</div>
         </button>
@@ -51900,7 +51900,7 @@ async function loadAppDrawerPluginTiles() {
                     : `plugin-${m.menu.view}`;
                 return {
                     id,
-                    icon: m.icon || '🧩',
+                    icon: m.icon || '',
                     name: m.menu.label || m.name || m.id,
                     desc: m.description || '',
                 };
@@ -52043,13 +52043,13 @@ function gwRender() {
         const cards = [];
         if (!s.smb || !s.smb.installed) {
             cards.push(`<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                <span style="color:#f59e0b;">⚠️ Samba is not installed on this node</span>
+                <span style="color:#f59e0b;">Samba is not installed on this node</span>
                 <span style="font-size:11px;color:var(--text-muted);">SMB shares need <code>samba</code>.</span>
-                <button class="btn btn-sm btn-primary" onclick="gwInstallDaemon('samba')">📦 Install Samba</button>
+                <button class="btn btn-sm btn-primary" onclick="gwInstallDaemon('samba')">Install Samba</button>
             </div>`);
         } else if (!s.smb.running) {
             cards.push(`<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                <span style="color:#f59e0b;">⚠️ smbd is not running</span>
+                <span style="color:#f59e0b;">smbd is not running</span>
                 <span style="font-size:11px;color:var(--text-muted);"><code>systemctl start smbd</code></span>
             </div>`);
         }
@@ -52057,7 +52057,7 @@ function gwRender() {
             cards.push(`<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
                 <span style="color:var(--text-muted);">ℹ️ NFS server is not installed</span>
                 <span style="font-size:11px;color:var(--text-muted);">Only needed for NFS shares.</span>
-                <button class="btn btn-sm" onclick="gwInstallDaemon('nfs')">📦 Install NFS server</button>
+                <button class="btn btn-sm" onclick="gwInstallDaemon('nfs')">Install NFS server</button>
             </div>`);
         }
         statusBox.innerHTML = cards.length === 0 ? '' :
@@ -52067,7 +52067,7 @@ function gwRender() {
     if (!_gwState.gateways || _gwState.gateways.length === 0) {
         list.innerHTML = `
             <div class="card"><div class="card-body" style="text-align:center;padding:40px 20px;">
-                <div style="font-size:48px;line-height:1;margin-bottom:12px;">📂</div>
+                <div style="font-size:48px;line-height:1;margin-bottom:12px;"></div>
                 <h3 style="margin:0 0 8px;">No shares on this node yet</h3>
                 <p style="color:var(--text-muted);max-width:520px;margin:0 auto 18px;">
                     Create a share to expose any storage on this node — local dirs, Docker volumes,
@@ -52093,9 +52093,9 @@ function gwTierBadge(tier) {
 
 function gwStatusBadge(g) {
     const rt = g.runtime || {};
-    if (g.disabled) return `<span style="color:#64748b;">⏸ disabled</span>`;
-    if (!rt.serving) return `<span style="color:#94a3b8;">⏳ not running</span>`;
-    if (!rt.healthy) return `<span style="color:#f59e0b;">⚠ unhealthy</span>`;
+    if (g.disabled) return `<span style="color:#64748b;">disabled</span>`;
+    if (!rt.serving) return `<span style="color:#94a3b8;">not running</span>`;
+    if (!rt.healthy) return `<span style="color:#f59e0b;">unhealthy</span>`;
     return `<span style="color:#22c55e;">● running</span>`;
 }
 
@@ -52107,7 +52107,7 @@ function gwRenderRow(g) {
     return `
         <div class="card" style="cursor:pointer;" onclick="gwOpenDetail('${safeId}')">
             <div class="card-body" style="display:flex;align-items:center;gap:14px;padding:14px 18px;">
-                <div style="font-size:24px;">📂</div>
+                <div style="font-size:24px;"></div>
                 <div style="flex:1;min-width:0;">
                     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
                         <strong style="font-size:14px;">${escapeHtml(g.name)}</strong>
@@ -52215,8 +52215,8 @@ async function gwRenderWizard() {
     m.innerHTML = `
         <div class="card" style="width:680px;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;">
             <div class="card-body" style="border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
-                <h3 style="margin:0;display:flex;align-items:center;gap:8px;">📂 ${titleLabel}</h3>
-                <button class="btn btn-sm" onclick="gwCloseWizard()">✕</button>
+                <h3 style="margin:0;display:flex;align-items:center;gap:8px;">${titleLabel}</h3>
+                <button class="btn btn-sm" onclick="gwCloseWizard()"></button>
             </div>
             <div class="card-body" style="padding:12px 18px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);">${stepBadge}</div>
             <div class="card-body" style="overflow:auto;flex:1;">${body}</div>
@@ -52390,7 +52390,7 @@ function gwWizardStep2() {
                         <label style="font-size:11px;display:flex;align-items:center;gap:4px;">
                             <input type="checkbox" ${u.writable ? 'checked' : ''} onchange="_gwWizardData.users[${i}].writable=this.checked;"> writable
                         </label>
-                        <button class="btn btn-sm" onclick="_gwWizardData.users.splice(${i},1);gwRenderWizard();">✕</button>
+                        <button class="btn btn-sm" onclick="_gwWizardData.users.splice(${i},1);gwRenderWizard();"></button>
                     </div>
                 `).join('')}
             </div>
@@ -52548,8 +52548,8 @@ async function gwOpenDetail(id) {
     m.innerHTML = `
         <div class="card" style="width:680px;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;">
             <div class="card-body" style="border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
-                <h3 style="margin:0;display:flex;align-items:center;gap:8px;">📂 ${escapeHtml(g.name)}</h3>
-                <button class="btn btn-sm" onclick="document.getElementById('gw-detail').remove()">✕</button>
+                <h3 style="margin:0;display:flex;align-items:center;gap:8px;">${escapeHtml(g.name)}</h3>
+                <button class="btn btn-sm" onclick="document.getElementById('gw-detail').remove()"></button>
             </div>
             <div class="card-body" style="overflow:auto;flex:1;">
                 <div style="display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;font-size:13px;">
@@ -52580,13 +52580,13 @@ async function gwOpenDetail(id) {
             </div>
             <div class="card-body" style="border-top:1px solid var(--border);display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
                 <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                    <button class="btn btn-sm" onclick="gwEditFrom('${escapeAttr(g.id)}')">✎ Edit</button>
-                    <button class="btn btn-sm" onclick="gwReload('${escapeAttr(g.id)}')">🔄 Reload</button>
+                    <button class="btn btn-sm" onclick="gwEditFrom('${escapeAttr(g.id)}')">Edit</button>
+                    <button class="btn btn-sm" onclick="gwReload('${escapeAttr(g.id)}')">Reload</button>
                     ${g.disabled
                         ? `<button class="btn btn-sm" onclick="gwEnable('${escapeAttr(g.id)}')">▶ Enable</button>`
-                        : `<button class="btn btn-sm" onclick="gwDisable('${escapeAttr(g.id)}')">⏸ Disable</button>`}
+                        : `<button class="btn btn-sm" onclick="gwDisable('${escapeAttr(g.id)}')">Disable</button>`}
                 </div>
-                <button class="btn btn-sm" style="background:#ef4444;color:white;" onclick="gwDelete('${escapeAttr(g.id)}','${escapeAttr(g.name)}')">🗑 Delete</button>
+                <button class="btn btn-sm" style="background:#ef4444;color:white;" onclick="gwDelete('${escapeAttr(g.id)}','${escapeAttr(g.name)}')">Delete</button>
             </div>
         </div>
     `;
@@ -52803,13 +52803,13 @@ function gwRenderFederationSection() {
     let rows = '';
     for (const f of list) {
         const ok = f.last_ok_unix && (!f.last_error || f.last_error === '');
-        const badge = f.last_error ? `<span style="color:#ef4444;">✗ ${escapeHtml(f.last_error.slice(0, 80))}</span>`
-                  : ok ? `<span style="color:#22c55e;">✓ connected</span>`
+        const badge = f.last_error ? `<span style="color:#ef4444;">${escapeHtml(f.last_error.slice(0, 80))}</span>`
+                  : ok ? `<span style="color:#22c55e;">connected</span>`
                   : `<span style="color:var(--text-muted);">○ not yet tested</span>`;
         rows += `
             <div class="card" style="margin-bottom:6px;">
                 <div class="card-body" style="padding:10px 14px;display:flex;align-items:center;gap:12px;">
-                    <div style="font-size:18px;">🌐</div>
+                    <div style="font-size:18px;"></div>
                     <div style="flex:1;min-width:0;">
                         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                             <strong>${escapeHtml(f.name)}</strong>
@@ -52842,7 +52842,7 @@ async function gwFedAddPrompt() {
     m.innerHTML = `
         <div class="card" style="width:520px;max-width:95vw;">
             <div class="card-body" style="border-bottom:1px solid var(--border);">
-                <h3 style="margin:0;">🌐 Connect another cluster</h3>
+                <h3 style="margin:0;">Connect another cluster</h3>
             </div>
             <div class="card-body" style="display:flex;flex-direction:column;gap:8px;">
                 <label style="font-size:12px;font-weight:600;">Display name</label>
@@ -52895,9 +52895,9 @@ async function gwFedSubmit() {
             const t = await fetch(`/api/federations/${encodeURIComponent(d.id)}/test`, { method: 'POST' });
             const tr = await t.json();
             if (tr.ok) {
-                showToast(`✓ ${name} connected (${tr.elapsed_ms}ms)`, 'success');
+                showToast(`${name} connected (${tr.elapsed_ms}ms)`, 'success');
             } else {
-                showToast(`⚠ ${name} added but probe failed: ${tr.error || 'unknown'}`, 'error', 6500);
+                showToast(`${name} added but probe failed: ${tr.error || 'unknown'}`, 'error', 6500);
             }
         } catch (probeErr) {
             showToast(`Added ${name}; probe failed: ${probeErr.message || probeErr}`, 'error');
@@ -52911,9 +52911,9 @@ async function gwFedTest(id) {
         const r = await fetch(`/api/federations/${encodeURIComponent(id)}/test`, { method: 'POST' });
         const d = await r.json();
         if (d.ok) {
-            showToast(`✓ ${d.name} — ${d.elapsed_ms}ms`, 'success');
+            showToast(`${d.name} — ${d.elapsed_ms}ms`, 'success');
         } else {
-            showToast(`✗ ${d.name}: ${d.error || 'unknown'}`, 'error', 6000);
+            showToast(`${d.name}: ${d.error || 'unknown'}`, 'error', 6000);
         }
         await gwLoad();
     } catch (e) { showToast('Test failed: ' + (e.message || String(e)), 'error'); }
@@ -52987,7 +52987,7 @@ function arrayRender() {
     if (!_arrayState.arrays || _arrayState.arrays.length === 0) {
         list.innerHTML = `
             <div class="card"><div class="card-body" style="text-align:center;padding:40px 20px;">
-                <div style="font-size:48px;line-height:1;margin-bottom:12px;">💽</div>
+                <div style="font-size:48px;line-height:1;margin-bottom:12px;"></div>
                 <h3 style="margin:0 0 8px;">No arrays detected</h3>
                 <p style="color:var(--text-muted);max-width:520px;margin:0 auto;">
                     No mdadm or NoNRAID arrays are present on any node in this cluster, and none of your federated clusters reported any.
@@ -53019,16 +53019,16 @@ function arrayRender() {
 
 function arrayStateBadge(s) {
     const map = {
-        clean:        ['#22c55e', '✓'],
-        active:       ['#22c55e', '✓'],
-        degraded:     ['#ef4444', '⚠'],
+        clean:        ['#22c55e', ''],
+        active:       ['#22c55e', ''],
+        degraded:     ['#ef4444', ''],
         recovering:   ['#f59e0b', '↻'],
         resyncing:    ['#3b82f6', '↻'],
         reshaping:    ['#3b82f6', '↻'],
-        checking:     ['#3b82f6', '🔍'],
-        inactive:     ['#94a3b8', '⏸'],
-        stopped:      ['#94a3b8', '⏸'],
-        unreachable:  ['#ef4444', '✗'],
+        checking:     ['#3b82f6', ''],
+        inactive:     ['#94a3b8', ''],
+        stopped:      ['#94a3b8', ''],
+        unreachable:  ['#ef4444', ''],
     };
     const [c, icon] = map[s] || ['#94a3b8', '?'];
     return `<span style="display:inline-block;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${icon} ${escapeHtml(s)}</span>`;
@@ -53049,7 +53049,7 @@ function arrayRowHtml(a) {
         return `
             <div class="card" style="border-left:3px solid #ef4444;">
                 <div class="card-body" style="display:flex;align-items:center;gap:14px;padding:14px 18px;">
-                    <div style="font-size:24px;">🌐</div>
+                    <div style="font-size:24px;"></div>
                     <div style="flex:1;min-width:0;">
                         <div><strong style="font-size:14px;color:#ef4444;">${escapeHtml(a.name)}</strong></div>
                         <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${escapeHtml(a.federation_error)}</div>
@@ -53087,7 +53087,7 @@ function arrayRowHtml(a) {
         `;
     }).join('');
     const remoteBadge = isFederated
-        ? `<span style="font-size:10px;color:#3b82f6;">🌐 ${escapeHtml(a.origin_federation_name || 'federated')}${a.origin_hostname ? ' / ' + escapeHtml(a.origin_hostname) : ''}</span>`
+        ? `<span style="font-size:10px;color:#3b82f6;">${escapeHtml(a.origin_federation_name || 'federated')}${a.origin_hostname ? ' / ' + escapeHtml(a.origin_hostname) : ''}</span>`
         : (!isLocal ? `<span style="font-size:10px;color:var(--text-muted);">on ${escapeHtml(a.origin_hostname || a.origin_node_id || 'peer')}</span>` : '');
     return `
         <div class="card" style="${isFederated ? 'border-left:3px solid #3b82f6;' : ''}">
@@ -53126,13 +53126,13 @@ function arrayRowHtml(a) {
                         : isLocal
                         ? `${a.state === 'stopped'
                                 ? `<button class="btn btn-sm" onclick="arrayStart('${escapeAttr(a.name)}')">▶ Start</button>`
-                                : `<button class="btn btn-sm" onclick="arrayStop('${escapeAttr(a.name)}')">⏸ Stop</button>`}
+                                : `<button class="btn btn-sm" onclick="arrayStop('${escapeAttr(a.name)}')">Stop</button>`}
                             ${a.state === 'checking' || a.state === 'resyncing' || a.state === 'recovering' || a.state === 'reshaping'
-                                ? `<button class="btn btn-sm" onclick="arrayParityCancel('${escapeAttr(a.name)}')">✕ Cancel parity</button>`
-                                : `<button class="btn btn-sm" onclick="arrayParity('${escapeAttr(a.name)}','check')">🔍 Parity check</button>
-                                   <button class="btn btn-sm" onclick="arrayParity('${escapeAttr(a.name)}','repair')" title="Overwrite mismatches with parity">🛠 Parity repair</button>`}
+                                ? `<button class="btn btn-sm" onclick="arrayParityCancel('${escapeAttr(a.name)}')">Cancel parity</button>`
+                                : `<button class="btn btn-sm" onclick="arrayParity('${escapeAttr(a.name)}','check')">Parity check</button>
+                                   <button class="btn btn-sm" onclick="arrayParity('${escapeAttr(a.name)}','repair')" title="Overwrite mismatches with parity">Parity repair</button>`}
                             <button class="btn btn-sm" onclick="arraySchedulePrompt('${escapeAttr(a.name)}')">
-                                🗓 Schedule${sched ? ` <small style="color:var(--text-muted);">(${escapeHtml(sched.cron)})</small>` : ''}
+                                Schedule${sched ? ` <small style="color:var(--text-muted);">(${escapeHtml(sched.cron)})</small>` : ''}
                             </button>`
                         : `<span style="font-size:11px;color:var(--text-muted);">Read-only view — manage from ${escapeHtml(a.origin_hostname || a.origin_node_id || 'the originating dashboard')}${isFederated ? ` (open <a href="${escapeAttr(a.origin_federation_url || '#')}" target="_blank" rel="noopener">${escapeHtml(a.origin_federation_name || 'remote cluster')}</a>)` : ''}</span>`}
                 </div>

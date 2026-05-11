@@ -2013,6 +2013,17 @@ pub fn spawn_dnsmasq_watchdog(state: std::sync::Arc<RouterState>, self_node_id: 
             // tested with `-C` before insertion. Steady-state cost is
             // ~3 iptables-check + 2 sysfs-read invocations per route
             // per minute — trivial.
+            //
+            // BEFORE reconciling, ask the cluster gossip whether there
+            // are workload subnets on remote peers that no configured
+            // route covers, and auto-create routes for them. klasSponsor
+            // 2026-05-11: "connections restored for about 10 minutes
+            // and then they disappeared again" — that's the symptom of
+            // gossip-known subnets that have no route configured at
+            // all, so the reconciler has nothing to keep alive. The
+            // auto-apply pass populates the config; the reconcile pass
+            // below then keeps the kernel routes installed.
+            auto_apply_missing_workload_routes(&state, &self_node_id);
             reconcile_subnet_routes(&state, &self_node_id);
 
             // Every 5th tick (~5 min) re-run the full config validation
@@ -2334,6 +2345,169 @@ pub fn reconcile_subnet_routes(state: &RouterState, self_node_id: &str) {
             }
         }
     }
+}
+
+/// Auto-create missing subnet_route entries for remote-peer workload
+/// subnets that the cluster has advertised but this node doesn't have
+/// configured. Runs on the same reconcile tick as `reconcile_subnet_routes`
+/// so freshly-joined peers get reachable within ~60s of advertising
+/// their workloads — no manual WolfRouter clicks needed.
+///
+/// Triggered by klasSponsor 2026-05-11: connections restored briefly
+/// then dropped. The missing routes weren't *configured* anywhere, so
+/// the existing reconciler had nothing to apply. This function plugs
+/// that gap by populating the config from cluster gossip.
+///
+/// Idempotent: skips any peer/subnet pair already covered by an existing
+/// enabled route whose gateway matches the peer's WolfNet IP — including
+/// coverage by a wider configured route (e.g. an existing `10.10.0.0/16
+/// via 10.100.10.30` covers a peer workload at `10.10.10.0/24`).
+///
+/// Safeguards:
+///   • Never touches an existing route — only appends new ones.
+///   • Skips peers whose hostname doesn't match a wolfnet peer-name (we
+///     have no way to know the right gateway IP without that match).
+///   • Skips subnets that aren't well-formed CIDRs.
+///   • Logs a single info line per route added; silent in steady state.
+///   • If saving the config fails, the in-memory adds are dropped on
+///     the next tick (we re-derive from gossip every cycle anyway).
+pub fn auto_apply_missing_workload_routes(state: &RouterState, self_node_id: &str) {
+    let peers = crate::networking::get_wolfnet_peers_list();
+    if peers.is_empty() { return; }
+
+    // Build hostname → wolfnet-IP map from /etc/wolfnet/config.toml.
+    let mut hostname_to_ip: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for p in &peers {
+        let ip_only = p.ip.split('/').next().unwrap_or(&p.ip).to_string();
+        if !p.name.is_empty() && !ip_only.is_empty() {
+            hostname_to_ip.insert(p.name.clone(), ip_only);
+        }
+    }
+
+    // Read persisted cluster state. We use the on-disk file directly
+    // so this function can live in `networking::router` without taking
+    // a circular dependency on `agent::ClusterState`.
+    let nodes_path = &crate::paths::get().nodes_config;
+    let nodes_json = match std::fs::read_to_string(nodes_path) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let nodes: Vec<crate::agent::Node> = match serde_json::from_str(&nodes_json) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // Build the (subnet, gateway) target set from gossip.
+    let mut wanted: Vec<(String, String, String)> = Vec::new(); // (cidr, gateway, peer_name)
+    for node in &nodes {
+        let gw = match hostname_to_ip.get(&node.hostname) {
+            Some(g) => g.clone(),
+            None => continue,
+        };
+        for sub in &node.workload_subnets {
+            if parse_cidr(sub).is_none() { continue; }
+            wanted.push((sub.clone(), gw.clone(), node.hostname.clone()));
+        }
+    }
+    if wanted.is_empty() { return; }
+
+    // Filter out any subnet/gateway already covered by an existing
+    // route — including DISABLED ones. Treating a disabled route as
+    // "covered" lets the operator opt out by toggling enabled=false
+    // in the UI; without that, auto-apply would re-create a fresh
+    // enabled entry on every tick.
+    let existing: Vec<(String, String)> = {
+        let cfg = state.config.read().unwrap();
+        cfg.subnet_routes.iter()
+            .map(|r| (r.subnet_cidr.clone(), r.gateway.clone()))
+            .collect()
+    };
+    let already_covered = |target_cidr: &str, target_gw: &str| -> bool {
+        let target = match parse_cidr(target_cidr) {
+            Some(t) => t,
+            None => return true, // unparseable — pretend covered, don't add
+        };
+        let target_net: u32 = ipv4_to_u32(&target.0);
+        for (cidr, gw) in &existing {
+            if gw != target_gw { continue; }
+            let parsed = match parse_cidr(cidr) {
+                Some(p) => p,
+                None => continue,
+            };
+            let route_prefix: u32 = parsed.1;
+            let route_net: u32 = ipv4_to_u32(&parsed.0);
+            if route_prefix > target.1 { continue; }
+            let mask: u32 = if route_prefix == 0 { 0 }
+                else { 0xFFFF_FFFFu32.checked_shl(32 - route_prefix).unwrap_or(0) };
+            if (target_net & mask) == (route_net & mask) {
+                return true;
+            }
+        }
+        false
+    };
+
+    let to_add: Vec<(String, String, String)> = wanted.into_iter()
+        .filter(|(cidr, gw, _)| !already_covered(cidr, gw))
+        .collect();
+    if to_add.is_empty() { return; }
+
+    // Mutate the config + persist. The write lock is held for the
+    // duration of the append; save() releases it via the cfg.clone()
+    // dance below (config.save() doesn't itself touch state.config).
+    {
+        let mut cfg = state.config.write().unwrap();
+        for (cidr, gw, peer_name) in &to_add {
+            cfg.subnet_routes.push(SubnetRoute {
+                id: format!("auto-wolfnet-{}-{}-{}",
+                    peer_name.replace(|c: char| !c.is_ascii_alphanumeric(), ""),
+                    cidr.replace('/', "_").replace('.', "_"),
+                    SystemTime::now().duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs()).unwrap_or(0),
+                ),
+                subnet_cidr: cidr.clone(),
+                gateway: gw.clone(),
+                node_id: Some(self_node_id.to_string()),
+                enabled: true,
+                description: format!(
+                    "Auto-created by WolfRouter for workload subnet on peer '{}'. \
+                     Detected via cluster gossip; safe to edit or disable manually.",
+                    peer_name,
+                ),
+            });
+        }
+    }
+    // Save outside the lock to avoid holding it during disk I/O.
+    let cfg_snapshot = state.config.read().unwrap().clone();
+    if let Err(e) = cfg_snapshot.save() {
+        tracing::warn!(
+            "WolfRouter auto-apply: added {} workload route(s) but save failed: {} \
+             (next tick will retry)",
+            to_add.len(), e,
+        );
+        // Roll the in-memory adds back so we don't apply ghost entries.
+        let mut cfg = state.config.write().unwrap();
+        let added_ids: std::collections::HashSet<String> = cfg.subnet_routes.iter()
+            .rev().take(to_add.len()).map(|r| r.id.clone()).collect();
+        cfg.subnet_routes.retain(|r| !added_ids.contains(&r.id));
+        return;
+    }
+
+    for (cidr, gw, peer_name) in &to_add {
+        tracing::info!(
+            "WolfRouter auto-apply: added subnet route {} via {} (peer '{}', cluster-gossip)",
+            cidr, gw, peer_name,
+        );
+    }
+
+    // Mirror the new routes to wolfnet's userspace table so the daemon
+    // can do longest-prefix matching for inbound TUN packets.
+    sync_subnet_routes_to_wolfnet(&cfg_snapshot.subnet_routes);
+}
+
+/// Helper: parse an IPv4 octet-string to u32 (network byte order).
+fn ipv4_to_u32(s: &str) -> u32 {
+    s.parse::<std::net::Ipv4Addr>().map(u32::from).unwrap_or(0)
 }
 
 /// Snapshot of the kernel forwarding plumbing for a single subnet route —

@@ -132,8 +132,8 @@
                 ? '<span style="background:#dc2626;color:#fff;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:600;">QUARANTINED</span>'
                 : '<span style="background:#16a34a;color:#fff;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:600;">BACKUP</span>';
             const parsesBadge = s.parses
-                ? '<span style="color:#16a34a;font-size:11px;">✓ parses</span>'
-                : '<span style="color:#dc2626;font-size:11px;font-weight:600;">✗ does NOT parse with this build</span>';
+                ? '<span style="color:#16a34a;font-size:11px;">parses</span>'
+                : '<span style="color:#dc2626;font-size:11px;font-weight:600;">does NOT parse with this build</span>';
             const safePath = String(s.path || '').replace(/'/g, "\\'");
             return `
                 <tr>
@@ -187,7 +187,7 @@
         bar.innerHTML = `
             <div style="background:#fef2f2;border:2px solid #dc2626;border-radius:6px;padding:16px 20px;margin:0 0 16px 0;">
                 <div style="display:flex;align-items:flex-start;gap:12px;">
-                    <span style="font-size:24px;line-height:1;">⚠️</span>
+                    <span style="font-size:24px;line-height:1;"></span>
                     <div style="flex:1;">
                         <div style="font-size:16px;font-weight:700;color:#991b1b;">
                             WolfRouter is in recovery mode — config.json failed to load
@@ -523,11 +523,11 @@
         wrShowDiagnosticsPanel({
             severity: 'error',
             title: 'WolfRouter preflight found blocking issues',
-            subtitle: `Cluster: <code>${escHtml(clusterName || '')}</code>. Items marked 🛑 must be fixed before the rack view can render reliably; the diagram above shows whatever topology data is currently reachable.`,
+            subtitle: `Cluster: <code>${escHtml(clusterName || '')}</code>. Items marked must be fixed before the rack view can render reliably; the diagram above shows whatever topology data is currently reachable.`,
             checks: pf.checks || [],
             checkActions: pf.actions || {},
             actions: `
-                <button onclick="(async () => { wrClearDiagnosticsPanel(); const pf = await (window.wrRunPreflight ? window.wrRunPreflight() : null); await wrLoadAll(); if (pf && pf.status === 'error') { wrRenderPreflight(pf, '${safeName}'); } else if (pf && pf.status === 'warning') { wrRenderPreflightBanner(pf); } })()" class="btn btn-primary btn-sm">🔄 Re-run preflight</button>
+                <button onclick="(async () => { wrClearDiagnosticsPanel(); const pf = await (window.wrRunPreflight ? window.wrRunPreflight() : null); await wrLoadAll(); if (pf && pf.status === 'error') { wrRenderPreflight(pf, '${safeName}'); } else if (pf && pf.status === 'warning') { wrRenderPreflightBanner(pf); } })()" class="btn btn-primary btn-sm">Re-run preflight</button>
             `,
         });
         // Make the functions reachable by inline buttons.
@@ -557,7 +557,7 @@
                 return;
             }
             const ok = (payload && payload.message) || 'Done.';
-            alert('✅ ' + ok);
+            alert('' + ok);
             // Re-run whichever panel is currently open: preflight,
             // health, or both. Cheap on a small cluster; the user gets
             // immediate feedback that the issue cleared.
@@ -596,14 +596,14 @@
         // copy-paste shell commands.
         const actionMap = checkActions || {};
         const checkRows = (checks || []).map(c => {
-            const icon  = c.ok ? '✅' : (c.severity === 'error' ? '🛑' : c.severity === 'warning' ? '⚠️' : 'ℹ️');
+            const icon  = c.ok ? '' : (c.severity === 'error' ? '' : c.severity === 'warning' ? '' : 'ℹ️');
             const color = c.ok ? '#10b981' : (c.severity === 'error' ? '#ef4444' : '#eab308');
             const action = (!c.ok && actionMap[c.id]) ? actionMap[c.id] : null;
             const actionBtn = action ? `
                 <div style="margin-top:8px;">
                     <button class="btn btn-primary btn-sm" title="${escHtml(action.detail || '')}"
                             onclick='wrRunPreflightFix(${JSON.stringify(action).replace(/'/g, "&#39;")})'>
-                        🔧 ${escHtml(action.label)}
+                        ${escHtml(action.label)}
                     </button>
                 </div>` : '';
             return `
@@ -790,7 +790,7 @@
             title: `${failures.length} section${failures.length === 1 ? '' : 's'} failed to load`,
             subtitle: 'The rack rendered from topology (which loaded), but the table panels below may be missing data from these endpoints.',
             failures,
-            actions: `<button onclick="wrLoadAll()" class="btn btn-sm">🔄 Retry</button>`,
+            actions: `<button onclick="wrLoadAll()" class="btn btn-sm">Retry</button>`,
         });
     }
 
@@ -818,7 +818,7 @@
             title: 'WolfRouter: topology could not be loaded',
             subtitle: `${topoBlock}${others.length ? 'Other endpoints that failed:' : ''}`,
             failures: others,
-            actions: `<button onclick="wrLoadAll()" class="btn btn-primary btn-sm">🔄 Retry</button>
+            actions: `<button onclick="wrLoadAll()" class="btn btn-primary btn-sm">Retry</button>
                 <span style="color:var(--text-muted); font-size:11px;">Full details with response bodies are in the browser console (F12) and the server log.</span>`,
         });
     }
@@ -989,8 +989,8 @@
                 <td>${ports}</td>
                 <td style="color:var(--text-muted); font-size:11px;">${escHtml(r.comment || '')}</td>
                 <td>
-                    <button class="btn btn-sm" title="Toggle" onclick="wrToggleRule('${r.id}')">${r.enabled ? '✅' : '⬜'}</button>
-                    <button class="btn btn-sm" title="Delete" onclick="wrDeleteRule('${r.id}')">🗑</button>
+                    <button class="btn btn-sm" title="Toggle" onclick="wrToggleRule('${r.id}')">${r.enabled ? '' : '⬜'}</button>
+                    <button class="btn btn-sm" title="Delete" onclick="wrDeleteRule('${r.id}')"></button>
                 </td>
             </tr>`;
         }).join('');
@@ -1003,9 +1003,9 @@
             case 'zone': return `<span class="badge" style="background:rgba(168,85,247,0.15); color:#a855f7; font-size:10px;">${zoneHuman(ep.zone)}</span>`;
             case 'interface': return `<code>${escHtml(ep.name)}</code>`;
             case 'ip': return `<code>${escHtml(ep.cidr)}</code>`;
-            case 'vm': return `🖥 ${escHtml(ep.name)}`;
-            case 'container': return `📦 ${escHtml(ep.name)}`;
-            case 'lan': return `🌐 ${escHtml(ep.id)}`;
+            case 'vm': return `${escHtml(ep.name)}`;
+            case 'container': return `${escHtml(ep.name)}`;
+            case 'lan': return `${escHtml(ep.id)}`;
         }
         return JSON.stringify(ep);
     }
@@ -1391,12 +1391,12 @@
         if (!rule) return;  // DOM not ready yet — skip analysis
         const warnings = wrAnalyzeRule(rule);
         if (!warnings.length) {
-            panel.innerHTML = '<div style="color:var(--text-muted); font-size:11px; padding:6px 0;">✓ No obvious issues detected with this rule.</div>';
+            panel.innerHTML = '<div style="color:var(--text-muted); font-size:11px; padding:6px 0;">No obvious issues detected with this rule.</div>';
             return;
         }
         const colours = {
-            danger:  { bg: 'rgba(239,68,68,0.12)', border: 'rgba(239,68,68,0.4)', icon: '🛑', label: '#ef4444' },
-            warning: { bg: 'rgba(251,191,36,0.10)', border: 'rgba(251,191,36,0.35)', icon: '⚠', label: '#fbbf24' },
+            danger:  { bg: 'rgba(239,68,68,0.12)', border: 'rgba(239,68,68,0.4)', icon: '', label: '#ef4444' },
+            warning: { bg: 'rgba(251,191,36,0.10)', border: 'rgba(251,191,36,0.35)', icon: '', label: '#fbbf24' },
             info:    { bg: 'rgba(96,165,250,0.08)', border: 'rgba(96,165,250,0.3)',   icon: 'ℹ', label: '#60a5fa' },
         };
         panel.innerHTML = warnings.map(w => {
@@ -1509,7 +1509,7 @@
         const discovered = (wrState.snapshot?.dhcp?.dnsmasq_processes) || [];
         const discoveredHtml = discovered.length
             ? `<div style="margin-bottom:16px; padding:12px; border:1px solid var(--border); border-radius:8px; background:var(--bg-card);">
-                <h4 style="font-size:13px; margin:0 0 8px;">📡 dnsmasq instances discovered on this host (${discovered.length})</h4>
+                <h4 style="font-size:13px; margin:0 0 8px;">dnsmasq instances discovered on this host (${discovered.length})</h4>
                 <div style="font-size:11px; color:var(--text-muted); margin-bottom:8px;">Other DHCP/DNS servers running independently of WolfRouter — listed so you don't accidentally double-bind a port.</div>
                 ${discovered.map(p => `
                     <div style="display:grid; grid-template-columns: 60px 120px 1fr; gap:8px; padding:4px 0; font-size:12px; border-top:1px dashed var(--border);">
@@ -1571,7 +1571,7 @@
         const nat = wrState.snapshot?.firewall?.nat || [];
         const all = filter.concat(nat);
         if (!all.length) {
-            panel.innerHTML = `<h4 style="font-size:13px; margin-bottom:8px; color:var(--text-muted);">🛡 Discovered host firewall rules</h4>
+            panel.innerHTML = `<h4 style="font-size:13px; margin-bottom:8px; color:var(--text-muted);">Discovered host firewall rules</h4>
                 <div style="color:var(--text-muted); font-size:12px; padding:12px;">No iptables rules detected (or iptables not readable as this user — try running as root).</div>`;
             return;
         }
@@ -1596,7 +1596,7 @@
         const orderedKeys = Object.keys(ownerLabel).filter(k => groups[k]);
         panel.innerHTML = `
             <div style="display:flex; align-items:baseline; justify-content:space-between; margin-bottom:8px;">
-                <h4 style="font-size:13px; margin:0; color:var(--text);">🛡 All firewall rules on this host (${all.length} total)</h4>
+                <h4 style="font-size:13px; margin:0; color:var(--text);">All firewall rules on this host (${all.length} total)</h4>
                 <span style="font-size:11px; color:var(--text-muted);">read-only — discovered from <code>iptables-save</code></span>
             </div>
             ${orderedKeys.map(k => `
@@ -1683,7 +1683,7 @@
                                 <button class="btn btn-sm" onclick="wrLanAddReservationRow()">+ Add reservation</button>
                             </div>
                             <div style="font-size:11px; color:var(--text-muted); margin-bottom:6px;">
-                                MAC-pinned IPs. Handy for servers, printers, cameras, IoT that needs a stable address. You can also use the 📌 <strong>Pin</strong> button on the DHCP Leases tab to promote an active lease here with one click.
+                                MAC-pinned IPs. Handy for servers, printers, cameras, IoT that needs a stable address. You can also use the <strong>Pin</strong> button on the DHCP Leases tab to promote an active lease here with one click.
                             </div>
                             <div id="wr-l-reservations" style="display:flex; flex-direction:column; gap:4px;"></div>
                         </div>
@@ -1910,7 +1910,7 @@
         const ifc = (n.interfaces || []).find(i => i.name === ifaceName) || (n.bridges || []).find(b => b.name === ifaceName);
         const addrs = ifc?.addresses || [];
         if (!addrs.length) {
-            info.innerHTML = `<span style="color:#fbbf24;">⚠ <code>${escHtml(ifaceName)}</code> has no IP address. Leave "Assign router IP to interface" ticked and WolfRouter will set it up on save.</span>`;
+            info.innerHTML = `<span style="color:#fbbf24;"><code>${escHtml(ifaceName)}</code> has no IP address. Leave "Assign router IP to interface" ticked and WolfRouter will set it up on save.</span>`;
         } else {
             info.innerHTML = `Current addresses on <code>${escHtml(ifaceName)}</code>: ${addrs.map(a => `<code>${escHtml(a)}</code>`).join(', ')}. Router IP will be added alongside.`;
         }
@@ -1932,7 +1932,7 @@
         const unlock = () => {
             if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = origLabel; }
         };
-        if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '⏳ Working…'; }
+        if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Working…'; }
         if (statusEl) statusEl.innerHTML = '';
 
         const existing = id ? wrState.lans.find(l => l.id === id) : null;
@@ -1961,15 +1961,15 @@
             const hostname = row.querySelector('.wr-l-res-host').value.trim();
             if (!mac && !ip && !hostname) continue;  // empty row — silently drop
             if (!macRe.test(mac)) {
-                say('❌', `Reservation has an invalid MAC: <code>${escHtml(mac || '(empty)')}</code>. Expected <code>aa:bb:cc:dd:ee:ff</code>. Save aborted.`, '#ef4444');
+                say('', `Reservation has an invalid MAC: <code>${escHtml(mac || '(empty)')}</code>. Expected <code>aa:bb:cc:dd:ee:ff</code>. Save aborted.`, '#ef4444');
                 unlock(); return;
             }
             if (!ipRe.test(ip)) {
-                say('❌', `Reservation for <code>${escHtml(mac)}</code> has an invalid IP: <code>${escHtml(ip || '(empty)')}</code>. Save aborted.`, '#ef4444');
+                say('', `Reservation for <code>${escHtml(mac)}</code> has an invalid IP: <code>${escHtml(ip || '(empty)')}</code>. Save aborted.`, '#ef4444');
                 unlock(); return;
             }
             if (seenMacs.has(mac)) {
-                say('❌', `Duplicate MAC in reservations: <code>${escHtml(mac)}</code>. Each MAC can only be pinned to one IP. Save aborted.`, '#ef4444');
+                say('', `Duplicate MAC in reservations: <code>${escHtml(mac)}</code>. Each MAC can only be pinned to one IP. Save aborted.`, '#ef4444');
                 unlock(); return;
             }
             seenMacs.add(mac);
@@ -1991,11 +1991,11 @@
         // the user sees the error in the form instead of a 400 from the
         // backend after they've clicked Save.
         if (dnsMode === 'external' && !extServerRaw) {
-            say('❌', 'External DNS mode needs the DNS server IP (field just above). Save aborted.', '#ef4444');
+            say('', 'External DNS mode needs the DNS server IP (field just above). Save aborted.', '#ef4444');
             unlock(); return;
         }
         if (dnsMode === 'wolf_router' && listenPort !== 53 && !extServerRaw) {
-            say('❌',
+            say('',
                 'Listen port isn\'t 53, so clients need a DNS IP they can reach on :53 — fill in the "DNS server advertised to clients" field (Advanced section).<br><br>' +
                 '<strong>This is just a reference IP — it doesn\'t need to be running yet.</strong> Set it to your AdGuard/Pi-hole container\'s planned IP (e.g. <code>172.17.0.5</code>). Save will move dnsmasq off :53, freeing it for AdGuard to bind. Only then does AdGuard need to actually be up.',
                 '#ef4444');
@@ -2016,14 +2016,14 @@
         // that spawns it. Without this the backend's dhcp::start fails with
         // a hard-to-read error after the user has already filled the form.
         if (lan.dhcp.enabled) {
-            say('⏳', 'Checking that dnsmasq is installed (apt/dnf can take up to a minute the first time)…', 'var(--text-muted)');
+            say('', 'Checking that dnsmasq is installed (apt/dnf can take up to a minute the first time)…', 'var(--text-muted)');
             const res = await wrEnsureTool('dnsmasq');
             if (res.alreadyInstalled) {
-                say('✅', 'dnsmasq already installed.', '#22c55e');
+                say('', 'dnsmasq already installed.', '#22c55e');
             } else if (res.success) {
-                say('✅', 'dnsmasq installed via the host package manager.', '#22c55e');
+                say('', 'dnsmasq installed via the host package manager.', '#22c55e');
             } else {
-                say('❌', `dnsmasq not available: ${escHtml(res.message)}. Install it manually (e.g. <code>apt install dnsmasq</code>) and try again.`, '#ef4444');
+                say('', `dnsmasq not available: ${escHtml(res.message)}. Install it manually (e.g. <code>apt install dnsmasq</code>) and try again.`, '#ef4444');
                 unlock();
                 return;
             }
@@ -2044,14 +2044,14 @@
                         body: JSON.stringify({ address: lan.router_ip, prefix }),
                     });
                     if (r.ok) {
-                        say('✅', `Router IP <code>${escHtml(lan.router_ip)}/${prefix}</code> assigned to <code>${escHtml(lan.interface)}</code>.`, '#22c55e');
+                        say('', `Router IP <code>${escHtml(lan.router_ip)}/${prefix}</code> assigned to <code>${escHtml(lan.interface)}</code>.`, '#22c55e');
                     } else {
                         const txt = await r.text();
                         // "File exists" is the idempotent-retry case — silently OK.
                         if (/file exists|already assigned|RTNETLINK.*File exists/i.test(txt)) {
                             say('ℹ', `Router IP already on <code>${escHtml(lan.interface)}</code>.`, 'var(--text-muted)');
                         } else {
-                            say('⚠', `IP assign warning (segment will still be saved): ${escHtml(txt)}`, '#fbbf24');
+                            say('', `IP assign warning (segment will still be saved): ${escHtml(txt)}`, '#fbbf24');
                         }
                     }
                     // Bring the interface up (best-effort; a bridge is typically already up).
@@ -2061,27 +2061,27 @@
                         body: JSON.stringify({ up: true }),
                     }).catch(() => {});
                 } catch (e) {
-                    say('⚠', `Could not assign IP: ${escHtml(e.message || e)}. Continuing with segment save.`, '#fbbf24');
+                    say('', `Could not assign IP: ${escHtml(e.message || e)}. Continuing with segment save.`, '#fbbf24');
                 }
             }
         }
 
-        say('⏳', 'Saving segment — dnsmasq will start…', 'var(--text-muted)');
+        say('', 'Saving segment — dnsmasq will start…', 'var(--text-muted)');
         const url = wrUrl(id ? '/api/router/segments/' + id : '/api/router/segments');
         const method = id ? 'PUT' : 'POST';
         try {
             const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(lan) });
             if (!r.ok) {
-                say('❌', `Save failed: ${escHtml(await r.text())}`, '#ef4444');
+                say('', `Save failed: ${escHtml(await r.text())}`, '#ef4444');
                 unlock();
                 return;
             }
         } catch (e) {
-            say('❌', `Save errored: ${escHtml(e.message || e)}`, '#ef4444');
+            say('', `Save errored: ${escHtml(e.message || e)}`, '#ef4444');
             unlock();
             return;
         }
-        say('✅', 'Segment saved — dnsmasq running.', '#22c55e');
+        say('', 'Segment saved — dnsmasq running.', '#22c55e');
         // Unlock the button as soon as the save returns — the setTimeout
         // that removes the overlay can race against an unrelated modal
         // being opened (confirm dialog, toast-as-modal) which would
@@ -2125,12 +2125,12 @@
         };
         const discoveredHtml = discoveredFiles.length
             ? `<div style="margin-bottom:16px;">
-                <h4 style="font-size:13px; margin:0 0 8px;">🔍 Lease files discovered on this host</h4>
+                <h4 style="font-size:13px; margin:0 0 8px;">Lease files discovered on this host</h4>
                 <div style="font-size:11px; color:var(--text-muted); margin-bottom:8px;">Aggregated from /var/lib/wolfstack-router, /var/lib/dhcp, /var/lib/misc and /run.</div>
                 ${discoveredFiles.map(f => `
                     <details ${f.leases.length ? 'open' : ''} style="margin-bottom:8px; border:1px solid var(--border); border-radius:6px; background:var(--bg-card);">
                         <summary style="padding:8px 12px; cursor:pointer; font-size:12px; font-weight:600;">
-                            📄 <code style="font-family:var(--font-mono);">${escHtml(f.path)}</code>
+                            <code style="font-family:var(--font-mono);">${escHtml(f.path)}</code>
                             <span class="badge" style="background:rgba(148,163,184,0.15); color:var(--text-muted); font-size:10px; padding:1px 6px; margin-left:6px;">${escHtml(f.format || 'dnsmasq')}</span>
                             <span style="color:var(--text-muted); font-weight:normal; margin-left:6px;">(${f.leases.length} ${f.format === 'dhclient' ? 'client-lease' : 'lease'}${f.leases.length===1?'':'s'})</span>
                         </summary>
@@ -2163,7 +2163,7 @@
                                 <span style="color:var(--text-muted); font-size:12px; font-weight:normal;">(${leases.length} active · ${reservedCount} pinned)</span>
                             </div>
                             <button class="btn btn-sm" title="Create a static reservation without waiting for the device to connect — useful for pre-pinning servers or IoT devices by their MAC."
-                                    onclick="wrShowAddReservation('${escHtml(lan.id)}')">📌 + Add reservation</button>
+                                    onclick="wrShowAddReservation('${escHtml(lan.id)}')">+ Add reservation</button>
                         </div>
                         <table class="data-table" style="font-size:12px;">
                             <thead><tr><th>IP</th><th>MAC</th><th>Hostname</th><th>Expires (epoch)</th><th style="width:90px;">Action</th></tr></thead>
@@ -2176,13 +2176,13 @@
                                     // user-supplied hostnames out of the inline onclick string
                                     // where a stray quote could break the JS (or worse).
                                     const btn = alreadyPinned
-                                        ? `<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e; font-size:10px;">📌 pinned</span>`
+                                        ? `<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e; font-size:10px;">pinned</span>`
                                         : `<button class="btn btn-sm wr-lease-pin" title="Pin this MAC → IP so it always gets this address"
                                                 data-lan="${escHtml(lan.id)}"
                                                 data-mac="${escHtml(le.mac)}"
                                                 data-ip="${escHtml(le.ip)}"
                                                 data-host="${escHtml(le.hostname || '')}"
-                                                onclick="wrPinLease(this)">📌 Pin</button>`;
+                                                onclick="wrPinLease(this)">Pin</button>`;
                                     return `<tr><td><code>${escHtml(le.ip)}</code></td><td><code>${escHtml(le.mac)}</code></td><td>${escHtml(le.hostname || '—')}</td><td style="color:var(--text-muted);">${le.expires}</td><td>${btn}</td></tr>`;
                                 }).join('')
                                 : '<tr><td colspan="5" style="text-align:center; color:var(--text-muted); padding:12px;">No active leases</td></tr>'}
@@ -2210,8 +2210,8 @@
     async function wrPinLease(btn) {
         if (!btn) return;
         if (wrState.pinning) {
-            btn.textContent = '⏳ busy…';
-            setTimeout(() => { btn.textContent = '📌 Pin'; }, 700);
+            btn.textContent = 'busy…';
+            setTimeout(() => { btn.textContent = 'Pin'; }, 700);
             return;
         }
         wrState.pinning = true;
@@ -2221,10 +2221,10 @@
         const hostname = btn.dataset.host || '';
         const origLabel = btn.textContent;
         btn.disabled = true;
-        btn.textContent = '⏳ Pinning…';
+        btn.textContent = 'Pinning…';
         try {
             const lan = (wrState.lans || []).find(l => l.id === lanId);
-            if (!lan) { btn.textContent = '✗ LAN not found'; return; }
+            if (!lan) { btn.textContent = 'LAN not found'; return; }
             // Defensive clone — don't mutate wrState in place; the next
             // poll will refresh anyway.
             const updated = JSON.parse(JSON.stringify(lan));
@@ -2234,7 +2234,7 @@
             // in that case — but belt and braces).
             const macLc = (mac || '').toLowerCase();
             if (updated.dhcp.reservations.some(r => (r.mac || '').toLowerCase() === macLc)) {
-                btn.textContent = '📌 already pinned';
+                btn.textContent = 'already pinned';
                 return;
             }
             updated.dhcp.reservations.push({
@@ -2248,7 +2248,7 @@
                 body: JSON.stringify(updated),
             });
             if (r.ok) {
-                btn.textContent = '✓ pinned';
+                btn.textContent = 'pinned';
                 btn.style.background = 'rgba(34,197,94,0.15)';
                 btn.style.color = '#22c55e';
                 // Refresh wrState + re-render so the column flips to the
@@ -2257,7 +2257,7 @@
                 await wrLoadAll();
             } else {
                 const txt = await r.text();
-                btn.textContent = '✗ failed';
+                btn.textContent = 'failed';
                 alert('Could not pin lease: ' + txt);
                 btn.disabled = false;
                 btn.textContent = origLabel;
@@ -2290,7 +2290,7 @@
         overlay.innerHTML = `
             <div class="modal" style="max-width:520px;">
                 <div class="modal-header">
-                    <h3>📌 Add static reservation &mdash; ${escHtml(lan.name)}</h3>
+                    <h3>Add static reservation &mdash; ${escHtml(lan.name)}</h3>
                     <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
                 </div>
                 <div class="modal-body" style="font-size:13px;">
@@ -2349,22 +2349,22 @@
         const macRe = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i;
         const ipRe = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
         if (!macRe.test(mac)) {
-            statusEl.innerHTML = `<span style="color:#ef4444;">✗ MAC must look like <code>aa:bb:cc:dd:ee:ff</code>.</span>`;
+            statusEl.innerHTML = `<span style="color:#ef4444;">MAC must look like <code>aa:bb:cc:dd:ee:ff</code>.</span>`;
             return;
         }
         if (!ipRe.test(ip)) {
-            statusEl.innerHTML = `<span style="color:#ef4444;">✗ IP must be a dotted quad, e.g. <code>192.168.10.50</code>.</span>`;
+            statusEl.innerHTML = `<span style="color:#ef4444;">IP must be a dotted quad, e.g. <code>192.168.10.50</code>.</span>`;
             return;
         }
         const lan = (wrState.lans || []).find(l => l.id === lanId);
-        if (!lan) { statusEl.innerHTML = `<span style="color:#ef4444;">✗ LAN not found.</span>`; return; }
+        if (!lan) { statusEl.innerHTML = `<span style="color:#ef4444;">LAN not found.</span>`; return; }
         if ((lan.dhcp?.reservations || []).some(r => (r.mac || '').toLowerCase() === mac)) {
-            statusEl.innerHTML = `<span style="color:#ef4444;">✗ A reservation for this MAC already exists. Edit it in the LAN editor (DHCP/LANs tab).</span>`;
+            statusEl.innerHTML = `<span style="color:#ef4444;">A reservation for this MAC already exists. Edit it in the LAN editor (DHCP/LANs tab).</span>`;
             return;
         }
         btn.disabled = true;
-        btn.textContent = '⏳ Saving…';
-        statusEl.innerHTML = '<span style="color:var(--text-muted);">⏳ Updating segment…</span>';
+        btn.textContent = 'Saving…';
+        statusEl.innerHTML = '<span style="color:var(--text-muted);">Updating segment…</span>';
 
         const updated = JSON.parse(JSON.stringify(lan));
         updated.dhcp = updated.dhcp || {};
@@ -2378,18 +2378,18 @@
                 body: JSON.stringify(updated),
             });
             if (r.ok) {
-                statusEl.innerHTML = `<span style="color:#22c55e;">✓ Reservation added &mdash; dnsmasq reloaded. Next time the MAC shows up on the LAN it'll be handed <code>${escHtml(ip)}</code>.</span>`;
+                statusEl.innerHTML = `<span style="color:#22c55e;">Reservation added &mdash; dnsmasq reloaded. Next time the MAC shows up on the LAN it'll be handed <code>${escHtml(ip)}</code>.</span>`;
                 setTimeout(() => {
                     document.querySelector('.modal-overlay')?.remove();
                     wrLoadAll();
                 }, 900);
             } else {
                 const txt = await r.text();
-                statusEl.innerHTML = `<span style="color:#ef4444;">✗ Save failed: ${escHtml(txt)}</span>`;
+                statusEl.innerHTML = `<span style="color:#ef4444;">Save failed: ${escHtml(txt)}</span>`;
                 btn.disabled = false; btn.textContent = 'Add reservation';
             }
         } catch (e) {
-            statusEl.innerHTML = `<span style="color:#ef4444;">✗ Request failed: ${escHtml(e.message || e)}</span>`;
+            statusEl.innerHTML = `<span style="color:#ef4444;">Request failed: ${escHtml(e.message || e)}</span>`;
             btn.disabled = false; btn.textContent = 'Add reservation';
         }
     }
@@ -2422,10 +2422,10 @@
                 const hasLan        = lans.some(l => l.node_id === node.node_id && l.interface === ifc.name);
                 const label = `<code>${escHtml(ifc.name)}</code> on <code>${escHtml(node.node_name)}</code>`;
                 if (z?.kind === 'wan' && !hasEnabledWan) {
-                    drifts.push({ sev: 'warn', iface: ifc.name, node: node.node_id, msg: `${label} is zoned <strong>WAN</strong> but no enabled WAN connection uses it. Either create a WAN connection for this interface, change the zone, or re-run ⚡ Quick Setup.` });
+                    drifts.push({ sev: 'warn', iface: ifc.name, node: node.node_id, msg: `${label} is zoned <strong>WAN</strong> but no enabled WAN connection uses it. Either create a WAN connection for this interface, change the zone, or re-run Quick Setup.` });
                 }
                 if (z?.kind === 'lan' && !hasLan) {
-                    drifts.push({ sev: 'warn', iface: ifc.name, node: node.node_id, msg: `${label} is zoned <strong>LAN ${z.id ?? 0}</strong> but no LAN segment serves DHCP on it. Either create a LAN segment for this interface, change the zone, or re-run ⚡ Quick Setup.` });
+                    drifts.push({ sev: 'warn', iface: ifc.name, node: node.node_id, msg: `${label} is zoned <strong>LAN ${z.id ?? 0}</strong> but no LAN segment serves DHCP on it. Either create a LAN segment for this interface, change the zone, or re-run Quick Setup.` });
                 }
                 if (hasEnabledWan && z && z.kind !== 'wan') {
                     drifts.push({ sev: 'warn', iface: ifc.name, node: node.node_id, msg: `${label} has an active WAN connection, but its zone is <strong>${escHtml(zoneHuman(z))}</strong>. Firewall rules will treat it as ${escHtml(zoneHuman(z))}; change the zone to WAN so rules match reality.` });
@@ -2437,7 +2437,7 @@
         }
         const driftBanner = drifts.length
             ? `<div style="margin-bottom:14px; padding:12px 14px; background:rgba(251,191,36,0.1); border:1px solid rgba(251,191,36,0.4); border-radius:6px; font-size:12px;">
-                <strong style="color:#fbbf24;">⚠ Zone labels and running config have drifted apart (${drifts.length} issue${drifts.length===1?'':'s'}).</strong>
+                <strong style="color:#fbbf24;">Zone labels and running config have drifted apart (${drifts.length} issue${drifts.length===1?'':'s'}).</strong>
                 <div style="color:var(--text-muted); margin-top:3px;">
                     Zones are labels that firewall rules use &mdash; changing a zone here doesn't automatically move the router IP, dnsmasq, or MASQUERADE to a different interface. Those live on LAN segments and WAN connections (their own interface fields). Drift means the rack view and rules may not match what's actually happening.
                 </div>
@@ -2689,7 +2689,7 @@
         const state = b.open
             ? `Watchdog circuit OPEN — ${b.recent_failure_count} restart failures in the last 5 minutes; auto-restart paused. Click "Restart dnsmasq" to retry now.`
             : `${b.recent_failure_count} recent restart failure(s) tracked.`;
-        return `<div style="background:${color}22; color:${color}; padding:8px 10px; font-size:12px; border-bottom:1px solid var(--border);">⚠ ${escHtml(state)}${lastErr}</div>`;
+        return `<div style="background:${color}22; color:${color}; padding:8px 10px; font-size:12px; border-bottom:1px solid var(--border);">${escHtml(state)}${lastErr}</div>`;
     }
 
     async function wrLoadLanHealthForLan(lanId) {
@@ -2880,7 +2880,7 @@
                             <label style="grid-column:1/-1; display:flex; align-items:start; gap:6px; padding:8px 10px; background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.3); border-radius:4px;">
                                 <input type="checkbox" id="wr-w-pppoe-default-route" style="margin-top:2px;"/>
                                 <div>
-                                    <strong style="color:#fca5a5;">⚠ Make this PPP link the default route</strong>
+                                    <strong style="color:#fca5a5;">Make this PPP link the default route</strong>
                                     <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">
                                         When enabled, pppd <em>replaces</em> the system's existing default gateway the moment the link comes up. ONLY tick this when PPPoE is genuinely your server's primary internet. If the server already reaches the internet via a different NIC, turning this on will break that connectivity immediately.
                                     </div>
@@ -2889,7 +2889,7 @@
                             <label style="grid-column:1/-1; display:flex; align-items:start; gap:6px; padding:8px 10px; background:rgba(251,191,36,0.08); border:1px solid rgba(251,191,36,0.3); border-radius:4px;">
                                 <input type="checkbox" id="wr-w-pppoe-peer-dns" style="margin-top:2px;"/>
                                 <div>
-                                    <strong style="color:#fbbf24;">⚠ Use ISP's DNS (overwrites /etc/resolv.conf)</strong>
+                                    <strong style="color:#fbbf24;">Use ISP's DNS (overwrites /etc/resolv.conf)</strong>
                                     <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">
                                         pppd will overwrite /etc/resolv.conf with the DNS servers the ISP hands out. Clobbers any existing resolver config.
                                     </div>
@@ -3062,11 +3062,11 @@
         };
 
         // Tier 0: Internet.
-        addNode('internet', 'Internet', '🌐', 0, 'internet');
+        addNode('internet', 'Internet', '', 0, 'internet');
 
         // Tier 1: WAN-ish zones (WAN, Management, Trusted).
-        addNode('zone:wan',        'WAN',        '📡', 1, 'zone', { zone: { kind: 'wan' } });
-        addNode('zone:management', 'Management', '🔧', 1, 'zone', { zone: { kind: 'management' } });
+        addNode('zone:wan',        'WAN',        '', 1, 'zone', { zone: { kind: 'wan' } });
+        addNode('zone:management', 'Management', '', 1, 'zone', { zone: { kind: 'management' } });
         addNode('zone:trusted',    'Trusted',    '⭐', 1, 'zone', { zone: { kind: 'trusted' } });
 
         // Tier 2: LAN-ish zones (LAN0, LAN1, DMZ, WolfNet) — only show
@@ -3089,13 +3089,13 @@
             if (['wan', 'management', 'trusted'].includes(slug)) continue;  // already tier 1
             if (slug.startsWith('lan')) {
                 const n = parseInt(slug.slice(3), 10) || 0;
-                addNode(`zone:${slug}`, `LAN ${n}`, '🌐', 2, 'zone', { zone: { kind: 'lan', id: n } });
+                addNode(`zone:${slug}`, `LAN ${n}`, '', 2, 'zone', { zone: { kind: 'lan', id: n } });
             } else if (slug === 'dmz') {
-                addNode('zone:dmz', 'DMZ', '🪖', 2, 'zone', { zone: { kind: 'dmz' } });
+                addNode('zone:dmz', 'DMZ', '', 2, 'zone', { zone: { kind: 'dmz' } });
             } else if (slug === 'wolfnet') {
-                addNode('zone:wolfnet', 'WolfNet', '⛓', 2, 'zone', { zone: { kind: 'wolfnet' } });
+                addNode('zone:wolfnet', 'WolfNet', '', 2, 'zone', { zone: { kind: 'wolfnet' } });
             } else {
-                addNode(`zone:${slug}`, slug, '🎯', 2, 'zone', { zone: { kind: slug } });
+                addNode(`zone:${slug}`, slug, '', 2, 'zone', { zone: { kind: slug } });
             }
         }
 
@@ -3113,7 +3113,7 @@
 
         // LAN segments (served by WolfRouter with DHCP+DNS).
         for (const lan of (wrState.lans || [])) {
-            addNode(`lan:${lan.id}`, lan.name, '🏠', lanTier, 'lan', { lan, ip: lan.subnet_cidr });
+            addNode(`lan:${lan.id}`, lan.name, '', lanTier, 'lan', { lan, ip: lan.subnet_cidr });
         }
 
         // Per-cluster-node topology: ports, vlans, bridges, VMs, CTs.
@@ -3122,30 +3122,30 @@
             const nodeTag = n.node_name || n.node_id;
             for (const p of (n.interfaces || [])) {
                 const ip = (p.addresses && p.addresses[0]) || '';
-                const icon = p.link_up ? '🔌' : '⛔';
+                const icon = p.link_up ? '' : '';
                 addNode(`port:${n.node_id}:${p.name}`, `${nodeTag}·${p.name}`, icon, 3, 'port', {
                     port: p, node: n.node_id, ip,
                 });
             }
             for (const v of (n.vlans || [])) {
                 const ip = (v.addresses && v.addresses[0]) || '';
-                addNode(`vlan:${n.node_id}:${v.name}`, `${nodeTag}·${v.name}`, '🏷', 4, 'vlan', {
+                addNode(`vlan:${n.node_id}:${v.name}`, `${nodeTag}·${v.name}`, '', 4, 'vlan', {
                     vlan: v, node: n.node_id, ip: ip || `VLAN ${v.vlan_id}`,
                 });
             }
             for (const b of (n.bridges || [])) {
                 const ip = (b.addresses && b.addresses[0]) || '';
-                addNode(`br:${n.node_id}:${b.name}`, `${nodeTag}·${b.name}`, '🌉', 5, 'bridge', {
+                addNode(`br:${n.node_id}:${b.name}`, `${nodeTag}·${b.name}`, '', 5, 'bridge', {
                     bridge: b, node: n.node_id, ip,
                 });
             }
             for (const vm of (n.vms || [])) {
-                addNode(`vm:${vm.name}`, vm.name, '🖥', deviceTier, 'vm', {
+                addNode(`vm:${vm.name}`, vm.name, '', deviceTier, 'vm', {
                     vm, node: n.node_id, ip: vm.ip || '',
                 });
             }
             for (const ct of (n.containers || [])) {
-                addNode(`ct:${ct.name}`, ct.name, '📦', deviceTier, 'container', {
+                addNode(`ct:${ct.name}`, ct.name, '', deviceTier, 'container', {
                     ct, node: n.node_id, ip: ct.ip || ct.attached_to || '',
                 });
             }
@@ -3330,7 +3330,7 @@
             const toName = (wrState.topology?.nodes || []).flatMap(n => n.vms || [])
                 .find(v => v.ip === m.wolfnet_ip)?.name;
             const toId = toName ? `vm:${toName}` : `ip:${m.wolfnet_ip}/32`;
-            if (!nodes.has(toId)) addNode(toId, m.wolfnet_ip, '🖥', 4, 'dynamic');
+            if (!nodes.has(toId)) addNode(toId, m.wolfnet_ip, '', 4, 'dynamic');
             edges.push({
                 id: 'mapping:' + m.id,
                 from: 'internet', to: toId,
@@ -3628,7 +3628,7 @@
                 });
                 const maxRx = Math.max(1, ...aggregates.map(a => a.rx));
                 const maxTx = Math.max(1, ...aggregates.map(a => a.tx));
-                nodeBwStrip.innerHTML = `<span style="color:var(--text);">📊 Cluster throughput:</span> ` +
+                nodeBwStrip.innerHTML = `<span style="color:var(--text);">Cluster throughput:</span> ` +
                     aggregates.map(a => {
                         const rxPct = (a.rx / maxRx) * 100;
                         const txPct = (a.tx / maxTx) * 100;
@@ -3776,7 +3776,7 @@
                 const isTraced = tracedEdgeIds.has(e.id);
                 const strokeW = baseW + trafficBoost + (isTraced ? 1.5 : 0);
                 const bpsLabel = bpsTotal > 0
-                    ? ` · ${wrFmtBps(bpsTotal)}${util >= 0.7 ? ' 🔥' : ''}`
+                    ? ` · ${wrFmtBps(bpsTotal)}${util >= 0.7 ? ' ' : ''}`
                     : '';
                 svg.insertAdjacentHTML('beforeend', `
                     <g class="wr-policy-edge" data-edge="${escHtml(e.id)}" style="cursor:pointer; color:${strokeColour};">
@@ -3855,7 +3855,7 @@
                              : warn?.level === 'warn'   ? '#fbbf24'
                              : stroke;
             const warnStrokeW = warn ? 2.5 : (isTraced ? 2.5 : 1.5);
-            const tooltip = warn ? `<title>${escHtml(n.label)}\n⚠ ${escHtml(warn.reasons.join('\n⚠ '))}</title>` : '';
+            const tooltip = warn ? `<title>${escHtml(n.label)}\n${escHtml(warn.reasons.join('\n'))}</title>` : '';
             svg.insertAdjacentHTML('beforeend', `
                 <g class="wr-policy-node" data-node="${escHtml(n.id)}" style="cursor:crosshair; opacity:${opacity};">
                     ${tooltip}
@@ -3866,7 +3866,7 @@
                           style="fill:var(--text); font-size:12px; font-weight:600; pointer-events:none;">${escHtml(n.icon)} ${escHtml(n.label.slice(0,18))}</text>
                     ${ipLine}
                     ${bpsTag}
-                    ${warn ? `<text x="${x + nodeW - 8}" y="${y + 14}" text-anchor="end" style="fill:${warn.level === 'danger' ? '#ef4444' : '#fbbf24'}; font-size:14px; pointer-events:none;">⚠</text>` : ''}
+                    ${warn ? `<text x="${x + nodeW - 8}" y="${y + 14}" text-anchor="end" style="fill:${warn.level === 'danger' ? '#ef4444' : '#fbbf24'}; font-size:14px; pointer-events:none;"></text>` : ''}
                 </g>
             `);
         }
@@ -4166,7 +4166,7 @@
             const fromEp = wrNodeIdToEndpoint(fromSel.value, fullGraph);
             const toEp   = wrNodeIdToEndpoint(toSel.value,   fullGraph);
             if (!fromEp || !toEp) {
-                result.innerHTML = '<span style="color:#ef4444;">✗ src or dst can\'t be translated</span>';
+                result.innerHTML = '<span style="color:#ef4444;">src or dst can\'t be translated</span>';
                 return;
             }
             const proto = protoSel.value;
@@ -4253,7 +4253,7 @@
                 action: r.action,
                 matchedRuleId: r.id,
                 matchedEdgeId: 'rule:' + r.id,
-                note: `${r.action === 'allow' ? '✓ permitted' : '✗ blocked'} — ${r.comment || '(no comment)'}`,
+                note: `${r.action === 'allow' ? 'permitted' : 'blocked'} — ${r.comment || '(no comment)'}`,
             };
         }
         return {
@@ -4502,9 +4502,9 @@
             tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:24px;">${msg}</td></tr>`;
         };
 
-        showStatus(`⏳ Capturing on <code>${escHtml(iface)}</code>${filter ? ' [filter: <code>' + escHtml(filter) + '</code>]' : ''}… max ${count} packets / ${timeoutSeconds}s timeout`);
+        showStatus(`Capturing on <code>${escHtml(iface)}</code>${filter ? ' [filter: <code>' + escHtml(filter) + '</code>]' : ''}… max ${count} packets / ${timeoutSeconds}s timeout`);
         showPlaceholder('Waiting for packets…');
-        setBtn(true, '⏳ Capturing…');
+        setBtn(true, 'Capturing…');
 
         const runCapture = async () => {
             const r = await fetch(wrUrl('/api/router/capture'), {
@@ -4527,8 +4527,8 @@
                 const manualHelp = manualCmd
                     ? `Try manually: <code>${escHtml(manualCmd)}</code>`
                     : `Install <code>tcpdump</code> with your distro's package manager and try again.`;
-                showStatus('📦 Installing tcpdump on this host (one-time)…');
-                setBtn(true, '📦 Installing tcpdump…');
+                showStatus('Installing tcpdump on this host (one-time)…');
+                setBtn(true, 'Installing tcpdump…');
                 const inst = await fetch(wrUrl('/api/router/install-tool'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -4536,23 +4536,23 @@
                 });
                 const instData = await inst.json();
                 if (!instData.success) {
-                    showStatus(`✗ Couldn't install tcpdump automatically: ${escHtml(instData.error || 'unknown error')}. ${manualHelp}`);
+                    showStatus(`Couldn't install tcpdump automatically: ${escHtml(instData.error || 'unknown error')}. ${manualHelp}`);
                     showPlaceholder('Install tcpdump manually with your package manager and try again.');
                     return;
                 }
-                showStatus(`✓ tcpdump installed. Now capturing…`);
-                setBtn(true, '⏳ Capturing…');
+                showStatus(`tcpdump installed. Now capturing…`);
+                setBtn(true, 'Capturing…');
                 result = await runCapture();
             }
 
             if (!result.ok) {
-                showStatus(`✗ HTTP ${result.status}: ${escHtml(result.data.error || JSON.stringify(result.data))}`);
+                showStatus(`HTTP ${result.status}: ${escHtml(result.data.error || JSON.stringify(result.data))}`);
                 showPlaceholder('Capture failed.');
                 return;
             }
             const lines = result.data.lines || [];
             const rows = lines.map(wrParsePacketLine);
-            showStatus(`✓ ${lines.length} packet${lines.length === 1 ? '' : 's'} on <code>${escHtml(result.data.iface || iface)}</code>${result.data.filter ? ' [filter: <code>' + escHtml(result.data.filter) + '</code>]' : ''}${result.data.error ? ' — ' + escHtml(result.data.error) : ''}`);
+            showStatus(`${lines.length} packet${lines.length === 1 ? '' : 's'} on <code>${escHtml(result.data.iface || iface)}</code>${result.data.filter ? ' [filter: <code>' + escHtml(result.data.filter) + '</code>]' : ''}${result.data.error ? ' — ' + escHtml(result.data.error) : ''}`);
 
             if (!rows.length) {
                 showPlaceholder('No packets captured (the timeout fired before any matched).');
@@ -4575,7 +4575,7 @@
                 </tr>`;
             }).join('');
         } catch (e) {
-            showStatus('✗ ' + escHtml(e.message || e));
+            showStatus('' + escHtml(e.message || e));
             showPlaceholder('Network error.');
         } finally {
             setBtn(false, '▶ Capture');
@@ -4655,8 +4655,8 @@
             return;
         }
         if (tbody) tbody.innerHTML = '';
-        if (status) status.textContent = '⏳ Tracing route to ' + target + '… (up to ~30s)';
-        if (goBtn) { goBtn.disabled = true; goBtn.textContent = '⏳ Tracing…'; }
+        if (status) status.textContent = 'Tracing route to ' + target + '… (up to ~30s)';
+        if (goBtn) { goBtn.disabled = true; goBtn.textContent = 'Tracing…'; }
 
         const map = wrEnsureTracerouteMap();
         if (wrTrLayer) wrTrLayer.clearLayers();
@@ -4666,8 +4666,8 @@
             resp = await fetch(apiUrl('/api/traceroute?target=' + encodeURIComponent(target)));
             data = await resp.json();
         } catch (e) {
-            if (status) status.textContent = '❌ Trace failed: ' + e.message;
-            if (goBtn) { goBtn.disabled = false; goBtn.textContent = '🛰 Trace'; }
+            if (status) status.textContent = 'Trace failed: ' + e.message;
+            if (goBtn) { goBtn.disabled = false; goBtn.textContent = 'Trace'; }
             return;
         }
         if (!resp.ok) {
@@ -4688,12 +4688,12 @@
                     ? `Try the package manager directly: <code>${wrEsc(manualCmd)}</code>.`
                     : `Install <code>${wrEsc(pkg)}</code> with your distro's package manager and try again.`;
                 if (status) {
-                    status.innerHTML = `❌ ${wrEsc(data.error || 'traceroute is not installed')} ` +
-                        `<button id="wr-tr-install" class="btn btn-sm btn-primary" style="margin-left:8px;">📦 Install ${wrEsc(pkg)}</button>`;
+                    status.innerHTML = `${wrEsc(data.error || 'traceroute is not installed')} ` +
+                        `<button id="wr-tr-install" class="btn btn-sm btn-primary" style="margin-left:8px;">Install ${wrEsc(pkg)}</button>`;
                     const btn = document.getElementById('wr-tr-install');
                     if (btn) btn.onclick = async () => {
                         btn.disabled = true;
-                        btn.textContent = '⏳ Installing…';
+                        btn.textContent = 'Installing…';
                         try {
                             const ir = await fetch('/api/system/install-package', {
                                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -4701,33 +4701,33 @@
                             });
                             const idata = await ir.json().catch(() => ({}));
                             if (!ir.ok || idata.success === false) {
-                                status.innerHTML = `❌ Install failed: ${wrEsc(idata.error || ir.statusText || 'unknown')}. ${manualHelp}`;
+                                status.innerHTML = `Install failed: ${wrEsc(idata.error || ir.statusText || 'unknown')}. ${manualHelp}`;
                                 return;
                             }
-                            status.textContent = '✅ Installed — re-running trace…';
+                            status.textContent = 'Installed — re-running trace…';
                             // Re-fire the original Trace flow so the user
                             // doesn't have to click again.
                             wrTracerouteGo();
                         } catch (e) {
-                            status.innerHTML = `❌ Install errored: ${wrEsc(e.message || String(e))}. ${manualHelp}`;
+                            status.innerHTML = `Install errored: ${wrEsc(e.message || String(e))}. ${manualHelp}`;
                         }
                     };
                 }
-                if (goBtn) { goBtn.disabled = false; goBtn.textContent = '🛰 Trace'; }
+                if (goBtn) { goBtn.disabled = false; goBtn.textContent = 'Trace'; }
                 return;
             }
-            if (status) status.textContent = '❌ ' + (data.error || resp.statusText);
-            if (goBtn) { goBtn.disabled = false; goBtn.textContent = '🛰 Trace'; }
+            if (status) status.textContent = '' + (data.error || resp.statusText);
+            if (goBtn) { goBtn.disabled = false; goBtn.textContent = 'Trace'; }
             return;
         }
         const hops = data.hops || [];
         if (!hops.length) {
-            if (status) status.textContent = '❌ traceroute returned no hops' + (data.error ? ' — ' + data.error : '');
-            if (goBtn) { goBtn.disabled = false; goBtn.textContent = '🛰 Trace'; }
+            if (status) status.textContent = 'traceroute returned no hops' + (data.error ? ' — ' + data.error : '');
+            if (goBtn) { goBtn.disabled = false; goBtn.textContent = 'Trace'; }
             return;
         }
 
-        if (status) status.textContent = `✓ ${hops.length} hops to ${target}${data.resolved_ip && data.resolved_ip !== target ? ' (' + data.resolved_ip + ')' : ''} — geolocating…`;
+        if (status) status.textContent = `${hops.length} hops to ${target}${data.resolved_ip && data.resolved_ip !== target ? ' (' + data.resolved_ip + ')' : ''} — geolocating…`;
 
         // Render the table immediately; fill location cells as geo lookups complete.
         if (tbody) {
@@ -4798,9 +4798,9 @@
         }
         if (status) {
             const plotted = points.length;
-            status.textContent = `✓ ${hops.length} hops — ${plotted} plotted (private/unresolved hops are listed but not on the map).`;
+            status.textContent = `${hops.length} hops — ${plotted} plotted (private/unresolved hops are listed but not on the map).`;
         }
-        if (goBtn) { goBtn.disabled = false; goBtn.textContent = '🛰 Trace'; }
+        if (goBtn) { goBtn.disabled = false; goBtn.textContent = 'Trace'; }
     }
     window.wrRenderTraceroute = wrRenderTraceroute;
     window.wrTracerouteGo = wrTracerouteGo;
@@ -4975,7 +4975,7 @@
         const diagSkipped = diag.filter(d => d.result === 'skipped');
         const failedBanner = diagFailed.length
             ? `<details style="margin-top:6px; font-size:11px;">
-                <summary style="cursor:pointer; color:#fbbf24;">⚠ ${diagFailed.length} cluster peer${diagFailed.length===1?'':'s'} unreachable — click to see why</summary>
+                <summary style="cursor:pointer; color:#fbbf24;">${diagFailed.length} cluster peer${diagFailed.length===1?'':'s'} unreachable — click to see why</summary>
                 <div style="margin-top:6px; padding:6px 10px; background:rgba(0,0,0,0.3); border-radius:4px;">
                     ${diagFailed.map(d => `<div style="color:var(--text-muted);"><strong>${escHtml(d.hostname || d.node_id)}</strong>: ${escHtml(d.reason || d.result)}</div>`).join('')}
                 </div>
@@ -4991,12 +4991,12 @@
 
         header.innerHTML = `
             <div style="flex:1; min-width:240px;">
-                <div><strong>📡 Cluster: ${escHtml(wrState.cluster || 'unnamed')}</strong>
+                <div><strong>Cluster: ${escHtml(wrState.cluster || 'unnamed')}</strong>
                     <span style="color:var(--text-muted); margin-left:8px;">${topo.nodes.length} node${topo.nodes.length===1?'':'s'} · ${totalUp}/${totalPorts} ports up · ${totalVms} VMs · ${totalCt} containers</span>
                 </div>
                 ${diagBanner}
             </div>
-            <div style="color:var(--text-muted); font-size:11px;">⛓ live topology refreshes every 3s</div>
+            <div style="color:var(--text-muted); font-size:11px;">live topology refreshes every 3s</div>
         `;
 
         const W = Math.max(canvas.clientWidth || 1000, 720);
@@ -5187,15 +5187,15 @@
                          C ${cloudCX-180},${cloudCY+45} ${cloudCX-185},${cloudCY+15} ${cloudCX-160},${cloudCY+12} Z"
                       fill="url(#wr-cloud)" stroke="rgba(96,165,250,0.5)" stroke-width="1.5"/>
                 <text x="${cloudCX}" y="${cloudCY-2}" text-anchor="middle"
-                      style="fill:#bfdbfe; font-size:14px; font-weight:600;">🌍 Internet</text>
+                      style="fill:#bfdbfe; font-size:14px; font-weight:600;">Internet</text>
                 <text x="${cloudCX}" y="${cloudCY+18}" text-anchor="middle"
                       style="fill:#93c5fd; font-size:10px;">WAN uplink</text>
             </g>
         `);
 
         const vendorEmoji = {
-            'mikrotik': '🔴', 'ubiquiti': '⬛', 'avm': '📡', 'openwrt': '🐧',
-            'opnsense': '🛡', 'pfsense': '🛡', 'tp-link': '📶', 'netgear': '📶',
+            'mikrotik': '', 'ubiquiti': '⬛', 'avm': '', 'openwrt': '',
+            'opnsense': '', 'pfsense': '', 'tp-link': '', 'netgear': '',
             'asus': '📶', 'linksys': '📶', 'cisco': '🔷', 'draytek': '📶',
         };
 
@@ -5228,7 +5228,7 @@
         for (const ri of routerItems) {
             const r = ri.router;
             const uy = rackY + ri.y;
-            const emoji = vendorEmoji[(r.vendor || '').toLowerCase()] || '📡';
+            const emoji = vendorEmoji[(r.vendor || '').toLowerCase()] || '';
             const label = r.name || r.ip;
             const sublabel = r.vendor ? `${r.vendor}${r.model && r.model !== r.vendor ? ' · ' + r.model : ''}` : r.ip;
 
@@ -5490,7 +5490,7 @@
                       stroke="#22c55e" stroke-width="4" stroke-linecap="round" opacity="0.6"
                       stroke-dasharray="6 4" class="wr-wire-active"/>
                 <text x="${wolfnetSpineX + 8}" y="${(firstY+lastY)/2}" transform="rotate(90 ${wolfnetSpineX+8} ${(firstY+lastY)/2})"
-                      text-anchor="middle" style="fill:#22c55e; font-size:10px; font-weight:600;">⛓ WolfNet mesh</text>
+                      text-anchor="middle" style="fill:#22c55e; font-size:10px; font-weight:600;">WolfNet mesh</text>
             `);
             // Per-node tap from the spine into the back of each appliance
             for (let n = 0; n < topo.nodes.length; n++) {
@@ -5609,7 +5609,7 @@
             devicesForNode.forEach((dev, i) => {
                 const isVm = dev.kind === 'vm';
                 const accent = isVm ? '#60a5fa' : '#a855f7';
-                const icon = isVm ? '🖥' : '📦';
+                const icon = isVm ? '' : '';
                 const dy = startY + i * deviceRowH;
                 const cableColor = accent;
                 // Manhattan H-V-H: out the chassis right, down/up to
@@ -5665,11 +5665,11 @@
             const wn = wrState.managed?.wolfnet_status;
             const peerCount = (wn?.peers || []).length;
             const wnBadge = wn
-                ? `<div style="display:flex; align-items:center; gap:6px;"><span style="color:#22c55e;">⛓</span> WolfNet: ${peerCount} peer${peerCount===1?'':'s'}${wn.running===false ? ' <span style="color:#ef4444;">(daemon down)</span>' : ''}</div>`
+                ? `<div style="display:flex; align-items:center; gap:6px;"><span style="color:#22c55e;"></span> WolfNet: ${peerCount} peer${peerCount===1?'':'s'}${wn.running===false ? ' <span style="color:#ef4444;">(daemon down)</span>' : ''}</div>`
                 : '';
             const mappingCount = (wrState.managed?.ip_mappings || []).length;
             const mapBadge = mappingCount
-                ? `<div style="display:flex; align-items:center; gap:6px;"><span style="color:#60a5fa;">🔗</span> ${mappingCount} port forward${mappingCount===1?'':'s'} (DNAT)</div>`
+                ? `<div style="display:flex; align-items:center; gap:6px;"><span style="color:#60a5fa;"></span> ${mappingCount} port forward${mappingCount===1?'':'s'} (DNAT)</div>`
                 : '';
 
             legend.innerHTML = [
@@ -5718,7 +5718,7 @@
                 </div>
                 <div class="modal-body" style="font-size:13px;">
                     <div style="display:grid; grid-template-columns:1fr 2fr; gap:6px 12px;">
-                        <div style="color:var(--text-muted);">State</div><div>${port.link_up ? '🟢 UP' : '⚫ DOWN'}</div>
+                        <div style="color:var(--text-muted);">State</div><div>${port.link_up ? 'UP' : 'DOWN'}</div>
                         <div style="color:var(--text-muted);">MAC</div><div><code>${escHtml(port.mac)}</code></div>
                         <div style="color:var(--text-muted);">Speed</div><div>${port.speed_mbps ? port.speed_mbps + ' Mbps' : '—'}</div>
                         <div style="color:var(--text-muted);">Addresses</div><div>${(port.addresses||[]).map(a => `<code>${escHtml(a)}</code>`).join(', ') || '—'}</div>
@@ -5754,7 +5754,7 @@
     /// good way to take yourself offline.
     async function wrBringUpPort(nodeId, iface, btn) {
         const orig = btn.textContent;
-        btn.disabled = true; btn.textContent = '⏳ Bringing up…';
+        btn.disabled = true; btn.textContent = 'Bringing up…';
         try {
             const r = await fetch(wrUrl('/api/router/interface-up'), {
                 method: 'POST',
@@ -5763,12 +5763,12 @@
             });
             const data = await r.json();
             if (!r.ok || data.success === false) {
-                btn.textContent = '✗ failed';
+                btn.textContent = 'failed';
                 alert('Bring up failed: ' + (data.error || 'HTTP ' + r.status));
                 btn.disabled = false; btn.textContent = orig;
                 return;
             }
-            btn.textContent = '✓ up';
+            btn.textContent = 'up';
             // Refresh topology so the rack view redraws the port as UP.
             setTimeout(async () => {
                 await wrLoadAll();
@@ -6079,7 +6079,7 @@
         overlay.innerHTML = `
             <div class="modal" style="max-width:720px;">
                 <div class="modal-header">
-                    <h3>⚡ Quick Setup — turn this host into a router</h3>
+                    <h3>Quick Setup — turn this host into a router</h3>
                     <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
                 </div>
                 <div class="modal-body" style="font-size:13px;">
@@ -6088,7 +6088,7 @@
                         <strong>Assign zones first.</strong> Give at least one interface the <code>WAN</code> zone (your internet-facing NIC) and one or more the <code>LAN</code> zone (your home network side). Then come back here.
                     </div>` : `
                     <div style="padding:10px 12px; margin-bottom:12px; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.35); border-radius:6px; font-size:12px;">
-                        <strong style="color:#fca5a5;">⚠ Shut down any other DHCP server on this LAN first.</strong>
+                        <strong style="color:#fca5a5;">Shut down any other DHCP server on this LAN first.</strong>
                         <div style="margin-top:3px; color:var(--text-muted);">If OPNsense, pfSense, your ISP router, a pi-hole, or another WolfRouter instance is still handing out leases on the same physical network, clients will get random leases from whichever server answered first — you'll see half the devices online and half unable to reach anything. One DHCP per broadcast domain.</div>
                     </div>
                     <p style="color:var(--text-muted); margin:0 0 12px;">Based on your zone assignments, WolfRouter will create the missing WAN + LAN records, assign the router IP to each LAN interface, apply the firewall, and verify DNS resolution end-to-end. Review below and edit any defaults, then click <strong>Run setup</strong>.</p>
@@ -6098,7 +6098,7 @@
                     </label>
 
                     ${wanPlan.length ? `
-                    <h4 style="font-size:13px; margin:14px 0 6px;">🌍 WAN (internet uplink)</h4>
+                    <h4 style="font-size:13px; margin:14px 0 6px;">WAN (internet uplink)</h4>
                     <div id="wr-qs-wan" style="display:grid; gap:8px;">
                         ${wanPlan.map((p, i) => `
                         <div style="padding:10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-card);">
@@ -6113,10 +6113,10 @@
                             </div>`}
                             <input type="hidden" data-wan-idx="${i}" data-node="${escHtml(p.iface.node_id)}" data-iface="${escHtml(p.iface.name)}" data-skip="${p.already ? '1' : '0'}"/>
                         </div>`).join('')}
-                    </div>` : '<div style="color:#f87171; font-size:12px;">⚠ No interface has the WAN zone. Without WAN, LAN clients have no internet uplink.</div>'}
+                    </div>` : '<div style="color:#f87171; font-size:12px;">No interface has the WAN zone. Without WAN, LAN clients have no internet uplink.</div>'}
 
                     ${lanPlan.length ? `
-                    <h4 style="font-size:13px; margin:14px 0 6px;">🌐 LAN (your home network)</h4>
+                    <h4 style="font-size:13px; margin:14px 0 6px;">LAN (your home network)</h4>
                     <div id="wr-qs-lan" style="display:grid; gap:8px;">
                         ${lanPlan.map((p, i) => `
                         <div style="padding:10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-card);">
@@ -6133,9 +6133,9 @@
                             </div>
                             ${p.otherIps.length ? `
                             <div style="margin-top:6px; padding:6px 8px; background:rgba(251,191,36,0.1); border:1px solid rgba(251,191,36,0.35); border-radius:4px; font-size:11px;">
-                                ⚠ Interface already has address(es): ${p.otherIps.map(a => `<code>${escHtml(a)}</code>`).join(', ')}. WolfRouter will add the router IP alongside — the existing IPs stay.
+                                Interface already has address(es): ${p.otherIps.map(a => `<code>${escHtml(a)}</code>`).join(', ')}. WolfRouter will add the router IP alongside — the existing IPs stay.
                             </div>` : ''}
-                            ${p.ipAlready ? `<div style="margin-top:6px; font-size:11px; color:var(--text-muted);">✓ <code>${escHtml(p.subnet.router_ip)}</code> already assigned to this interface.</div>` : ''}
+                            ${p.ipAlready ? `<div style="margin-top:6px; font-size:11px; color:var(--text-muted);"><code>${escHtml(p.subnet.router_ip)}</code> already assigned to this interface.</div>` : ''}
                             <input type="hidden" data-lan-idx="${i}" data-node="${escHtml(p.iface.node_id)}" data-iface="${escHtml(p.iface.name)}" data-zone="${escHtml(wrZoneToValue(p.iface.zone))}" data-skip="${p.already ? '1' : '0'}"/>
                         </div>`).join('')}
                     </div>` : '<div style="color:var(--text-muted); font-size:12px;">No interface has a LAN zone — nothing to serve DHCP on.</div>'}
@@ -6170,15 +6170,15 @@
         // not installed" error inside dhcp::start after all the setup ran.
         // install-tool no-ops (returns "already installed") when present, so
         // calling blind is safe.
-        log('⏳', 'Preflight: checking dnsmasq + iptables are installed on the host…', 'var(--text-muted)');
+        log('', 'Preflight: checking dnsmasq + iptables are installed on the host…', 'var(--text-muted)');
         for (const tool of ['iptables', 'dnsmasq']) {
             const res = await wrEnsureTool(tool);
             if (res.alreadyInstalled) {
-                log('✅', `<code>${escHtml(tool)}</code> already installed.`, '#22c55e');
+                log('', `<code>${escHtml(tool)}</code> already installed.`, '#22c55e');
             } else if (res.success) {
-                log('✅', `<code>${escHtml(tool)}</code> installed: ${escHtml(res.message)}`, '#22c55e');
+                log('', `<code>${escHtml(tool)}</code> installed: ${escHtml(res.message)}`, '#22c55e');
             } else {
-                log('❌', `<code>${escHtml(tool)}</code> install failed: ${escHtml(res.message)}. Fix that first (try <code>apt install ${escHtml(tool)}</code>) then re-run Quick Setup.`, '#ef4444');
+                log('', `<code>${escHtml(tool)}</code> install failed: ${escHtml(res.message)}. Fix that first (try <code>apt install ${escHtml(tool)}</code>) then re-run Quick Setup.`, '#ef4444');
                 // Abort — every subsequent step depends on these tools.
                 runBtn.textContent = 'Aborted';
                 return;
@@ -6201,10 +6201,10 @@
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body),
                 });
-                if (r.ok) log('✅', `WAN connection on <code>${escHtml(iface)}</code> created. MASQUERADE installed.`, '#22c55e');
-                else log('❌', `WAN create on <code>${escHtml(iface)}</code> failed: ${escHtml(await r.text())}`, '#ef4444');
+                if (r.ok) log('', `WAN connection on <code>${escHtml(iface)}</code> created. MASQUERADE installed.`, '#22c55e');
+                else log('', `WAN create on <code>${escHtml(iface)}</code> failed: ${escHtml(await r.text())}`, '#ef4444');
             } catch (e) {
-                log('❌', `WAN create on <code>${escHtml(iface)}</code> errored: ${escHtml(e.message || e)}`, '#ef4444');
+                log('', `WAN create on <code>${escHtml(iface)}</code> errored: ${escHtml(e.message || e)}`, '#ef4444');
             }
         }
 
@@ -6224,7 +6224,7 @@
             const poolStart = card.querySelector('.wr-qs-pool-start').value.trim();
             const poolEnd = card.querySelector('.wr-qs-pool-end').value.trim();
             const prefix = wrPrefixFromCidr(cidr);
-            if (prefix == null) { log('❌', `LAN <code>${escHtml(iface)}</code>: bad CIDR <code>${escHtml(cidr)}</code>`, '#ef4444'); continue; }
+            if (prefix == null) { log('', `LAN <code>${escHtml(iface)}</code>: bad CIDR <code>${escHtml(cidr)}</code>`, '#ef4444'); continue; }
 
             // 2a. Assign router IP to the interface (idempotent — ignore "File exists").
             try {
@@ -6234,11 +6234,11 @@
                     body: JSON.stringify({ address: routerIp, prefix }),
                 });
                 const txt = await r.text();
-                if (r.ok) log('✅', `<code>${escHtml(routerIp)}/${prefix}</code> assigned to <code>${escHtml(iface)}</code>.`, '#22c55e');
+                if (r.ok) log('', `<code>${escHtml(routerIp)}/${prefix}</code> assigned to <code>${escHtml(iface)}</code>.`, '#22c55e');
                 else if (/file exists|already assigned|RTNETLINK.*File exists/i.test(txt)) log('ℹ', `<code>${escHtml(routerIp)}/${prefix}</code> already on <code>${escHtml(iface)}</code>.`, 'var(--text-muted)');
-                else log('❌', `IP assign on <code>${escHtml(iface)}</code> failed: ${escHtml(txt)}`, '#ef4444');
+                else log('', `IP assign on <code>${escHtml(iface)}</code> failed: ${escHtml(txt)}`, '#ef4444');
             } catch (e) {
-                log('❌', `IP assign on <code>${escHtml(iface)}</code> errored: ${escHtml(e.message || e)}`, '#ef4444');
+                log('', `IP assign on <code>${escHtml(iface)}</code> errored: ${escHtml(e.message || e)}`, '#ef4444');
             }
 
             // 2b. Bring interface up.
@@ -6274,21 +6274,21 @@
                     body: JSON.stringify(body),
                 });
                 if (r.ok) {
-                    log('✅', `LAN segment on <code>${escHtml(iface)}</code> created — dnsmasq serving DHCP+DNS on <code>${escHtml(cidr)}</code> (forwarders: ${escHtml(forwarders.join(', '))}).`, '#22c55e');
+                    log('', `LAN segment on <code>${escHtml(iface)}</code> created — dnsmasq serving DHCP+DNS on <code>${escHtml(cidr)}</code> (forwarders: ${escHtml(forwarders.join(', '))}).`, '#22c55e');
                     createdLans.push({ iface, routerIp });
-                } else log('❌', `LAN segment on <code>${escHtml(iface)}</code> failed: ${escHtml(await r.text())}`, '#ef4444');
+                } else log('', `LAN segment on <code>${escHtml(iface)}</code> failed: ${escHtml(await r.text())}`, '#ef4444');
             } catch (e) {
-                log('❌', `LAN segment on <code>${escHtml(iface)}</code> errored: ${escHtml(e.message || e)}`, '#ef4444');
+                log('', `LAN segment on <code>${escHtml(iface)}</code> errored: ${escHtml(e.message || e)}`, '#ef4444');
             }
         }
 
         // 3. Apply firewall so the new rules/MASQUERADE go live.
         try {
             const r = await fetch(wrUrl('/api/router/rules/apply'), { method: 'POST' });
-            if (r.ok) log('✅', 'Firewall ruleset applied.', '#22c55e');
-            else log('❌', `Firewall apply failed: ${escHtml(await r.text())}`, '#ef4444');
+            if (r.ok) log('', 'Firewall ruleset applied.', '#22c55e');
+            else log('', `Firewall apply failed: ${escHtml(await r.text())}`, '#ef4444');
         } catch (e) {
-            log('❌', `Firewall apply errored: ${escHtml(e.message || e)}`, '#ef4444');
+            log('', `Firewall apply errored: ${escHtml(e.message || e)}`, '#ef4444');
         }
 
         // 4. Host-side DNS bind check for each created LAN. This only
@@ -6297,7 +6297,7 @@
         // reach it. For that, point the user at the DNS Tools tab's
         // LAN-side health section.
         if (createdLans.length) {
-            log('⏳', 'Running host-side dnsmasq bind check on each LAN…', 'var(--text-muted)');
+            log('', 'Running host-side dnsmasq bind check on each LAN…', 'var(--text-muted)');
             // Give dnsmasq a moment to finish binding after segment create.
             await new Promise(r => setTimeout(r, 800));
             let anyFailed = false;
@@ -6315,24 +6315,24 @@
                     });
                     const j = await r.json();
                     if (j.success) {
-                        log('✅', `dnsmasq on <code>${escHtml(cl.iface)}</code> (<code>${escHtml(cl.routerIp)}</code>) is bound and answering host-side — resolved cloudflare.com → <code>${escHtml((j.answer || '').split('\n')[0])}</code> in ${j.duration_ms}ms. (Host-side only — doesn't prove LAN clients can reach it.)`, '#22c55e');
+                        log('', `dnsmasq on <code>${escHtml(cl.iface)}</code> (<code>${escHtml(cl.routerIp)}</code>) is bound and answering host-side — resolved cloudflare.com → <code>${escHtml((j.answer || '').split('\n')[0])}</code> in ${j.duration_ms}ms. (Host-side only — doesn't prove LAN clients can reach it.)`, '#22c55e');
                     } else {
                         anyFailed = true;
-                        log('❌', `dnsmasq bind check on <code>${escHtml(cl.iface)}</code> (<code>${escHtml(cl.routerIp)}</code>): ${escHtml(j.error || 'failed')}`, '#ef4444');
+                        log('', `dnsmasq bind check on <code>${escHtml(cl.iface)}</code> (<code>${escHtml(cl.routerIp)}</code>): ${escHtml(j.error || 'failed')}`, '#ef4444');
                     }
                 } catch (e) {
                     anyFailed = true;
-                    log('⚠', `DNS bind check on <code>${escHtml(cl.iface)}</code> errored (dig not installed?): ${escHtml(e.message || e)}`, '#fbbf24');
+                    log('', `DNS bind check on <code>${escHtml(cl.iface)}</code> errored (dig not installed?): ${escHtml(e.message || e)}`, '#fbbf24');
                 }
             }
             if (anyFailed) {
-                log('ℹ', 'Open the <strong>🛠 DNS Tools</strong> tab → "LAN-side DNS health" section to see if LAN clients are actually reaching dnsmasq.', '#60a5fa');
+                log('ℹ', 'Open the <strong>DNS Tools</strong> tab → "LAN-side DNS health" section to see if LAN clients are actually reaching dnsmasq.', '#60a5fa');
             } else {
-                log('ℹ', 'Next step: verify from a LAN client. If a client can\'t resolve, open the <strong>🛠 DNS Tools</strong> tab → "LAN-side DNS health" section — it tails dnsmasq\'s query log so you can see in real time whether client queries are arriving.', '#60a5fa');
+                log('ℹ', 'Next step: verify from a LAN client. If a client can\'t resolve, open the <strong>DNS Tools</strong> tab → "LAN-side DNS health" section — it tails dnsmasq\'s query log so you can see in real time whether client queries are arriving.', '#60a5fa');
             }
         }
 
-        log('🎉', '<strong>Setup complete.</strong> Plug a client into the LAN interface — it should get a DHCP lease and reach the internet.', '#a855f7');
+        log('', '<strong>Setup complete.</strong> Plug a client into the LAN interface — it should get a DHCP lease and reach the internet.', '#a855f7');
         runBtn.textContent = 'Done';
         if (typeof showToast === 'function') showToast('Quick Setup complete — WAN + LAN + firewall applied', 'success');
         await wrLoadAll();
@@ -6400,7 +6400,7 @@
                  to run by hand. Distro-aware (apt/dnf/pacman/apk/zypper). -->
             <div id="wr-deps-card" style="padding:14px; border:1px solid rgba(34,197,94,0.35); border-radius:8px; background:rgba(34,197,94,0.06); margin-bottom:16px;">
                 <div style="display:flex; align-items:baseline; gap:8px; margin-bottom:6px;">
-                    <strong style="font-size:14px; color:#22c55e;">📦 DNS tooling on this node</strong>
+                    <strong style="font-size:14px; color:#22c55e;">DNS tooling on this node</strong>
                     <span style="font-size:11px; color:var(--text-muted);">— what's installed vs. what we need, with a one-click installer matched to your distro</span>
                 </div>
                 <div id="wr-deps-body" style="font-size:12px; color:var(--text-muted);">Checking…</div>
@@ -6413,7 +6413,7 @@
                  scenario. -->
             <div id="wr-host-dns-card" style="padding:14px; border:1px solid rgba(59,130,246,0.35); border-radius:8px; background:rgba(59,130,246,0.06); margin-bottom:16px;">
                 <div style="display:flex; align-items:baseline; gap:8px; margin-bottom:6px;">
-                    <strong style="font-size:14px; color:#3b82f6;">🛡 Host DNS resolver — port 53</strong>
+                    <strong style="font-size:14px; color:#3b82f6;">Host DNS resolver — port 53</strong>
                     <span style="font-size:11px; color:var(--text-muted);">— who owns port 53 on this node, and how to free it for a containerised DNS server</span>
                 </div>
                 <div id="wr-host-dns-body" style="font-size:12px; color:var(--text-muted);">Checking…</div>
@@ -6423,7 +6423,7 @@
                  traffic, not by running dig from the host. -->
             <div style="padding:14px; border:1px solid rgba(168,85,247,0.35); border-radius:8px; background:rgba(168,85,247,0.06); margin-bottom:16px;">
                 <div style="display:flex; align-items:baseline; gap:8px; margin-bottom:6px;">
-                    <strong style="font-size:14px; color:#a855f7;">🔬 LAN-side DNS health</strong>
+                    <strong style="font-size:14px; color:#a855f7;">LAN-side DNS health</strong>
                     <span style="font-size:11px; color:var(--text-muted);">— shows whether LAN clients can actually reach dnsmasq</span>
                 </div>
                 <div style="font-size:11px; color:var(--text-muted); margin-bottom:10px;">
@@ -6439,14 +6439,14 @@
                     <!-- dnsmasq query log — definitive evidence of whether clients arrive. -->
                     <div style="padding:12px; border:1px solid var(--border); border-radius:6px; background:var(--bg-card); display:flex; flex-direction:column; gap:8px;">
                         <div style="display:flex; align-items:center; justify-content:space-between;">
-                            <strong style="font-size:13px;">📜 dnsmasq query log</strong>
+                            <strong style="font-size:13px;">dnsmasq query log</strong>
                             <span id="wr-lside-log-badge" class="badge" style="font-size:10px; padding:2px 6px;">checking…</span>
                         </div>
                         <div style="font-size:11px; color:var(--text-muted);">Tail the per-LAN dnsmasq log. Enable to capture every query from LAN clients — no query in here after a client tries to resolve = packet never reached dnsmasq.</div>
                         <div style="display:flex; gap:6px;">
                             <button id="wr-lside-log-on" class="btn btn-sm btn-primary" onclick="wrLSideSetQueryLog(true)">Enable logging</button>
                             <button id="wr-lside-log-off" class="btn btn-sm" onclick="wrLSideSetQueryLog(false)">Disable</button>
-                            <button class="btn btn-sm" onclick="wrLSideRefreshLog()">🔄 Refresh</button>
+                            <button class="btn btn-sm" onclick="wrLSideRefreshLog()">Refresh</button>
                             <label style="font-size:11px; display:flex; align-items:center; gap:4px; margin-left:auto;">
                                 <input type="checkbox" id="wr-lside-log-auto" checked/> auto-refresh
                             </label>
@@ -6459,7 +6459,7 @@
                          that sees arriving packets even if dnsmasq rejected them. -->
                     <div style="padding:12px; border:1px solid var(--border); border-radius:6px; background:var(--bg-card); display:flex; flex-direction:column; gap:8px;">
                         <div style="display:flex; align-items:center; justify-content:space-between;">
-                            <strong style="font-size:13px;">📡 Capture UDP 53 on LAN interface</strong>
+                            <strong style="font-size:13px;">Capture UDP 53 on LAN interface</strong>
                             <span id="wr-lside-cap-badge" class="badge" style="font-size:10px; padding:2px 6px; background:rgba(148,163,184,0.15); color:var(--text-muted);">idle</span>
                         </div>
                         <div style="font-size:11px; color:var(--text-muted);">Runs <code>tcpdump -i &lt;iface&gt; udp port 53</code> for 10 seconds. Shows packets reaching the NIC even if dnsmasq isn't answering them.</div>
@@ -6485,10 +6485,10 @@
             <div id="wr-tools-status" style="margin-bottom:12px;"></div>
 
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
-                ${wrToolCardHtml('ping', '📡 Ping', 'Four ICMP echo packets with 1s timeout. Shows round-trip latency and packet loss.', 'cloudflare.com', false)}
-                ${wrToolCardHtml('traceroute', '🛣 Traceroute', 'Map each router hop to the target. Capped at 20 hops, 2s per probe.', 'cloudflare.com', false)}
-                ${wrToolCardHtml('nslookup', '🔍 nslookup', 'Resolve a name against the system (or an explicit) DNS server. Runs from the host — for LAN-client issues use the section above.', 'cloudflare.com', true)}
-                ${wrToolCardHtml('whois', '🪪 whois', 'WHOIS registry lookup for a domain or IP. Takes up to 30 seconds.', 'cloudflare.com', false)}
+                ${wrToolCardHtml('ping', 'Ping', 'Four ICMP echo packets with 1s timeout. Shows round-trip latency and packet loss.', 'cloudflare.com', false)}
+                ${wrToolCardHtml('traceroute', 'Traceroute', 'Map each router hop to the target. Capped at 20 hops, 2s per probe.', 'cloudflare.com', false)}
+                ${wrToolCardHtml('nslookup', 'nslookup', 'Resolve a name against the system (or an explicit) DNS server. Runs from the host — for LAN-client issues use the section above.', 'cloudflare.com', true)}
+                ${wrToolCardHtml('whois', 'whois', 'WHOIS registry lookup for a domain or IP. Takes up to 30 seconds.', 'cloudflare.com', false)}
             </div>
         `;
 
@@ -6618,7 +6618,7 @@
             ${lansHtml}
 
             <div style="display:flex; gap:8px; align-items:center; margin-top:6px;">
-                <button class="btn btn-sm" onclick="wrHostDnsRefresh()">🔄 Refresh</button>
+                <button class="btn btn-sm" onclick="wrHostDnsRefresh()">Refresh</button>
             </div>
             <div id="wr-host-dns-result" style="font-size:12px; margin-top:10px;"></div>
         `;
@@ -6682,7 +6682,7 @@
                     dnsmasq is on :53 for this LAN. Move it off to let a container own :53 on <code>${escHtml(lan.interface)}</code>.
                 </div>
                 <div style="font-size:11px; color:var(--text-muted); margin-top:4px; line-height:1.5;">
-                    💡 The "Advertise DNS" IP doesn't need to be running yet — it's just a future reference DHCP will hand out to clients. Set it to your AdGuard/Pi-hole container's planned IP, click Apply, and dnsmasq will move off :53 — freeing it for AdGuard to bind. <strong>Then</strong> start AdGuard on that IP.
+                    The "Advertise DNS" IP doesn't need to be running yet — it's just a future reference DHCP will hand out to clients. Set it to your AdGuard/Pi-hole container's planned IP, click Apply, and dnsmasq will move off :53 — freeing it for AdGuard to bind. <strong>Then</strong> start AdGuard on that IP.
                 </div>
                 <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:6px;">
                     <label style="font-size:12px; color:var(--text-muted); display:flex; gap:6px; align-items:center;">
@@ -6923,7 +6923,7 @@
 
         const depRows = (data.deps || []).map(d => {
             const mark = d.installed
-                ? '<span style="color:#22c55e;">✓ installed</span>'
+                ? '<span style="color:#22c55e;">installed</span>'
                 : (d.package
                     ? '<span style="color:#f59e0b;">◯ missing</span>'
                     : '<span style="color:var(--text-muted);">— not packaged on this distro</span>');
@@ -6960,13 +6960,13 @@
                 <pre style="font-family:var(--font-mono); font-size:11px; background:var(--bg-secondary); padding:8px; border-radius:4px; margin:0 0 8px 0; white-space:pre-wrap; overflow-x:auto;">${escHtml(cmd)}</pre>
                 <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
                     <button class="btn btn-sm btn-primary" onclick="wrDepsInstall()" ${data.is_root ? '' : 'disabled title="Install needs root — copy the command and run it manually."'}>Install on this node</button>
-                    <button class="btn btn-sm" onclick="wrDepsCopy()">📋 Copy command</button>
-                    <button class="btn btn-sm" onclick="wrDepsRefresh()">🔄 Refresh</button>
+                    <button class="btn btn-sm" onclick="wrDepsCopy()">Copy command</button>
+                    <button class="btn btn-sm" onclick="wrDepsRefresh()">Refresh</button>
                 </div>
                 <div id="wr-deps-result" style="font-size:12px; margin-top:10px;"></div>
             ` : `
                 <div style="color:#22c55e; font-size:12px;">All DNS-area tooling is already installed on this node.</div>
-                <div style="margin-top:6px;"><button class="btn btn-sm" onclick="wrDepsRefresh()">🔄 Refresh</button></div>
+                <div style="margin-top:6px;"><button class="btn btn-sm" onclick="wrDepsRefresh()">Refresh</button></div>
             `}
         `;
         // Stash the command on the card so copy button can grab it
@@ -6996,7 +6996,7 @@
             if (out) {
                 out.innerHTML = `
                     <div style="color:${ok ? '#22c55e' : '#ef4444'}; margin-bottom:4px;">
-                        ${ok ? '✅ Install finished (exit 0).' : `❌ Install exited with code ${escHtml(String(data.exit_code))}.`}
+                        ${ok ? 'Install finished (exit 0).' : `Install exited with code ${escHtml(String(data.exit_code))}.`}
                     </div>
                     <details ${ok ? '' : 'open'}><summary style="cursor:pointer; font-size:11px; color:var(--text-muted);">package manager output</summary>
                         <pre style="font-family:var(--font-mono); font-size:11px; background:var(--bg-secondary); padding:8px; border-radius:4px; max-height:280px; overflow:auto; white-space:pre-wrap; margin:6px 0 0 0;">${escHtml(data.output || '(no output)')}</pre>
@@ -7043,7 +7043,7 @@
         const meta = document.getElementById('wr-lside-log-meta');
         if (btnOn) btnOn.disabled = true;
         if (btnOff) btnOff.disabled = true;
-        if (meta) meta.innerHTML = `<span style="color:var(--text-muted);">⏳ ${enable ? 'Enabling' : 'Disabling'} query logging — dnsmasq will restart (~1s)…</span>`;
+        if (meta) meta.innerHTML = `<span style="color:var(--text-muted);">${enable ? 'Enabling' : 'Disabling'} query logging — dnsmasq will restart (~1s)…</span>`;
         try {
             const r = await fetch(wrUrl(`/api/router/segments/${encodeURIComponent(id)}/query-log`), {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -7051,12 +7051,12 @@
             });
             const j = await r.json();
             if (j.success) {
-                if (meta) meta.innerHTML = `<span style="color:#22c55e;">✓ ${escHtml(j.message || '')}</span>`;
+                if (meta) meta.innerHTML = `<span style="color:#22c55e;">${escHtml(j.message || '')}</span>`;
             } else {
-                if (meta) meta.innerHTML = `<span style="color:#ef4444;">✗ ${escHtml(j.error || 'Failed')}</span>`;
+                if (meta) meta.innerHTML = `<span style="color:#ef4444;">${escHtml(j.error || 'Failed')}</span>`;
             }
         } catch (e) {
-            if (meta) meta.innerHTML = `<span style="color:#ef4444;">✗ Request failed: ${escHtml(e.message || e)}</span>`;
+            if (meta) meta.innerHTML = `<span style="color:#ef4444;">Request failed: ${escHtml(e.message || e)}</span>`;
         } finally {
             if (btnOn) btnOn.disabled = false;
             if (btnOff) btnOff.disabled = false;
@@ -7074,7 +7074,7 @@
         try {
             const r = await fetch(wrUrl(`/api/router/segments/${encodeURIComponent(id)}/query-log?lines=200`));
             if (!r.ok) {
-                tail.textContent = '✗ Fetch failed: HTTP ' + r.status;
+                tail.textContent = 'Fetch failed: HTTP ' + r.status;
                 if (badge) { badge.textContent = 'error'; badge.style.color = '#ef4444'; badge.style.background = 'rgba(239,68,68,0.15)'; }
                 return;
             }
@@ -7107,7 +7107,7 @@
                 meta.innerHTML = parts.join(' · ');
             }
         } catch (e) {
-            tail.textContent = '✗ Fetch errored: ' + (e.message || e);
+            tail.textContent = 'Fetch errored: ' + (e.message || e);
         }
     }
     window.wrLSideRefreshLog = wrLSideRefreshLog;
@@ -7137,7 +7137,7 @@
         const out = document.getElementById('wr-lside-cap-out');
         if (!lan || !btn || !out) return;
         btn.disabled = true;
-        btn.textContent = '⏳ Capturing 10s…';
+        btn.textContent = 'Capturing 10s…';
         if (badge) { badge.textContent = 'capturing…'; badge.style.background = 'rgba(251,191,36,0.15)'; badge.style.color = '#fbbf24'; }
         if (meta) meta.innerHTML = `<span style="color:var(--text-muted);">Watching <code>${escHtml(lan.interface)}</code> for UDP/53 traffic. Try DNS from a LAN client NOW — you have 10 seconds.</span>`;
         out.textContent = '(waiting for packets…)';
@@ -7157,18 +7157,18 @@
             if (lines.length) {
                 out.textContent = lines.join('\n');
                 if (badge) { badge.textContent = `${lines.length} packets`; badge.style.background = 'rgba(34,197,94,0.15)'; badge.style.color = '#22c55e'; }
-                if (meta) meta.innerHTML = `<span style="color:#22c55e;">✓ ${lines.length} packet(s) captured on <code>${escHtml(lan.interface)}</code>. DNS traffic IS reaching the interface.</span>`;
+                if (meta) meta.innerHTML = `<span style="color:#22c55e;">${lines.length} packet(s) captured on <code>${escHtml(lan.interface)}</code>. DNS traffic IS reaching the interface.</span>`;
             } else if (j.error) {
-                out.textContent = '✗ ' + j.error;
+                out.textContent = '' + j.error;
                 if (badge) { badge.textContent = 'error'; badge.style.background = 'rgba(239,68,68,0.15)'; badge.style.color = '#ef4444'; }
                 if (meta) meta.innerHTML = `<span style="color:#ef4444;">${escHtml(j.error)}</span>`;
             } else {
                 out.textContent = '(nothing captured in 10 seconds)';
                 if (badge) { badge.textContent = 'nothing seen'; badge.style.background = 'rgba(251,191,36,0.15)'; badge.style.color = '#fbbf24'; }
-                if (meta) meta.innerHTML = `<span style="color:#fbbf24;">⚠ No DNS packets reached <code>${escHtml(lan.interface)}</code>. If you tried to resolve from a client during the capture, the packet never made it here — check client's default gateway, ARP (<code>ip neigh</code>), and upstream switches.</span>`;
+                if (meta) meta.innerHTML = `<span style="color:#fbbf24;">No DNS packets reached <code>${escHtml(lan.interface)}</code>. If you tried to resolve from a client during the capture, the packet never made it here — check client's default gateway, ARP (<code>ip neigh</code>), and upstream switches.</span>`;
             }
         } catch (e) {
-            out.textContent = '✗ Capture failed: ' + (e.message || e);
+            out.textContent = 'Capture failed: ' + (e.message || e);
             if (badge) { badge.textContent = 'failed'; badge.style.background = 'rgba(239,68,68,0.15)'; badge.style.color = '#ef4444'; }
         } finally {
             btn.disabled = false;
@@ -7202,7 +7202,7 @@
     async function wrRenderToolsStatus() {
         const statusBox = document.getElementById('wr-tools-status');
         if (!statusBox) return;
-        statusBox.innerHTML = '<span style="color:var(--text-muted); font-size:12px;">⏳ Checking which diagnostic tools are installed on this host…</span>';
+        statusBox.innerHTML = '<span style="color:var(--text-muted); font-size:12px;">Checking which diagnostic tools are installed on this host…</span>';
         let status;
         try {
             const r = await fetch(wrUrl('/api/router/tools/status'));
@@ -7238,16 +7238,16 @@
             if (digMissing && !parts.includes('nslookup')) parts.push('dig');
             statusBox.innerHTML = `
                 <div style="padding:12px 14px; background:rgba(251,191,36,0.1); border:1px solid rgba(251,191,36,0.35); border-radius:6px; font-size:13px;">
-                    <strong style="color:#fbbf24;">⚠ Missing tools:</strong> <code>${parts.join(', ')}</code>
+                    <strong style="color:#fbbf24;">Missing tools:</strong> <code>${parts.join(', ')}</code>
                     <div style="color:var(--text-muted); font-size:11px; margin-top:3px;">
                         Click the button to install them automatically — WolfStack detects your distro's package manager (apt, dnf, yum, pacman, zypper) and uses the right package name for each.
                     </div>
-                    <button id="wr-tools-install-btn" class="btn btn-primary btn-sm" style="margin-top:8px;" onclick="wrInstallDiagTools()">📥 Install missing tools</button>
+                    <button id="wr-tools-install-btn" class="btn btn-primary btn-sm" style="margin-top:8px;" onclick="wrInstallDiagTools()">Install missing tools</button>
                     <div id="wr-tools-install-status" style="margin-top:6px; font-size:11px; color:var(--text-muted);"></div>
                 </div>
             `;
         } else {
-            statusBox.innerHTML = `<div style="padding:10px 12px; background:rgba(34,197,94,0.08); border:1px solid rgba(34,197,94,0.3); border-radius:6px; font-size:12px; color:#4ade80;">✓ All diagnostic tools are installed on this host.</div>`;
+            statusBox.innerHTML = `<div style="padding:10px 12px; background:rgba(34,197,94,0.08); border:1px solid rgba(34,197,94,0.3); border-radius:6px; font-size:12px; color:#4ade80;">All diagnostic tools are installed on this host.</div>`;
         }
     }
 
@@ -7256,7 +7256,7 @@
         const statusEl = document.getElementById('wr-tools-install-status');
         if (!btn || !statusEl) return;
         btn.disabled = true;
-        btn.textContent = '⏳ Installing…';
+        btn.textContent = 'Installing…';
         statusEl.textContent = 'Running the package manager. On a first-time install this can take 10–60 seconds depending on your distro.';
         try {
             const r = await fetch(wrUrl('/api/router/tools/install'), {
@@ -7264,19 +7264,19 @@
             });
             const j = await r.json();
             if (j.success) {
-                statusEl.innerHTML = `<span style="color:#22c55e;">✓ ${escHtml(j.message || 'Installed.')}</span>`;
-                btn.textContent = '✓ Installed';
+                statusEl.innerHTML = `<span style="color:#22c55e;">${escHtml(j.message || 'Installed.')}</span>`;
+                btn.textContent = 'Installed';
                 // Refresh status so the per-card badges flip to "installed".
                 setTimeout(() => wrRenderToolsStatus(), 400);
             } else {
-                statusEl.innerHTML = `<span style="color:#ef4444;">✗ ${escHtml(j.error || 'Install failed.')}</span>`;
+                statusEl.innerHTML = `<span style="color:#ef4444;">${escHtml(j.error || 'Install failed.')}</span>`;
                 btn.disabled = false;
-                btn.textContent = '📥 Retry install';
+                btn.textContent = 'Retry install';
             }
         } catch (e) {
-            statusEl.innerHTML = `<span style="color:#ef4444;">✗ Install request failed: ${escHtml(e.message || e)}</span>`;
+            statusEl.innerHTML = `<span style="color:#ef4444;">Install request failed: ${escHtml(e.message || e)}</span>`;
             btn.disabled = false;
-            btn.textContent = '📥 Retry install';
+            btn.textContent = 'Retry install';
         }
     }
     window.wrInstallDiagTools = wrInstallDiagTools;
@@ -7291,12 +7291,12 @@
         if (!target) {
             out.style.display = 'block';
             out.style.color = '#ef4444';
-            out.textContent = '✗ Enter a target hostname or IP first.';
+            out.textContent = 'Enter a target hostname or IP first.';
             return;
         }
         btn.disabled = true;
         const origLabel = btn.textContent;
-        btn.textContent = '⏳ Running…';
+        btn.textContent = 'Running…';
         out.style.display = 'block';
         out.style.color = 'var(--text-muted)';
         // Per-tool "this may take a while" hint so the user doesn't wonder
@@ -7320,22 +7320,22 @@
             const j = await r.json();
             if (r.status === 400) {
                 out.style.color = '#ef4444';
-                out.textContent = '✗ ' + (j.error || 'Invalid input');
+                out.textContent = '' + (j.error || 'Invalid input');
             } else if (j.success) {
                 out.style.color = 'var(--text)';
-                const tail = `\n\n──\n✓ Completed in ${j.duration_ms}ms.`;
+                const tail = `\n\n──\nCompleted in ${j.duration_ms}ms.`;
                 out.textContent = (j.output || '(no output)') + tail;
             } else {
                 out.style.color = '#f87171';
                 const parts = [];
                 if (j.output) parts.push(j.output);
-                if (j.error) parts.push('✗ ' + j.error);
+                if (j.error) parts.push('' + j.error);
                 parts.push(`Completed in ${j.duration_ms}ms.`);
                 out.textContent = parts.join('\n');
             }
         } catch (e) {
             out.style.color = '#ef4444';
-            out.textContent = '✗ Request failed: ' + (e.message || e);
+            out.textContent = 'Request failed: ' + (e.message || e);
         } finally {
             btn.disabled = false;
             btn.textContent = origLabel;
@@ -7392,14 +7392,14 @@
         overlay.innerHTML = `
             <div class="modal" style="max-width:560px;">
                 <div class="modal-header">
-                    <h3>📤 Import WolfRouter config</h3>
+                    <h3>Import WolfRouter config</h3>
                     <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
                 </div>
                 <div class="modal-body" style="font-size:13px;">
                     <div style="padding:10px 12px; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.35); border-radius:6px; margin-bottom:12px;">
-                        <strong style="color:#fca5a5;">⚠ Replaces your entire config.</strong>
+                        <strong style="color:#fca5a5;">Replaces your entire config.</strong>
                         <div style="color:var(--text-muted); font-size:12px; margin-top:3px;">
-                            All zones, LANs, WAN connections, and firewall rules will be overwritten by the uploaded file. Export your current config first (💾 Export) if you want a rollback.
+                            All zones, LANs, WAN connections, and firewall rules will be overwritten by the uploaded file. Export your current config first (Export) if you want a rollback.
                         </div>
                     </div>
                     <label style="display:block; margin-bottom:10px;">Config file (JSON from Export)
@@ -7433,25 +7433,25 @@
         if (!fileEl || !btn || !statusEl) return;
         const file = fileEl.files && fileEl.files[0];
         if (!file) {
-            statusEl.innerHTML = '<span style="color:#ef4444;">✗ Pick a JSON file first.</span>';
+            statusEl.innerHTML = '<span style="color:#ef4444;">Pick a JSON file first.</span>';
             return;
         }
         btn.disabled = true;
-        btn.textContent = '⏳ Importing…';
-        statusEl.innerHTML = '<span style="color:var(--text-muted);">⏳ Reading file…</span>';
+        btn.textContent = 'Importing…';
+        statusEl.innerHTML = '<span style="color:var(--text-muted);">Reading file…</span>';
 
         let parsed;
         try {
             const text = await file.text();
             parsed = JSON.parse(text);
         } catch (e) {
-            statusEl.innerHTML = `<span style="color:#ef4444;">✗ Could not parse JSON: ${escHtml(e.message || e)}</span>`;
+            statusEl.innerHTML = `<span style="color:#ef4444;">Could not parse JSON: ${escHtml(e.message || e)}</span>`;
             btn.disabled = false;
             btn.textContent = 'Import';
             return;
         }
 
-        statusEl.innerHTML = '<span style="color:var(--text-muted);">⏳ Uploading + applying…</span>';
+        statusEl.innerHTML = '<span style="color:var(--text-muted);">Uploading + applying…</span>';
         try {
             const r = await fetch(wrUrl('/api/router/import'), {
                 method: 'POST',
@@ -7462,7 +7462,7 @@
             if (j.success) {
                 const s = j.summary || {};
                 const a = j.applied || {};
-                const parts = [`✓ ${escHtml(j.message || 'Imported.')}`];
+                const parts = [`${escHtml(j.message || 'Imported.')}`];
                 parts.push(`<div style="margin-top:6px; font-size:11px; color:var(--text-muted);">Summary: ${s.lans || 0} LAN(s), ${s.wan_connections || 0} WAN, ${s.rules || 0} rules, ${s.zones || 0} zone assignments.</div>`);
                 if (applyEl.checked) {
                     const applyBits = [];
@@ -7473,19 +7473,19 @@
                     if (applyBits.length) parts.push(`<div style="margin-top:4px; font-size:11px;">Applied: ${applyBits.join(' · ')}</div>`);
                 }
                 statusEl.innerHTML = `<div style="padding:8px 10px; background:rgba(34,197,94,0.1); border:1px solid rgba(34,197,94,0.35); border-radius:4px; color:#4ade80;">${parts.join('')}</div>`;
-                btn.textContent = '✓ Imported';
+                btn.textContent = 'Imported';
                 // Delay close so user reads the summary.
                 setTimeout(() => {
                     document.querySelector('.modal-overlay')?.remove();
                     wrLoadAll();
                 }, 2000);
             } else {
-                statusEl.innerHTML = `<div style="padding:8px 10px; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.35); border-radius:4px; color:#fca5a5;">✗ ${escHtml(j.error || 'Import failed.')}</div>`;
+                statusEl.innerHTML = `<div style="padding:8px 10px; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.35); border-radius:4px; color:#fca5a5;">${escHtml(j.error || 'Import failed.')}</div>`;
                 btn.disabled = false;
                 btn.textContent = 'Import';
             }
         } catch (e) {
-            statusEl.innerHTML = `<span style="color:#ef4444;">✗ Request failed: ${escHtml(e.message || e)}</span>`;
+            statusEl.innerHTML = `<span style="color:#ef4444;">Request failed: ${escHtml(e.message || e)}</span>`;
             btn.disabled = false;
             btn.textContent = 'Import';
         }
@@ -7518,11 +7518,11 @@
             return `<code>${escHtml(b.host || '?')}</code>`;
         }
         if (b.kind === 'vm') {
-            const typeIcon = b.vm_type === 'proxmox' ? '🟠' : '🖥';
+            const typeIcon = b.vm_type === 'proxmox' ? '' : '';
             return `${typeIcon} ${escHtml(b.vm_name || b.vm_id)} <span style="color:var(--text-muted); font-size:11px;">(${escHtml(b.vm_type || 'vm')} — <code>${escHtml(b.host || '?')}</code>)</span>`;
         }
         if (b.kind === 'container') {
-            const icon = b.container_type === 'lxc' ? '🧊' : '📦';
+            const icon = b.container_type === 'lxc' ? '' : '';
             return `${icon} ${escHtml(b.container_name || b.container_id)} <span style="color:var(--text-muted); font-size:11px;">(${escHtml(b.container_type || 'container')} — <code>${escHtml(b.host || '?')}</code>)</span>`;
         }
         return escHtml(JSON.stringify(b));
@@ -7544,7 +7544,7 @@
             <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
                 <div style="flex:1; min-width:260px;">
                     <div style="font-size:15px; font-weight:600; margin-bottom:4px;">
-                        🔀 ${escHtml(p.domain || '(no domain)')}
+                        ${escHtml(p.domain || '(no domain)')}
                         ${proxyLbLabel(p.lb_policy, backends.length)}
                         ${disabled ? '<span class="badge" style="background:rgba(148,163,184,0.15); color:#94a3b8; font-size:10px; margin-left:8px;">disabled</span>' : ''}
                     </div>
@@ -7555,9 +7555,9 @@
                     ${backendsHtml}
                 </div>
                 <div style="display:flex; gap:6px;">
-                    <button class="btn btn-sm" onclick="wrToggleProxy('${escHtml(p.id)}')" title="${disabled ? 'Enable' : 'Disable'}">${disabled ? '▶' : '⏸'}</button>
-                    <button class="btn btn-sm" onclick="wrShowProxyEditor('${escHtml(p.id)}')" title="Edit">✎</button>
-                    <button class="btn btn-sm" onclick="wrDeleteProxy('${escHtml(p.id)}')" title="Delete">🗑</button>
+                    <button class="btn btn-sm" onclick="wrToggleProxy('${escHtml(p.id)}')" title="${disabled ? 'Enable' : 'Disable'}">${disabled ? '▶' : ''}</button>
+                    <button class="btn btn-sm" onclick="wrShowProxyEditor('${escHtml(p.id)}')" title="Edit"></button>
+                    <button class="btn btn-sm" onclick="wrDeleteProxy('${escHtml(p.id)}')" title="Delete"></button>
                 </div>
             </div>
         </div>`;
@@ -7582,7 +7582,7 @@
     function proxyPickerOptionsHtml(picks, selectedRaw) {
         const out = [];
         if (picks.vms?.libvirt?.length) {
-            out.push(`<optgroup label="🖥 WolfStack / libvirt VMs">`);
+            out.push(`<optgroup label="WolfStack / libvirt VMs">`);
             for (const v of picks.vms.libvirt) {
                 const val = `vm::libvirt::${v.id}::${v.host || ''}::${v.name}`;
                 out.push(`<option value="${escHtml(val)}" ${val === selectedRaw ? 'selected' : ''}>${escHtml(v.name)} — ${escHtml(v.host || 'no IP')}</option>`);
@@ -7590,7 +7590,7 @@
             out.push(`</optgroup>`);
         }
         if (picks.vms?.proxmox?.length) {
-            out.push(`<optgroup label="🟠 Proxmox VE VMs">`);
+            out.push(`<optgroup label="Proxmox VE VMs">`);
             for (const v of picks.vms.proxmox) {
                 const val = `vm::proxmox::${v.id}::${v.host || ''}::${v.name}`;
                 out.push(`<option value="${escHtml(val)}" ${val === selectedRaw ? 'selected' : ''}>${escHtml(v.name)} — ${escHtml(v.host || 'no IP')}</option>`);
@@ -7598,7 +7598,7 @@
             out.push(`</optgroup>`);
         }
         if (picks.containers?.docker?.length) {
-            out.push(`<optgroup label="📦 Docker containers">`);
+            out.push(`<optgroup label="Docker containers">`);
             for (const c of picks.containers.docker) {
                 const val = `container::docker::${c.id}::${c.host || ''}::${c.name}`;
                 out.push(`<option value="${escHtml(val)}" ${val === selectedRaw ? 'selected' : ''}>${escHtml(c.name)} — ${escHtml(c.host || 'no IP')}</option>`);
@@ -7606,7 +7606,7 @@
             out.push(`</optgroup>`);
         }
         if (picks.containers?.lxc?.length) {
-            out.push(`<optgroup label="🧊 LXC containers">`);
+            out.push(`<optgroup label="LXC containers">`);
             for (const c of picks.containers.lxc) {
                 const val = `container::lxc::${c.id}::${c.host || ''}::${c.name}`;
                 out.push(`<option value="${escHtml(val)}" ${val === selectedRaw ? 'selected' : ''}>${escHtml(c.name)} — ${escHtml(c.host || 'no IP')}</option>`);
@@ -7639,7 +7639,7 @@
                         Weight
                         <input type="number" class="form-control wr-proxy-weight" data-idx="${idx}" value="${weight}" min="1" max="100" style="width:64px; padding:2px 6px; font-size:12px;" />
                     </label>
-                    <button class="btn btn-sm" type="button" onclick="wrProxyRemoveBackend(${idx})" title="Remove this backend">🗑</button>
+                    <button class="btn btn-sm" type="button" onclick="wrProxyRemoveBackend(${idx})" title="Remove this backend"></button>
                 </div>
             </div>
             <div class="wr-proxy-picker-row" data-idx="${idx}" style="${kindIsCustom ? 'display:none;' : ''}">
@@ -7984,7 +7984,7 @@
             // the fix.
             let nodeLine;
             if (!r.node_id) {
-                nodeLine = `<span style="color:var(--text-muted);">🌐 Cluster-wide (every node)</span>`;
+                nodeLine = `<span style="color:var(--text-muted);">Cluster-wide (every node)</span>`;
             } else if (knownNodeIds.size === 0) {
                 // Topology not loaded yet — don't false-alarm. Just show the id.
                 nodeLine = `<span style="color:var(--text-muted);">Node: ${escHtml(r.node_id)}</span>`;
@@ -7992,7 +7992,7 @@
                 const friendly = nodeNameById.get(r.node_id) || r.node_id;
                 nodeLine = `<span style="color:var(--text-muted);">Node: <strong style="color:var(--text);">${escHtml(friendly)}</strong> <code style="font-size:10px;">(${escHtml(r.node_id)})</code></span>`;
             } else {
-                nodeLine = `<span style="color:#fca5a5;">⚠ Assigned to <code>${escHtml(r.node_id)}</code> — no such node in this cluster. Click ✎ Edit and pick a node from the dropdown to fix.</span>`;
+                nodeLine = `<span style="color:#fca5a5;">Assigned to <code>${escHtml(r.node_id)}</code> — no such node in this cluster. Click Edit and pick a node from the dropdown to fix.</span>`;
             }
             return `
             <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:14px; display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
@@ -8009,10 +8009,10 @@
                 </div>
                 <div style="display:flex; gap:6px; flex-wrap:wrap;">
                     <button class="btn btn-sm" onclick="wrToggleSubnetRoute('${escHtml(r.id)}')" title="${r.enabled ? 'Disable this route' : 'Enable this route'}" style="font-size:11px;">
-                        ${r.enabled ? '✓ Enabled' : '⊘ Disabled'}
+                        ${r.enabled ? 'Enabled' : '⊘ Disabled'}
                     </button>
-                    <button class="btn btn-sm" onclick="wrEditSubnetRoute('${escHtml(r.id)}')" title="Edit route" style="font-size:11px;">✎ Edit</button>
-                    <button class="btn btn-sm btn-danger" onclick="wrDeleteSubnetRoute('${escHtml(r.id)}')" title="Delete route" style="font-size:11px;">🗑 Delete</button>
+                    <button class="btn btn-sm" onclick="wrEditSubnetRoute('${escHtml(r.id)}')" title="Edit route" style="font-size:11px;">Edit</button>
+                    <button class="btn btn-sm btn-danger" onclick="wrDeleteSubnetRoute('${escHtml(r.id)}')" title="Delete route" style="font-size:11px;">Delete</button>
                 </div>
             </div>
             `;
@@ -8040,7 +8040,7 @@
         // build the label as a single text string ("name — id") rather
         // than nesting a <span>.
         const nodeOptionsHtml = (() => {
-            const opts = [`<option value="">🌐 Cluster-wide (install on every node)</option>`];
+            const opts = [`<option value="">Cluster-wide (install on every node)</option>`];
             for (const n of nodes) {
                 const sel = n.node_id === currentNodeId ? 'selected' : '';
                 const friendly = n.node_name || n.node_id;
@@ -8049,13 +8049,13 @@
             }
             const inCluster = nodes.some(n => n.node_id === currentNodeId);
             if (currentNodeId && !inCluster) {
-                opts.push(`<option value="${escHtml(currentNodeId)}" selected>⚠ ${escHtml(currentNodeId)} (NOT in this cluster — pick a real node)</option>`);
+                opts.push(`<option value="${escHtml(currentNodeId)}" selected>${escHtml(currentNodeId)} (NOT in this cluster — pick a real node)</option>`);
             }
             return opts.join('');
         })();
 
         const dlg = showDialog({
-            title: routeId ? '✎ Edit Subnet Route' : '🛣 Add Subnet Route',
+            title: routeId ? 'Edit Subnet Route' : 'Add Subnet Route',
             html: `
                 <div style="display:grid; gap:14px; color:var(--text);">
                     <div>
@@ -8086,7 +8086,7 @@
                     onclick: (dlg) => dlg.close(),
                 },
                 {
-                    label: routeId ? '💾 Save Changes' : '➕ Create Route',
+                    label: routeId ? 'Save Changes' : 'Create Route',
                     onclick: (dlg) => wrSaveSubnetRoute(dlg, routeId),
                 },
             ],
@@ -8202,7 +8202,7 @@
         panel.style.display = 'block';
         panel.innerHTML = `
             <div style="padding:14px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; font-size:12px; color:var(--text-muted);">
-                ⏳ Querying every cluster node for kernel routing state…
+                Querying every cluster node for kernel routing state…
             </div>
         `;
 
@@ -8277,14 +8277,14 @@
         }
 
         const sevColour = {
-            ok:                      { bg: 'rgba(34,197,94,0.15)',  fg: '#4ade80', border: 'rgba(34,197,94,0.5)',  label: '✓ Working' },
-            gateway_ok:              { bg: 'rgba(34,197,94,0.15)',  fg: '#4ade80', border: 'rgba(34,197,94,0.5)',  label: '✓ Working (gateway)' },
-            missing:                 { bg: 'rgba(239,68,68,0.15)',  fg: '#fca5a5', border: 'rgba(239,68,68,0.5)',  label: '✗ Broken — route not in Linux' },
-            wrong_gateway:           { bg: 'rgba(234,179,8,0.15)',  fg: '#fde047', border: 'rgba(234,179,8,0.5)',  label: '⚠ Conflict — different route already there' },
-            unsupported_form:        { bg: 'rgba(234,179,8,0.15)',  fg: '#fde047', border: 'rgba(234,179,8,0.5)',  label: '⚠ Special route — needs manual fix' },
-            gateway_misconfigured:   { bg: 'rgba(239,68,68,0.15)',  fg: '#fca5a5', border: 'rgba(239,68,68,0.5)',  label: '✗ Gateway plumbing missing' },
-            forwarding_misconfigured:{ bg: 'rgba(234,179,8,0.15)',  fg: '#fde047', border: 'rgba(234,179,8,0.5)',  label: '⚠ Half-broken — forwarding missing' },
-            kernel_query_failed:     { bg: 'rgba(239,68,68,0.15)',  fg: '#fca5a5', border: 'rgba(239,68,68,0.5)',  label: '✗ Could not check' },
+            ok:                      { bg: 'rgba(34,197,94,0.15)',  fg: '#4ade80', border: 'rgba(34,197,94,0.5)',  label: 'Working' },
+            gateway_ok:              { bg: 'rgba(34,197,94,0.15)',  fg: '#4ade80', border: 'rgba(34,197,94,0.5)',  label: 'Working (gateway)' },
+            missing:                 { bg: 'rgba(239,68,68,0.15)',  fg: '#fca5a5', border: 'rgba(239,68,68,0.5)',  label: 'Broken — route not in Linux' },
+            wrong_gateway:           { bg: 'rgba(234,179,8,0.15)',  fg: '#fde047', border: 'rgba(234,179,8,0.5)',  label: 'Conflict — different route already there' },
+            unsupported_form:        { bg: 'rgba(234,179,8,0.15)',  fg: '#fde047', border: 'rgba(234,179,8,0.5)',  label: 'Special route — needs manual fix' },
+            gateway_misconfigured:   { bg: 'rgba(239,68,68,0.15)',  fg: '#fca5a5', border: 'rgba(239,68,68,0.5)',  label: 'Gateway plumbing missing' },
+            forwarding_misconfigured:{ bg: 'rgba(234,179,8,0.15)',  fg: '#fde047', border: 'rgba(234,179,8,0.5)',  label: 'Half-broken — forwarding missing' },
+            kernel_query_failed:     { bg: 'rgba(239,68,68,0.15)',  fg: '#fca5a5', border: 'rgba(239,68,68,0.5)',  label: 'Could not check' },
             disabled:                { bg: 'rgba(148,163,184,0.15)',fg: '#94a3b8', border: 'rgba(148,163,184,0.5)',label: '⊘ Switched off' },
             not_targeted_here:       { bg: 'rgba(148,163,184,0.15)',fg: '#94a3b8', border: 'rgba(148,163,184,0.5)',label: '— Not for this node' },
         };
@@ -8314,27 +8314,27 @@
         parts.push(`
             <div style="padding:14px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
-                    <div style="font-weight:600; font-size:13px; color:var(--text);">🩺 Subnet route diagnostics</div>
+                    <div style="font-weight:600; font-size:13px; color:var(--text);">Subnet route diagnostics</div>
                     <div style="display:flex; gap:6px;">
-                        <button class="btn btn-sm" onclick="wrRunSubnetRouteDiagnostics()">🔄 Re-run</button>
-                        <button class="btn btn-sm" onclick="document.getElementById('wr-subnet-routes-diagnostics').style.display='none'">✕ Close</button>
+                        <button class="btn btn-sm" onclick="wrRunSubnetRouteDiagnostics()">Re-run</button>
+                        <button class="btn btn-sm" onclick="document.getElementById('wr-subnet-routes-diagnostics').style.display='none'">Close</button>
                     </div>
                 </div>
                 <div style="padding:10px 12px; background:var(--bg); border:1px solid var(--border); border-radius:6px; margin-bottom:10px; font-size:12px; color:var(--text-muted); line-height:1.6;">
                     <strong style="color:var(--text);">What this does:</strong> for every subnet route you've configured, we go to the node that's supposed to host it and look at Linux's actual routing table. Then we tell you whether the route is actually there, and if not, why.
                     <br><br>
-                    <strong style="color:var(--text);">How to read it:</strong> each route gets its own block below. Each row inside the block is one node. Look for the "★ target node" star — that's the node that <em>must</em> have the route installed. If the star says <span style="color:#4ade80;">✓ Working</span> you're good. Anything red or yellow needs your attention; the explanation tells you exactly what to do.
+                    <strong style="color:var(--text);">How to read it:</strong> each route gets its own block below. Each row inside the block is one node. Look for the "target node" star — that's the node that <em>must</em> have the route installed. If the star says <span style="color:#4ade80;">Working</span> you're good. Anything red or yellow needs your attention; the explanation tells you exactly what to do.
                 </div>
         `);
 
         if (orphanedRoutes.length) {
             parts.push(`
                 <div style="margin-bottom:14px; padding:14px; background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.5); border-radius:8px; color:var(--text);">
-                    <div style="font-weight:600; font-size:13px; color:#fca5a5; margin-bottom:6px;">🚨 Found ${orphanedRoutes.length} route${orphanedRoutes.length === 1 ? '' : 's'} pointing at a node that doesn't exist in this cluster</div>
+                    <div style="font-weight:600; font-size:13px; color:#fca5a5; margin-bottom:6px;">Found ${orphanedRoutes.length} route${orphanedRoutes.length === 1 ? '' : 's'} pointing at a node that doesn't exist in this cluster</div>
                     <div style="font-size:12px; color:var(--text-muted); line-height:1.6;">
                         These routes have a Node Assignment that doesn't match any of the <code>ws-…</code> node IDs your cluster knows about. That means <strong>no node ever installs the route</strong> — it just sits in config doing nothing. This usually happens when the route was created with a hostname (e.g. <code>klnet-12gb</code>) typed into the Node Assignment field instead of being picked from the dropdown.
                         <br><br>
-                        <strong style="color:var(--text);">Fix:</strong> click ✎ Edit on each route below, then pick the right node from the <strong>Node Assignment</strong> dropdown (which now shows the friendly name plus the <code>ws-…</code> ID), then Save.
+                        <strong style="color:var(--text);">Fix:</strong> click Edit on each route below, then pick the right node from the <strong>Node Assignment</strong> dropdown (which now shows the friendly name plus the <code>ws-…</code> ID), then Save.
                     </div>
                     <ul style="margin:10px 0 0; padding-left:20px; font-size:12px; font-family:monospace;">
                         ${orphanedRoutes.map(c => `<li><strong>${escHtml(c.subnet_cidr)} → ${escHtml(c.gateway)}</strong> — assigned to <code>${escHtml(c.node_id)}</code> (no such node)</li>`).join('')}
@@ -8383,7 +8383,7 @@
         if (kernelOrphans.length) {
             parts.push(`
                 <div style="margin-bottom:14px; padding:14px; background:rgba(234,179,8,0.10); border:1px solid rgba(234,179,8,0.45); border-radius:8px; color:var(--text);">
-                    <div style="font-weight:600; font-size:13px; color:#fde047; margin-bottom:6px;">⚠ Found ${kernelOrphans.length} kernel route${kernelOrphans.length === 1 ? '' : 's'} with no matching configuration row</div>
+                    <div style="font-weight:600; font-size:13px; color:#fde047; margin-bottom:6px;">Found ${kernelOrphans.length} kernel route${kernelOrphans.length === 1 ? '' : 's'} with no matching configuration row</div>
                     <div style="font-size:12px; color:var(--text-muted); line-height:1.6;">
                         These routes go via the WolfNet interface but aren't in WolfStack's subnet-route list. They were likely installed by an older WolfStack version and never cleaned up, or by a manual <code>ip route add</code>. Click <strong>Remove from kernel</strong> to drop the entry — WolfStack will refuse if the kernel's gateway has changed since this scan, so it can't accidentally undo another tool's route.
                     </div>
@@ -8405,7 +8405,7 @@
                                     <td style="padding:6px 8px; border-bottom:1px solid var(--border); font-family:monospace;">${escHtml(o.gateway)}</td>
                                     <td style="padding:6px 8px; border-bottom:1px solid var(--border); font-family:monospace;">${escHtml(o.iface || '?')}</td>
                                     <td style="padding:6px 8px; border-bottom:1px solid var(--border);">
-                                        <button class="btn btn-sm" data-orphan-idx="${idx}" onclick="wrRemoveOrphanRoute('${escHtml(o.nodeId)}','${escHtml(o.cidr)}','${escHtml(o.gateway)}', this)">🗑 Remove from kernel</button>
+                                        <button class="btn btn-sm" data-orphan-idx="${idx}" onclick="wrRemoveOrphanRoute('${escHtml(o.nodeId)}','${escHtml(o.cidr)}','${escHtml(o.gateway)}', this)">Remove from kernel</button>
                                     </td>
                                 </tr>
                             `).join('')}
@@ -8439,14 +8439,14 @@
             // messages further down (orphans are NOT fine).
             let targetLabel;
             if (isOrphan) {
-                targetLabel = `🚨 <code>${escHtml(c.node_id)}</code> — not a real node in this cluster`;
+                targetLabel = `<code>${escHtml(c.node_id)}</code> — not a real node in this cluster`;
             } else if (c.node_id) {
                 const friendly = nodeNameById.get(c.node_id);
                 targetLabel = friendly && friendly !== c.node_id
                     ? `<strong>${escHtml(friendly)}</strong> <code style="font-size:10px;">(${escHtml(c.node_id)})</code>`
                     : `<code>${escHtml(c.node_id)}</code>`;
             } else {
-                targetLabel = '🌐 Cluster-wide (every node)';
+                targetLabel = 'Cluster-wide (every node)';
             }
             // The "target" node is the one that MUST hold the kernel
             // entry. For cluster-wide routes, every node is a target.
@@ -8476,14 +8476,14 @@
                         : '<span style="color:var(--text-muted); font-size:11px;">(no entry — kernel does not have this CIDR)</span>');
                 const fwd = e.ip_forward;
                 const fwdHint = (isTarget(nodeId) && fwd === '0' && e.enabled)
-                    ? `<div style="margin-top:6px; font-size:11px; color:#fde047;">⚠ <code>net.ipv4.ip_forward = 0</code> on this node — packets that need to traverse this route will be dropped. Enable forwarding with <code>sysctl -w net.ipv4.ip_forward=1</code> and persist via <code>/etc/sysctl.conf</code>.</div>`
+                    ? `<div style="margin-top:6px; font-size:11px; color:#fde047;"><code>net.ipv4.ip_forward = 0</code> on this node — packets that need to traverse this route will be dropped. Enable forwarding with <code>sysctl -w net.ipv4.ip_forward=1</code> and persist via <code>/etc/sysctl.conf</code>.</div>`
                     : '';
                 nodeRows.push(`
                     <tr>
                         <td style="padding:8px; border-bottom:1px solid var(--border); vertical-align:top;">
                             <div style="font-weight:600; font-size:12px;">${escHtml(nodeName)}</div>
                             <div style="font-size:11px; color:var(--text-muted); font-family:monospace;">${escHtml(nodeId)}</div>
-                            ${isTarget(nodeId) ? '<div style="font-size:10px; color:var(--success); margin-top:2px;">★ target node</div>' : ''}
+                            ${isTarget(nodeId) ? '<div style="font-size:10px; color:var(--success); margin-top:2px;">target node</div>' : ''}
                         </td>
                         <td style="padding:8px; border-bottom:1px solid var(--border); vertical-align:top;">
                             <span style="display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600; background:${sev.bg}; color:${sev.fg}; border:1px solid ${sev.border};">${sev.label}</span>
@@ -8544,7 +8544,7 @@
         if (!confirm(`Remove kernel route ${cidr} via ${gateway} from this node?\n\nThis runs \`ip route del ${cidr}\` on the host. WolfStack will refuse if the kernel's gateway has changed since the scan, so it can't accidentally delete a route managed by something else.`)) {
             return;
         }
-        if (btn) { btn.disabled = true; btn.textContent = '⏳ Removing…'; }
+        if (btn) { btn.disabled = true; btn.textContent = 'Removing…'; }
         try {
             const url = await wrNodeUrl(nodeId, '/api/router/subnet-routes/orphan/remove');
             const resp = await fetch(url, {
@@ -8554,14 +8554,14 @@
             });
             const j = await resp.json().catch(() => ({}));
             if (!resp.ok || j.ok === false) {
-                if (btn) { btn.disabled = false; btn.textContent = '🗑 Remove from kernel'; }
+                if (btn) { btn.disabled = false; btn.textContent = 'Remove from kernel'; }
                 alert('Could not remove orphan route:\n\n' + (j.error || `HTTP ${resp.status}`));
                 return;
             }
             // Re-run diagnostics so the page reflects post-delete state.
             await wrRunSubnetRouteDiagnostics();
         } catch (e) {
-            if (btn) { btn.disabled = false; btn.textContent = '🗑 Remove from kernel'; }
+            if (btn) { btn.disabled = false; btn.textContent = 'Remove from kernel'; }
             alert('Could not remove orphan route: ' + ((e && e.message) || String(e)));
         }
     }
