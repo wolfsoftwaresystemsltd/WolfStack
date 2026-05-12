@@ -31674,10 +31674,16 @@ function renderDnsProviders() {
     var html = '';
     dnsProvidersCache.forEach(function (p) {
         var testStatus = '';
+        // klasSponsor 2026-05-12: "Error display would be nice. It
+        // disappears and I can't find it." The toast showed for ~4s
+        // and the only persistence was a hover-tooltip on the icon,
+        // which is easy to miss. Now: failed tests render a visible
+        // "View error" button that opens a modal with the full log.
         if (p.last_test_result === 'ok') {
             testStatus = '<span style="color:var(--success);font-size:12px;">\u2713 tested ' + escapeHtml(formatRelativeTime(p.last_tested_at)) + '</span>';
         } else if (p.last_test_result) {
-            testStatus = '<span style="color:var(--danger);font-size:12px;" title="' + escapeHtml(p.last_test_result) + '">\u2717 test failed ' + escapeHtml(formatRelativeTime(p.last_tested_at)) + '</span>';
+            testStatus = '<span style="color:var(--danger);font-size:12px;">\u2717 test failed ' + escapeHtml(formatRelativeTime(p.last_tested_at)) + '</span>' +
+                ' <button class="btn btn-sm" onclick="dnsProviderShowTestError(\'' + escapeAttr(p.id) + '\')" style="font-size:11px;padding:2px 8px;margin-left:6px;background:var(--bg-tertiary);border:1px solid var(--danger);color:var(--danger);">View error</button>';
         } else {
             testStatus = '<span style="color:var(--text-muted);font-size:12px;">never tested</span>';
         }
@@ -31698,6 +31704,57 @@ function renderDnsProviders() {
         '</div>';
     });
     el.innerHTML = html;
+}
+
+// Surface the full DNS provider test error in a modal that stays open
+// until the operator dismisses it. Triggered from the "View error"
+// button on the failed-test row. Pre-fix the only place this message
+// lived was a 4-second toast and a hover-tooltip on the cross icon.
+function dnsProviderShowTestError(id) {
+    var provider = dnsProvidersCache.find(function (p) { return p.id === id; });
+    if (!provider) return;
+    var msg = provider.last_test_result || 'No detail recorded.';
+    // Build a modal directly rather than going through showConfirm/
+    // showPrompt \u2014 we want a scrollable pre-formatted block, not a
+    // single-line input.
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;';
+    var modal = document.createElement('div');
+    modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--danger);border-radius:12px;padding:24px 28px;max-width:720px;width:90%;max-height:80vh;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.5);';
+    var title = document.createElement('div');
+    title.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:8px;color:var(--danger);';
+    title.textContent = 'DNS provider test failed \u2014 ' + provider.name;
+    var subtitle = document.createElement('div');
+    subtitle.style.cssText = 'font-size:12px;color:var(--text-muted);margin-bottom:14px;';
+    subtitle.textContent = 'Last tested: ' + (provider.last_tested_at || 'unknown') + ' \u00b7 Plugin: ' + provider.plugin;
+    var pre = document.createElement('pre');
+    pre.style.cssText = 'background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:12px;font-family:monospace;font-size:12px;color:var(--text-primary);overflow:auto;max-height:50vh;white-space:pre-wrap;word-break:break-word;flex:1;';
+    pre.textContent = msg;
+    var btnRow = document.createElement('div');
+    btnRow.style.cssText = 'margin-top:14px;display:flex;justify-content:flex-end;gap:8px;';
+    var copyBtn = document.createElement('button');
+    copyBtn.textContent = 'Copy to clipboard';
+    copyBtn.className = 'btn btn-sm';
+    copyBtn.onclick = function () {
+        try {
+            navigator.clipboard.writeText(msg);
+            copyBtn.textContent = 'Copied \u2713';
+            setTimeout(function () { copyBtn.textContent = 'Copy to clipboard'; }, 1500);
+        } catch (_) { /* clipboard unavailable */ }
+    };
+    var closeBtn = document.createElement('button');
+    closeBtn.textContent = 'Close';
+    closeBtn.className = 'btn btn-primary btn-sm';
+    closeBtn.onclick = function () { overlay.remove(); };
+    btnRow.appendChild(copyBtn);
+    btnRow.appendChild(closeBtn);
+    modal.appendChild(title);
+    modal.appendChild(subtitle);
+    modal.appendChild(pre);
+    modal.appendChild(btnRow);
+    overlay.appendChild(modal);
+    overlay.onclick = function (e) { if (e.target === overlay) overlay.remove(); };
+    document.body.appendChild(overlay);
 }
 
 function formatRelativeTime(iso) {
@@ -31798,10 +31855,16 @@ async function dnsProviderShowTestPrompt(id) {
         var data = await resp.json();
         if (resp.ok) {
             showToast('Test succeeded for ' + provider.name + '.', 'success');
+            await loadDnsProviders();
         } else {
-            showToast('Test failed: ' + (data.error || 'unknown'), 'error');
+            // klasSponsor 2026-05-12: toast disappears too fast to read
+            // the certbot stderr. Show toast AND immediately open the
+            // persistent error modal so the operator can read it
+            // without hunting through the row's "View error" button.
+            showToast('Test failed for ' + provider.name + ' — opening details.', 'error');
+            await loadDnsProviders();
+            dnsProviderShowTestError(id);
         }
-        await loadDnsProviders();
     } catch (e) {
         showToast('Failed: ' + e.message, 'error');
     }

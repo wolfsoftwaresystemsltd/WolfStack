@@ -534,9 +534,16 @@ pub fn request_certificate(domain: &str, email: &str) -> Result<String, String> 
         ));
     }
 
+    // Resolve certbot via certbot_path() so snap installs at /snap/bin
+    // are found — sudo's secure_path doesn't include /snap/bin on
+    // Debian/Ubuntu by default, and pre-fix `sudo certbot ...` would
+    // silently fail with "command not found" even when the operator's
+    // login shell could run `certbot --version` fine.
+    let certbot_bin = crate::certbot::certbot_path()
+        .ok_or_else(|| "certbot is not installed on this node".to_string())?;
     let output = Command::new("sudo")
         .args([
-            "certbot", "certonly", "--standalone",
+            certbot_bin.as_str(), "certonly", "--standalone",
             "-d", domain,
             "--email", email,
             "--agree-tos", "--non-interactive",
@@ -554,8 +561,13 @@ pub fn request_certificate(domain: &str, email: &str) -> Result<String, String> 
 /// Parse `sudo certbot certificates` output into structured cert info
 /// Returns Vec of (domains, cert_path, key_path, expiry)
 fn parse_certbot_certificates() -> Vec<(String, String, String, String)> {
+    // Same /snap/bin issue as request_certificate — use the resolved
+    // path. If certbot isn't installed at all, fall back to the bare
+    // command so the error message stays meaningful (certbot certificates
+    // → "command not found" rather than panic).
+    let certbot_bin = crate::certbot::certbot_path().unwrap_or_else(|| "certbot".to_string());
     let output = Command::new("sudo")
-        .args(["certbot", "certificates"])
+        .args([certbot_bin.as_str(), "certificates"])
         .output()
         .ok();
 

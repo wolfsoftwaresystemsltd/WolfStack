@@ -119,9 +119,46 @@ pub struct CertSummary {
     pub base_zone: String,
 }
 
+/// Resolve the path to the `certbot` binary, or `None` if not present.
+///
+/// systemd's default `PATH` is `/usr/local/sbin:/usr/local/bin:/usr/sbin:
+/// /usr/bin:/sbin:/bin` — it does NOT include `/snap/bin`. Operators who
+/// installed certbot via `snap install certbot --classic` (the path
+/// EFF recommends on Ubuntu / Debian since 20.04) end up with certbot
+/// at `/snap/bin/certbot`, invisible to the WolfStack systemd service.
+/// Pre-v23.0.1 this surfaced as a confusing "certbot is not installed
+/// on this node" from the DNS-provider Test button even though
+/// `certbot --version` worked fine in the operator's shell.
+///
+/// We probe PATH first (cheap), then fall back to a known-good list of
+/// install locations: apt (`/usr/bin`), pip / source build
+/// (`/usr/local/bin`), snap (`/snap/bin`), and the EFF-maintained
+/// virtualenv path (`/opt/certbot/bin`).
+pub fn certbot_path() -> Option<String> {
+    if let Ok(out) = Command::new("certbot").arg("--version").output() {
+        if out.status.success() {
+            return Some("certbot".to_string());
+        }
+    }
+    for cand in &[
+        "/usr/bin/certbot",
+        "/usr/local/bin/certbot",
+        "/snap/bin/certbot",
+        "/opt/certbot/bin/certbot",
+    ] {
+        if std::path::Path::new(cand).exists() {
+            if let Ok(out) = Command::new(cand).arg("--version").output() {
+                if out.status.success() {
+                    return Some((*cand).to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn is_installed() -> bool {
-    Command::new("certbot").arg("--version")
-        .output().map(|o| o.status.success()).unwrap_or(false)
+    certbot_path().is_some()
 }
 
 pub fn ensure_webroot(cfg: &CertbotConfig) -> Result<(), String> {
@@ -355,7 +392,14 @@ pub fn issue(
         return Err("an email address is required (for Let's Encrypt account registration)".to_string());
     }
 
-    let mut cmd = Command::new("certbot");
+    // Always invoke certbot via its resolved path (handles /snap/bin
+    // etc. that aren't in systemd's PATH). is_installed() already
+    // guaranteed Some above; expect() can only fire on a TOCTOU race
+    // where someone uninstalled certbot in the last microseconds, in
+    // which case "certbot is not installed" is the right thing to say.
+    let certbot_bin = certbot_path()
+        .ok_or_else(|| "certbot is not installed on this node".to_string())?;
+    let mut cmd = Command::new(&certbot_bin);
     cmd.arg("certonly").arg("--non-interactive").arg("--agree-tos");
 
     // Email priority: explicit arg overrides saved default. Saved
@@ -458,7 +502,12 @@ pub fn issue_via_provider(
     // duration of the certbot call below.
     let creds = store.materialize(provider_id)?;
 
-    let mut cmd = Command::new("certbot");
+    // Resolve certbot via certbot_path() so snap installs at /snap/bin
+    // are found — systemd's default PATH doesn't include /snap/bin and
+    // pre-fix `Command::new("certbot")` silently failed there.
+    let certbot_bin = certbot_path()
+        .ok_or_else(|| "certbot is not installed on this node".to_string())?;
+    let mut cmd = Command::new(&certbot_bin);
     cmd.arg("certonly").arg("--non-interactive").arg("--agree-tos");
     cmd.arg("--email").arg(&resolved_email);
     for d in domains {
@@ -493,8 +542,8 @@ pub fn issue_via_provider(
 /// window — used when the admin wants to rotate the cert early (e.g.
 /// after changing SANs).
 pub fn renew(name: &str) -> Result<String, String> {
-    if !is_installed() { return Err("certbot is not installed".to_string()); }
-    let out = Command::new("certbot")
+    let certbot_bin = certbot_path().ok_or_else(|| "certbot is not installed".to_string())?;
+    let out = Command::new(&certbot_bin)
         .args(["renew", "--non-interactive", "--force-renewal", "--cert-name", name])
         .output()
         .map_err(|e| format!("spawn certbot: {e}"))?;
@@ -511,8 +560,8 @@ pub fn renew(name: &str) -> Result<String, String> {
 /// `/etc/letsencrypt/{live,archive}/<name>` leaves dangling renewal
 /// config in `/etc/letsencrypt/renewal/<name>.conf`.
 pub fn delete(name: &str) -> Result<String, String> {
-    if !is_installed() { return Err("certbot is not installed".to_string()); }
-    let out = Command::new("certbot")
+    let certbot_bin = certbot_path().ok_or_else(|| "certbot is not installed".to_string())?;
+    let out = Command::new(&certbot_bin)
         .args(["delete", "--non-interactive", "--cert-name", name])
         .output()
         .map_err(|e| format!("spawn certbot: {e}"))?;
@@ -556,8 +605,11 @@ fn reload_proxy(cfg: &CertbotConfig) -> Result<(), String> {
 pub fn renew_due() -> Result<(), String> {
     let cfg = CertbotConfig::load();
     if !cfg.auto_renew { return Ok(()); }
-    if !is_installed() { return Ok(()); }
-    let _ = Command::new("certbot")
+    let certbot_bin = match certbot_path() {
+        Some(p) => p,
+        None => return Ok(()), // no certbot installed → silently no-op (daily task)
+    };
+    let _ = Command::new(&certbot_bin)
         .args(["renew", "--non-interactive", "--quiet"])
         .output();
     // Always reload — cheap, and picks up anything certbot just
