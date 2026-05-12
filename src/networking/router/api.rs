@@ -5673,7 +5673,24 @@ fn cluster_node_id_set(
             normalize(n.cluster_name.as_deref())
         };
         if cname == want {
+            // A node can be referenced two ways in cluster-scoped
+            // config: by its locally-assigned key (`node-xxxx`, generated
+            // by add_server when the operator clicked "Add Node") OR by
+            // its own stable self_id (`ws-xxxx`, the value of
+            // /etc/wolfstack/node_id on the peer). Subnet routes,
+            // node_handles_route, and the analyzer all use self_id for
+            // cluster-wide stability — but for peers added via "Add
+            // Node" the local key differs from self_id, so a guard that
+            // only matches on `n.id` rejects every legitimately-pinned
+            // route. Insert both so the guard mirrors what the rest of
+            // the codebase actually does (see `ClusterState::get_node`
+            // which already falls back to a self_id scan).
             set.insert(n.id.clone());
+            if let Some(sid) = n.self_id.as_ref() {
+                if !sid.is_empty() {
+                    set.insert(sid.clone());
+                }
+            }
         }
     }
     Some(set)

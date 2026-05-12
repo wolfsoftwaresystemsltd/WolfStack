@@ -399,19 +399,31 @@ async fn main() -> std::io::Result<()> {
     // the permissions in place. See paths::harden_existing for scope.
     paths::harden_existing();
 
-    // Load or generate node ID
+    // Load or generate node ID. An empty / whitespace-only file is
+    // treated the same as a missing file — pre-fix, an empty file
+    // silently produced `node_id = ""`, which then leaked through
+    // every StatusReport. Peers stored `self_id: null` for this node
+    // forever (poll handler at agent/mod.rs preserves the previous
+    // self_id when the incoming string is empty), and any subnet
+    // route or other config pinned to this node's self_id became
+    // unmatchable in the strict-cluster guard.
     let node_id_file = paths::get().node_id_file;
-    let node_id = if let Ok(content) = std::fs::read_to_string(&node_id_file) {
-        content.trim().to_string()
-    } else {
-        let id = format!("ws-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-        if let Some(dir) = std::path::Path::new(&node_id_file).parent() {
-            let _ = std::fs::create_dir_all(dir);
+    let existing = std::fs::read_to_string(&node_id_file)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let node_id = match existing {
+        Some(id) => id,
+        None => {
+            let id = format!("ws-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+            if let Some(dir) = std::path::Path::new(&node_id_file).parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Err(e) = std::fs::write(&node_id_file, &id) {
+                tracing::error!("Failed to persist node ID: {}", e);
+            }
+            id
         }
-        if let Err(e) = std::fs::write(&node_id_file, &id) {
-            tracing::error!("Failed to persist node ID: {}", e);
-        }
-        id
     };
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
