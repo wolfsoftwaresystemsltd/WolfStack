@@ -11809,6 +11809,7 @@ function nginxNewSiteForm() {
                     <option value="">— don't auto-fill (enter paths manually below) —</option>
                 </select>
                 <small style="color:var(--text-muted);">Pick a Let's Encrypt cert from <code>/etc/letsencrypt/live/</code> to auto-fill the cert paths and switch HTTPS on. Wildcards reveal a subdomain field so one cert can serve every host in the zone.</small>
+                <div id="nginx-cert-picker-hint"></div>
             </div>
             <div class="form-group" id="nginx-subdomain-row" style="grid-column:span 2; display:none;">
                 <label style="font-weight:600; margin-bottom:4px; display:block;">Subdomain</label>
@@ -11885,11 +11886,20 @@ var nginxAvailableCerts = [];
 async function nginxLoadAvailableCerts() {
     const sel = document.getElementById('nginx-cert-picker');
     if (!sel) return;
+    const hintEl = document.getElementById('nginx-cert-picker-hint');
+    if (hintEl) hintEl.innerHTML = '';
     try {
-        const resp = await fetch('/api/configurator/nginx/available-certs');
+        // configuratorApiUrl auto-appends ?runtime=...&target=... when a
+        // container target is active, so the listing reflects what THAT
+        // container can see rather than the host's certs (which the
+        // container can't read unless /etc/letsencrypt is bind-mounted).
+        const resp = await fetch(configuratorApiUrl('/api/configurator/nginx/available-certs'));
         if (!resp.ok) return; // dropdown stays as just the "don't auto-fill" option
         const data = await resp.json();
         nginxAvailableCerts = data.certs || [];
+        const targetKind = data.target_kind || 'host';
+        const targetName = data.target_name || '';
+
         const opts = ['<option value="">— don\'t auto-fill (enter paths manually below) —</option>'];
         nginxAvailableCerts.forEach(function (c) {
             const tag = c.is_wildcard ? ' (wildcard)' : '';
@@ -11898,6 +11908,22 @@ async function nginxLoadAvailableCerts() {
             opts.push('<option value="' + escapeAttr(c.name) + '">' + escapeHtml(label) + '</option>');
         });
         sel.innerHTML = opts.join('');
+
+        // Target-aware empty-state hint. When configuring nginx inside a
+        // container that has no certs of its own, tell the operator
+        // explicitly what to do — the previous version silently showed
+        // host certs and the operator's nginx would fail to start with
+        // a path that didn't exist inside the container.
+        if (hintEl && nginxAvailableCerts.length === 0 && targetKind !== 'host') {
+            const which = targetKind === 'docker' ? 'Docker container' : 'LXC container';
+            hintEl.innerHTML =
+                '<div style="margin-top:6px;padding:8px 10px;background:rgba(234,179,8,0.1);border:1px solid rgba(234,179,8,0.3);border-radius:6px;color:var(--text-secondary);font-size:12px;line-height:1.5;">' +
+                'No Let\'s Encrypt certs found inside ' + escapeHtml(which) + ' <code>' + escapeHtml(targetName) + '</code>. Either:<br>' +
+                '&nbsp;• Bind-mount the host\'s <code>/etc/letsencrypt</code> into this container, OR<br>' +
+                '&nbsp;• Run certbot inside the container (it\'ll need its own DNS provider creds for DNS-01).<br>' +
+                'Host certs are deliberately not shown here — picking one would auto-fill a path the container can\'t read.' +
+                '</div>';
+        }
     } catch (e) {
         // Non-fatal — operator can still type cert paths manually.
     }

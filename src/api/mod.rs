@@ -20961,20 +20961,55 @@ pub async fn nginx_update_site(req: HttpRequest, state: web::Data<AppState>, pat
 }
 
 /// GET /api/configurator/nginx/available-certs — list installed
-/// Let's Encrypt certs from /etc/letsencrypt/live/ so the WolfProxy
-/// site-creation form can offer them in a dropdown. Wildcards (`*.zone`)
-/// are tagged so the UI can swap the server-name textbox for a
-/// "subdomain + zone-chip" pair and synthesise the final hostname.
+/// Let's Encrypt certs visible to the configurator target.
 ///
-/// This deliberately reads from the management node's host filesystem
-/// rather than via the `configurator` ExecTarget — certs live host-side
-/// even when the nginx site being configured is inside a container,
-/// and the operator will bind-mount `/etc/letsencrypt` into the
-/// container if they want them visible inside it.
-pub async fn nginx_available_certs(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+/// Target-aware: honours `?runtime=docker|lxc&target=name` the same way
+/// the sibling site-CRUD endpoints do. Container targets see their own
+/// `/etc/letsencrypt/live/` (which is empty unless certbot ran inside
+/// them or the host's `/etc/letsencrypt` is bind-mounted in). The
+/// previous host-only behaviour caused exactly this bug: operators
+/// configuring an LXC nginx site picked a host cert from the dropdown,
+/// got cert paths that didn't exist inside the LXC, and nginx failed
+/// to start. Refusing to silently leak host certs into a container
+/// context is the correct call — frontend renders an explicit empty
+/// state with bind-mount instructions.
+///
+/// Wildcards (`*.zone`) are tagged so the UI can swap the server-name
+/// textbox for a "subdomain + zone-chip" pair and synthesise the final
+/// hostname (e.g. `myhost` + `*.wolf.uk.com` → `myhost.wolf.uk.com`).
+pub async fn nginx_available_certs(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<ConfiguratorTarget>,
+) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let certs = crate::certbot::list_certs();
-    HttpResponse::Ok().json(serde_json::json!({ "certs": certs }))
+    let target = match parse_exec_target(&query) { Ok(t) => t, Err(r) => return r };
+    // Surface what the dropdown is reading so the UI can render the
+    // right empty-state copy ("no certs on this host" vs "no certs in
+    // this LXC — bind-mount /etc/letsencrypt or run certbot inside").
+    let target_kind = match &target {
+        crate::configurator::ExecTarget::Host => "host",
+        crate::configurator::ExecTarget::Docker(_) => "docker",
+        crate::configurator::ExecTarget::Lxc(_) => "lxc",
+    };
+    let target_name = match &target {
+        crate::configurator::ExecTarget::Host => String::new(),
+        crate::configurator::ExecTarget::Docker(n) | crate::configurator::ExecTarget::Lxc(n) => n.clone(),
+    };
+    // Subprocess fan-out (one openssl-per-cert) — keep it off the actix
+    // worker thread.
+    let probe_target = target.clone();
+    let certs = match web::block(move || crate::certbot::list_certs_via_target(&probe_target)).await {
+        Ok(v) => v,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("cert probe failed: {}", e)
+        })),
+    };
+    HttpResponse::Ok().json(serde_json::json!({
+        "certs": certs,
+        "target_kind": target_kind,
+        "target_name": target_name,
+    }))
 }
 
 /// DELETE /api/configurator/nginx/sites/{name} — delete a site

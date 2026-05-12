@@ -171,6 +171,117 @@ pub fn list_certs() -> Vec<CertSummary> {
     out
 }
 
+/// Same as `list_certs` but reads `/etc/letsencrypt/live/` from inside
+/// the given `ExecTarget`. Used by the WolfProxy nginx site form so
+/// the cert dropdown reflects the certs visible to the *container* (or
+/// host) that will actually serve nginx — picking a host cert when
+/// you're configuring an LXC container would auto-fill a path the
+/// container can't read, and nginx would fail to start.
+///
+/// Returns an empty Vec if the target has no /etc/letsencrypt/live/
+/// directory (typical for fresh containers that haven't had certbot
+/// run inside them and don't have /etc/letsencrypt bind-mounted from
+/// the host). Caller renders an "empty container" hint rather than a
+/// fallback to host certs — leaking host paths into a container
+/// context is exactly the bug we're fixing here.
+pub fn list_certs_via_target(target: &crate::configurator::ExecTarget) -> Vec<CertSummary> {
+    use crate::configurator::ExecTarget;
+    // Fast path for the host case — avoid the sudo sh subprocess
+    // round-trip openssl-per-cert that the ExecTarget abstraction
+    // would impose. Behaviour-equivalent, just cheaper.
+    if matches!(target, ExecTarget::Host) {
+        return list_certs();
+    }
+
+    // Probe the container's /etc/letsencrypt/live/ via ExecTarget.
+    if !target.path_exists(LE_LIVE_DIR).unwrap_or(false) {
+        return Vec::new();
+    }
+    let names = match target.list_dir(LE_LIVE_DIR) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for name in names {
+        // certbot drops a README at the top of LE_LIVE_DIR and uses
+        // per-cert subdirectories for everything else; same filter as
+        // the host-side walker.
+        if name == "README" || name.starts_with('.') {
+            continue;
+        }
+        let cert_pem = format!("{}/{}/cert.pem", LE_LIVE_DIR, name);
+        if !target.path_exists(&cert_pem).unwrap_or(false) {
+            continue;
+        }
+        let (domains, expires, days_remaining) = probe_cert_via_target(target, &cert_pem);
+        let wildcard = domains.iter().find(|d| d.starts_with("*."));
+        let is_wildcard = wildcard.is_some();
+        let base_zone = wildcard
+            .map(|d| d.trim_start_matches("*.").to_string())
+            .unwrap_or_default();
+        out.push(CertSummary {
+            name: name.clone(),
+            domains,
+            expires,
+            days_remaining,
+            cert_path: format!("{}/{}/fullchain.pem", LE_LIVE_DIR, name),
+            key_path: format!("{}/{}/privkey.pem", LE_LIVE_DIR, name),
+            is_wildcard,
+            base_zone,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Container-aware version of `probe_cert` — shells out to openssl
+/// *inside* the target. Same parsing logic; only the transport differs.
+fn probe_cert_via_target(
+    target: &crate::configurator::ExecTarget,
+    pem_path: &str,
+) -> (Vec<String>, String, i64) {
+    let mut domains = Vec::new();
+    let mut expires = String::new();
+    let mut days: i64 = 0;
+
+    // The path can be controlled by `name` from list_dir, but list_dir
+    // already filtered to entries under /etc/letsencrypt/live/. Quote
+    // defensively anyway — single-quote-escape via the same pattern as
+    // ExecTarget::read_file.
+    let q = pem_path.replace('\'', "'\\''");
+    let sans_cmd = format!("openssl x509 -in '{}' -noout -ext subjectAltName", q);
+    if let Ok(txt) = target.exec(&sans_cmd) {
+        for line in txt.lines() {
+            for part in line.split(',') {
+                if let Some(dom) = part.trim().strip_prefix("DNS:") {
+                    domains.push(dom.trim().to_string());
+                }
+            }
+        }
+    }
+    let end_cmd = format!("openssl x509 -in '{}' -noout -enddate", q);
+    if let Ok(txt) = target.exec(&end_cmd) {
+        let trimmed = txt.trim();
+        if let Some(val) = trimmed.strip_prefix("notAfter=") {
+            expires = val.to_string();
+            // Convert via `date -d` inside the same target so timezone
+            // semantics match — containers can have skewed clocks but
+            // openssl emits UTC, so date -d on the target is fine.
+            let date_cmd = format!("date -d '{}' +%s", val.replace('\'', "'\\''"));
+            if let Ok(out) = target.exec(&date_cmd) {
+                if let Ok(ts) = out.trim().parse::<i64>() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    days = (ts - now) / 86400;
+                }
+            }
+        }
+    }
+    (domains, expires, days)
+}
+
 /// Extract the SANs and notAfter from a PEM-encoded x509. We shell out
 /// to `openssl x509` rather than pulling in a rustls-pemfile/x509-parser
 /// dep tree — certbot already requires openssl on the host, so there's
