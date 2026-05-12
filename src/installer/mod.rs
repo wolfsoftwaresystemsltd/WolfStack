@@ -484,11 +484,54 @@ pub fn restart_service(service: &str) -> Result<String, String> {
     }
 }
 
-/// Request a certificate via certbot
+/// Marker the API layer keys off to render the "use DNS-01 / wildcard"
+/// CTA instead of a raw certbot error. Kept as a stable string so the
+/// frontend can match against it across builds.
+pub const CERT_PORT80_BUSY_PREFIX: &str = "PORT_80_BUSY: ";
+
+/// Probe whether anything is listening on TCP 0.0.0.0:80 / [::]:80.
+/// certbot's `--standalone` mode binds port 80 to serve the HTTP-01
+/// challenge; if WolfProxy / nginx / Caddy already holds it, certbot
+/// fails with a noisy "Could not bind to IPv4 or IPv6". Detect first
+/// so we can return a structured, actionable error instead.
+///
+/// We bind ourselves rather than parsing `/proc/net/tcp` so the check
+/// matches certbot's actual failure mode exactly: if certbot would fail
+/// to bind, we report busy; if it would succeed, we report free. Edge
+/// cases like SO_REUSEPORT are intentionally consistent — both sides
+/// see the same kernel.
+fn port_80_busy() -> bool {
+    use std::net::TcpListener;
+    // Try IPv4 first; if that's free, try IPv6 too — certbot tries
+    // both, so any in-use binding blocks it.
+    let v4_busy = TcpListener::bind(("0.0.0.0", 80)).is_err();
+    let v6_busy = TcpListener::bind(("::", 80)).is_err();
+    v4_busy || v6_busy
+}
+
+/// Request a certificate via certbot. Uses `--standalone` only when
+/// port 80 is free; otherwise returns a structured error that the UI
+/// can route to the "add a DNS provider" flow. The legacy API
+/// (`POST /api/certificates`) calls this; the new path
+/// (`POST /api/certs` with `dns_provider_id`) bypasses it entirely.
 pub fn request_certificate(domain: &str, email: &str) -> Result<String, String> {
     if !binary_exists("certbot") {
-
         install_certbot(detect_distro())?;
+    }
+
+    if port_80_busy() {
+        // Surface a stable, machine-parseable prefix so the UI can pivot
+        // to the wildcard / DNS-01 panel without having to grep certbot's
+        // free-form stderr.
+        return Err(format!(
+            "{prefix}port 80 is already in use on this host (typically by WolfProxy or nginx), \
+             so certbot's standalone HTTP-01 challenge can't bind it. Use the DNS-01 + wildcard \
+             flow instead: Settings → Certificates → DNS-01, or add a DNS provider under \
+             Settings → DNS Providers. DNS-01 also lets you issue one *.{domain} cert that covers \
+             every host in the zone.",
+            prefix = CERT_PORT80_BUSY_PREFIX,
+            domain = domain,
+        ));
     }
 
     let output = Command::new("sudo")

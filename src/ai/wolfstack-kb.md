@@ -249,6 +249,15 @@
 - After install: API response carries `restart_service` (`wolfstack` or `pveproxy`). Frontend opens a `confirm()` dialog — never auto-restart. User clicks OK → POST `/api/certificates/restart-service` schedules a deferred restart (1.5s for wolfstack so HTTP response flushes, 100ms for pveproxy)
 - Endpoints: `POST /api/certificates/install`, `POST /api/certificates/self-signed`, `POST /api/certificates/restart-service`, `GET /api/certificates/list`, `POST /api/certificates` (Let's Encrypt)
 
+## DNS providers + DNS-01 / wildcard certs (v22.14.12+)
+- Module: `src/dns_providers/mod.rs`. Store at `/etc/wolfstack/dns-providers.json` (mode 0600). Credentials are XOR-obfuscated using the same `wolfstack-dns-v1` key pattern as `xo::obfuscate_token` — defence is fs perms, not crypto.
+- Plugin whitelist (`KNOWN_PLUGINS`) gates which `--dns-<plugin>` strings can land on the certbot argv. Hand-editing the JSON to inject a new plugin is rejected at materialise time too (`issue_via_provider` re-checks).
+- Materialise-to-tmp pattern: `DnsProviderStore::materialize(id)` writes a unique `/run/wolfstack/dns-creds/<id>-<rand>.ini` at mode 0600, returns a `MaterializedCreds` RAII guard whose `Drop` unlinks the file. Caller MUST bind to a local across the entire `certbot` invocation; using `web::block` keeps the guard on one thread.
+- Endpoints: `GET/POST /api/dns-providers`, `PUT/DELETE /api/dns-providers/{id}`, `POST /api/dns-providers/{id}/test` (staging dry-run, stores result on the provider entry).
+- Cert issuance: `POST /api/certs` accepts `dns_provider_id` and `dns_provider_id` wins over `challenge` when set. Wildcards (`*.zone.tld`) work for free over DNS-01.
+- Port-80 collision: `installer::request_certificate` probes `TcpListener::bind(0.0.0.0:80)` + `[::]:80` before calling certbot. Busy → returns `PORT_80_BUSY:` prefixed error → API maps to 409 with `port_80_busy: true` → frontend `requestCertificate()` flips the radio to DNS-01 and surfaces the CTA. The old "raw certbot port 80 stderr" UX is gone.
+- UI: Settings → DNS Providers tab (add/edit/delete/test). Certificates page gains an HTTP-01/DNS-01 radio; DNS-01 reveals the provider dropdown and updates the help text. The provider dropdown is refreshed both when the tab is selected AND when the cert page loads, so newly-added providers appear without a hard reload.
+
 ## Installer (setup.sh)
 - Curl-piped: `curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash`
 - Flags: `--beta` (use beta branch), `--yes`/`-y` (skip confirmation), `--agent` (agent-only install — see Clustering), `--install-dir <path>` (redirect Cargo target dir to external mount for low-disk hosts)

@@ -264,6 +264,85 @@ pub fn issue(
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// Issue a cert using DNS-01 via a stored DNS provider. The provider
+/// credentials are materialised to a 0600 INI file under
+/// `/run/wolfstack/dns-creds/` for the duration of the certbot run, then
+/// unlinked via the `MaterializedCreds` Drop impl — even on error or
+/// panic. This is the wildcard-friendly path; pass `*.zone.tld` in
+/// `domains` and certbot does the rest.
+///
+/// `dry_run = true` hits Let's Encrypt's staging CA — used by the
+/// `/api/dns-providers/{id}/test` button so an operator can sanity-check
+/// their credentials without burning the 5-issuance-per-week rate limit
+/// on production.
+pub fn issue_via_provider(
+    domains: &[String],
+    email: &str,
+    provider_id: &str,
+    dry_run: bool,
+) -> Result<String, String> {
+    if !is_installed() {
+        return Err("certbot is not installed on this node".to_string());
+    }
+    if domains.is_empty() {
+        return Err("at least one domain is required".to_string());
+    }
+    let cfg = CertbotConfig::load();
+    let resolved_email = if email.is_empty() { cfg.email.clone() } else { email.to_string() };
+    if resolved_email.is_empty() {
+        return Err("an email address is required (for Let's Encrypt account registration)".to_string());
+    }
+
+    // Load the store fresh so any concurrent UI update of the provider
+    // credentials takes effect immediately (no in-memory caching).
+    let store = crate::dns_providers::DnsProviderStore::load();
+    let provider = store
+        .get(provider_id)
+        .ok_or_else(|| format!("DNS provider '{}' not found", provider_id))?;
+    if !crate::dns_providers::is_known_plugin(&provider.plugin) {
+        // Belt-and-braces: store::add already guards this, but a
+        // hand-edited /etc/wolfstack/dns-providers.json could slip a
+        // bad plugin past validation. Plugin is about to be
+        // interpolated into argv, so refuse here too.
+        return Err(format!("DNS provider has unsafe plugin '{}'", provider.plugin));
+    }
+
+    // Materialise creds. The guard unlinks the file when it goes out of
+    // scope — bind it to a local so the file lives for the full
+    // duration of the certbot call below.
+    let creds = store.materialize(provider_id)?;
+
+    let mut cmd = Command::new("certbot");
+    cmd.arg("certonly").arg("--non-interactive").arg("--agree-tos");
+    cmd.arg("--email").arg(&resolved_email);
+    for d in domains {
+        cmd.arg("-d").arg(d);
+    }
+    if dry_run {
+        cmd.arg("--dry-run");
+    }
+    // certbot DNS plugins follow a fixed naming convention:
+    //   --dns-<plugin>                      → use this plugin
+    //   --dns-<plugin>-credentials <path>   → INI file path
+    // Plugin is whitelisted (dns_providers::KNOWN_PLUGINS), so the
+    // string interpolation here can't introduce a new flag.
+    cmd.arg(format!("--dns-{}", provider.plugin));
+    cmd.arg(format!("--dns-{}-credentials", provider.plugin)).arg(&creds.path);
+
+    let out = cmd.output().map_err(|e| format!("spawn certbot: {e}"))?;
+    // `creds` drops here on either success or error — file is unlinked.
+    if !out.status.success() {
+        return Err(format!(
+            "certbot failed:\n{}",
+            String::from_utf8_lossy(&out.stderr),
+        ));
+    }
+    if !dry_run {
+        let _ = reload_proxy(&cfg);
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 /// Force-renew one cert by name. Skips certbot's 30-day freshness
 /// window — used when the admin wants to rotate the cert early (e.g.
 /// after changing SANs).

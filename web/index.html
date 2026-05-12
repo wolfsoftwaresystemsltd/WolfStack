@@ -3525,18 +3525,38 @@
                     <h3>Let's Encrypt (Certbot)</h3>
                 </div>
                 <div class="card-body">
+                    <div class="form-group" style="margin-bottom:12px;">
+                        <label style="display:block;margin-bottom:6px;">Challenge type</label>
+                        <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:13px;">
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                                <input type="radio" name="cert-challenge" value="http-01" checked onchange="updateCertChallengeUI()">
+                                <span><strong>HTTP-01</strong> &mdash; needs port 80 free</span>
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                                <input type="radio" name="cert-challenge" value="dns-01" onchange="updateCertChallengeUI()">
+                                <span><strong>DNS-01</strong> &mdash; works behind WolfProxy, allows <code>*.zone.tld</code></span>
+                            </label>
+                        </div>
+                    </div>
                     <div class="form-group">
-                        <label>Domain Name</label>
+                        <label>Domain name <span id="cert-domain-hint" style="color:var(--text-muted);font-weight:normal;font-size:12px;"></span></label>
                         <input type="text" class="form-control" id="cert-domain" placeholder="example.com">
                     </div>
+                    <div class="form-group" id="cert-dns-provider-row" style="margin-top: 12px; display:none;">
+                        <label>DNS provider</label>
+                        <select class="form-control" id="cert-dns-provider"></select>
+                        <small style="display:block;color:var(--text-muted);margin-top:4px;font-size:12px;">
+                            Manage providers under <a href="#" onclick="selectView('settings'); switchSettingsTab('dnsproviders'); return false;">Settings &rarr; DNS Providers</a>.
+                        </small>
+                    </div>
                     <div class="form-group" style="margin-top: 12px;">
-                        <label>Email Address</label>
+                        <label>Email address</label>
                         <input type="email" class="form-control" id="cert-email" placeholder="admin@example.com">
                     </div>
                     <button class="btn btn-primary" onclick="requestCertificate()" style="margin-top: 12px;">
                         <span class="ws-icon-clean-wrap" data-icon="lock"></span> Request Certificate (Let's Encrypt)
                     </button>
-                    <p style="margin-top: 12px; font-size: 13px; color: var(--text-muted);">
+                    <p style="margin-top: 12px; font-size: 13px; color: var(--text-muted);" id="cert-help-text">
                         Uses Certbot to obtain a free SSL certificate from Let's Encrypt.
                         Port 80 must be accessible from the internet. Certbot will be installed automatically if needed.
                         After obtaining a certificate, restart WolfStack to enable HTTPS.
@@ -4393,6 +4413,7 @@
                         <button class="settings-tab-btn" onclick="switchSettingsTab('users')"><span class="ws-icon-clean-wrap" data-icon="user"></span> Users &amp; Auth</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('security')"><span class="ws-icon-clean-wrap" data-icon="lock"></span> Security</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('passkeys')"><span class="ws-icon-clean-wrap" data-icon="key"></span> Passkeys</button>
+                        <button class="settings-tab-btn" onclick="switchSettingsTab('dnsproviders')"><span class="ws-icon-clean-wrap" data-icon="globe"></span> DNS Providers</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('systemcheck')"><span class="ws-icon-clean-wrap" data-icon="health"></span> System Check</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('paths')"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span> File Locations</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('reverseproxy')"><span class="ws-icon-clean-wrap" data-icon="globe"></span> Reverse Proxy</button>
@@ -5460,6 +5481,68 @@
 
                             </div>
                         </details>
+                    </div>
+
+                    <!-- ─── DNS Providers Tab ─── -->
+                    <!--
+                        Stored DNS-API credentials (Cloudflare, Route53, etc.) used to
+                        issue ACME DNS-01 certificates, including wildcards. Solves
+                        two problems at once: (1) you can request certs while WolfProxy
+                        holds port 80; (2) one *.zone.tld cert covers every node in
+                        the zone, so the operator manages 1-3 certs instead of N.
+                    -->
+                    <div id="settings-tab-dnsproviders" class="settings-tab-panel">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;max-width:760px;">
+                            <div>
+                                <h4 style="margin:0 0 4px 0;font-size:16px;font-weight:600;">DNS Providers</h4>
+                                <p style="font-size:13px;color:var(--text-muted);margin:0;">
+                                    Add DNS API credentials once; use them across the cluster to issue
+                                    wildcard certificates via the ACME DNS-01 challenge. Works while
+                                    WolfProxy holds port 80, and lets one <code>*.zone.tld</code> cert
+                                    cover every host in the zone.
+                                </p>
+                            </div>
+                            <button class="btn btn-primary btn-sm" onclick="dnsProviderShowAddForm()" id="btn-dns-add">
+                                + Add Provider
+                            </button>
+                        </div>
+
+                        <div id="dns-providers-add-form" style="display:none;background:var(--bg-input);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px;max-width:760px;">
+                            <h5 style="margin:0 0 10px;font-size:14px;">Add DNS Provider</h5>
+                            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
+                                <div>
+                                    <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;">Friendly name</label>
+                                    <input type="text" id="dns-add-name" placeholder="e.g. Cloudflare — wolf.uk.com"
+                                           style="width:100%;padding:8px 12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-size:13px;box-sizing:border-box;">
+                                </div>
+                                <div>
+                                    <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;">Plugin</label>
+                                    <select id="dns-add-plugin"
+                                            style="width:100%;padding:8px 12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-size:13px;">
+                                        <option value="">— pick a plugin —</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div style="margin-bottom:10px;">
+                                <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;">
+                                    Credentials INI <span style="color:var(--text-muted);">— paste the contents certbot expects, e.g. <code>dns_cloudflare_api_token = …</code></span>
+                                </label>
+                                <textarea id="dns-add-creds" rows="6" autocomplete="off" spellcheck="false"
+                                          placeholder="# Cloudflare API token
+dns_cloudflare_api_token = your_token_here"
+                                          style="width:100%;padding:10px 12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-size:12px;font-family:monospace;box-sizing:border-box;resize:vertical;"></textarea>
+                                <small style="color:var(--text-muted);">Stored at <code>/etc/wolfstack/dns-providers.json</code> (mode 0600), XOR-obfuscated. Not encryption — defence is filesystem permissions.</small>
+                            </div>
+                            <div style="display:flex;gap:8px;">
+                                <button class="btn btn-primary btn-sm" onclick="dnsProviderAdd()">Save Provider</button>
+                                <button class="btn btn-sm" onclick="document.getElementById('dns-providers-add-form').style.display='none'"
+                                        style="background:var(--bg-tertiary);border:1px solid var(--border);color:var(--text-primary);">Cancel</button>
+                            </div>
+                        </div>
+
+                        <div id="dns-providers-list" style="max-width:760px;min-height:60px;">
+                            <div style="color:var(--text-muted);text-align:center;padding:20px;">Loading…</div>
+                        </div>
                     </div>
 
                     <!-- ─── File Locations Tab ─── -->

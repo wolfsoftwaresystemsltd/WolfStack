@@ -4046,12 +4046,26 @@ pub struct CertRequest {
     pub email: String,
 }
 
-/// POST /api/certificates — request a certificate
+/// POST /api/certificates — request a certificate (legacy HTTP-01
+/// standalone path). When port 80 is busy (typical for hosts running
+/// WolfProxy), we return 409 Conflict with a `port_80_busy: true`
+/// marker so the frontend can pivot to the DNS-01 + wildcard flow
+/// without parsing free-form certbot stderr. For new integrations,
+/// prefer POST /api/certs with `dns_provider_id` set.
 pub async fn request_certificate(req: HttpRequest, state: web::Data<AppState>, body: web::Json<CertRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     match installer::request_certificate(&body.domain, &body.email) {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => {
+            if let Some(rest) = e.strip_prefix(installer::CERT_PORT80_BUSY_PREFIX) {
+                HttpResponse::Conflict().json(serde_json::json!({
+                    "error": rest,
+                    "port_80_busy": true,
+                }))
+            } else {
+                HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }))
+            }
+        }
     }
 }
 
@@ -5380,8 +5394,16 @@ pub struct CertIssueRequest {
     #[serde(default)]
     pub challenge: String,
     /// Path to an uploaded DNS provider credentials INI, if using DNS-01.
+    /// Legacy path — prefer `dns_provider_id` which uses the cluster
+    /// store and keeps the secret out of the per-request payload.
     #[serde(default)]
     pub dns_credentials_path: String,
+    /// ID of a saved DNS provider (see /api/dns-providers). When set,
+    /// the cert is issued via DNS-01 with that provider's credentials,
+    /// regardless of `challenge` — set this and you also get wildcard
+    /// support for free.
+    #[serde(default)]
+    pub dns_provider_id: String,
     #[serde(default)]
     pub dry_run: bool,
 }
@@ -5395,14 +5417,26 @@ pub async fn certs_issue(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let b = body.into_inner();
-    let challenge = if b.challenge.is_empty() { "webroot".to_string() } else { b.challenge };
-    let creds: Option<String> = if b.dns_credentials_path.is_empty() { None } else { Some(b.dns_credentials_path.clone()) };
     let domains = b.domains.clone();
     let email = b.email.clone();
     let dry_run = b.dry_run;
-    let result = web::block(move || {
-        crate::certbot::issue(&domains, &email, &challenge, creds.as_deref(), dry_run)
-    }).await;
+
+    // `dns_provider_id` wins over `challenge`: if the operator picked a
+    // saved provider, we issue via that regardless of the radio button
+    // setting. Wildcard support drops out for free — pass `*.zone.tld`
+    // in `domains` and certbot does the rest.
+    let result = if !b.dns_provider_id.is_empty() {
+        let pid = b.dns_provider_id.clone();
+        web::block(move || crate::certbot::issue_via_provider(&domains, &email, &pid, dry_run)).await
+    } else {
+        let challenge = if b.challenge.is_empty() { "webroot".to_string() } else { b.challenge };
+        let creds: Option<String> = if b.dns_credentials_path.is_empty() {
+            None
+        } else {
+            Some(b.dns_credentials_path.clone())
+        };
+        web::block(move || crate::certbot::issue(&domains, &email, &challenge, creds.as_deref(), dry_run)).await
+    };
     match result {
         Ok(Ok(out)) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "log": out })),
         Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
@@ -5456,6 +5490,184 @@ pub async fn certs_config_save(
         "saved": true,
         "nginx_snippet": crate::certbot::nginx_snippet_path().display().to_string(),
     }))
+}
+
+// ─── DNS Providers (for ACME DNS-01 + wildcard certs) ───────────────────
+//
+// Lets the operator save one credentials INI per DNS API (Cloudflare,
+// Route53, etc.) at the cluster level, then issue wildcard certs
+// without ever touching port 80. See src/dns_providers/mod.rs for
+// storage + obfuscation; see crate::certbot::issue_via_provider for the
+// certbot invocation that consumes a stored provider.
+
+#[derive(Deserialize)]
+pub struct DnsProviderCreate {
+    pub name: String,
+    pub plugin: String,
+    /// Multiline INI body the operator pasted in. Never logged.
+    pub credentials: String,
+}
+
+#[derive(Deserialize)]
+pub struct DnsProviderUpdate {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Empty string ⇒ "leave creds alone". Optional so the UI can
+    /// rename without re-pasting the secret.
+    #[serde(default)]
+    pub credentials: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct DnsProviderTestRequest {
+    /// Domain to use for the staging dry-run. Required — we don't
+    /// guess the user's zone. UI defaults this to whatever was in the
+    /// most recent cert request form.
+    #[serde(default)]
+    pub domain: String,
+    /// Email for the staging-CA registration. Falls back to the saved
+    /// `CertbotConfig.email` when empty.
+    #[serde(default)]
+    pub email: String,
+}
+
+/// GET /api/dns-providers — list providers (credentials redacted).
+pub async fn dns_providers_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let store = crate::dns_providers::DnsProviderStore::load();
+    HttpResponse::Ok().json(serde_json::json!({
+        "providers": store.list_redacted(),
+        "known_plugins": crate::dns_providers::KNOWN_PLUGINS,
+    }))
+}
+
+/// POST /api/dns-providers — add a new provider.
+pub async fn dns_providers_add(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<DnsProviderCreate>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let body = body.into_inner();
+    let mut store = crate::dns_providers::DnsProviderStore::load();
+    let id = match store.add(body.name, body.plugin, &body.credentials) {
+        Ok(id) => id,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+    if let Err(e) = store.save() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+    let provider = store.get(&id).map(|p| p.redacted());
+    HttpResponse::Ok().json(serde_json::json!({
+        "id": id,
+        "provider": provider,
+    }))
+}
+
+/// PUT /api/dns-providers/{id} — update name and/or credentials.
+pub async fn dns_providers_update(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<DnsProviderUpdate>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let body = body.into_inner();
+    let mut store = crate::dns_providers::DnsProviderStore::load();
+    // Pass None when the field is missing entirely; pass Some(&str)
+    // (which may be empty — store::update treats empty as "leave alone")
+    // when the operator submitted the field.
+    let creds = body.credentials.as_deref();
+    if let Err(e) = store.update(&id, body.name, creds) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
+    }
+    if let Err(e) = store.save() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+    HttpResponse::Ok().json(serde_json::json!({
+        "updated": true,
+        "provider": store.get(&id).map(|p| p.redacted()),
+    }))
+}
+
+/// DELETE /api/dns-providers/{id} — remove a provider.
+pub async fn dns_providers_remove(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let mut store = crate::dns_providers::DnsProviderStore::load();
+    if !store.remove(&id) {
+        return HttpResponse::NotFound().json(serde_json::json!({
+            "error": format!("provider '{}' not found", id)
+        }));
+    }
+    if let Err(e) = store.save() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "removed": true }))
+}
+
+/// POST /api/dns-providers/{id}/test — staging-CA dry-run to validate
+/// credentials. Stores the result on the provider entry so the UI can
+/// show "last tested OK 2 minutes ago" or surface the error.
+pub async fn dns_providers_test(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<DnsProviderTestRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let body = body.into_inner();
+    let domain = body.domain.trim().to_string();
+    if domain.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "a domain is required for the dry-run (e.g. example.com)"
+        }));
+    }
+    let email = body.email.clone();
+    let id_for_block = id.clone();
+    let result = web::block(move || {
+        crate::certbot::issue_via_provider(
+            &[domain],
+            &email,
+            &id_for_block,
+            true, // dry_run — Let's Encrypt staging
+        )
+    })
+    .await;
+
+    // Persist the result on the provider entry. The dry-run side of
+    // certbot still uses staging-CA rate limits, so we want the UI to
+    // remember "you already tested this 5 minutes ago — don't hammer".
+    let (success, message): (bool, String) = match result {
+        Ok(Ok(out)) => (true, truncate(&out, 240)),
+        Ok(Err(e)) => (false, truncate(&e, 240)),
+        Err(e) => (false, truncate(&e.to_string(), 240)),
+    };
+    let mut store = crate::dns_providers::DnsProviderStore::load();
+    if let Some(p) = store.get_mut(&id) {
+        p.last_tested_at = chrono::Utc::now().to_rfc3339();
+        p.last_test_result = if success { "ok".to_string() } else { message.clone() };
+        let _ = store.save();
+    }
+    if success {
+        HttpResponse::Ok().json(serde_json::json!({ "ok": true, "log": message }))
+    } else {
+        HttpResponse::BadRequest().json(serde_json::json!({ "error": message }))
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max).collect();
+    format!("{}…", cut)
 }
 
 // ─── GitHub Backup ──────────────────────────────────────────────────────
@@ -25762,6 +25974,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/cluster/secret/repush", web::post().to(cluster_secret_repush))
         .route("/api/cluster/secret/receive", web::post().to(cluster_secret_receive))
         .route("/api/cluster/leave", web::post().to(cluster_leave))
+        .route("/api/dns-providers", web::get().to(dns_providers_list))
+        .route("/api/dns-providers", web::post().to(dns_providers_add))
+        .route("/api/dns-providers/{id}", web::put().to(dns_providers_update))
+        .route("/api/dns-providers/{id}", web::delete().to(dns_providers_remove))
+        .route("/api/dns-providers/{id}/test", web::post().to(dns_providers_test))
         .route("/api/cluster/wolfnet-sync", web::post().to(wolfnet_sync_cluster))
         .route("/api/cluster/diagnose", web::post().to(cluster_diagnose))
         .route("/api/nodes", web::get().to(get_nodes))

@@ -66,6 +66,7 @@ mod plugins;
 mod sql_connections;
 mod netguard;
 mod certbot;
+mod dns_providers;
 mod threat_intel;
 #[allow(dead_code)]
 mod integrations;

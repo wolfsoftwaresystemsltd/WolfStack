@@ -8699,12 +8699,95 @@ async function deleteVm(name) {
 }
 
 // ─── Certificates ───
+// Reflect the HTTP-01 / DNS-01 radio: show or hide the provider dropdown,
+// update the domain hint, and reload providers when DNS mode is picked
+// so the dropdown is current. Wired to the radio's onchange in HTML.
+function updateCertChallengeUI() {
+    var sel = document.querySelector('input[name="cert-challenge"]:checked');
+    var mode = sel ? sel.value : 'http-01';
+    var row = document.getElementById('cert-dns-provider-row');
+    var hint = document.getElementById('cert-domain-hint');
+    var help = document.getElementById('cert-help-text');
+    if (mode === 'dns-01') {
+        if (row) row.style.display = '';
+        if (hint) hint.textContent = '— wildcards allowed, e.g. *.example.com';
+        if (help) help.textContent =
+            'Uses the DNS-01 challenge via the selected provider. ' +
+            'Works while WolfProxy holds port 80; supports wildcards (*.zone.tld) ' +
+            'so one cert can cover every host in the zone.';
+        // Refresh the dropdown so newly-added providers appear immediately
+        // when the user pivots after adding one in another tab.
+        loadDnsProviders();
+    } else {
+        if (row) row.style.display = 'none';
+        if (hint) hint.textContent = '';
+        if (help) help.textContent =
+            'Uses Certbot to obtain a free SSL certificate from Let\'s Encrypt. ' +
+            'Port 80 must be accessible from the internet. Certbot will be installed automatically if needed. ' +
+            'After obtaining a certificate, restart WolfStack to enable HTTPS.';
+    }
+}
+
+// Populate the per-provider <select> on the cert request form. Called by
+// loadDnsProviders after it refreshes dnsProvidersCache.
+function renderCertDnsProviderOptions() {
+    var sel = document.getElementById('cert-dns-provider');
+    if (!sel) return;
+    if (!dnsProvidersCache || dnsProvidersCache.length === 0) {
+        sel.innerHTML = '<option value="">— no providers configured —</option>';
+        return;
+    }
+    var prev = sel.value;
+    var opts = ['<option value="">— pick a provider —</option>'];
+    dnsProvidersCache.forEach(function (p) {
+        opts.push('<option value="' + escapeAttr(p.id) + '">' + escapeHtml(p.name) + ' (' + escapeHtml(p.plugin) + ')</option>');
+    });
+    sel.innerHTML = opts.join('');
+    if (prev) sel.value = prev;
+}
+
 async function requestCertificate() {
     const domain = document.getElementById('cert-domain').value.trim();
     const email = document.getElementById('cert-email').value.trim();
+    const challengeSel = document.querySelector('input[name="cert-challenge"]:checked');
+    const challenge = challengeSel ? challengeSel.value : 'http-01';
     if (!domain) { showToast('Enter a domain name', 'error'); return; }
     if (!email) { showToast('Enter an email address (required by Let\'s Encrypt)', 'error'); return; }
 
+    if (challenge === 'dns-01') {
+        const providerId = (document.getElementById('cert-dns-provider') || {}).value;
+        if (!providerId) {
+            showToast('Pick a DNS provider, or add one under Settings → DNS Providers.', 'warning');
+            return;
+        }
+        showToast('Requesting certificate for ' + domain + ' via DNS-01… This may take a minute.', 'info');
+        try {
+            const resp = await fetch(apiUrl('/api/certs'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    domains: [domain],
+                    email: email,
+                    dns_provider_id: providerId,
+                })
+            });
+            const data = await resp.json();
+            if (resp.ok) {
+                showToast('Certificate obtained for ' + domain + '. Restart WolfStack to enable HTTPS.', 'success');
+                if (typeof loadCertificates === 'function') loadCertificates();
+            } else {
+                showToast(data.error || 'Certificate request failed', 'error');
+            }
+        } catch (e) {
+            showToast('Failed: ' + e.message, 'error');
+        }
+        return;
+    }
+
+    // HTTP-01 (legacy standalone path). The backend returns 409 with
+    // `port_80_busy: true` when WolfProxy / nginx holds the port — pivot
+    // the operator into the DNS-01 flow rather than dumping certbot's
+    // stderr at them.
     showToast(`Requesting certificate for ${domain}... This may take a moment.`, 'info');
     try {
         const resp = await fetch(apiUrl('/api/certificates'), {
@@ -8716,6 +8799,12 @@ async function requestCertificate() {
         if (resp.ok) {
             showToast(data.message, 'success');
             loadCertificates();
+        } else if (resp.status === 409 && data.port_80_busy) {
+            // Auto-flip the form to DNS-01 so the operator can fix it
+            // without hunting through the docs.
+            const dnsRadio = document.querySelector('input[name="cert-challenge"][value="dns-01"]');
+            if (dnsRadio) { dnsRadio.checked = true; updateCertChallengeUI(); }
+            showToast(data.error || 'Port 80 busy — switched to DNS-01 (pick a provider below).', 'warning');
         } else {
             showToast(data.error || 'Certificate request failed', 'error');
         }
@@ -8868,6 +8957,11 @@ function prepareCertUpdate(certPath, keyPath) {
 }
 
 async function loadCertificates() {
+    // Refresh DNS providers in parallel so the request-cert form's
+    // DNS-01 dropdown is populated by the time the user clicks the radio.
+    if (typeof loadDnsProviders === 'function') {
+        loadDnsProviders().catch(function () { /* non-fatal */ });
+    }
     const el = document.getElementById('cert-list');
     if (!el) return;
     try {
@@ -28485,6 +28579,8 @@ function switchSettingsTab(tabName) {
     } else if (tabName === 'security') {
         loadClusterSecretStatus();
         loadLeaveClusterContext();
+    } else if (tabName === 'dnsproviders') {
+        loadDnsProviders();
     } else if (tabName === 'passkeys') {
         loadPasskeys();
     } else if (tabName === 'paths') {
@@ -31376,6 +31472,208 @@ async function repushClusterSecret() {
     } finally {
         btn.innerHTML = origHtml;
         btn.disabled = false;
+    }
+}
+
+// \u2500\u2500\u2500 DNS Providers (for ACME DNS-01 + wildcards) \u2500\u2500\u2500
+//
+// Cluster-level store of DNS-API credentials so the operator can issue
+// wildcard certs without ever touching port 80 (so it works alongside
+// WolfProxy). Backed by /api/dns-providers; credentials never round-trip
+// to the browser after they're saved.
+
+// Cached redacted list \u2014 keeps the cert-request UI's provider dropdown
+// in sync with whatever Settings \u2192 DNS Providers shows.
+var dnsProvidersCache = [];
+var dnsKnownPlugins = [];
+
+async function loadDnsProviders() {
+    var listEl = document.getElementById('dns-providers-list');
+    try {
+        var resp = await fetch('/api/dns-providers');
+        if (!resp.ok) {
+            if (listEl) listEl.innerHTML = '<div style="color:var(--danger);padding:12px;">Failed to load: HTTP ' + resp.status + '</div>';
+            return;
+        }
+        var data = await resp.json();
+        dnsProvidersCache = data.providers || [];
+        dnsKnownPlugins = data.known_plugins || [];
+        renderDnsProviders();
+        renderDnsPluginsDropdown();
+        // Re-render the cert form's dropdown if it's currently open.
+        if (typeof renderCertDnsProviderOptions === 'function') {
+            renderCertDnsProviderOptions();
+        }
+    } catch (e) {
+        if (listEl) listEl.innerHTML = '<div style="color:var(--danger);padding:12px;">Failed: ' + escapeHtml(e.message) + '</div>';
+    }
+}
+
+function renderDnsPluginsDropdown() {
+    var sel = document.getElementById('dns-add-plugin');
+    if (!sel) return;
+    var opts = ['<option value="">\u2014 pick a plugin \u2014</option>'];
+    dnsKnownPlugins.forEach(function (p) {
+        opts.push('<option value="' + escapeHtml(p) + '">' + escapeHtml(p) + '</option>');
+    });
+    sel.innerHTML = opts.join('');
+}
+
+function renderDnsProviders() {
+    var el = document.getElementById('dns-providers-list');
+    if (!el) return;
+    if (dnsProvidersCache.length === 0) {
+        el.innerHTML = '<div style="background:var(--bg-input);border:1px dashed var(--border);border-radius:10px;padding:24px;text-align:center;color:var(--text-muted);font-size:13px;">' +
+            'No DNS providers configured yet. Click "+ Add Provider" to add Cloudflare, Route53, etc.' +
+            '</div>';
+        return;
+    }
+    var html = '';
+    dnsProvidersCache.forEach(function (p) {
+        var testStatus = '';
+        if (p.last_test_result === 'ok') {
+            testStatus = '<span style="color:var(--success);font-size:12px;">\u2713 tested ' + escapeHtml(formatRelativeTime(p.last_tested_at)) + '</span>';
+        } else if (p.last_test_result) {
+            testStatus = '<span style="color:var(--danger);font-size:12px;" title="' + escapeHtml(p.last_test_result) + '">\u2717 test failed ' + escapeHtml(formatRelativeTime(p.last_tested_at)) + '</span>';
+        } else {
+            testStatus = '<span style="color:var(--text-muted);font-size:12px;">never tested</span>';
+        }
+        html += '<div style="background:var(--bg-input);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:10px;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">' +
+                '<div style="flex:1;min-width:0;">' +
+                    '<div style="font-weight:600;font-size:14px;margin-bottom:2px;">' + escapeHtml(p.name) + '</div>' +
+                    '<div style="font-size:12px;color:var(--text-muted);">' +
+                        'plugin <code>' + escapeHtml(p.plugin) + '</code> \u00b7 added ' + escapeHtml(formatRelativeTime(p.created_at)) + ' \u00b7 ' + testStatus +
+                    '</div>' +
+                '</div>' +
+                '<div style="display:flex;gap:6px;flex-shrink:0;">' +
+                    '<button class="btn btn-sm" onclick="dnsProviderShowTestPrompt(\'' + escapeAttr(p.id) + '\')" title="Run a Let\'s Encrypt staging dry-run to validate the credentials" style="font-size:12px;">Test</button>' +
+                    '<button class="btn btn-sm" onclick="dnsProviderShowUpdateForm(\'' + escapeAttr(p.id) + '\')" style="font-size:12px;">Update creds</button>' +
+                    '<button class="btn btn-sm" onclick="dnsProviderRemove(\'' + escapeAttr(p.id) + '\', \'' + escapeAttr(p.name) + '\')" style="background:var(--danger);color:#fff;border:1px solid var(--danger);font-size:12px;">Delete</button>' +
+                '</div>' +
+            '</div>' +
+        '</div>';
+    });
+    el.innerHTML = html;
+}
+
+function formatRelativeTime(iso) {
+    if (!iso) return '';
+    try {
+        var t = new Date(iso).getTime();
+        if (isNaN(t)) return iso;
+        var diff = Math.floor((Date.now() - t) / 1000);
+        if (diff < 60) return 'just now';
+        if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+        if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+        if (diff < 2592000) return Math.floor(diff / 86400) + 'd ago';
+        return new Date(iso).toISOString().slice(0, 10);
+    } catch (_) { return iso; }
+}
+
+function dnsProviderShowAddForm() {
+    var form = document.getElementById('dns-providers-add-form');
+    if (!form) return;
+    document.getElementById('dns-add-name').value = '';
+    document.getElementById('dns-add-plugin').value = '';
+    document.getElementById('dns-add-creds').value = '';
+    form.style.display = '';
+    form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+async function dnsProviderAdd() {
+    var name = document.getElementById('dns-add-name').value.trim();
+    var plugin = document.getElementById('dns-add-plugin').value;
+    var creds = document.getElementById('dns-add-creds').value;
+    if (!name) { showToast('Enter a name', 'warning'); return; }
+    if (!plugin) { showToast('Pick a DNS plugin', 'warning'); return; }
+    if (!creds.trim()) { showToast('Paste the credentials INI', 'warning'); return; }
+    var btn = document.getElementById('btn-dns-add');
+    var orig = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = 'Saving\u2026'; }
+    try {
+        var resp = await fetch('/api/dns-providers', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name, plugin: plugin, credentials: creds })
+        });
+        var data = await resp.json();
+        if (!resp.ok) { showToast(data.error || 'Failed', 'error'); return; }
+        showToast('DNS provider saved.', 'success');
+        document.getElementById('dns-providers-add-form').style.display = 'none';
+        // Wipe the secret from the DOM immediately on success.
+        document.getElementById('dns-add-creds').value = '';
+        await loadDnsProviders();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+    }
+}
+
+async function dnsProviderShowUpdateForm(id) {
+    var provider = dnsProvidersCache.find(function (p) { return p.id === id; });
+    if (!provider) return;
+    var newCreds = await showPrompt(
+        'Paste the new credentials INI for "' + provider.name + '".\n\nLeave blank to cancel.',
+        'Update DNS Provider Credentials'
+    );
+    if (newCreds === null) return;
+    if (!newCreds.trim()) { showToast('Cancelled (no creds entered)', 'warning'); return; }
+    try {
+        var resp = await fetch('/api/dns-providers/' + encodeURIComponent(id), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ credentials: newCreds })
+        });
+        var data = await resp.json();
+        if (!resp.ok) { showToast(data.error || 'Failed', 'error'); return; }
+        showToast('Credentials updated.', 'success');
+        await loadDnsProviders();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function dnsProviderShowTestPrompt(id) {
+    var provider = dnsProvidersCache.find(function (p) { return p.id === id; });
+    if (!provider) return;
+    var domain = await showPrompt(
+        'Enter a domain to use for the staging-CA dry-run (e.g. example.com).\n\n' +
+        'This calls Let\'s Encrypt staging \u2014 no production rate limits consumed.',
+        'Test DNS Provider'
+    );
+    if (domain === null) return;
+    if (!domain.trim()) { showToast('Cancelled (no domain)', 'warning'); return; }
+    showToast('Running staging dry-run for ' + domain + '\u2026', 'info');
+    try {
+        var resp = await fetch('/api/dns-providers/' + encodeURIComponent(id) + '/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain: domain.trim() })
+        });
+        var data = await resp.json();
+        if (resp.ok) {
+            showToast('Test succeeded for ' + provider.name + '.', 'success');
+        } else {
+            showToast('Test failed: ' + (data.error || 'unknown'), 'error');
+        }
+        await loadDnsProviders();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function dnsProviderRemove(id, name) {
+    if (!(await showConfirm('Delete DNS provider "' + name + '"?\n\nCertificates already issued via this provider are not affected. New issuance / renewal that depended on these credentials will fail until you add new ones.', 'Delete DNS Provider'))) return;
+    try {
+        var resp = await fetch('/api/dns-providers/' + encodeURIComponent(id), { method: 'DELETE' });
+        var data = await resp.json();
+        if (!resp.ok) { showToast(data.error || 'Failed', 'error'); return; }
+        showToast('Removed.', 'success');
+        await loadDnsProviders();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
     }
 }
 
