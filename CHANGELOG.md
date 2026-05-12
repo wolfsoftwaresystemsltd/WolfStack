@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v23.0.1: certbot snap-path detection + persistent DNS test error view** _(2026-05-12 — [`ebb7e2c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ebb7e2c6d22d037744fb30d08491dab8e3dfa895))_
 - **v23.0.0: container-aware cert listing for the WolfProxy site form** _(2026-05-12 — [`b2ccc20`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b2ccc206d39f1e742880b12c4b86f828db4172af))_
 - **v22.14.13: WolfProxy nginx site form auto-fills from installed certs** _(2026-05-12 — [`b576170`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b576170543d678ed4ebd57881de0498b906c3d9a))_
 - **v22.14.12: Leave Cluster + cluster-guard fix + DNS providers / wildcards** _(2026-05-12 — [`f609684`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f60968424858fc70f7bc215c581ad63fbfedfb35))_
