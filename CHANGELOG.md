@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v22.14.13: WolfProxy nginx site form auto-fills from installed certs** _(2026-05-12 — [`b576170`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b576170543d678ed4ebd57881de0498b906c3d9a))_
 - **v22.14.12: Leave Cluster + cluster-guard fix + DNS providers / wildcards** _(2026-05-12 — [`f609684`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f60968424858fc70f7bc215c581ad63fbfedfb35))_
 - **v22.14.11: Peer tombstones — operator removals stay removed** _(2026-05-12 — [`f2a64a3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f2a64a3d445948008daaa1fc55b7a6c08c886245))_
 - **v22.14.10: Batch WolfNet endpoint reconcile + orphan peer scanner** _(2026-05-11 — [`3d4f993`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3d4f9931db5e7e3d948e91579ad097062801a7f6))_
