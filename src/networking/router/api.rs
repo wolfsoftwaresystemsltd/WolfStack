@@ -5104,60 +5104,61 @@ pub async fn diagnostics_subnet_routes(req: HttpRequest, state: S) -> HttpRespon
                 ),
             )
         } else if !kernel_present {
-            (
-                "missing",
-                format!(
-                    "Broken — this node was supposed to install `{} via {}` into Linux, but the route is not there. The most common cause is that the route's Node Assignment doesn't match a real node in this cluster (look at the route's settings — if it shows a hostname like `myserver` instead of a `ws-…` ID, edit the route and pick the node from the dropdown). Other possible causes: the WolfStack service restarted at the wrong moment, or another program holds a conflicting route. Try: edit the route → save (re-applies on save), or restart WolfStack on this node.",
-                    r.subnet_cidr, r.gateway
-                ),
-            )
-        } else if kernel_matches {
-            // Route is in the kernel — but routing alone doesn't move
-            // packets. Inspect ip_forward, rp_filter, FORWARD chain and
-            // POSTROUTING MASQUERADE before declaring "ok". Sponsor
-            // klasSponsor (2026-04-27) hit a green health check but
-            // ping still failed because the plumbing wasn't installed.
-            let fwd = super::read_forwarding_state(r);
-            let mut missing: Vec<&str> = Vec::new();
-            if fwd.ip_forward.as_deref() != Some("1") {
-                missing.push("ip_forward (kernel forwarding disabled)");
-            }
-            if !fwd.forward_in {
-                missing.push("FORWARD ACCEPT (incoming on WolfNet)");
-            }
-            if !fwd.forward_out {
-                missing.push("FORWARD ACCEPT (return via WolfNet)");
-            }
-            if !fwd.masquerade {
-                missing.push("POSTROUTING MASQUERADE (LAN reply path)");
-            }
-            // rp_filter strict (1) is sometimes fine in simple flat
-            // topologies — flag as advisory only, don't block "ok".
-            let rp_strict = fwd.rp_filter_wolfnet.as_deref() == Some("1")
-                || fwd.rp_filter_all.as_deref() == Some("1");
-
-            if missing.is_empty() {
-                let advisory = if rp_strict {
-                    format!(" Note: rp_filter is in strict mode on `{}` — usually fine, but switch to loose (0) if pings still fail.", fwd.wolfnet_iface)
-                } else {
-                    String::new()
-                };
+            // `ip route show <exact-cidr>` returned nothing — but the
+            // destination may still be reachable through a wider prefix
+            // already in the kernel (e.g. configured /24 covered by an
+            // existing /16 via the same gateway). Probe `ip route get` to
+            // distinguish "truly missing" from "covered by broader route".
+            // klasSponsor 2026-05-13: `ip r` showed the route and ping
+            // worked, but diagnostics said missing.
+            let wn_iface = crate::networking::detect_wolfnet_iface()
+                .unwrap_or_else(|| "wolfnet0".to_string());
+            if super::route_covered_by_broader_prefix(&r.subnet_cidr, &r.gateway, &wn_iface) {
                 (
                     "ok",
                     format!(
-                        "Working — route `{} via {}` is installed and the kernel forwarding plumbing (ip_forward, FORWARD ACCEPT, MASQUERADE) is in place.{}",
-                        r.subnet_cidr, r.gateway, advisory
+                        "Working — `{} via {}` isn't an exact entry in Linux's table, but a wider route already covers it via the same gateway on `{}`. Traffic to addresses in `{}` will be routed correctly through `{}`. No action needed.",
+                        r.subnet_cidr, r.gateway, wn_iface, r.subnet_cidr, r.gateway
                     ),
                 )
             } else {
                 (
-                    "forwarding_misconfigured",
+                    "missing",
                     format!(
-                        "Half-broken — the route `{} via {}` is in the kernel, but traffic still won't pass because the following forwarding pieces are missing: {}. WolfStack v20.11.4+ installs all four automatically; older versions only added the route. Fix: edit the route → save (re-applies plumbing), or restart WolfStack on this node so apply_subnet_route() runs again.",
-                        r.subnet_cidr, r.gateway, missing.join(", ")
+                        "Broken — this node was supposed to install `{} via {}` into Linux, but the route is not there and no broader route covers it via `{}`. The most common cause is that the route's Node Assignment doesn't match a real node in this cluster (look at the route's settings — if it shows a hostname like `myserver` instead of a `ws-…` ID, edit the route and pick the node from the dropdown). Other possible causes: the WolfStack service restarted at the wrong moment, or another program holds a conflicting route. Try: edit the route → save (re-applies on save), or restart WolfStack on this node.",
+                        r.subnet_cidr, r.gateway, r.gateway
                     ),
                 )
             }
+        } else if kernel_matches {
+            // Consumer role (gateway role short-circuited above via
+            // `is_gateway_here`). Per `apply_subnet_route`, consumers only
+            // get the kernel `ip route` entry — NO iptables/sysctl plumbing.
+            // The plumbing exists on whichever node owns the gateway IP.
+            // klasSponsor 2026-05-13: diagnostics was reporting "Half-broken
+            // — forwarding missing" on consumer VPSes whose route actually
+            // worked end-to-end (ping passed). The plumbing it was looking
+            // for is *never installed here* and its absence is correct.
+            //
+            // rp_filter strict (1) is the only forwarding-state knob that
+            // can still bite a consumer (strict reverse-path can drop
+            // wolfnet-sourced replies on some kernels), so we surface it
+            // as an advisory without blocking "ok".
+            let fwd = super::read_forwarding_state(r);
+            let rp_strict = fwd.rp_filter_wolfnet.as_deref() == Some("1")
+                || fwd.rp_filter_all.as_deref() == Some("1");
+            let advisory = if rp_strict {
+                format!(" Note: rp_filter is in strict mode on `{}` — usually fine, but switch to loose (0) if pings still fail.", fwd.wolfnet_iface)
+            } else {
+                String::new()
+            };
+            (
+                "ok",
+                format!(
+                    "Working — route `{} via {}` is installed in Linux. As the consumer side, this node only needs the route entry (no iptables/sysctl plumbing — that lives on the gateway node `{}`).{}",
+                    r.subnet_cidr, r.gateway, r.gateway, advisory
+                ),
+            )
         } else if let Some(gw) = &kernel_gw {
             (
                 "wrong_gateway",
@@ -5293,6 +5294,198 @@ pub async fn remove_orphan_subnet_route(
             "error": e
         })),
     }
+}
+
+/// POST /api/router/subnet-routes/{id}/reapply — force `apply_subnet_route`
+/// to run for the named route on THIS node, return the result. This is
+/// the operator-visible path for the case where edit+save left the
+/// kernel state wrong (silent apply failure during config_receive on a
+/// peer, missing iptables binary, etc.). The frontend fans this out via
+/// the existing `/api/nodes/{id}/proxy/...` wrapper so the operator can
+/// re-apply on the specific node that diagnostics flagged as broken.
+///
+/// klasSponsor 2026-05-13: gateway diagnostics reported "gateway plumbing
+/// missing" and edit+save didn't fix it because the apply on the gateway
+/// node was failing silently inside `config_receive`. This endpoint
+/// surfaces those errors so the operator can see WHY the plumbing won't
+/// install.
+pub async fn reapply_subnet_route(
+    req: HttpRequest,
+    state: S,
+    path: web::Path<String>,
+) -> HttpResponse {
+    auth_or_return!(req, state);
+    let id = path.into_inner();
+    let self_id = crate::agent::self_node_id();
+
+    let route = {
+        let cfg = state.router.config.read().unwrap();
+        cfg.subnet_routes.iter().find(|r| r.id == id).cloned()
+    };
+    let route = match route {
+        Some(r) => r,
+        None => return HttpResponse::NotFound().json(serde_json::json!({
+            "ok": false,
+            "error": "Subnet route not found"
+        })),
+    };
+
+    if !route.enabled {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "ok": false,
+            "error": "Route is disabled — enable it from the route list before re-applying"
+        }));
+    }
+
+    let role = if super::node_is_route_gateway(&route) {
+        "gateway"
+    } else if super::route_targets_self(&route, &self_id) {
+        "consumer"
+    } else {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "ok": false,
+            "error": "This node is neither the configured consumer nor the gateway for this route — re-apply on the right node instead.",
+            "node_id": self_id,
+        }));
+    };
+
+    match super::apply_subnet_route(&route, None) {
+        Ok(()) => {
+            // Keep wolfnetd's longest-prefix-match map in sync with the
+            // configured set so any side-effect on the userspace daemon
+            // (e.g. dropped CIDR after a previous bad apply) is also
+            // resolved by the same operator click. Snapshot the routes
+            // and drop the read lock before the disk write + SIGHUP so
+            // we don't block concurrent writers during I/O.
+            let snapshot = {
+                let cfg = state.router.config.read().unwrap();
+                cfg.subnet_routes.clone()
+            };
+            super::sync_subnet_routes_to_wolfnet(&snapshot);
+            HttpResponse::Ok().json(serde_json::json!({
+                "ok": true,
+                "node_id": self_id,
+                "role": role,
+                "applied": {
+                    "subnet_cidr": route.subnet_cidr,
+                    "gateway": route.gateway,
+                },
+            }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "ok": false,
+            "node_id": self_id,
+            "role": role,
+            "error": e,
+        })),
+    }
+}
+
+/// POST /api/router/wolfnet/routes/resync — recompute the local route
+/// map from cluster gossip + local containers and flush to
+/// `/var/run/wolfnet/routes.json`. Sends SIGHUP to wolfnetd. Returns the
+/// route map that was written so the operator can verify the propagation
+/// actually landed.
+///
+/// klasSponsor 2026-05-13: container/VM WolfNet IPs unreachable from the
+/// VPS while peer-to-peer ping kept working — symptom of routes.json
+/// being stale on the VPS. The poll loop is supposed to keep it fresh,
+/// but a wedged poll or transient parse failure can leave entries
+/// missing. This button gives the operator a way to force a resync
+/// without restarting WolfStack.
+pub async fn wolfnet_routes_resync(req: HttpRequest, state: S) -> HttpResponse {
+    auth_or_return!(req, state);
+
+    // Build the route table the same way the periodic poll does, but
+    // synchronously and from the current cluster snapshot. We don't
+    // re-poll peers here — `poll_remote_nodes` is the canonical
+    // gatherer; this just re-applies what we've already collected.
+    let mut routes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    // Local container / VM / VIP IPs → this node's wolfnet IP.
+    let local_ips = crate::containers::wolfnet_used_ips();
+    let local_host_wn_ip = local_ips.first().cloned().unwrap_or_default();
+    if local_ips.len() > 1
+        && local_host_wn_ip.parse::<std::net::Ipv4Addr>().is_ok()
+    {
+        for ip in &local_ips[1..] {
+            if ip.is_empty() || ip == &local_host_wn_ip { continue; }
+            if ip.parse::<std::net::Ipv4Addr>().is_err() { continue; }
+            routes.insert(ip.clone(), local_host_wn_ip.clone());
+        }
+    }
+
+    // Remote nodes — pick up their advertised wolfnet_ips by re-polling
+    // the agent endpoint. Single client built outside the loop so all
+    // peers share a connection pool (matches the POLL_CLIENT pattern in
+    // agent::poll_remote_nodes).
+    let client = match crate::api::ipv4_only_client_builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .danger_accept_invalid_certs(true)
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "ok": false,
+            "error": format!("failed to build HTTP client: {}", e),
+        })),
+    };
+    let nodes = state.cluster.get_all_nodes();
+    let mut polled_peers: usize = 0;
+    for node in &nodes {
+        if node.is_self { continue; }
+        if !node.online { continue; }
+        // Proxmox-type members don't run a WolfStack agent — they're
+        // PVE hosts surfaced through the standalone integration and
+        // don't have `/api/agent/status`. Match the skip in
+        // `poll_remote_nodes` so we don't waste a 10-second timeout on
+        // every Proxmox peer in the cluster.
+        if node.node_type == "proxmox" { continue; }
+        let urls = [
+            format!("http://{}:{}/api/agent/status", node.address, node.port + 1),
+            format!("https://{}:{}/api/agent/status", node.address, node.port),
+            format!("http://{}:{}/api/agent/status", node.address, node.port),
+        ];
+        let mut got = false;
+        for url in &urls {
+            let resp = client.get(url)
+                .header("X-WolfStack-Secret", &state.cluster_secret)
+                .send().await;
+            let resp = match resp {
+                Ok(r) if r.status().is_success() => r,
+                _ => continue,
+            };
+            let msg: Result<crate::agent::AgentMessage, _> = resp.json().await;
+            if let Ok(crate::agent::AgentMessage::StatusReport { wolfnet_ips, .. }) = msg {
+                if wolfnet_ips.len() > 1 {
+                    let host_wn_ip = &wolfnet_ips[0];
+                    if !host_wn_ip.is_empty()
+                        && host_wn_ip.parse::<std::net::Ipv4Addr>().is_ok()
+                    {
+                        for container_ip in &wolfnet_ips[1..] {
+                            if container_ip.is_empty() || container_ip == host_wn_ip { continue; }
+                            if container_ip.parse::<std::net::Ipv4Addr>().is_err() { continue; }
+                            routes.insert(container_ip.clone(), host_wn_ip.clone());
+                        }
+                    }
+                }
+                got = true;
+                break;
+            }
+        }
+        if got { polled_peers += 1; }
+    }
+
+    let count = routes.len();
+    crate::containers::replace_wolfnet_routes(routes.clone());
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "ok": true,
+        "node_id": crate::agent::self_node_id(),
+        "polled_peers": polled_peers,
+        "route_count": count,
+        "routes": routes,
+    }))
 }
 
 // ─── LAN Health ───
@@ -6240,8 +6433,10 @@ pub fn configure(cfg: &mut actix_web::web::ServiceConfig) {
         .route("/api/router/subnet-routes",                 web::post().to(create_subnet_route))
         .route("/api/router/subnet-routes/diagnostics",     web::get().to(diagnostics_subnet_routes))
         .route("/api/router/subnet-routes/orphan/remove",   web::post().to(remove_orphan_subnet_route))
+        .route("/api/router/subnet-routes/{id}/reapply",    web::post().to(reapply_subnet_route))
         .route("/api/router/subnet-routes/{id}",            web::put().to(update_subnet_route))
         .route("/api/router/subnet-routes/{id}",            web::delete().to(delete_subnet_route))
+        .route("/api/router/wolfnet/routes/resync",         web::post().to(wolfnet_routes_resync))
         // Recovery — surfaces parse-error state, lists rollback
         // snapshots, and lets the user restore one or commit an
         // artefact-reconstructed config when no snapshot is left.

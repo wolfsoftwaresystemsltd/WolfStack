@@ -8296,14 +8296,32 @@
         // a node_id like "ws-1a2b3c4d"). When this happens, every node
         // says "not for this node" — looks deceptively like the route is
         // just configured for a different node, but really it's
-        // configured for a node that doesn't exist. We check directly
-        // against the topology rather than against diagnostics responses
-        // so an offline target node doesn't false-positive as orphan.
+        // configured for a node that doesn't exist.
+        //
+        // klasSponsor 2026-05-13: a node that has just restarted WolfStack
+        // briefly disappears from `wrState.topology.nodes` while it
+        // re-registers. Routes targeting it would then look orphaned
+        // here even though they're perfectly valid. Two extra guards:
+        //   1. Only run orphan detection when EVERY topology node
+        //      responded to its diagnostics call. If any node failed,
+        //      we don't yet know which IDs the cluster actually has.
+        //   2. A node ID that we DID receive a diagnostics response from
+        //      (via its `node_id` field in the response) is, by
+        //      definition, a real node — accept it even if topology
+        //      hasn't caught up yet.
         const knownNodeIds = new Set(
             (wrState.topology?.nodes || []).map(n => n.node_id).filter(Boolean)
         );
+        // Add every node ID that actually answered diagnostics — covers
+        // the restarting-node case where topology lags.
+        for (const r of results) {
+            if (r.error) continue;
+            const responderId = r.data?.node_id;
+            if (responderId) knownNodeIds.add(responderId);
+        }
         const orphanedRoutes = [];
-        if (knownNodeIds.size > 0) {
+        const orphanDetectionRan = knownNodeIds.size > 0 && nodeErrors.length === 0;
+        if (orphanDetectionRan) {
             for (const r of routeIndex.values()) {
                 const c = r.config;
                 if (!c.enabled || !c.node_id) continue; // disabled or cluster-wide → can't be orphaned
@@ -8317,6 +8335,7 @@
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
                     <div style="font-weight:600; font-size:13px; color:var(--text);">Subnet route diagnostics</div>
                     <div style="display:flex; gap:6px;">
+                        <button class="btn btn-sm" onclick="wrResyncContainerRoutes(this)" title="Force every node to recompute its /var/run/wolfnet/routes.json from cluster state and reload wolfnetd. Fixes the case where container/VM WolfNet IPs are unreachable from a peer even though wolfnet peers themselves work.">Re-sync container routes</button>
                         <button class="btn btn-sm" onclick="wrRunSubnetRouteDiagnostics()">Re-run</button>
                         <button class="btn btn-sm" onclick="document.getElementById('wr-subnet-routes-diagnostics').style.display='none'">Close</button>
                     </div>
@@ -8432,7 +8451,12 @@
 
         for (const r of routes) {
             const c = r.config;
-            const isOrphan = !!c.node_id && knownNodeIds.size > 0 && !knownNodeIds.has(c.node_id);
+            // Match the global orphan-detection guard above: only call a
+            // route "orphaned" when EVERY node responded AND the target
+            // ID isn't a node we either know via topology or just got a
+            // diagnostics response from. Otherwise routes briefly look
+            // orphaned during a restart of the target node.
+            const isOrphan = !!c.node_id && orphanDetectionRan && !knownNodeIds.has(c.node_id);
             // Friendly target label: show the node's hostname plus its
             // node_id when we can resolve it; show the cluster-wide
             // marker for cluster-scoped routes; flag orphans loudly so
@@ -8479,6 +8503,31 @@
                 const fwdHint = (isTarget(nodeId) && fwd === '0' && e.enabled)
                     ? `<div style="margin-top:6px; font-size:11px; color:#fde047;"><code>net.ipv4.ip_forward = 0</code> on this node — packets that need to traverse this route will be dropped. Enable forwarding with <code>sysctl -w net.ipv4.ip_forward=1</code> and persist via <code>/etc/sysctl.conf</code>.</div>`
                     : '';
+                // Surface a re-apply button on rows where the node has a
+                // role to play in this route (target/gateway) AND the
+                // status is something the operator can plausibly fix
+                // with a re-apply. klasSponsor 2026-05-13: "gateway
+                // plumbing missing, edit+save does nothing" — silent
+                // apply failure inside config_receive. The new POST
+                // /api/router/subnet-routes/{id}/reapply endpoint runs
+                // synchronously and returns the underlying iptables /
+                // sysctl error so the operator can see what broke.
+                const repairable = new Set([
+                    'gateway_misconfigured',
+                    'gateway_no_lan_path',
+                    'gateway_egress_unknown',
+                    'missing',
+                    'wrong_gateway',
+                    'unsupported_form',
+                    'forwarding_misconfigured',
+                    'kernel_query_failed',
+                ]);
+                const showReapply = e.enabled
+                    && (isTarget(nodeId) || e.is_gateway_here)
+                    && repairable.has(e.status);
+                const reapplyBtn = showReapply
+                    ? `<div style="margin-top:6px;"><button class="btn btn-sm" onclick="wrReapplySubnetRoute('${escHtml(nodeId)}','${escHtml(c.id)}', this)">Re-apply on this node</button></div>`
+                    : '';
                 nodeRows.push(`
                     <tr>
                         <td style="padding:8px; border-bottom:1px solid var(--border); vertical-align:top;">
@@ -8493,6 +8542,7 @@
                             ${kernelLine}
                             <div style="margin-top:4px; font-size:11px; color:var(--text-muted);">${escHtml(e.status_detail || '')}</div>
                             ${fwdHint}
+                            ${reapplyBtn}
                         </td>
                     </tr>
                 `);
@@ -8567,6 +8617,106 @@
         }
     }
 
+    /// Force `apply_subnet_route` to run synchronously for one route on
+    /// one specific node and surface the result (success or kernel/
+    /// iptables error). Drives the "Re-apply on this node" button shown
+    /// on diagnostic rows whose status is something the operator can
+    /// plausibly fix that way.
+    ///
+    /// Sponsor klasSponsor 2026-05-13: gateway diagnostics said "gateway
+    /// plumbing missing" and edit+save did nothing — silent apply
+    /// failure inside config_receive. This surfaces the underlying
+    /// error so the operator can see whether iptables is missing, the
+    /// FORWARD chain rejected the rule, etc.
+    async function wrReapplySubnetRoute(nodeId, routeId, btn) {
+        if (btn) { btn.disabled = true; btn.textContent = 'Re-applying…'; }
+        try {
+            const url = await wrNodeUrl(nodeId, '/api/router/subnet-routes/' + encodeURIComponent(routeId) + '/reapply');
+            const resp = await fetch(url, { method: 'POST' });
+            const j = await resp.json().catch(() => ({}));
+            if (!resp.ok || j.ok === false) {
+                if (btn) { btn.disabled = false; btn.textContent = 'Re-apply on this node'; }
+                showToast('Re-apply failed: ' + (j.error || `HTTP ${resp.status}`), 'error');
+                return;
+            }
+            showToast(`Re-applied on ${j.role || 'node'} — re-running diagnostics`, 'success');
+            await wrRunSubnetRouteDiagnostics();
+        } catch (e) {
+            if (btn) { btn.disabled = false; btn.textContent = 'Re-apply on this node'; }
+            showToast('Re-apply failed: ' + ((e && e.message) || String(e)), 'error');
+        }
+    }
+
+    /// Force every cluster node to recompute its `/var/run/wolfnet/routes.json`
+    /// from the current cluster state and SIGHUP wolfnetd. Used when
+    /// container/VM WolfNet IPs are unreachable from a peer even though
+    /// peer-to-peer WolfNet pings work — symptom of a stale or missing
+    /// route table on the peer (klasSponsor 2026-05-13).
+    ///
+    /// Renders a non-blocking result panel above the diagnostics list
+    /// rather than calling `alert()` — matches the "visible feedback,
+    /// no blocking dialogs" rule the rest of WolfRouter follows.
+    async function wrResyncContainerRoutes(btn) {
+        if (btn) { btn.disabled = true; btn.textContent = 'Re-syncing…'; }
+        const topoNodes = (wrState.topology?.nodes || [])
+            .filter(n => n && n.node_id);
+        if (topoNodes.length === 0) topoNodes.push({ node_id: '', node_name: 'this node' });
+        const results = await Promise.all(topoNodes.map(async (n) => {
+            try {
+                const url = await wrNodeUrl(n.node_id, '/api/router/wolfnet/routes/resync');
+                const r = await fetch(url, { method: 'POST' });
+                if (!r.ok) return { node: n, error: `HTTP ${r.status}: ${(await r.text()).slice(0, 200)}` };
+                return { node: n, data: await r.json() };
+            } catch (e) {
+                return { node: n, error: (e && e.message) || String(e) };
+            }
+        }));
+        if (btn) { btn.disabled = false; btn.textContent = 'Re-sync container routes'; }
+
+        const okResults = results.filter(r => !r.error && r.data?.ok);
+        const failedResults = results.filter(r => r.error || r.data?.ok === false);
+        const heading = `Re-synced container routes on ${okResults.length} of ${results.length} node${results.length === 1 ? '' : 's'}.`;
+        const okRows = okResults.map(r => {
+            const name = r.node?.node_name || r.data?.node_id || 'node';
+            const rc = r.data?.route_count ?? 0;
+            const pp = r.data?.polled_peers ?? 0;
+            return `<li><code>${escHtml(name)}</code>: ${rc} route${rc === 1 ? '' : 's'} after polling ${pp} peer${pp === 1 ? '' : 's'}</li>`;
+        }).join('');
+        const failedRows = failedResults.map(r => {
+            const name = r.node?.node_name || r.node?.node_id || 'node';
+            const msg = r.error || r.data?.error || 'unknown error';
+            return `<li><code>${escHtml(name)}</code>: ${escHtml(msg)}</li>`;
+        }).join('');
+
+        const panel = document.getElementById('wr-subnet-routes-diagnostics');
+        const banner = `
+            <div id="wr-resync-result" style="margin-bottom:14px; padding:12px 14px; background:${failedResults.length ? 'rgba(234,179,8,0.10)' : 'rgba(34,197,94,0.10)'}; border:1px solid ${failedResults.length ? 'rgba(234,179,8,0.45)' : 'rgba(34,197,94,0.45)'}; border-radius:8px;">
+                <div style="display:flex; justify-content:space-between; gap:8px; align-items:center;">
+                    <div style="font-weight:600; font-size:13px; color:var(--text);">${escHtml(heading)}</div>
+                    <button class="btn btn-sm" onclick="document.getElementById('wr-resync-result')?.remove()">Dismiss</button>
+                </div>
+                ${okRows ? `<div style="margin-top:8px; font-size:12px; color:var(--text-muted);">Succeeded:<ul style="margin:4px 0 0; padding-left:20px;">${okRows}</ul></div>` : ''}
+                ${failedRows ? `<div style="margin-top:8px; font-size:12px; color:#fca5a5;">Failed:<ul style="margin:4px 0 0; padding-left:20px;">${failedRows}</ul></div>` : ''}
+            </div>
+        `;
+        if (panel) {
+            const existing = document.getElementById('wr-resync-result');
+            if (existing) existing.remove();
+            // Insert just inside the diagnostics container, before the
+            // first child block, so the operator sees it immediately
+            // without scrolling.
+            const inner = panel.firstElementChild;
+            if (inner) inner.insertAdjacentHTML('afterbegin', banner);
+            else panel.insertAdjacentHTML('afterbegin', banner);
+        }
+
+        if (failedResults.length === 0) {
+            showToast('Container routes re-synced — wolfnetd reloaded on every node.', 'success');
+        } else {
+            showToast(`Re-sync had ${failedResults.length} failure${failedResults.length === 1 ? '' : 's'} — see details above.`, 'error');
+        }
+    }
+
     // Expose subnet route functions
     window.wrShowSubnetRouteEditor = wrShowSubnetRouteEditor;
     window.wrEditSubnetRoute = wrEditSubnetRoute;
@@ -8574,6 +8724,8 @@
     window.wrToggleSubnetRoute = wrToggleSubnetRoute;
     window.wrRunSubnetRouteDiagnostics = wrRunSubnetRouteDiagnostics;
     window.wrRemoveOrphanRoute = wrRemoveOrphanRoute;
+    window.wrReapplySubnetRoute = wrReapplySubnetRoute;
+    window.wrResyncContainerRoutes = wrResyncContainerRoutes;
 
     // ─── HTTP (L7) proxies — v23.2 multi-target + edge ─────────────────
     //

@@ -2408,6 +2408,24 @@ pub fn reconcile_subnet_routes(state: &RouterState, self_node_id: &str) {
             }
         }
     }
+
+    // Self-heal wolfnetd's userspace CIDR map. The kernel route +
+    // forwarding plumbing is only half the path on a TUN-based overlay
+    // — wolfnetd reads packets off the TUN and needs an explicit
+    // longest-prefix-match table (subnet_cidr → gateway WolfNet IP) to
+    // know which peer to encapsulate towards. That table lives at
+    // `/var/run/wolfnet/subnet-routes.json` — a tmpfs path that goes
+    // away on reboot. Without this call, the route would look perfect
+    // in `ip r` and the diagnostics page would be all-green, but every
+    // packet through the route would silently drop at wolfnetd's
+    // TUN-read step because its CIDR map was empty.
+    //
+    // klasSponsor 2026-05-13: "subnet route stopped working even when
+    // it shows up on ip r and is showing all green in wolfrouter".
+    // The internal sync function short-circuits on a content match so
+    // a tick that finds the file already up-to-date is free (no write,
+    // no SIGHUP).
+    sync_subnet_routes_to_wolfnet(&cfg.subnet_routes);
 }
 
 /// Disable every subnet_route whose gateway equals `gateway_ip`, and
@@ -2783,7 +2801,13 @@ pub fn first_addr_in_cidr(cidr: &str) -> Option<String> {
 pub fn sync_subnet_routes_to_wolfnet(routes: &[SubnetRoute]) {
     use std::process::Command;
 
-    let map: std::collections::HashMap<String, String> = routes.iter()
+    // BTreeMap (not HashMap) so the JSON serialization is deterministic
+    // across calls — `serde_json::to_string_pretty` walks the map in
+    // iteration order, and HashMap iteration is randomized per-process.
+    // The reconciler self-heal below relies on the content-comparison
+    // short-circuit to avoid SIGHUPing wolfnetd every minute; without a
+    // stable key order, the comparison would always claim "differs".
+    let map: std::collections::BTreeMap<String, String> = routes.iter()
         .filter(|r| r.enabled)
         .map(|r| (r.subnet_cidr.clone(), r.gateway.clone()))
         .collect();
@@ -2800,6 +2824,20 @@ pub fn sync_subnet_routes_to_wolfnet(routes: &[SubnetRoute]) {
             return;
         }
     };
+
+    // Skip the disk write + SIGHUP when the file already has the exact
+    // same content. Lets `reconcile_subnet_routes` call this every
+    // 60-second tick as a self-heal (klasSponsor 2026-05-13: kernel
+    // route was correct and all diagnostics green, but traffic dropped
+    // — wolfnetd's CIDR map at /var/run/wolfnet/subnet-routes.json had
+    // gone missing on tmpfs and nothing was re-writing it) without
+    // hammering wolfnetd with a SIGHUP per minute. Treats "file missing"
+    // as "content differs" so the heal-on-startup case still fires.
+    let existing = std::fs::read_to_string(path).ok();
+    let needs_write = existing.as_deref() != Some(json.as_str());
+    if !needs_write {
+        return;
+    }
     if let Err(e) = std::fs::write(path, &json) {
         tracing::warn!("Failed to write {}: {}", path, e);
         return;
@@ -2848,6 +2886,45 @@ fn inspect_subnet_egress(cidr: &str) -> (Option<String>, Option<String>) {
         }
     }
     (iface, src)
+}
+
+/// Check whether the kernel would route a packet destined for the first
+/// host in `cidr` via `expected_gateway` and `expected_iface` — meaning
+/// the destination is reachable even when `ip route show <cidr>` returns
+/// nothing (e.g. a wider /16 already in the table covers the configured
+/// /24). Used by the diagnostics endpoint to distinguish "actually
+/// missing" from "covered by broader route". Returns true only when the
+/// kernel's `via` and `dev` both match the configured route.
+///
+/// klasSponsor 2026-05-13: diagnostics reported "missing" on a consumer
+/// VPS whose `ip r` clearly showed coverage via the right gateway. Root
+/// cause: `ip route show 10.10.10.0/24` returned empty because the
+/// kernel had `10.10.0.0/16 via ...`, but the subnet WAS reachable.
+pub fn route_covered_by_broader_prefix(cidr: &str, expected_gateway: &str, expected_iface: &str) -> bool {
+    use std::process::Command;
+    let probe_ip = match first_addr_in_cidr(cidr) {
+        Some(ip) => ip,
+        None => return false,
+    };
+    let out = Command::new("ip")
+        .args(["-4", "route", "get", &probe_ip])
+        .output();
+    let stdout = match out {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return false,
+    };
+    let text = String::from_utf8_lossy(&stdout);
+    let mut gw: Option<String> = None;
+    let mut iface: Option<String> = None;
+    let mut tokens = text.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        match tok {
+            "via" => gw = tokens.next().map(|s| s.to_string()),
+            "dev" => iface = tokens.next().map(|s| s.to_string()),
+            _ => {}
+        }
+    }
+    gw.as_deref() == Some(expected_gateway) && iface.as_deref() == Some(expected_iface)
 }
 
 /// Tear down the iptables rules that `enable_subnet_route_forwarding`

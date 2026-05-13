@@ -924,6 +924,22 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                 .send().await
             {
                 Ok(resp) => {
+                    // Only treat a peer as "polled" when we actually
+                    // parsed a StatusReport from its body. A 401 / 404 /
+                    // 500 response from a misconfigured peer used to fall
+                    // into the catch-all `poll_ok = true` below — the
+                    // node looked successfully polled while we'd
+                    // collected zero data, which then caused
+                    // `replace_wolfnet_routes` to wipe that host's
+                    // container/VM routes from `routes.json` (because
+                    // its host wolfnet IP wasn't added to `fresh_hosts`
+                    // and existing entries pointing at it were dropped
+                    // from `final_routes`). klasSponsor 2026-05-13:
+                    // intermittent container/VM WolfNet IP unreachability
+                    // from the VPS while peer-to-peer ping kept working.
+                    if !resp.status().is_success() {
+                        continue;
+                    }
                     if let Ok(msg) = resp.json::<AgentMessage>().await {
                         if let AgentMessage::StatusReport { node_id: peer_self_id, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes, deleted_ids, wolfnet_ips, has_docker, has_lxc, has_kvm, workload_subnets: peer_workload_subnets, license_key } = msg {
                             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
@@ -1119,32 +1135,62 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                     }
                                 }
                             }
-                            // Collect subnet routes from this node's wolfnet_ips
-                            // First IP = host WolfNet address, remaining = container/VM IPs
+                            // Collect subnet routes from this node's wolfnet_ips.
+                            // First IP = host WolfNet address, remaining =
+                            // container/VM IPs. Validate the host entry
+                            // before treating it as a gateway: if `wolfnet0`
+                            // had no IP on the peer at the moment its
+                            // status was built, `wolfnet_used_ips()`
+                            // returns containers WITHOUT a host index 0,
+                            // and the old code would happily map
+                            // container_b → container_a — poisoning
+                            // routes.json on receivers.
                             if wolfnet_ips.len() > 1 {
                                 let host_wn_ip = &wolfnet_ips[0];
-
-                                for container_ip in &wolfnet_ips[1..] {
-                                    if !container_ip.is_empty() {
+                                let host_ok = !host_wn_ip.is_empty()
+                                    && host_wn_ip.parse::<std::net::Ipv4Addr>().is_ok();
+                                if host_ok {
+                                    for container_ip in &wolfnet_ips[1..] {
+                                        if container_ip.is_empty() { continue; }
+                                        if container_ip == host_wn_ip { continue; }
+                                        if container_ip.parse::<std::net::Ipv4Addr>().is_err() { continue; }
                                         subnet_routes.insert(container_ip.clone(), host_wn_ip.clone());
                                     }
+                                } else {
+                                    tracing::warn!(
+                                        "poll_remote_nodes: peer {} returned {} wolfnet_ips with no valid host IP at [0]; skipping container-route propagation for this peer",
+                                        node.id, wolfnet_ips.len()
+                                    );
                                 }
-                            } else if !wolfnet_ips.is_empty() {
-
                             }
                             // Cache the peer's host WolfNet IP so future
                             // build_node_urls calls can insert a
                             // HTTP-over-WolfNet attempt before falling
                             // back to plaintext on the public address.
+                            // Same validity guard as above — never cache
+                            // a bogus "host IP" that's actually a
+                            // container address.
                             if let Some(host_wn_ip) = wolfnet_ips.first() {
-                                if !host_wn_ip.is_empty() {
+                                if !host_wn_ip.is_empty()
+                                    && host_wn_ip.parse::<std::net::Ipv4Addr>().is_ok() {
                                     crate::api::record_node_wolfnet_ip(&node.address, host_wn_ip);
                                 }
                             }
+                            // Only mark this poll as successful when we
+                            // actually parsed a StatusReport. A 200 with
+                            // a non-StatusReport body (corrupt agent, mid-
+                            // restart partial JSON, version mismatch)
+                            // used to also set poll_ok=true and cause
+                            // the route-merge phase to treat the peer as
+                            // authoritative-but-empty, dropping its
+                            // routes.
+                            poll_ok = true;
                         }
                     }
-                    poll_ok = true;
-                    break; // Success — no need to try the next URL
+                    if poll_ok { break; }
+                    // Body wasn't a StatusReport — try the next URL in
+                    // the fallback chain rather than declaring success.
+                    continue;
                 }
                 Err(_) => {
                     continue; // Try next URL
