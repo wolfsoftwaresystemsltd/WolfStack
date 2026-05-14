@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v23.2.2: per-cluster threat-intel — off by default, dry-run, typed-confirm promote** _(2026-05-14 — [`94baa0b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/94baa0bcec612716cb88e8846e270ccd3c967f9d))_
 - **v23.2.1: critical safety fixes for threat-intel blocklist** _(2026-05-14 — [`67ea1d7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/67ea1d7e920c3cc26cfeee961fc373fa42039efe))_
 - **v23.2.0: Real protection for WolfStack + Proxmox clusters** _(2026-05-14 — [`c2f334d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c2f334d91983da16ee2d3c2aee0c6e417e9369d3))_
 - **v23.1.2: compromise_indicators predictive analyzer with auto-remediation** _(2026-05-14 — [`2751ad4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2751ad49d6fba8d404b74a76e61c772a831c2a29))_
