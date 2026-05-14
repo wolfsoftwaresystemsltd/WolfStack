@@ -407,6 +407,99 @@ pub struct RunningKernel {
 // OSV vuln model — what we cache from the API
 // ---------------------------------------------------------------------
 
+/// Coarse "how hard is this to exploit" bucket derived from the CVSS
+/// vector. Three categories matching the operator's mental model:
+///
+/// - **Unauthenticated remote** — the worst kind. Attacker reaches the
+///   service over the network with no credentials. CVSS: `AV:N + PR:N`.
+/// - **Authenticated remote** — network-reachable but needs a valid
+///   login first. Still bad on shared hosts / multi-tenant, but a
+///   different priority than unauth. CVSS: `AV:N + PR:L|H`, or any
+///   `AV:A` (adjacent network — same broadcast domain only).
+/// - **Local** — needs shell access or physical proximity. CVSS:
+///   `AV:L` or `AV:P`.
+///
+/// Without this split, operators get drowned in 200-CVE lists where
+/// the unauth-RCE that needs patching right now is mixed in with
+/// "needs root on the box already" gadget-chain bugs. The inbox
+/// groups by category so the actionable stuff floats to the top.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExploitCategory {
+    UnauthRemote,
+    AuthRemote,
+    Local,
+    /// Couldn't derive from the available CVSS vector (no v3/v4 vector,
+    /// or `AV:` metric missing). Shown in its own bucket so it's
+    /// honest rather than guessed.
+    Unknown,
+}
+
+impl ExploitCategory {
+    /// Stable-ordered label for UI sections. The frontend matches on
+    /// these strings to render the right accent colour — see
+    /// app.js → predictive evidence section.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ExploitCategory::UnauthRemote => "Exploitable without login",
+            ExploitCategory::AuthRemote => "Needs an authenticated session",
+            ExploitCategory::Local => "Local access required",
+            ExploitCategory::Unknown => "Unknown attack vector",
+        }
+    }
+}
+
+/// Derive the exploit category from a single CVSS vector string.
+/// Reads `AV:` (Attack Vector) and `PR:` (Privileges Required) — both
+/// present in v3.x and v4.0. CVSS v2 has `AV:` and `Au:` (Authentication
+/// required) but uses different value letters; we map those too so
+/// older entries don't fall to Unknown.
+pub fn exploit_category_from_vector(vector: &str) -> ExploitCategory {
+    let metrics = match parse_vector(vector) {
+        Some(m) => m,
+        None => return ExploitCategory::Unknown,
+    };
+    let av = metrics.get("AV").map(String::as_str);
+    // CVSS v3/v4: PR (Privileges Required). N = none, L/H = some.
+    // CVSS v2: Au (Authentication). N = none required, S/M = one or more.
+    let needs_auth = match metrics.get("PR").map(String::as_str) {
+        Some("N") => false,
+        Some("L") | Some("H") => true,
+        _ => match metrics.get("Au").map(String::as_str) {
+            Some("N") => false,
+            Some("S") | Some("M") => true,
+            _ => false,  // unknown — assume worst case (no auth needed)
+        },
+    };
+    match av {
+        Some("N") if !needs_auth => ExploitCategory::UnauthRemote,
+        Some("N") => ExploitCategory::AuthRemote,
+        // Adjacent network = same LAN/VLAN/bridge. Treated as the
+        // authenticated-remote bucket because the attacker needs to
+        // already be inside the network perimeter — a meaningful step
+        // up from random-internet-host but less severe than full
+        // local shell.
+        Some("A") => ExploitCategory::AuthRemote,
+        Some("L") | Some("P") => ExploitCategory::Local,
+        _ => ExploitCategory::Unknown,
+    }
+}
+
+/// Pick the exploit category for a vuln given its set of severity
+/// entries. Prefers v3, then v4, then v2 — mirrors `pick_best_cvss`
+/// so the category and the score come from the same vector.
+fn pick_best_exploit_category(severities: &[OsvSeverityEntry]) -> ExploitCategory {
+    for ty in &["CVSS_V3", "CVSS_V4", "CVSS_V2"] {
+        if let Some(s) = severities.iter().find(|s| s.ty == *ty) {
+            let cat = exploit_category_from_vector(&s.score);
+            if cat != ExploitCategory::Unknown {
+                return cat;
+            }
+        }
+    }
+    ExploitCategory::Unknown
+}
+
 /// A single OSV vulnerability record, distilled to the fields we
 /// actually use. Cached so repeat scans don't refetch /v1/vulns/{id}.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -446,7 +539,15 @@ pub struct OsvVuln {
     /// the upstream record lists no fixed event.
     #[serde(default)]
     pub fixed_versions: HashMap<String, String>,
+    /// Coarse exploit category derived from the CVSS vector — see
+    /// [`ExploitCategory`]. Defaults to `Unknown` when this record
+    /// pre-dates the v23.4.x cache schema or has no parseable vector.
+    /// The next OSV refresh will repopulate it.
+    #[serde(default = "default_exploit_category")]
+    pub exploit_category: ExploitCategory,
 }
+
+fn default_exploit_category() -> ExploitCategory { ExploitCategory::Unknown }
 
 /// One reference URL on an OSV record, with its `type` so the inbox
 /// can label the chip ("Advisory", "Web", "Fix", etc.). The cached
@@ -1411,6 +1512,7 @@ fn osv_fetch_vuln(
 /// Reduce an OsvFullVuln to the fields we cache.
 fn distill_full(full: OsvFullVuln) -> OsvVuln {
     let cvss_score = pick_best_cvss(&full.severity);
+    let exploit_category = pick_best_exploit_category(&full.severity);
     let advisory_url = full.references.iter()
         .find(|r| r.ty.eq_ignore_ascii_case("ADVISORY"))
         .or_else(|| full.references.iter().find(|r| r.ty.eq_ignore_ascii_case("WEB")))
@@ -1446,6 +1548,7 @@ fn distill_full(full: OsvFullVuln) -> OsvVuln {
         references,
         modified: full.modified,
         fixed_versions,
+        exploit_category,
     }
 }
 
@@ -2105,11 +2208,33 @@ fn build_target_proposal(g: &TargetGroup<'_>, ctx: &Context, suppressed_no_fix: 
         )
     };
 
+    // Category counts for the framing sentence. Surfacing the unauth
+    // count up-front gives operators a 5-second triage instead of
+    // making them scroll the evidence list.
+    let unauth_count = g.findings.iter()
+        .filter(|f| f.vuln.exploit_category == ExploitCategory::UnauthRemote)
+        .count();
+    let auth_count = g.findings.iter()
+        .filter(|f| f.vuln.exploit_category == ExploitCategory::AuthRemote)
+        .count();
+    let local_count = g.findings.iter()
+        .filter(|f| f.vuln.exploit_category == ExploitCategory::Local)
+        .count();
+
     let why = format!(
-        "OSV.dev's database matched {} CVE{} against installed package(s) on {}. {}{}{}",
+        "OSV.dev's database matched {} CVE{} against installed package(s) on {}. {}{}{}{}",
         total,
         if total == 1 { "" } else { "s" },
         target_label,
+        if unauth_count > 0 {
+            format!(
+                "{} {} exploitable without login (network-reachable, no credentials needed) — \
+                 these are the ones to patch first. ",
+                unauth_count, if unauth_count == 1 { "is" } else { "are" },
+            )
+        } else {
+            String::new()
+        },
         if kev_count > 0 {
             format!(
                 "{} of these {} on the CISA Known Exploited Vulnerabilities list — \
@@ -2122,8 +2247,10 @@ fn build_target_proposal(g: &TargetGroup<'_>, ctx: &Context, suppressed_no_fix: 
         } else if patchable_count > 0 {
             format!(
                 "{} can be patched now by running your distro's security upgrade; \
-                 {} need a patched version from upstream that has not yet shipped. ",
+                 {} need a patched version from upstream that has not yet shipped. \
+                 Breakdown: {} unauth-remote, {} auth-remote, {} local. ",
                 patchable_count, awaiting_count,
+                unauth_count, auth_count, local_count,
             )
         } else {
             "None of these have a patched build available upstream yet — \
@@ -2188,74 +2315,94 @@ fn build_target_proposal(g: &TargetGroup<'_>, ctx: &Context, suppressed_no_fix: 
         });
     }
 
-    // Split visible findings by whether a patch is available. Each
-    // section is independently sorted by KEV → CVSS → CVE id so the
-    // worst offender in each bucket sits at the top.
-    let patchable_sorted = sort_findings(
-        &g.findings.iter().filter(|f| f.fix_available).copied().collect::<Vec<_>>(),
-    );
-    let awaiting_sorted = sort_findings(
-        &g.findings.iter().filter(|f| !f.fix_available).copied().collect::<Vec<_>>(),
-    );
-
-    if !patchable_sorted.is_empty() {
+    // Group findings by exploit category — the primary triage axis an
+    // operator actually cares about. "200 CVEs" with no structure is
+    // overwhelming; "12 exploitable without login, 80 needs auth, 108
+    // local-only" tells you EXACTLY where to start. KEV/CVSS rank still
+    // float the worst offender to the top within each category.
+    //
+    // Render order: worst attack vector first. Within each, show how
+    // many are patchable now vs awaiting an upstream fix so the
+    // operator can plan (apt-upgrade + read-the-advisory respectively).
+    let categories = [
+        ExploitCategory::UnauthRemote,
+        ExploitCategory::AuthRemote,
+        ExploitCategory::Local,
+        ExploitCategory::Unknown,
+    ];
+    for cat in categories {
+        let in_cat: Vec<&OsvFinding> = g.findings.iter()
+            .filter(|f| f.vuln.exploit_category == cat)
+            .copied()
+            .collect();
+        if in_cat.is_empty() { continue; }
+        let cat_total = in_cat.len();
+        let cat_patchable = in_cat.iter().filter(|f| f.fix_available).count();
+        let cat_awaiting = cat_total - cat_patchable;
+        let sorted = sort_findings(&in_cat);
+        let mut header_detail = match cat {
+            ExploitCategory::UnauthRemote =>
+                "Reachable over the network with no credentials — patch first.".to_string(),
+            ExploitCategory::AuthRemote =>
+                "Network-reachable but requires a valid login or adjacent-network access.".to_string(),
+            ExploitCategory::Local =>
+                "Needs shell access or physical proximity. Lower urgency unless multi-user.".to_string(),
+            ExploitCategory::Unknown =>
+                "OSV record has no parseable CVSS attack vector — review the advisory link.".to_string(),
+        };
+        if cat_patchable > 0 && cat_awaiting > 0 {
+            header_detail.push_str(&format!(
+                " {} patchable now, {} awaiting upstream fix.",
+                cat_patchable, cat_awaiting,
+            ));
+        } else if cat_patchable > 0 {
+            header_detail.push_str(" All patchable now via distro upgrade.");
+        } else {
+            header_detail.push_str(" No patched build available — mitigate via advisory.");
+        }
         evidence.push(Evidence {
-            label: "Patchable now".into(),
-            value: format!(
-                "{} CVE{}",
-                patchable_count,
-                if patchable_count == 1 { "" } else { "s" },
-            ),
-            detail: Some("Run the upgrade command — fix is available upstream".into()),
+            label: cat.label().to_string(),
+            value: format!("{} CVE{}", cat_total, if cat_total == 1 { "" } else { "s" }),
+            detail: Some(header_detail),
             links: Vec::new(),
         });
-        for f in patchable_sorted.iter().take(MAX_CVE_EVIDENCE_ROWS_PER_SECTION) {
+        for f in sorted.iter().take(MAX_CVE_EVIDENCE_ROWS_PER_SECTION) {
             evidence.push(cve_evidence_row(f));
         }
-        if patchable_count > MAX_CVE_EVIDENCE_ROWS_PER_SECTION {
+        if cat_total > MAX_CVE_EVIDENCE_ROWS_PER_SECTION {
             evidence.push(Evidence {
-                label: "More patchable".into(),
+                label: format!("More in {}", cat.label()),
                 value: format!(
                     "+{} additional",
-                    patchable_count - MAX_CVE_EVIDENCE_ROWS_PER_SECTION,
+                    cat_total - MAX_CVE_EVIDENCE_ROWS_PER_SECTION,
                 ),
-                detail: Some("Run the upgrade command below to patch all of them".into()),
+                detail: Some(if cat_patchable > 0 {
+                    "Run the upgrade command below to patch the patchable ones; \
+                     read advisories for the rest.".into()
+                } else {
+                    "Track upstream for fixes; mitigate via advisory links.".into()
+                }),
                 links: Vec::new(),
             });
         }
     }
 
-    if !awaiting_sorted.is_empty() {
+    // Keep the legacy patchable/awaiting summary at the very end of
+    // the evidence panel as a quick "how many can I actually fix
+    // right now?" counter — feeds the bulk-upgrade button.
+    if patchable_count > 0 && awaiting_count > 0 {
         evidence.push(Evidence {
-            label: "Awaiting upstream fix".into(),
-            value: format!(
-                "{} CVE{}",
-                awaiting_count,
-                if awaiting_count == 1 { "" } else { "s" },
-            ),
+            label: "Patch availability".into(),
+            value: format!("{} now / {} pending upstream", patchable_count, awaiting_count),
             detail: Some(
-                "No patched build published yet — read the linked advisories \
-                 for mitigation. KEV-listed and Critical issues are still \
-                 shown here even without a fix.".into(),
+                "Run the upgrade command below to clear the 'now' set. \
+                 The 'pending' set requires upstream to publish a patched \
+                 build before you can apply anything; read the linked \
+                 advisories for interim mitigation.".into(),
             ),
             links: Vec::new(),
         });
-        for f in awaiting_sorted.iter().take(MAX_CVE_EVIDENCE_ROWS_PER_SECTION) {
-            evidence.push(cve_evidence_row(f));
-        }
-        if awaiting_count > MAX_CVE_EVIDENCE_ROWS_PER_SECTION {
-            evidence.push(Evidence {
-                label: "More awaiting".into(),
-                value: format!(
-                    "+{} additional",
-                    awaiting_count - MAX_CVE_EVIDENCE_ROWS_PER_SECTION,
-                ),
-                detail: Some("Track upstream for fixes; mitigate via advisory links".into()),
-                links: Vec::new(),
-            });
-        }
     }
-
     let ecosystem = g.findings.first().map(|f| f.ecosystem.as_str()).unwrap_or("");
     let commands = bulk_upgrade_commands(&g.target, ecosystem);
     let instructions = match &g.target {
@@ -3161,6 +3308,7 @@ mod tests {
                 modified: None,
                 fixed_versions: HashMap::new(),
                 references: Vec::new(),
+                exploit_category: ExploitCategory::Unknown,
             },
             kev_listed: true,
             fix_available: false,
@@ -3184,6 +3332,7 @@ mod tests {
                 modified: None,
                 fixed_versions: HashMap::new(),
                 references: Vec::new(),
+                exploit_category: ExploitCategory::Unknown,
             },
             kev_listed: false,
             fix_available: false,
@@ -3203,6 +3352,7 @@ mod tests {
                 cvss_score: score, advisory_url: None, modified: None,
                 fixed_versions: HashMap::new(),
                 references: Vec::new(),
+                exploit_category: ExploitCategory::Unknown,
             },
             kev_listed: false,
             fix_available: false,
@@ -3226,6 +3376,7 @@ mod tests {
                 cvss_score: Some(9.0), advisory_url: None, modified: None,
                 fixed_versions: HashMap::new(),
                 references: Vec::new(),
+                exploit_category: ExploitCategory::Unknown,
             },
             kev_listed: kev,
             fix_available: false,
@@ -3246,6 +3397,7 @@ mod tests {
             summary: "".into(), cvss_score: None, advisory_url: None,
             modified: None, fixed_versions: HashMap::new(),
             references: Vec::new(),
+            exploit_category: ExploitCategory::Unknown,
         };
         let cves = v.cve_ids();
         assert_eq!(cves.len(), 2);
@@ -3269,6 +3421,7 @@ mod tests {
                 advisory_url: None, modified: None,
                 fixed_versions: HashMap::new(),
                 references: Vec::new(),
+                exploit_category: ExploitCategory::Unknown,
             },
             kev_listed: false,
             fix_available: false,
@@ -3292,6 +3445,7 @@ mod tests {
                 advisory_url: None, modified: None,
                 fixed_versions: HashMap::new(),
                 references: Vec::new(),
+                exploit_category: ExploitCategory::Unknown,
             },
             kev_listed: false,
             fix_available: false,
@@ -3322,6 +3476,7 @@ mod tests {
                 advisory_url: None, modified: None,
                 fixed_versions: HashMap::new(),
                 references: Vec::new(),
+                exploit_category: ExploitCategory::Unknown,
             },
             kev_listed: false,
             fix_available: false,
@@ -3337,6 +3492,7 @@ mod tests {
                 advisory_url: None, modified: None,
                 fixed_versions: HashMap::new(),
                 references: Vec::new(),
+                exploit_category: ExploitCategory::Unknown,
             },
             kev_listed: true,
             fix_available: false,
@@ -3362,6 +3518,7 @@ mod tests {
                 advisory_url: None, modified: None,
                 fixed_versions: HashMap::new(),
                 references: Vec::new(),
+                exploit_category: ExploitCategory::Unknown,
             },
             kev_listed: kev,
             fix_available: false,
@@ -3369,24 +3526,28 @@ mod tests {
         let findings: Vec<OsvFinding> = (0..15).map(|i| mk(i, i == 7)).collect();
         let g = TargetGroup { target: ScanTargetOwned::Host, findings: findings.iter().collect() };
         let prop = build_target_proposal(&g, &ctx, 0);
-        // Evidence: Total + KEV-count chip + section header + 6 CVE rows + "+9 more awaiting".
-        // No "Patchable now" header because every finding has fix_available=false.
+        // Evidence is now grouped by exploit category. All findings here
+        // have exploit_category=Unknown, so they all land in the
+        // "Unknown attack vector" bucket plus the worst-first CVE rows.
         let labels: Vec<&str> = prop.evidence.iter().map(|e| e.label.as_str()).collect();
         assert!(labels.contains(&"Total"));
         assert!(labels.contains(&"KEV"));
-        assert!(labels.contains(&"Awaiting upstream fix"));
-        assert!(labels.contains(&"More awaiting"));
-        assert!(!labels.contains(&"Patchable now"),
-            "all findings have fix_available=false; the patchable section must not render");
-        // First CVE row must be the KEV one (CVE-2026-0007).
+        assert!(labels.contains(&ExploitCategory::Unknown.label()),
+            "the Unknown category section must render when all findings have no parseable vector");
+        // First CVE row must be the KEV one (CVE-2026-0007) — KEV still
+        // floats to the top inside each category bucket.
         let first_cve_row = prop.evidence.iter().find(|e| e.label.starts_with("CVE-2026-")).unwrap();
         assert_eq!(first_cve_row.label, "CVE-2026-0007",
-            "KEV-listed CVE must surface at the top of the evidence list");
-        // The cap kicks in: only 6 CVE rows render in the section.
+            "KEV-listed CVE must surface at the top of its category section");
+        // Per-category cap kicks in: only 6 CVE rows render in the section.
         let cve_row_count = prop.evidence.iter()
             .filter(|e| e.label.starts_with("CVE-2026-")).count();
         assert_eq!(cve_row_count, MAX_CVE_EVIDENCE_ROWS_PER_SECTION,
             "section cap must trim the row list at MAX_CVE_EVIDENCE_ROWS_PER_SECTION");
+        // Overflow chip names the category so the operator knows which
+        // bucket they're scrolling into.
+        assert!(labels.iter().any(|l| l.starts_with("More in ")),
+            "must render an overflow chip when the bucket has more than the cap");
     }
 
     #[test]
@@ -3404,6 +3565,7 @@ mod tests {
                 advisory_url: None, modified: None,
                 fixed_versions: HashMap::new(),
                 references: Vec::new(),
+                exploit_category: ExploitCategory::Unknown,
             },
             kev_listed: false,
             fix_available: false,
@@ -3429,6 +3591,64 @@ mod tests {
             match_key("Ubuntu:22.04:LTS", "openssl", "3.0.2-0ubuntu1.15"),
             "Ubuntu:22.04:LTS|openssl|3.0.2-0ubuntu1.15",
         );
+    }
+
+    #[test]
+    fn exploit_category_unauth_remote_when_network_no_privs() {
+        // The unauth-RCE pattern — AV:N + PR:N. This is what klasSponsor
+        // wants to see at the top of the inbox, separated from the rest.
+        let cat = exploit_category_from_vector("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H");
+        assert_eq!(cat, ExploitCategory::UnauthRemote);
+    }
+
+    #[test]
+    fn exploit_category_auth_remote_when_network_with_privs() {
+        // Authenticated remote — AV:N + PR:L. Still network-reachable
+        // but needs a credential. Different priority bucket.
+        let low = exploit_category_from_vector("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H");
+        assert_eq!(low, ExploitCategory::AuthRemote);
+        let high = exploit_category_from_vector("CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H");
+        assert_eq!(high, ExploitCategory::AuthRemote);
+    }
+
+    #[test]
+    fn exploit_category_auth_remote_when_adjacent_network() {
+        // Adjacent network — same LAN segment. Treated as "auth-required"
+        // bucket because the attacker has to already be inside the
+        // perimeter, similar in trust posture to having a credential.
+        let cat = exploit_category_from_vector("CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H");
+        assert_eq!(cat, ExploitCategory::AuthRemote);
+    }
+
+    #[test]
+    fn exploit_category_local_for_av_l_and_av_p() {
+        let local = exploit_category_from_vector("CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H");
+        assert_eq!(local, ExploitCategory::Local);
+        let physical = exploit_category_from_vector("CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H");
+        assert_eq!(physical, ExploitCategory::Local);
+    }
+
+    #[test]
+    fn exploit_category_unknown_for_unparseable() {
+        // Garbage vectors fall to Unknown — operators see that bucket
+        // explicitly rather than getting silently miscategorised.
+        assert_eq!(exploit_category_from_vector(""), ExploitCategory::Unknown);
+        assert_eq!(exploit_category_from_vector("not a cvss vector"), ExploitCategory::Unknown);
+        assert_eq!(
+            exploit_category_from_vector("CVSS:3.1/AC:L/PR:N"),
+            ExploitCategory::Unknown,
+            "missing AV: must fall to Unknown — we won't guess the worst case"
+        );
+    }
+
+    #[test]
+    fn exploit_category_v2_au_metric_translates_to_pr() {
+        // CVSS v2 uses Au:N/S/M instead of PR. The helper accepts both
+        // so very old cached records don't all fall to Unknown.
+        let unauth = exploit_category_from_vector("AV:N/AC:L/Au:N/C:C/I:C/A:C");
+        assert_eq!(unauth, ExploitCategory::UnauthRemote);
+        let auth = exploit_category_from_vector("AV:N/AC:L/Au:S/C:C/I:C/A:C");
+        assert_eq!(auth, ExploitCategory::AuthRemote);
     }
 
     #[test]
@@ -3481,6 +3701,7 @@ mod tests {
                 modified: None,
                 fixed_versions: HashMap::new(),
                 references: Vec::new(),
+                exploit_category: ExploitCategory::Unknown,
             },
             kev_listed: kev,
             fix_available,
@@ -3535,10 +3756,21 @@ mod tests {
         let g = TargetGroup { target: ScanTargetOwned::Host, findings: f.iter().collect() };
         let prop = build_target_proposal(&g, &ctx, /*suppressed_no_fix=*/0);
         let labels: Vec<&str> = prop.evidence.iter().map(|e| e.label.as_str()).collect();
-        assert!(labels.contains(&"Patchable now"),
-            "two patchable findings must produce the Patchable section");
-        assert!(labels.contains(&"Awaiting upstream fix"),
-            "one no-fix finding must produce the Awaiting section");
+        // With category grouping, patchable/awaiting split is surfaced
+        // INSIDE the category-section detail strings AND in a summary
+        // chip at the end. Test for the summary chip — it only renders
+        // when there's a mix of both.
+        let patch_summary = prop.evidence.iter()
+            .find(|e| e.label == "Patch availability")
+            .expect("Patch availability summary must render when mixed");
+        assert!(patch_summary.value.contains("2 now"),
+            "summary value should name the 2 patchable findings: {}", patch_summary.value);
+        assert!(patch_summary.value.contains("1 pending"),
+            "summary value should name the 1 awaiting finding: {}", patch_summary.value);
+        // All three findings have exploit_category=Unknown (mk_finding's
+        // default), so they all end up in the Unknown bucket.
+        assert!(labels.contains(&ExploitCategory::Unknown.label()),
+            "all three findings are in the Unknown bucket; that section must render");
     }
 
     #[test]
@@ -3607,6 +3839,7 @@ mod tests {
                         url: "https://security-tracker.debian.org/tracker/CVE-2099-1234".into(),
                     },
                 ],
+                exploit_category: ExploitCategory::Unknown,
             },
             kev_listed: false,
             fix_available: false,
@@ -3643,6 +3876,7 @@ mod tests {
                 summary: "".into(), cvss_score: None, advisory_url: None,
                 modified: None, fixed_versions: HashMap::new(),
                 references: refs,
+                exploit_category: ExploitCategory::Unknown,
             },
             kev_listed: false, fix_available: false,
         };
@@ -3672,6 +3906,7 @@ mod tests {
                     OsvVulnReference { ty: "REPORT".into(), url: "https://bugzilla.redhat.com/123".into() },
                     OsvVulnReference { ty: "WEB".into(), url: "https://nvd.nist.gov/vuln/detail/CVE-X".into() },
                 ],
+                exploit_category: ExploitCategory::Unknown,
             },
             kev_listed: false,
             fix_available: false,

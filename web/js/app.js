@@ -51410,16 +51410,29 @@ function predictiveExpandedBody(p) {
               '</span>'
             : '';
         // Section-header style for evidence rows whose label flags a
-        // group split — the OSV analyzer uses these to delimit
-        // "Patchable now" from "Awaiting upstream fix". Treated as a
-        // visual divider rather than just another chip.
-        const isSection = e.label === 'Patchable now'
-            || e.label === 'Awaiting upstream fix'
+        // group split. The OSV analyzer emits these to delimit the
+        // exploit-category buckets (unauth-remote, auth-remote, local,
+        // unknown) plus the legacy patch-availability and hidden-no-fix
+        // chips. Each gets a distinctive accent so the operator can
+        // scan the inbox card by colour: red for unauth, amber for
+        // anything else network-reachable, neutral for local-only.
+        const isSection = e.label === 'Exploitable without login'
+            || e.label === 'Needs an authenticated session'
+            || e.label === 'Local access required'
+            || e.label === 'Unknown attack vector'
+            || (typeof e.label === 'string' && e.label.startsWith('More in '))
+            || e.label === 'Patch availability'
             || e.label === 'Hidden — no upstream fix';
         if (isSection) {
-            const accent = e.label === 'Patchable now' ? '#34d399'
+            // Colour map matches the category urgency. Unauth-RCE gets
+            // the strongest danger colour so it pops out of a long card.
+            const accent = e.label === 'Exploitable without login' ? '#ef4444'
+                : e.label === 'Needs an authenticated session' ? '#fbbf24'
+                : e.label === 'Local access required' ? '#60a5fa'
+                : e.label === 'Unknown attack vector' ? '#a1a1aa'
+                : e.label === 'Patch availability' ? '#34d399'
                 : e.label === 'Hidden — no upstream fix' ? '#a1a1aa'
-                : '#fbbf24';
+                : '#94a3b8';  // overflow "More in …" chips
             return `<div style="display:block;width:100%;margin:10px 0 4px;padding:4px 8px;border-left:3px solid ${accent};background:rgba(255,255,255,0.02);font-size:12px;color:var(--text-primary);font-weight:600;">
                 ${escapeHtml(e.label)} <span style="color:var(--text-muted);font-weight:normal;margin-left:6px;">${escapeHtml(e.value)}</span>
                 ${e.detail ? `<div style="font-size:11px;color:var(--text-muted);font-weight:normal;margin-top:2px;">${escapeHtml(e.detail)}</div>` : ''}

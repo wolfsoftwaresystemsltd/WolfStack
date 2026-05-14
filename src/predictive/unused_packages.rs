@@ -726,6 +726,7 @@ mod tests {
                 modified: None,
                 fixed_versions: std::collections::HashMap::new(),
                 references: Vec::new(),
+                exploit_category: crate::predictive::osv::ExploitCategory::Unknown,
             },
             kev_listed: false,
             fix_available: false,
@@ -792,6 +793,7 @@ mod tests {
                 advisory_url: None, modified: None,
                 fixed_versions: std::collections::HashMap::new(),
                 references: Vec::new(),
+                exploit_category: crate::predictive::osv::ExploitCategory::Unknown,
             },
             kev_listed: false, fix_available: false,
         };
@@ -856,6 +858,7 @@ mod tests {
                 advisory_url: None, modified: None,
                 fixed_versions: std::collections::HashMap::new(),
                 references: Vec::new(),
+                exploit_category: crate::predictive::osv::ExploitCategory::Unknown,
             },
             kev_listed: false, fix_available: false,
         };
