@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v23.3.2: hotfix — threat-intel UI back to working state** _(2026-05-14 — [`4f776a7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4f776a77e5d31dd87aeb4a2ddaa0003da42431b2))_
 - **v23.3.1: threat-intel operations honour the active WolfRouter cluster** _(2026-05-14 — [`fad593b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/fad593bb586643ce836c792f7eb45104e8c28845))_
 - **v23.3.0: threat-intel cluster-wide visibility — surface peer divergence** _(2026-05-14 — [`805353b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/805353b8e7fd21a4816e8c212cabf110a2c5f69e))_
 - **v23.2.3: threat-intel cluster filter actually scopes to the active cluster** _(2026-05-14 — [`5cbe317`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5cbe317abc7b23439bccbbd912b516eb4ae72235))_
