@@ -469,7 +469,11 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         else
             QEMU_PKG="qemu-system-x86 qemu-utils"
         fi
-        apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates dnsmasq-base bridge-utils $QEMU_PKG socat nfs-common fuse3
+        # apparmor + apparmor-utils are Recommends (not Depends) of lxc on
+        # Debian/Ubuntu — minimal cloud images skip them with -y, then the
+        # first `lxc-start` fails with "apparmor_parser not available".
+        # Pin them explicitly so containers actually start out of the box.
+        apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates apparmor apparmor-utils dnsmasq-base bridge-utils $QEMU_PKG socat nfs-common fuse3
         apt install -y s3fs-fuse 2>/dev/null || apt install -y s3fs 2>/dev/null || echo "  ⚠ s3fs not available — S3 mounts will use built-in sync"
     fi
 elif [ "$PKG_MANAGER" = "dnf" ]; then
@@ -495,7 +499,8 @@ elif [ "$PKG_MANAGER" = "zypper" ]; then
     else
         QEMU_ZYPP="qemu-kvm qemu-tools"
     fi
-    zypper install -y git curl gcc gcc-c++ make libopenssl-devel pkg-config lxc dnsmasq bridge-utils $QEMU_ZYPP socat s3fs nfs-client fuse3
+    # SUSE uses AppArmor by default — same Recommends-not-Depends trap.
+    zypper install -y git curl gcc gcc-c++ make libopenssl-devel pkg-config lxc apparmor-parser apparmor-utils dnsmasq bridge-utils $QEMU_ZYPP socat s3fs nfs-client fuse3
 elif [ "$PKG_MANAGER" = "pacman" ]; then
     ARCH=$(uname -m)
     if [ "$ARCH" = "aarch64" ]; then
