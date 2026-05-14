@@ -2508,9 +2508,23 @@ fn cve_evidence_row(f: &OsvFinding) -> Evidence {
         Some(s) => format!("CVSS {:.1}{}", s, kev_marker),
         None => format!("unscored{}", kev_marker),
     };
-    let detail = match f.vuln.fixed_versions.get(&f.package) {
-        Some(fv) => Some(format!("{} {} → fixed in {}", f.package, f.version, fv)),
-        None => Some(format!("{} {} — no upstream fix yet", f.package, f.version)),
+    // Per-CVE remediation command. When OSV records a fix version AND
+    // we recognise the ecosystem's package manager, build the exact
+    // command to patch JUST this package (e.g.
+    // `apt install --only-upgrade openssl`) instead of forcing the
+    // operator to read a 100-line `apt upgrade` plan. Trades a bit of
+    // verbosity in the inbox for actionable copy-paste — the user
+    // who wanted this said the bulk command was nearly useless
+    // because it patches everything, including services they planned
+    // to upgrade in a controlled window.
+    let fix_cmd = per_package_fix_command(&f.target, &f.ecosystem, &f.package);
+    let detail = match (f.vuln.fixed_versions.get(&f.package), fix_cmd) {
+        (Some(fv), Some(cmd)) =>
+            Some(format!("{} {} → fixed in {} — run: {}", f.package, f.version, fv, cmd)),
+        (Some(fv), None) =>
+            Some(format!("{} {} → fixed in {}", f.package, f.version, fv)),
+        (None, _) =>
+            Some(format!("{} {} — no upstream fix yet", f.package, f.version)),
     };
     // Prepend a canonical "Details" link to OSV.dev so the operator
     // can click straight into the authoritative CVE page (summary,
@@ -2605,10 +2619,49 @@ fn label_for_reference(ty: &str, url: &str) -> String {
     }
 }
 
-/// Bulk upgrade command for the target's ecosystem. We don't list
-/// per-package commands because a host with 50 CVEs would produce a
-/// 50-package command line; running the distro's full security
-/// upgrade is what the operator actually wants to do.
+/// Per-CVE upgrade command for a single package. Lets each row in the
+/// inbox carry the exact command to patch just that package (e.g.
+/// `apt install --only-upgrade openssl`) instead of forcing the
+/// operator into a system-wide upgrade. Returns None when we don't
+/// recognise the ecosystem's package manager — we'd rather show
+/// nothing than emit a wrong command. For LXC targets the command is
+/// wrapped in `lxc-attach`.
+///
+/// Note: `--only-upgrade` (apt) and the bare-package form on dnf/zypper/apk
+/// upgrade the package to whatever the distro currently advertises.
+/// We don't pin to OSV's `fixed_versions` value because that's the
+/// upstream semver (e.g. "3.0.14") while distros ship with their own
+/// version suffix (e.g. "3.0.14-0ubuntu1.1") — pinning to upstream
+/// would fail to resolve. The package manager's own metadata already
+/// knows the right patched build.
+fn per_package_fix_command(
+    target: &ScanTargetOwned,
+    ecosystem: &str,
+    package: &str,
+) -> Option<String> {
+    let pm = pm_for_ecosystem(ecosystem)?;
+    let bare = match pm {
+        PackageManager::Apt => format!("apt-get install --only-upgrade -y {}", package),
+        PackageManager::Dnf => format!("dnf upgrade -y {}", package),
+        PackageManager::Yum => format!("yum update -y {}", package),
+        PackageManager::Zypper => format!("zypper update -y {}", package),
+        PackageManager::Apk => format!("apk add -u {}", package),
+        PackageManager::Pacman => format!("pacman -S --noconfirm {}", package),
+        // Rolling/source distros without a generic per-package upgrade —
+        // emit nothing rather than guess, so the per-CVE row's advisory
+        // link stays the actionable surface.
+        PackageManager::None => return None,
+    };
+    Some(match target {
+        ScanTargetOwned::Host => bare,
+        ScanTargetOwned::Lxc(name) => format!("lxc-attach -n {} -- {}", name, bare),
+    })
+}
+
+/// Bulk upgrade command for the target's ecosystem. Used as a "fix
+/// everything at once" fallback in the proposal's RemediationPlan.
+/// Per-CVE commands live in each evidence row's detail string —
+/// see `per_package_fix_command`.
 fn bulk_upgrade_commands(target: &ScanTargetOwned, ecosystem: &str) -> Vec<String> {
     let pm = pm_for_ecosystem(ecosystem);
     match (target, pm) {
@@ -2627,6 +2680,16 @@ fn bulk_upgrade_commands(target: &ScanTargetOwned, ecosystem: &str) -> Vec<Strin
             "apk update".into(),
             "apk upgrade".into(),
         ],
+        (ScanTargetOwned::Host, Some(PackageManager::Yum)) => vec![
+            "yum update --security -y".into(),
+        ],
+        (ScanTargetOwned::Host, Some(PackageManager::Pacman)) => vec![
+            // Arch ships rolling — `-Syu` syncs the package DB and
+            // upgrades everything. Don't use `--noconfirm` on the bulk
+            // path because Arch upgrades occasionally need operator
+            // intervention (pacman.conf changes, etc.).
+            "pacman -Syu".into(),
+        ],
         (ScanTargetOwned::Lxc(name), Some(PackageManager::Apt)) => vec![
             format!("lxc-attach -n {} -- apt-get update", name),
             format!("lxc-attach -n {} -- apt-get upgrade -y", name),
@@ -2641,17 +2704,26 @@ fn bulk_upgrade_commands(target: &ScanTargetOwned, ecosystem: &str) -> Vec<Strin
         (ScanTargetOwned::Lxc(name), Some(PackageManager::Apk)) => vec![
             format!("lxc-attach -n {} -- apk upgrade", name),
         ],
-        (target, _) => {
-            let prefix = match target {
-                ScanTargetOwned::Host => String::new(),
-                ScanTargetOwned::Lxc(name) => format!("lxc-attach -n {} -- ", name),
-            };
+        (ScanTargetOwned::Lxc(name), Some(PackageManager::Yum)) => vec![
+            format!("lxc-attach -n {} -- yum update --security -y", name),
+        ],
+        (ScanTargetOwned::Lxc(name), Some(PackageManager::Pacman)) => vec![
+            format!("lxc-attach -n {} -- pacman -Syu", name),
+        ],
+        (_, _) => {
+            // Unknown ecosystem — don't dump a menu of wrong commands.
+            // On a Rocky/Alma/Arch host, `apt-get upgrade` is obviously
+            // pointless and made the inbox card look broken. Emit a
+            // single line explaining the situation; the per-CVE rows
+            // above each carry their own command (or, when the package
+            // manager wasn't recognised, an advisory link). Operators
+            // can still see what to do per-CVE without a wrong bulk
+            // command being the headline.
             vec![
-                format!("# Choose the line for your distro's package manager:"),
-                format!("{}apt-get update && {}apt-get upgrade -y", prefix, prefix),
-                format!("{}dnf upgrade --refresh -y", prefix),
-                format!("{}zypper update -y", prefix),
-                format!("{}apk upgrade", prefix),
+                "# No bulk command — OSV ecosystem not recognised. Patch each \
+                 CVE individually using the command shown in its row above, \
+                 or run your distro's security-upgrade procedure manually."
+                    .to_string(),
             ]
         }
     }
@@ -2672,8 +2744,25 @@ fn pm_for_ecosystem(ecosystem: &str) -> Option<PackageManager> {
         || ecosystem.starts_with("Mageia")
         || ecosystem.starts_with("openEuler")
         || ecosystem.starts_with("Photon OS")
+        // RHEL/CentOS 8+ ships dnf. Mapping the generic family strings
+        // OSV sometimes emits ("RHEL", "Red Hat") to dnf is the right
+        // default for modern hosts; the yum branch below catches the
+        // explicit 6/7 case where dnf isn't installed.
+        || ecosystem.starts_with("Fedora")
+        || ecosystem.starts_with("Red Hat")
+        || ecosystem.starts_with("RHEL")
     {
         return Some(PackageManager::Dnf);
+    }
+    // RHEL 6 / RHEL 7 / CentOS 7 — explicitly tagged ecosystems get
+    // yum. dnf wasn't backported to these and the inbox card looking
+    // wrong on a still-supported (paid ELS) RHEL 7 host is a real
+    // ops-trust hit.
+    if ecosystem == "CentOS:7"
+        || ecosystem == "Red Hat:6" || ecosystem == "Red Hat:7"
+        || ecosystem == "RHEL:6" || ecosystem == "RHEL:7"
+    {
+        return Some(PackageManager::Yum);
     }
     if ecosystem.starts_with("openSUSE") || ecosystem.starts_with("SUSE") {
         return Some(PackageManager::Zypper);
@@ -2687,6 +2776,14 @@ fn pm_for_ecosystem(ecosystem: &str) -> Option<PackageManager> {
         || ecosystem.starts_with("BellSoft")
     {
         return Some(PackageManager::Apk);
+    }
+    // Arch and derivatives. OSV doesn't ship an Arch ecosystem string
+    // (Arch security is tracked at security.archlinux.org, not OSV.dev),
+    // but we still see findings on Arch via the broader RUSTSEC / OSS
+    // ecosystems on package contents; recognising the strings lets
+    // those rows carry a pacman-shaped command.
+    if ecosystem.starts_with("Arch") || ecosystem.starts_with("Manjaro") {
+        return Some(PackageManager::Pacman);
     }
     None
 }
@@ -3594,6 +3691,49 @@ mod tests {
     }
 
     #[test]
+    fn per_package_fix_command_per_distro_apt_only_upgrades() {
+        // The "patch just this one package" command must use --only-upgrade
+        // on apt — otherwise apt would refuse if the package isn't
+        // installed, and missing the flag invites an unintended install.
+        let cmd = per_package_fix_command(
+            &ScanTargetOwned::Host, "Ubuntu:22.04:LTS", "openssl",
+        ).unwrap();
+        assert_eq!(cmd, "apt-get install --only-upgrade -y openssl");
+    }
+
+    #[test]
+    fn per_package_fix_command_uses_lxc_attach_for_container_targets() {
+        let cmd = per_package_fix_command(
+            &ScanTargetOwned::Lxc("web1".into()),
+            "Debian:12",
+            "openssl",
+        ).unwrap();
+        assert_eq!(cmd, "lxc-attach -n web1 -- apt-get install --only-upgrade -y openssl");
+    }
+
+    #[test]
+    fn per_package_fix_command_dnf_yum_zypper_apk_pacman() {
+        let dnf = per_package_fix_command(&ScanTargetOwned::Host, "Rocky Linux:9", "kernel").unwrap();
+        assert_eq!(dnf, "dnf upgrade -y kernel");
+        let yum = per_package_fix_command(&ScanTargetOwned::Host, "CentOS:7", "httpd").unwrap();
+        assert_eq!(yum, "yum update -y httpd");
+        let zypper = per_package_fix_command(&ScanTargetOwned::Host, "openSUSE:Leap 15.5", "curl").unwrap();
+        assert_eq!(zypper, "zypper update -y curl");
+        let apk = per_package_fix_command(&ScanTargetOwned::Host, "Alpine:v3.19", "musl").unwrap();
+        assert_eq!(apk, "apk add -u musl");
+        let pacman = per_package_fix_command(&ScanTargetOwned::Host, "Arch:rolling", "openssl").unwrap();
+        assert_eq!(pacman, "pacman -S --noconfirm openssl");
+    }
+
+    #[test]
+    fn per_package_fix_command_returns_none_for_unknown_ecosystem() {
+        // No silent guess for unknown distros — operator sees no
+        // command rather than the wrong command.
+        assert!(per_package_fix_command(&ScanTargetOwned::Host, "FutureOS:1.0", "anything").is_none());
+        assert!(per_package_fix_command(&ScanTargetOwned::Host, "", "x").is_none());
+    }
+
+    #[test]
     fn exploit_category_unauth_remote_when_network_no_privs() {
         // The unauth-RCE pattern — AV:N + PR:N. This is what klasSponsor
         // wants to see at the top of the inbox, separated from the rest.
@@ -4034,22 +4174,27 @@ mod tests {
     }
 
     #[test]
-    fn bulk_upgrade_commands_fall_through_for_unknown_ecosystem() {
-        // Unknown ecosystem (or the rare classifiable-but-unknown-PM
-        // case) emits all four common commands prefixed by lxc-attach
-        // for the LXC target. Caller picks.
+    fn bulk_upgrade_commands_for_unknown_ecosystem_emits_explanation_not_menu() {
+        // Previously we dumped a menu of apt/dnf/zypper/apk lines
+        // hoping the operator would pick the right one. On a Rocky/Alma
+        // host that menu made the inbox card look broken — three of
+        // the four commands were obviously wrong. New behaviour: emit
+        // a single comment explaining the situation; per-CVE rows
+        // carry their own command via per_package_fix_command.
         let cmds = bulk_upgrade_commands(
             &ScanTargetOwned::Lxc("ct1".into()),
             "FutureDistro:1.0",
         );
-        assert!(cmds.iter().any(|c| c.contains("apt-get upgrade")));
-        assert!(cmds.iter().any(|c| c.contains("dnf upgrade")));
-        assert!(cmds.iter().any(|c| c.contains("zypper update")));
-        assert!(cmds.iter().any(|c| c.contains("apk upgrade")));
-        // Every non-comment line must be lxc-attach-prefixed.
-        for c in cmds.iter().filter(|c| !c.starts_with('#')) {
-            assert!(c.contains("lxc-attach -n ct1 --"), "missing prefix on: {}", c);
-        }
+        assert!(!cmds.iter().any(|c| c.contains("apt-get") && !c.starts_with('#')),
+            "unknown ecosystem must not emit apt-get (wrong on non-Debian)");
+        assert!(!cmds.iter().any(|c| c.contains("dnf upgrade") && !c.starts_with('#')),
+            "unknown ecosystem must not emit dnf");
+        assert!(!cmds.iter().any(|c| c.contains("zypper update") && !c.starts_with('#')),
+            "unknown ecosystem must not emit zypper");
+        assert!(!cmds.iter().any(|c| c.contains("apk upgrade") && !c.starts_with('#')),
+            "unknown ecosystem must not emit apk");
+        assert!(cmds.iter().any(|c| c.starts_with("# No bulk command")),
+            "must surface a hint that no bulk command is available");
     }
 
     #[test]
