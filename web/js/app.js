@@ -31040,19 +31040,19 @@ var _tiCachedStatus = null;
 // operations so we never operate on the wrong cluster.
 var _tiClusterStatusRows = null;
 
-// Resolve the URL for a threat-intel API call. Currently always returns
-// the local bastion path: v23.3.1's proxy-via-target-cluster-node
-// approach broke real-world multi-cluster setups (the proxy chain ran
-// into cluster-secret mismatches and unreachable-node failures that
-// surfaced as "failed to load config on remote server"). The correct
-// fix is per-cluster config STORAGE on the bastion — landing in a
-// later release — so for now this helper is a transparent passthrough.
-// Trade-off: until per-cluster storage ships, threat-intel state is
-// shared across all clusters this bastion manages, exactly like
-// v23.3.0 and prior. The cluster-status table is still correctly
-// per-cluster-scoped (server-side ?cluster= filter).
+// Resolve the URL for a threat-intel API call against the cluster
+// currently displayed in WolfRouter. Append `?cluster=NAME` so the
+// bastion's handlers load/save the right per-cluster config slot.
+// All calls land on the local bastion (no proxy) — the bastion holds
+// one config file per managed cluster and propagates each cluster's
+// changes to peers in THAT cluster only.
 function tiClusterApi(path) {
-    return { url: path, viaNodeId: null };
+    const cluster = (typeof window.wrState === 'object' && window.wrState && window.wrState.cluster) || '';
+    if (!cluster) {
+        return { url: path, viaNodeId: null };
+    }
+    const sep = path.includes('?') ? '&' : '?';
+    return { url: path + sep + 'cluster=' + encodeURIComponent(cluster), viaNodeId: null };
 }
 
 // Per-provider delisting / lookup info used by the self-blacklist banner.
@@ -31116,18 +31116,11 @@ function tiEsc(s) {
 
 async function tiLoadConfig() {
     try {
-        // Config is read from the local bastion. v23.3.1 routed this
-        // through tiClusterApi (proxy via target-cluster node), which
-        // broke on real-world multi-cluster setups when the remote node
-        // returned non-OK and the page reported "Failed to load config"
-        // with no way to recover. Reads now always use the local
-        // bastion's config — write operations still cluster-scope via
-        // tiClusterApi so the actual policy targets the right cluster.
-        // Trade-off: in multi-cluster, the form briefly shows the
-        // bastion's own config until the operator changes it; the
-        // cluster status table below shows what each cluster's nodes
-        // actually have applied.
-        const resp = await fetch('/api/threat-intel/config');
+        // Read the config slot for the cluster currently shown in
+        // WolfRouter. Backend (v23.3.3) stores one config file per
+        // cluster the bastion manages; ?cluster=NAME picks the right
+        // one. No node-proxy involved — all reads stay on the bastion.
+        const resp = await fetch(tiClusterApi('/api/threat-intel/config').url);
         if (!resp.ok) throw new Error('Failed to load config');
         const cfg = await resp.json();
         _tiCachedConfig = cfg;
@@ -31501,12 +31494,10 @@ function tiRenderSelfBanner(self_blacklisted) {
 
 async function tiLoadStatus() {
     try {
-        // Local read — see comment in tiLoadConfig. Per-cluster status
-        // for the table comes from /api/threat-intel/cluster-status
-        // which already supports ?cluster=NAME server-side, so the
-        // table is correctly scoped even when this local /status is
-        // showing the bastion's own numbers.
-        const resp = await fetch('/api/threat-intel/status');
+        // Per-cluster status read — see tiLoadConfig comment. The
+        // cluster-status (aggregator) endpoint is separate; this one
+        // returns just the bastion's local view of the target cluster.
+        const resp = await fetch(tiClusterApi('/api/threat-intel/status').url);
         if (!resp.ok) throw new Error('Failed to load status');
         const s = await resp.json();
         _tiCachedStatus = s;

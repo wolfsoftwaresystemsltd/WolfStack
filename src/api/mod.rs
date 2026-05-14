@@ -885,17 +885,6 @@ pub async fn passkey_delete(req: HttpRequest, state: web::Data<AppState>, path: 
 /// "listen on all interfaces" sentinel some nodes report instead of a
 /// real public address; passing it to threat-intel as an exempt creates
 /// no value and confuses the self-blacklist scan.
-fn ti_cluster_node_ips(state: &web::Data<AppState>) -> Vec<String> {
-    state.cluster.get_all_nodes().iter()
-        .map(|n| n.address.clone())
-        .filter(|a| {
-            match a.parse::<std::net::IpAddr>() {
-                Ok(ip) => !ip.is_unspecified(),
-                Err(_) => false,  // unparseable strings are useless to safe-filter
-            }
-        })
-        .collect()
-}
 
 /// Helper: best-effort extraction of the requesting client's IP. Used as a
 /// transient exemption so an admin can't accidentally lock themselves out
@@ -931,6 +920,49 @@ fn ti_normalize_cluster(name: &str) -> String {
     if name.is_empty() { "WolfStack".to_string() } else { name.to_string() }
 }
 
+/// Extract the target cluster name from `?cluster=` on a threat-intel
+/// request. Defaults to the bastion's own cluster_name when missing —
+/// preserves single-cluster behaviour for installs that haven't named
+/// their cluster yet.
+fn ti_target_cluster(req: &HttpRequest, state: &web::Data<AppState>) -> String {
+    if let Some(q) = req.uri().query() {
+        for pair in q.split('&') {
+            if let Some(rest) = pair.strip_prefix("cluster=") {
+                if let Ok(decoded) = urlencoding::decode(rest) {
+                    let val = decoded.into_owned();
+                    if !val.is_empty() {
+                        return val;
+                    }
+                }
+            }
+        }
+    }
+    state.cluster.get_self_cluster_name()
+}
+
+/// True when `target` matches the bastion's own cluster — used by every
+/// threat-intel handler to decide whether to (a) load/save the default
+/// config file vs a per-cluster file, and (b) actually apply kernel
+/// rules locally vs only update on-disk + propagated state. The
+/// normalisation rule must match `ti_normalize_cluster` so cluster
+/// identity is consistent across endpoints.
+fn ti_is_local_cluster(state: &web::Data<AppState>, target: &str) -> bool {
+    ti_normalize_cluster(target) == ti_normalize_cluster(state.cluster.get_self_cluster_name().as_str())
+}
+
+/// On-disk slug for a cluster. Empty for the bastion's own cluster
+/// (uses legacy `threat-intel.json` for backward compat); otherwise
+/// the normalised cluster name. This is what the threat_intel module
+/// expects as its `cluster` parameter — keeping the mapping in one
+/// place stops the handlers and the propagation code from drifting.
+fn ti_storage_cluster(state: &web::Data<AppState>, target: &str) -> String {
+    if ti_is_local_cluster(state, target) {
+        String::new()
+    } else {
+        ti_normalize_cluster(target)
+    }
+}
+
 /// Fan out an `ipset` install request to every online WolfStack peer in
 /// parallel and await the results. Used when the local admin flips
 /// Threat Intel to enforce mode — peers need ipset present before they
@@ -944,22 +976,19 @@ fn ti_normalize_cluster(name: &str) -> String {
 /// Returns one [`TiPeerOpResult`] per attempted peer. The caller — the
 /// HTTP handler that triggered the enforcement change — includes these
 /// in its response so the UI can name the failing nodes.
-async fn ti_install_ipset_on_peers(state: &web::Data<AppState>) -> Vec<TiPeerOpResult> {
+async fn ti_install_ipset_on_peers(state: &web::Data<AppState>, target_cluster: &str) -> Vec<TiPeerOpResult> {
     let nodes = state.cluster.get_all_nodes();
     let secret = state.cluster_secret.clone();
     let self_id = state.cluster.self_id.clone();
-    // Threat Intel is per-cluster. A node only ever propagates to peers
-    // in its OWN cluster — without this filter, a bastion managing
-    // clusters A and B would fan a "pause" or "enforce" decision across
-    // every cluster the bastion can see, silently overriding policy on
-    // unrelated tenants. Operators acting on cluster B from a different
-    // bastion's WolfRouter view proxy via a cluster-B node (see the
-    // frontend's tiClusterApi helper); that node's "own cluster" is B,
-    // so this filter keeps the fanout scoped where the operator expects.
-    let self_cluster = ti_normalize_cluster(state.cluster.get_self_cluster_name().as_str());
+    // Threat Intel is per-cluster. Fan out to peers in the TARGET
+    // cluster (the one the operator is modifying), not the bastion's
+    // own cluster — without this scope, the bastion would push ipset
+    // installs to every cluster it manages, including ones whose
+    // operators haven't enabled threat-intel.
+    let target = ti_normalize_cluster(target_cluster);
     let peers: Vec<(String, String, u16)> = nodes.iter()
         .filter(|n| !n.is_self && n.id != self_id && n.online && n.node_type == "wolfstack"
-                    && ti_normalize_cluster(n.cluster_name.as_deref().unwrap_or("")) == self_cluster)
+                    && ti_normalize_cluster(n.cluster_name.as_deref().unwrap_or("")) == target)
         .map(|n| (n.hostname.clone(), n.address.clone(), n.port))
         .collect();
     if peers.is_empty() { return Vec::new(); }
@@ -1037,26 +1066,27 @@ async fn ti_install_ipset_on_peers(state: &web::Data<AppState>) -> Vec<TiPeerOpR
 /// Returns one [`TiPeerOpResult`] per peer attempted. The caller surfaces
 /// these so the UI can name nodes that didn't apply the change — without
 /// this, a peer in a divergent state was invisible to the operator.
-async fn ti_propagate_config_to_peers(state: &web::Data<AppState>) -> Vec<TiPeerOpResult> {
+async fn ti_propagate_config_to_peers(state: &web::Data<AppState>, target_cluster: &str) -> Vec<TiPeerOpResult> {
     let nodes = state.cluster.get_all_nodes();
     let secret = state.cluster_secret.clone();
     let self_id = state.cluster.self_id.clone();
-    // Same cluster-scoping reasoning as ti_install_ipset_on_peers:
-    // a node fans changes out only inside its own cluster so tenant
-    // policies never leak between clusters managed by the same bastion.
-    let self_cluster = ti_normalize_cluster(state.cluster.get_self_cluster_name().as_str());
+    // Fan out to peers in the TARGET cluster only — see comment on
+    // ti_install_ipset_on_peers. Each peer in the target cluster
+    // stores the config as its own (default-slot) file because, from
+    // its own perspective, the target cluster IS its cluster.
+    let target = ti_normalize_cluster(target_cluster);
     let peers: Vec<(String, String, u16)> = nodes.iter()
         .filter(|n| !n.is_self && n.id != self_id && n.online && n.node_type == "wolfstack"
-                    && ti_normalize_cluster(n.cluster_name.as_deref().unwrap_or("")) == self_cluster)
+                    && ti_normalize_cluster(n.cluster_name.as_deref().unwrap_or("")) == target)
         .map(|n| (n.hostname.clone(), n.address.clone(), n.port))
         .collect();
     if peers.is_empty() { return Vec::new(); }
 
-    // Read the unmasked on-disk config and serialise the full struct.
-    // The receiving peer's PATCH handler will use its own ProviderConfig
-    // sentinel logic — including a real key value (not "***") replaces
-    // the on-disk key.
-    let cfg = crate::threat_intel::ThreatIntelConfig::load();
+    // Read the unmasked on-disk config for the target cluster and
+    // serialise the full struct. The receiving peer's PATCH handler
+    // will use its own ProviderConfig sentinel logic — including a
+    // real key value (not "***") replaces the on-disk key.
+    let cfg = crate::threat_intel::ThreatIntelConfig::load_for(&ti_storage_cluster(state, target_cluster));
     let payload = serde_json::json!({
         "enabled": cfg.enabled,
         "dry_run": cfg.dry_run,
@@ -1127,9 +1157,19 @@ fn ti_mask_keys(mut cfg: crate::threat_intel::ThreatIntelConfig) -> crate::threa
 }
 
 /// GET /api/threat-intel/config — return the persisted config (API keys masked).
+/// `?cluster=NAME` selects which cluster's config to return; default is
+/// the bastion's own cluster. Peers (cluster-node auth) always read
+/// their own config slot.
 pub async fn threat_intel_get_config(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let cfg = crate::threat_intel::ThreatIntelConfig::load();
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    let from_peer = caller == "cluster-node";
+    let storage_slug = if from_peer {
+        String::new()
+    } else {
+        let target = ti_target_cluster(&req, &state);
+        ti_storage_cluster(&state, &target)
+    };
+    let cfg = crate::threat_intel::ThreatIntelConfig::load_for(&storage_slug);
     HttpResponse::Ok().json(ti_mask_keys(cfg))
 }
 
@@ -1159,8 +1199,20 @@ pub async fn threat_intel_patch_config(
     // Cycle-breaker: when a peer receives a propagated config push, the
     // caller is "cluster-node" (X-WolfStack-Secret auth). Don't re-propagate
     // back out — the originating bastion is already fanning to every node.
+    // Peers always treat the propagated config as THEIR OWN cluster's
+    // config (cluster slug = "") regardless of any ?cluster= the bastion
+    // tacked on, since from the peer's perspective the target IS their
+    // cluster. Operator-driven calls use the requested target cluster.
     let from_peer = caller == "cluster-node";
-    let mut cfg = crate::threat_intel::ThreatIntelConfig::load();
+    let target_cluster = ti_target_cluster(&req, &state);
+    let storage_slug = if from_peer {
+        String::new()
+    } else {
+        ti_storage_cluster(&state, &target_cluster)
+    };
+    let is_local_kernel = from_peer || ti_is_local_cluster(&state, &target_cluster);
+
+    let mut cfg = crate::threat_intel::ThreatIntelConfig::load_for(&storage_slug);
     let prev_enforcement = crate::threat_intel::enforcement_active(&cfg);
 
     if let Some(v) = body.enabled { cfg.enabled = v; }
@@ -1186,7 +1238,7 @@ pub async fn threat_intel_patch_config(
         }
     }
 
-    if let Err(e) = cfg.save() {
+    if let Err(e) = cfg.save_for(&storage_slug) {
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
     }
 
@@ -1195,18 +1247,17 @@ pub async fn threat_intel_patch_config(
     let mut ipset_install_results: Vec<TiPeerOpResult> = Vec::new();
     if new_enforcement != prev_enforcement {
         // The kernel state needs to catch up. Run on a blocking thread —
-        // apply_state_change shells out to ipset/iptables-restore.
-        match tokio::task::spawn_blocking(crate::threat_intel::apply_state_change).await {
+        // apply_state_change_for shells out to ipset/iptables-restore
+        // (only when is_local_kernel; otherwise it just refreshes the
+        // cached `applied` flag for the target cluster).
+        let slug_for_apply = storage_slug.clone();
+        match tokio::task::spawn_blocking(move || crate::threat_intel::apply_state_change_for(&slug_for_apply, is_local_kernel)).await {
             Ok(Ok(())) => {
-                // Local enforcement just activated — fan out an ipset
-                // install to every online WolfStack peer and AWAIT the
-                // results. Previously this was tokio::spawn'd and the
-                // outcome was only logged, so a peer where ipset failed
-                // to install would silently stay in dry-run while the
-                // bastion reported success. Awaiting per-peer (in
-                // parallel) lets us surface the divergence to the UI.
+                // Enforcement just activated for the target cluster.
+                // Fan out an ipset install to peers in THAT cluster so
+                // they can apply kernel rules themselves.
                 if new_enforcement && !from_peer {
-                    ipset_install_results = ti_install_ipset_on_peers(&state).await;
+                    ipset_install_results = ti_install_ipset_on_peers(&state, &target_cluster).await;
                 }
             }
             Ok(Err(e)) => apply_error = Some(e),
@@ -1214,13 +1265,11 @@ pub async fn threat_intel_patch_config(
         }
         // If the apply failed, roll the config back so on-disk state matches kernel state.
         if apply_error.is_some() {
-            let mut rolled = crate::threat_intel::ThreatIntelConfig::load();
-            // Conservative rollback to the "off" state — preserves user's
-            // allowlist/provider changes but disables enforcement.
+            let mut rolled = crate::threat_intel::ThreatIntelConfig::load_for(&storage_slug);
             rolled.enabled = false;
             rolled.dry_run = true;
             rolled.paused = false;
-            let _ = rolled.save();
+            let _ = rolled.save_for(&storage_slug);
         }
     }
 
@@ -1236,49 +1285,66 @@ pub async fn threat_intel_patch_config(
     // failed to apply the change — see comment on ti_propagate_config_to_peers.
     let mut propagation_results: Vec<TiPeerOpResult> = Vec::new();
     if !from_peer {
-        propagation_results = ti_propagate_config_to_peers(&state).await;
+        propagation_results = ti_propagate_config_to_peers(&state, &target_cluster).await;
     }
 
     HttpResponse::Ok().json(serde_json::json!({
-        "config": ti_mask_keys(crate::threat_intel::ThreatIntelConfig::load()),
+        "config": ti_mask_keys(crate::threat_intel::ThreatIntelConfig::load_for(&storage_slug)),
         "peers": propagation_results,
         "ipset_install": ipset_install_results,
     }))
 }
 
 /// POST /api/threat-intel/refresh — trigger an immediate refresh.
+/// `?cluster=NAME` selects the cluster whose feeds to refresh; default
+/// is the bastion's own cluster.
 pub async fn threat_intel_refresh(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let cluster_ips = ti_cluster_node_ips(&state);
+    let target = ti_target_cluster(&req, &state);
+    let storage_slug = ti_storage_cluster(&state, &target);
+    let is_local_kernel = ti_is_local_cluster(&state, &target);
+    // Only exempt cluster_node_ips from peers in the TARGET cluster —
+    // unrelated clusters' IPs shouldn't get a free pass.
+    let target_norm = ti_normalize_cluster(&target);
+    let cluster_ips: Vec<String> = state.cluster.get_all_nodes().iter()
+        .filter(|n| ti_normalize_cluster(n.cluster_name.as_deref().unwrap_or("")) == target_norm)
+        .map(|n| n.address.clone())
+        .filter(|a| match a.parse::<std::net::IpAddr>() {
+            Ok(ip) => !ip.is_unspecified(),
+            Err(_) => false,
+        })
+        .collect();
     let admin_ip = ti_request_client_ip(&req);
-    let new_state = crate::threat_intel::refresh_all(cluster_ips, admin_ip).await;
+    let new_state = crate::threat_intel::refresh_all_for(&storage_slug, cluster_ips, admin_ip, is_local_kernel).await;
     HttpResponse::Ok().json(new_state)
 }
 
 /// POST /api/threat-intel/pause — emergency-off. Drops the kernel rule
 /// immediately while preserving config + ipset state for a one-click
-/// resume. Cluster-wide: propagates pause to every online peer.
+/// resume. Cluster-scoped: `?cluster=NAME` pauses just that cluster.
 pub async fn threat_intel_pause(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
     let from_peer = caller == "cluster-node";
-    let mut cfg = crate::threat_intel::ThreatIntelConfig::load();
+    let target = ti_target_cluster(&req, &state);
+    let storage_slug = if from_peer { String::new() } else { ti_storage_cluster(&state, &target) };
+    let is_local_kernel = from_peer || ti_is_local_cluster(&state, &target);
+
+    let mut cfg = crate::threat_intel::ThreatIntelConfig::load_for(&storage_slug);
     if cfg.paused {
         return HttpResponse::Ok().json(serde_json::json!({ "paused": true, "no_op": true, "peers": [] }));
     }
     cfg.paused = true;
-    if let Err(e) = cfg.save() {
+    if let Err(e) = cfg.save_for(&storage_slug) {
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
     }
-    match tokio::task::spawn_blocking(crate::threat_intel::apply_state_change).await {
+    let slug_for_apply = storage_slug.clone();
+    match tokio::task::spawn_blocking(move || crate::threat_intel::apply_state_change_for(&slug_for_apply, is_local_kernel)).await {
         Ok(Ok(())) => {
-            // Pause is the operator's "emergency off" — awaiting peer
-            // propagation makes "paused" actually mean cluster-wide
-            // paused. Without this, a peer that briefly couldn't be
-            // reached would keep enforcing while the bastion reported
-            // the pause as complete — the worst kind of false
-            // confidence for an emergency control.
+            // Pause is the operator's "emergency off" for THIS cluster.
+            // Propagate to peers in the target cluster only — pausing
+            // cluster A's view shouldn't take cluster B offline.
             let mut peers: Vec<TiPeerOpResult> = Vec::new();
-            if !from_peer { peers = ti_propagate_config_to_peers(&state).await; }
+            if !from_peer { peers = ti_propagate_config_to_peers(&state, &target).await; }
             HttpResponse::Ok().json(serde_json::json!({ "paused": true, "peers": peers }))
         }
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
@@ -1286,31 +1352,35 @@ pub async fn threat_intel_pause(req: HttpRequest, state: web::Data<AppState>) ->
     }
 }
 
-/// POST /api/threat-intel/resume — undo a pause. Cluster-wide.
+/// POST /api/threat-intel/resume — undo a pause. Cluster-scoped.
 pub async fn threat_intel_resume(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
     let from_peer = caller == "cluster-node";
-    let mut cfg = crate::threat_intel::ThreatIntelConfig::load();
+    let target = ti_target_cluster(&req, &state);
+    let storage_slug = if from_peer { String::new() } else { ti_storage_cluster(&state, &target) };
+    let is_local_kernel = from_peer || ti_is_local_cluster(&state, &target);
+
+    let mut cfg = crate::threat_intel::ThreatIntelConfig::load_for(&storage_slug);
     if !cfg.paused {
         return HttpResponse::Ok().json(serde_json::json!({ "paused": false, "no_op": true, "peers": [], "ipset_install": [] }));
     }
     cfg.paused = false;
-    if let Err(e) = cfg.save() {
+    if let Err(e) = cfg.save_for(&storage_slug) {
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
     }
-    match tokio::task::spawn_blocking(crate::threat_intel::apply_state_change).await {
+    let slug_for_apply = storage_slug.clone();
+    match tokio::task::spawn_blocking(move || crate::threat_intel::apply_state_change_for(&slug_for_apply, is_local_kernel)).await {
         Ok(Ok(())) => {
             // If unpausing actually re-activated enforcement (the common
             // case — pause was the only thing turning it off), make sure
-            // peers have ipset and the same config. Await both so the
-            // response can name peers where re-activation failed.
+            // peers in the target cluster have ipset and the same config.
             let mut ipset_install: Vec<TiPeerOpResult> = Vec::new();
             let mut peers: Vec<TiPeerOpResult> = Vec::new();
             if !from_peer
-                && crate::threat_intel::enforcement_active(&crate::threat_intel::ThreatIntelConfig::load())
+                && crate::threat_intel::enforcement_active(&crate::threat_intel::ThreatIntelConfig::load_for(&storage_slug))
             {
-                ipset_install = ti_install_ipset_on_peers(&state).await;
-                peers = ti_propagate_config_to_peers(&state).await;
+                ipset_install = ti_install_ipset_on_peers(&state, &target).await;
+                peers = ti_propagate_config_to_peers(&state, &target).await;
             }
             HttpResponse::Ok().json(serde_json::json!({
                 "paused": false,
@@ -1328,9 +1398,16 @@ pub async fn threat_intel_resume(req: HttpRequest, state: web::Data<AppState>) -
 /// added IPs (first 50 of each family — the UI uses these for "preview"
 /// rendering without shipping 200k entries to the browser).
 pub async fn threat_intel_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let snapshot = crate::threat_intel::snapshot_cache();
-    let cfg = crate::threat_intel::ThreatIntelConfig::load();
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    let from_peer = caller == "cluster-node";
+    let storage_slug = if from_peer {
+        String::new()
+    } else {
+        let target = ti_target_cluster(&req, &state);
+        ti_storage_cluster(&state, &target)
+    };
+    let snapshot = crate::threat_intel::snapshot_cache_for(&storage_slug);
+    let cfg = crate::threat_intel::ThreatIntelConfig::load_for(&storage_slug);
 
     let sample_v4: Vec<String> = snapshot.blocklist_v4.iter().take(50).cloned().collect();
     let sample_v6: Vec<String> = snapshot.blocklist_v6.iter().take(50).cloned().collect();
@@ -1555,13 +1632,22 @@ pub async fn threat_intel_cluster_status(req: HttpRequest, state: web::Data<AppS
 }
 
 /// GET /api/threat-intel/lookup/{ip} — is this IP currently blocked, and which feed CIDRs match?
+/// `?cluster=NAME` picks which cluster's blocklist to check against;
+/// default is the bastion's own.
 pub async fn threat_intel_lookup(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    let from_peer = caller == "cluster-node";
     let ip = path.into_inner();
     if ip.parse::<std::net::IpAddr>().is_err() {
         return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Not a valid IP address" }));
     }
-    let matches = crate::threat_intel::lookup_ip(&ip);
+    let storage_slug = if from_peer {
+        String::new()
+    } else {
+        let target = ti_target_cluster(&req, &state);
+        ti_storage_cluster(&state, &target)
+    };
+    let matches = crate::threat_intel::lookup_ip_for(&storage_slug, &ip);
     HttpResponse::Ok().json(serde_json::json!({
         "ip": ip,
         "blocked": !matches.is_empty(),

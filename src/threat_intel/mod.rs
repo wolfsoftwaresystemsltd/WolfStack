@@ -183,26 +183,88 @@ pub struct ProviderState {
 // ─── Persistence ───
 // ═══════════════════════════════════════════════
 
-fn config_path() -> String {
-    let cfg = crate::paths::get().config_dir;
-    format!("{}/threat-intel.json", cfg)
+/// Sanitise a cluster name for use as a filesystem suffix. Operators
+/// can name clusters anything they like; without this an embedded `/`,
+/// `..`, or unicode quirk could escape /etc/wolfstack. Strips to a
+/// safe alphanumeric/_/- subset and truncates to 64 chars.
+fn slug_cluster(name: &str) -> String {
+    let s: String = name.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' => c,
+            _ => '_',
+        })
+        .take(64)
+        .collect();
+    if s.is_empty() { "_".to_string() } else { s }
 }
 
-fn state_path() -> String {
+/// Per-cluster config file path. Empty cluster name → legacy
+/// `threat-intel.json` (the bastion's own cluster, backward compatible
+/// with single-cluster installs). Named clusters get
+/// `threat-intel-{slug}.json`. Same scheme for state files.
+pub fn config_path_for(cluster: &str) -> String {
     let cfg = crate::paths::get().config_dir;
-    format!("{}/threat-intel-state.json", cfg)
+    if cluster.is_empty() {
+        format!("{}/threat-intel.json", cfg)
+    } else {
+        format!("{}/threat-intel-{}.json", cfg, slug_cluster(cluster))
+    }
+}
+
+pub fn state_path_for(cluster: &str) -> String {
+    let cfg = crate::paths::get().config_dir;
+    if cluster.is_empty() {
+        format!("{}/threat-intel-state.json", cfg)
+    } else {
+        format!("{}/threat-intel-state-{}.json", cfg, slug_cluster(cluster))
+    }
+}
+
+fn state_path() -> String { state_path_for("") }
+
+/// Enumerate every cluster that has a saved config on disk. Includes
+/// the default (legacy) `threat-intel.json` as the empty-string entry.
+/// Used by the scheduler loop so refreshes run for every managed
+/// cluster, not just the bastion's own.
+pub fn known_clusters() -> Vec<String> {
+    let dir = crate::paths::get().config_dir;
+    let mut out: Vec<String> = Vec::new();
+    if std::path::Path::new(&format!("{}/threat-intel.json", dir)).exists() {
+        out.push(String::new());
+    }
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Pattern: threat-intel-<slug>.json  (NOT threat-intel-state-*.json)
+            if let Some(rest) = name.strip_prefix("threat-intel-") {
+                if let Some(slug) = rest.strip_suffix(".json") {
+                    if slug.starts_with("state-") || slug == "state" { continue; }
+                    if !out.contains(&slug.to_string()) {
+                        out.push(slug.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 impl ThreatIntelConfig {
-    pub fn load() -> Self {
-        match std::fs::read_to_string(config_path()) {
+    pub fn load() -> Self { Self::load_for("") }
+
+    /// Load the config for a specific cluster. Empty `cluster` loads
+    /// the legacy `threat-intel.json` (bastion's own cluster). Missing
+    /// files return a fresh default — the safe-by-default
+    /// `enabled: false, dry_run: true` state.
+    pub fn load_for(cluster: &str) -> Self {
+        match std::fs::read_to_string(config_path_for(cluster)) {
             Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
             Err(_) => Self::default(),
         }
     }
 
-    pub fn save(&self) -> Result<(), String> {
-        let path = config_path();
+    pub fn save_for(&self, cluster: &str) -> Result<(), String> {
+        let path = config_path_for(cluster);
         if let Some(dir) = std::path::Path::new(&path).parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -214,8 +276,10 @@ impl ThreatIntelConfig {
 }
 
 impl ThreatIntelState {
-    pub fn load() -> Self {
-        let mut s: Self = match std::fs::read_to_string(state_path()) {
+    pub fn load() -> Self { Self::load_for("") }
+
+    pub fn load_for(cluster: &str) -> Self {
+        let mut s: Self = match std::fs::read_to_string(state_path_for(cluster)) {
             Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
             Err(_) => return Self::default(),
         };
@@ -230,8 +294,8 @@ impl ThreatIntelState {
         s
     }
 
-    pub fn save(&self) -> Result<(), String> {
-        let path = state_path();
+    pub fn save_for(&self, cluster: &str) -> Result<(), String> {
+        let path = state_path_for(cluster);
         if let Some(dir) = std::path::Path::new(&path).parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -246,43 +310,69 @@ impl ThreatIntelState {
 // ─── In-memory cache (for fast lookups) ───
 // ═══════════════════════════════════════════════
 
-/// Cached state — refreshed by the background task and consulted by the
-/// `/api/threat-intel/lookup/{ip}` endpoint plus the firewall builder.
-fn cache() -> &'static RwLock<ThreatIntelState> {
+/// Per-cluster cache. Each cluster the bastion manages has its own
+/// in-memory state snapshot keyed by cluster slug (empty string for the
+/// default / bastion's own cluster). Lazily populated on first access:
+/// the first read for a cluster loads from `state-{slug}.json` on disk.
+fn caches() -> &'static RwLock<std::collections::HashMap<String, ThreatIntelState>> {
     use std::sync::OnceLock;
-    static C: OnceLock<RwLock<ThreatIntelState>> = OnceLock::new();
-    C.get_or_init(|| RwLock::new(ThreatIntelState::load()))
+    static C: OnceLock<RwLock<std::collections::HashMap<String, ThreatIntelState>>> = OnceLock::new();
+    C.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
 }
 
-/// Replace the cache wholesale. Called by the refresh worker.
-pub fn set_cache(state: ThreatIntelState) {
-    let mut w = cache().write().unwrap();
-    *w = state;
+/// Replace a cluster's cache wholesale. Called by the refresh worker
+/// for whichever cluster it just finished refreshing.
+pub fn set_cache_for(cluster: &str, state: ThreatIntelState) {
+    let mut w = caches().write().unwrap();
+    w.insert(cluster.to_string(), state);
 }
 
-/// Clone the current cached state — cheap-ish thanks to BTreeSet's structural sharing? No,
-/// BTreeSet clones fully. Callers should prefer `with_cache(|s| ...)` for read-only use.
-pub fn snapshot_cache() -> ThreatIntelState {
-    cache().read().unwrap().clone()
+pub fn set_cache(state: ThreatIntelState) { set_cache_for("", state); }
+
+/// Clone the current cached state for a cluster. Loads from disk on
+/// first access. Cluster snapshots can be MB-sized when the blocklist
+/// is dense — callers that only need one or two fields should reach for
+/// `with_cache_for` instead once that lands.
+pub fn snapshot_cache_for(cluster: &str) -> ThreatIntelState {
+    {
+        let r = caches().read().unwrap();
+        if let Some(s) = r.get(cluster) {
+            return s.clone();
+        }
+    }
+    // Not cached yet — load from disk under a write lock so concurrent
+    // callers don't all race to the same file. The `get-or-insert`
+    // pattern keeps us at most one load per cluster per process life.
+    let mut w = caches().write().unwrap();
+    if let Some(s) = w.get(cluster) {
+        return s.clone();
+    }
+    let fresh = ThreatIntelState::load_for(cluster);
+    w.insert(cluster.to_string(), fresh.clone());
+    fresh
 }
+
+pub fn snapshot_cache() -> ThreatIntelState { snapshot_cache_for("") }
 
 /// Check whether a single IP is on the active blocklist. Returns the CIDRs
 /// that match (usually one, occasionally several when both a /32 and a
 /// containing CIDR are on different feeds). Currently does exact string
 /// match for /32 and /128 entries; full CIDR containment is a follow-up.
-pub fn lookup_ip(ip: &str) -> Vec<String> {
-    let cache = cache().read().unwrap();
-    let mut hits = Vec::new();
+/// Per-cluster blocklist lookup. The bastion uses the empty-cluster
+/// lookup for its own traffic; the API endpoint also accepts a
+/// `?cluster=` to let the operator check what cluster B's blocklist
+/// would do.
+pub fn lookup_ip_for(cluster: &str, ip: &str) -> Vec<String> {
+    let snapshot = snapshot_cache_for(cluster);
+    let mut hits: Vec<String> = Vec::new();
     let parsed: std::net::IpAddr = match ip.parse() {
         Ok(p) => p,
         Err(_) => return hits,
     };
     let pool = match parsed {
-        std::net::IpAddr::V4(_) => &cache.blocklist_v4,
-        std::net::IpAddr::V6(_) => &cache.blocklist_v6,
+        std::net::IpAddr::V4(_) => &snapshot.blocklist_v4,
+        std::net::IpAddr::V6(_) => &snapshot.blocklist_v6,
     };
-    // Exact match plus simple CIDR containment using the ipnet-free
-    // approach: parse each entry, check if `parsed` falls inside.
     for entry in pool.iter() {
         if entry == ip {
             hits.push(entry.clone());
@@ -488,7 +578,7 @@ mod tests {
     #[test]
     fn test_lookup_ip_empty_cache() {
         // Cache starts empty (load returns default). Lookup returns empty.
-        let result = lookup_ip("8.8.8.8");
+        let result = lookup_ip_for("", "8.8.8.8");
         assert!(result.is_empty() || result.iter().all(|_| true));  // tolerate state from prior tests
     }
 
@@ -665,11 +755,21 @@ fn unix_now() -> u64 {
 ///
 /// Returns the new `ThreatIntelState` which is also persisted and pushed
 /// into the in-memory cache.
-pub async fn refresh_all(
+/// Per-cluster refresh. Same logic as `refresh_all` but loads the
+/// target cluster's config + state file, persists results to that
+/// cluster's files, and only pushes to the local kernel ipset when
+/// `apply_local_kernel` is true (i.e. this is the bastion's own
+/// cluster). For other clusters the bastion stores the proposed
+/// blocklist on disk so the UI can show it, but the kernel rules
+/// belong on the OTHER cluster's nodes — they apply them locally
+/// when they receive the propagated config.
+pub async fn refresh_all_for(
+    cluster: &str,
     cluster_node_ips: Vec<String>,
     extra_exempt_ips: Vec<String>,
+    apply_local_kernel: bool,
 ) -> ThreatIntelState {
-    let cfg = ThreatIntelConfig::load();
+    let cfg = ThreatIntelConfig::load_for(cluster);
     let mut new_state = ThreatIntelState::default();
     new_state.last_refresh_secs = unix_now();
 
@@ -751,10 +851,12 @@ pub async fn refresh_all(
     new_state.blocklist_size = new_state.blocklist_v4.len() + new_state.blocklist_v6.len();
     new_state.applied = false;
 
-    // Push to ipset only when enforcement is active (enabled, not dry-run,
-    // not paused). ipset failures are logged but don't poison the state —
-    // the dry-run report still shows the user what would have been blocked.
-    if enforcement_active(&cfg) {
+    // Push to ipset only when enforcement is active AND this refresh
+    // belongs to the bastion's OWN cluster. For other clusters we
+    // store the proposed blocklist on disk + cache so the UI can show
+    // it; the kernel rules go on those clusters' nodes when the
+    // bastion propagates the config to them.
+    if apply_local_kernel && enforcement_active(&cfg) {
         let v4_lines = new_state.blocklist_v4.clone();
         let v6_lines = new_state.blocklist_v6.clone();
         let res = tokio::task::spawn_blocking(move || {
@@ -771,15 +873,15 @@ pub async fn refresh_all(
             new_state.applied = true;
         } else {
             for e in &res {
-                tracing::warn!("threat-intel ipset apply: {}", e);
+                tracing::warn!("threat-intel ipset apply (cluster '{}'): {}", cluster, e);
             }
         }
     }
 
-    if let Err(e) = new_state.save() {
-        tracing::warn!("threat-intel state save failed: {}", e);
+    if let Err(e) = new_state.save_for(cluster) {
+        tracing::warn!("threat-intel state save failed for cluster '{}': {}", cluster, e);
     }
-    set_cache(new_state.clone());
+    set_cache_for(cluster, new_state.clone());
     new_state
 }
 
@@ -793,34 +895,64 @@ pub async fn scheduler_loop(cluster: std::sync::Arc<crate::agent::ClusterState>)
     use std::time::Duration;
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
-        let cfg = ThreatIntelConfig::load();
-        if !cfg.enabled {
-            continue;
+        // Iterate over every cluster the bastion has a config for —
+        // each cluster has its own enabled flag, refresh schedule, and
+        // last-refresh state. Without this, a bastion managing N
+        // clusters only ever refreshed the default one and the other
+        // N-1 clusters' blocklists went stale.
+        let bastion_cluster_raw = cluster.get_self_cluster_name();
+        // The bastion's own cluster is the empty-slug ("") on disk.
+        // Other clusters are stored under their slug.
+        for slug in known_clusters() {
+            let cfg = ThreatIntelConfig::load_for(&slug);
+            if !cfg.enabled { continue; }
+            let state = ThreatIntelState::load_for(&slug);
+            let now = unix_now();
+            let interval_secs = cfg.refresh_hours.clamp(1, 168) * 3600;
+            let due = state.last_refresh_secs == 0
+                || now.saturating_sub(state.last_refresh_secs) >= interval_secs;
+            if !due { continue; }
+            let cluster_ips: Vec<String> = cluster
+                .get_all_nodes()
+                .iter()
+                // Limit safe-filter to the TARGET cluster's IPs — we
+                // shouldn't exempt cluster A's nodes from cluster B's
+                // blocklist (different threat models, different policy).
+                .filter(|n| {
+                    let other = n.cluster_name.as_deref().unwrap_or("");
+                    slug_matches_cluster(&slug, other, &bastion_cluster_raw)
+                })
+                .map(|n| n.address.clone())
+                .filter(|a| {
+                    match a.parse::<std::net::IpAddr>() {
+                        Ok(ip) => !ip.is_unspecified(),
+                        Err(_) => false,
+                    }
+                })
+                .collect();
+            // Whether the kernel side runs locally: only when refreshing
+            // the bastion's own cluster's config. For other clusters,
+            // we update on-disk state + cache (so the UI reflects the
+            // refresh) but never touch the bastion's kernel — those
+            // rules belong on the OTHER cluster's nodes, which the
+            // bastion fanned the config out to.
+            let is_local_kernel = slug.is_empty()
+                || slug == slug_cluster(bastion_cluster_raw.as_str());
+            let _ = refresh_all_for(&slug, cluster_ips, Vec::new(), is_local_kernel).await;
         }
-        let state = ThreatIntelState::load();
-        let now = unix_now();
-        let interval_secs = cfg.refresh_hours.clamp(1, 168) * 3600;
-        let due = state.last_refresh_secs == 0
-            || now.saturating_sub(state.last_refresh_secs) >= interval_secs;
-        if !due {
-            continue;
-        }
-        let cluster_ips: Vec<String> = cluster
-            .get_all_nodes()
-            .iter()
-            .map(|n| n.address.clone())
-            .filter(|a| {
-                // Drop 0.0.0.0 / :: — listen-on-all sentinel, not a real address.
-                match a.parse::<std::net::IpAddr>() {
-                    Ok(ip) => !ip.is_unspecified(),
-                    Err(_) => false,
-                }
-            })
-            .collect();
-        // Scheduler has no notion of an "admin IP" — pass empty extras.
-        // API-triggered refreshes pass the requester's IP to protect
-        // them; the periodic scheduler doesn't need to.
-        let _ = refresh_all(cluster_ips, Vec::new()).await;
+    }
+}
+
+/// Does this slug refer to the same cluster as `cluster_name`? The
+/// bastion's own cluster has the empty slug on disk; everything else
+/// gets `slug_cluster(name)`. Empty cluster names normalise to the
+/// bastion's view so legacy nodes show up in the right bucket.
+fn slug_matches_cluster(slug: &str, candidate_name: &str, bastion_name: &str) -> bool {
+    if slug.is_empty() {
+        // Default file is the bastion's own cluster.
+        candidate_name.is_empty() || candidate_name == bastion_name
+    } else {
+        slug == slug_cluster(candidate_name)
     }
 }
 
@@ -880,8 +1012,29 @@ pub fn startup() {
 /// `iptables-restore --test` will reject the ruleset and the apply
 /// rolls back. We therefore pre-create (or seed from the cached
 /// blocklist) before rebuilding the ruleset.
-pub fn apply_state_change() -> Result<(), String> {
-    let cfg = ThreatIntelConfig::load();
+/// Per-cluster apply. When `apply_local_kernel` is false the function
+/// is a no-op kernel-wise — it only refreshes the cached `applied`
+/// flag for the target cluster's state. Use this when the bastion is
+/// modifying a cluster's config but the kernel rules belong on a
+/// different host (the propagation step delivers the new config to
+/// the right nodes and they apply locally).
+pub fn apply_state_change_for(cluster: &str, apply_local_kernel: bool) -> Result<(), String> {
+    let cfg = ThreatIntelConfig::load_for(cluster);
+
+    if !apply_local_kernel {
+        // Not the bastion's own cluster — only update the cached
+        // `applied` flag so the UI reflects what the config says.
+        // Real kernel application happens on the target cluster's
+        // nodes when they receive the propagated config.
+        let new_applied = enforcement_active(&cfg);
+        let mut w = caches().write().unwrap();
+        let entry = w.entry(cluster.to_string()).or_insert_with(|| ThreatIntelState::load_for(cluster));
+        entry.applied = new_applied;
+        let snapshot = entry.clone();
+        drop(w);
+        let _ = snapshot.save_for(cluster);
+        return Ok(());
+    }
 
     if enforcement_active(&cfg) {
         // Going to enforce. ipset MUST be available — otherwise the
@@ -921,7 +1074,7 @@ pub fn apply_state_change() -> Result<(), String> {
         // Seed the ipsets with whatever we have cached — typically from
         // an earlier dry-run refresh. Empty seed is fine; the kernel
         // rule will match nothing until the next refresh populates it.
-        let cached = snapshot_cache();
+        let cached = snapshot_cache_for(cluster);
         ipset::replace_set(IPSET_NAME_V4, "inet", &cached.blocklist_v4)
             .map_err(|e| format!("create ipset {}: {}", IPSET_NAME_V4, e))?;
         ipset::replace_set(IPSET_NAME_V6, "inet6", &cached.blocklist_v6)
@@ -957,11 +1110,12 @@ pub fn apply_state_change() -> Result<(), String> {
     // iptables rule references them.
     let new_applied = enforcement_active(&cfg);
     {
-        let mut w = cache().write().unwrap();
-        w.applied = new_applied;
-        let snapshot = w.clone();
+        let mut w = caches().write().unwrap();
+        let entry = w.entry(cluster.to_string()).or_insert_with(|| ThreatIntelState::load_for(cluster));
+        entry.applied = new_applied;
+        let snapshot = entry.clone();
         drop(w);
-        let _ = snapshot.save();
+        let _ = snapshot.save_for(cluster);
     }
     Ok(())
 }

@@ -135,21 +135,85 @@ pub struct CertSummary {
 /// (`/usr/local/bin`), snap (`/snap/bin`), and the EFF-maintained
 /// virtualenv path (`/opt/certbot/bin`).
 pub fn certbot_path() -> Option<String> {
+    // 1. systemd PATH probe — cheapest, works for distro packages
+    //    (apt/dnf/pacman install to /usr/bin which is in systemd's PATH).
     if let Ok(out) = Command::new("certbot").arg("--version").output() {
         if out.status.success() {
             return Some("certbot".to_string());
         }
     }
+    // 2. Ask a login shell where certbot is — picks up /etc/environment,
+    //    /etc/profile.d/*, snap wrappers, pyenv, asdf, pipx, nix, and any
+    //    operator-defined PATH addition. systemd unlike interactive
+    //    shells doesn't source these, so without this we miss many real
+    //    installs in the wild (snap on Ubuntu, pipx on Fedora, /opt on
+    //    Arch derivatives, etc.). We try bash → sh so the call works on
+    //    minimal Alpine/Debian-slim hosts that don't have bash.
+    for shell in &["/bin/bash", "/bin/sh"] {
+        if !std::path::Path::new(shell).exists() { continue; }
+        if let Ok(out) = Command::new(shell)
+            .args(["-lc", "command -v certbot"])
+            .output()
+        {
+            if out.status.success() {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !path.is_empty() && std::path::Path::new(&path).exists() {
+                    // Sanity-check the binary actually runs.
+                    if let Ok(v) = Command::new(&path).arg("--version").output() {
+                        if v.status.success() {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 3. Known install locations across distros, package managers, and
+    //    deployment styles. Order matters: distro packages first (most
+    //    common), then snap (EFF's Ubuntu recommendation), then EFF's
+    //    own virtualenv install, then user-local pip / pipx prefixes.
+    //    /root/* covers `sudo pip install` and `pipx --global` on hosts
+    //    where the WolfStack service runs as root.
     for cand in &[
         "/usr/bin/certbot",
+        "/usr/sbin/certbot",
         "/usr/local/bin/certbot",
+        "/usr/local/sbin/certbot",
         "/snap/bin/certbot",
+        "/var/lib/snapd/snap/bin/certbot",
         "/opt/certbot/bin/certbot",
+        "/opt/letsencrypt/certbot",
+        "/opt/eff.org/certbot/venv/bin/certbot",
+        "/root/.local/bin/certbot",
+        "/root/.local/pipx/venvs/certbot/bin/certbot",
     ] {
         if std::path::Path::new(cand).exists() {
             if let Ok(out) = Command::new(cand).arg("--version").output() {
                 if out.status.success() {
                     return Some((*cand).to_string());
+                }
+            }
+        }
+    }
+    // 4. Last resort — walk common install roots looking for any
+    //    executable called `certbot`. Bounded depth so we don't trawl
+    //    the whole filesystem on hosts with deep home dirs. Stop on
+    //    the first hit that runs `--version` successfully.
+    for root in &["/usr/local", "/opt", "/snap"] {
+        if !std::path::Path::new(root).exists() { continue; }
+        if let Ok(out) = Command::new("find")
+            .args([root, "-maxdepth", "5", "-name", "certbot", "-type", "f", "-executable"])
+            .output()
+        {
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let p = line.trim();
+                    if p.is_empty() { continue; }
+                    if let Ok(v) = Command::new(p).arg("--version").output() {
+                        if v.status.success() {
+                            return Some(p.to_string());
+                        }
+                    }
                 }
             }
         }
