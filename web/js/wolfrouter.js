@@ -309,6 +309,12 @@
     window.wrPreviewReconstruction = wrPreviewReconstruction;
 
     // Expose hooks the HTML and app.js call directly.
+    // wrState is exposed so the Threat Intel tab (rendered from app.js)
+    // can read the active cluster name and pass it as ?cluster= when
+    // calling /api/threat-intel/cluster-status. Without this, the
+    // status table leaks every node from every cluster a bastion
+    // manages into every cluster's view.
+    window.wrState = wrState;
     window.wrLoadAll = wrLoadAll;
     window.wrStartPolling = wrStartPolling;
     window.showWolfRouterForCluster = showWolfRouterForCluster;
