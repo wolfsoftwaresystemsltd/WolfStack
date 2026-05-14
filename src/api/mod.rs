@@ -922,6 +922,15 @@ pub struct TiPeerOpResult {
     pub error: Option<String>,
 }
 
+/// Normalise a cluster name for comparison. Nodes without an explicit
+/// `cluster_name` (legacy single-cluster installs, freshly-onboarded
+/// nodes) fall under the "WolfStack" default. Same normalisation rule
+/// the cluster-status endpoint uses so the peer-filter agrees with
+/// what the operator sees in the cluster status table.
+fn ti_normalize_cluster(name: &str) -> String {
+    if name.is_empty() { "WolfStack".to_string() } else { name.to_string() }
+}
+
 /// Fan out an `ipset` install request to every online WolfStack peer in
 /// parallel and await the results. Used when the local admin flips
 /// Threat Intel to enforce mode — peers need ipset present before they
@@ -939,8 +948,18 @@ async fn ti_install_ipset_on_peers(state: &web::Data<AppState>) -> Vec<TiPeerOpR
     let nodes = state.cluster.get_all_nodes();
     let secret = state.cluster_secret.clone();
     let self_id = state.cluster.self_id.clone();
+    // Threat Intel is per-cluster. A node only ever propagates to peers
+    // in its OWN cluster — without this filter, a bastion managing
+    // clusters A and B would fan a "pause" or "enforce" decision across
+    // every cluster the bastion can see, silently overriding policy on
+    // unrelated tenants. Operators acting on cluster B from a different
+    // bastion's WolfRouter view proxy via a cluster-B node (see the
+    // frontend's tiClusterApi helper); that node's "own cluster" is B,
+    // so this filter keeps the fanout scoped where the operator expects.
+    let self_cluster = ti_normalize_cluster(state.cluster.get_self_cluster_name().as_str());
     let peers: Vec<(String, String, u16)> = nodes.iter()
-        .filter(|n| !n.is_self && n.id != self_id && n.online && n.node_type == "wolfstack")
+        .filter(|n| !n.is_self && n.id != self_id && n.online && n.node_type == "wolfstack"
+                    && ti_normalize_cluster(n.cluster_name.as_deref().unwrap_or("")) == self_cluster)
         .map(|n| (n.hostname.clone(), n.address.clone(), n.port))
         .collect();
     if peers.is_empty() { return Vec::new(); }
@@ -1022,8 +1041,13 @@ async fn ti_propagate_config_to_peers(state: &web::Data<AppState>) -> Vec<TiPeer
     let nodes = state.cluster.get_all_nodes();
     let secret = state.cluster_secret.clone();
     let self_id = state.cluster.self_id.clone();
+    // Same cluster-scoping reasoning as ti_install_ipset_on_peers:
+    // a node fans changes out only inside its own cluster so tenant
+    // policies never leak between clusters managed by the same bastion.
+    let self_cluster = ti_normalize_cluster(state.cluster.get_self_cluster_name().as_str());
     let peers: Vec<(String, String, u16)> = nodes.iter()
-        .filter(|n| !n.is_self && n.id != self_id && n.online && n.node_type == "wolfstack")
+        .filter(|n| !n.is_self && n.id != self_id && n.online && n.node_type == "wolfstack"
+                    && ti_normalize_cluster(n.cluster_name.as_deref().unwrap_or("")) == self_cluster)
         .map(|n| (n.hostname.clone(), n.address.clone(), n.port))
         .collect();
     if peers.is_empty() { return Vec::new(); }

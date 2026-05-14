@@ -31035,6 +31035,48 @@ async function passkeyDelete(credentialId, btn) {
 // config object back and forth on every change.
 var _tiCachedConfig = null;
 var _tiCachedStatus = null;
+// Most-recent cluster-status response rows for the active WolfRouter
+// cluster — used by tiClusterApi to pick a target node for state-change
+// operations so we never operate on the wrong cluster.
+var _tiClusterStatusRows = null;
+
+// Resolve the right URL for a threat-intel API call against the cluster
+// currently displayed in WolfRouter. Threat Intel lives inside the
+// WolfRouter view and must only affect the cluster the operator is
+// looking at — never the bastion's own cluster when those differ.
+//
+// Strategy:
+// - If the active cluster contains the local bastion (is_self row),
+//   use the direct /api/threat-intel/... path. The node_proxy endpoint
+//   explicitly rejects self-proxy with "Use local API for self node".
+// - Otherwise, find any online wolfstack node in the active cluster
+//   and route through /api/nodes/{id}/proxy/api/threat-intel/... .
+//   The remote node updates its own config and propagates inside its
+//   own cluster (the backend's self-cluster peer filter ensures this),
+//   so the local bastion stays untouched.
+//
+// Returns { url, viaNodeId } or throws if no online node in the active
+// cluster is available to act on.
+function tiClusterApi(path) {
+    const rows = _tiClusterStatusRows || [];
+    // Prefer the local bastion if it's part of the active cluster — it's
+    // the fastest path and matches the operator's "I'm using this UI"
+    // expectation.
+    const selfRow = rows.find(r => r.is_self && r.online && r.reachable !== false);
+    if (selfRow) {
+        return { url: path, viaNodeId: null };
+    }
+    // Otherwise pick any online wolfstack peer in the cluster. Reachable
+    // matters too — an offline node would 502 the proxy call.
+    const target = rows.find(r => r.online && r.reachable !== false && r.status);
+    if (!target) {
+        throw new Error('No online node in this cluster to apply the change. Bring at least one cluster node online and try again.');
+    }
+    return {
+        url: `/api/nodes/${encodeURIComponent(target.id)}/proxy${path}`,
+        viaNodeId: target.id,
+    };
+}
 
 // Per-provider delisting / lookup info used by the self-blacklist banner.
 // Keep in sync with the provider IDs in src/threat_intel/feeds.rs.
@@ -31065,13 +31107,21 @@ const TI_DELISTING = {
     },
 };
 
-function tiRenderTab() {
+async function tiRenderTab() {
+    // Clear the previous cluster's cached rows BEFORE any other call
+    // resolves them — if the user just switched WolfRouter clusters,
+    // tiClusterApi must not fire requests at the prior cluster's nodes.
+    // tiLoadConfig/tiLoadStatus wait for fresh rows below.
+    _tiClusterStatusRows = null;
+    // Cluster status must finish first because tiLoadConfig and
+    // tiLoadStatus pick a target node from its result. Without this
+    // ordering, on a fresh tab open (or cluster switch) those two
+    // requests fall back to the local bastion — which may be in a
+    // completely different cluster than the one the operator is
+    // viewing — and the UI silently misreports the active cluster's
+    // state.
+    await tiLoadClusterStatus();
     tiLoadConfig();
-    // Cluster status drives the big badge, self-blacklist banner, and
-    // divergence banner — kick it off first so those render with
-    // accurate (cluster-wide) values rather than briefly flashing the
-    // bastion-local view that tiLoadStatus would otherwise paint.
-    tiLoadClusterStatus();
     tiLoadStatus();
     tiStartClusterPolling();
 }
@@ -31097,7 +31147,16 @@ function tiEsc(s) {
 
 async function tiLoadConfig() {
     try {
-        const resp = await fetch('/api/threat-intel/config');
+        // The config drives the UI controls (toggles, allowlist text,
+        // provider keys). It must be loaded from a node in the ACTIVE
+        // WolfRouter cluster, not the local bastion — otherwise the
+        // operator sees cluster A's config while looking at cluster B's
+        // tab. Falls back to local /api/threat-intel/config if cluster
+        // status hasn't loaded yet (chicken-egg on first paint).
+        let url;
+        try { url = tiClusterApi('/api/threat-intel/config').url; }
+        catch (_) { url = '/api/threat-intel/config'; }
+        const resp = await fetch(url);
         if (!resp.ok) throw new Error('Failed to load config');
         const cfg = await resp.json();
         _tiCachedConfig = cfg;
@@ -31163,6 +31222,9 @@ async function tiLoadClusterStatus() {
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
         const rows = data.nodes || [];
+        // Cache so tiClusterApi can target nodes in this cluster for
+        // subsequent state-change operations.
+        _tiClusterStatusRows = rows;
         tiRenderClusterStatusTable(rows);
         // Re-derive the top-level badge from cluster data so it reflects
         // the cluster as a whole, not just the bastion the browser hit.
@@ -31468,7 +31530,16 @@ function tiRenderSelfBanner(self_blacklisted) {
 
 async function tiLoadStatus() {
     try {
-        const resp = await fetch('/api/threat-intel/status');
+        // Status drives the summary text and the per-provider freshness
+        // lines under each provider row. Target a node in the active
+        // cluster so the numbers shown match the cluster the operator
+        // is looking at, not whatever cluster the bastion happens to be
+        // in. Falls back to local /status on first paint before cluster
+        // status has populated _tiClusterStatusRows.
+        let url;
+        try { url = tiClusterApi('/api/threat-intel/status').url; }
+        catch (_) { url = '/api/threat-intel/status'; }
+        const resp = await fetch(url);
         if (!resp.ok) throw new Error('Failed to load status');
         const s = await resp.json();
         _tiCachedStatus = s;
@@ -31594,12 +31665,16 @@ function tiRenderPropagationBanner(peerOps, ipsetOps, operation) {
 async function tiPatchEnableTriple() {
     // Called when the user toggles "Enabled" or "Dry-run" — both go in
     // a single PATCH so the backend's apply_state_change runs at most
-    // once for the change pair.
+    // once for the change pair. Routed via tiClusterApi so the change
+    // hits a node in the cluster the operator is currently viewing —
+    // not the local bastion, which may be in a completely different
+    // cluster.
     const enabled = document.getElementById('ti-cfg-enabled').checked;
     const dry_run = document.getElementById('ti-cfg-dry-run').checked;
     const body = { enabled, dry_run };
     try {
-        const resp = await fetch('/api/threat-intel/config', {
+        const target = tiClusterApi('/api/threat-intel/config');
+        const resp = await fetch(target.url, {
             method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body),
         });
         const data = await resp.json().catch(() => ({}));
@@ -31632,9 +31707,11 @@ async function tiPatchEnableTriple() {
 // body, then surface any peer-propagation failures via the divergence
 // banner. Used by every save-* function so an allowlist or provider
 // change that didn't reach a peer becomes visible instead of silently
-// leaving the cluster split-brained on policy.
+// leaving the cluster split-brained on policy. Routed via tiClusterApi
+// so the change lands on a node in the cluster the operator is viewing.
 async function tiPatchAndReport(body, opName) {
-    const resp = await fetch('/api/threat-intel/config', {
+    const target = tiClusterApi('/api/threat-intel/config');
+    const resp = await fetch(target.url, {
         method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body),
     });
     const data = await resp.json().catch(() => ({}));
@@ -31691,10 +31768,15 @@ async function tiRefreshNow() {
     const btn = document.getElementById('ti-refresh-now-btn');
     if (btn) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
     try {
-        const resp = await fetch('/api/threat-intel/refresh', { method: 'POST' });
+        // Refresh is a per-node operation (each node fetches feeds on its
+        // own schedule) — route to a node in the currently viewed cluster
+        // so we don't burn API quota on the wrong tenant.
+        const target = tiClusterApi('/api/threat-intel/refresh');
+        const resp = await fetch(target.url, { method: 'POST' });
         if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Server error');
         showToast('Refreshed', 'success');
         tiLoadStatus();
+        tiLoadClusterStatus();
     } catch (e) {
         showToast('Refresh failed: ' + e.message, 'error');
     } finally {
@@ -31703,9 +31785,10 @@ async function tiRefreshNow() {
 }
 
 async function tiPause() {
-    if (!await wolfConfirm('Pause threat-intel enforcement? The kernel rule will be removed immediately. Configuration is preserved — click Resume to re-activate.', 'Pause enforcement')) return;
+    if (!await wolfConfirm('Pause threat-intel enforcement for THIS cluster? The kernel rule will be removed immediately on every node in the cluster you are viewing. Configuration is preserved — click Resume to re-activate. Other clusters this bastion manages are not affected.', 'Pause enforcement')) return;
     try {
-        const resp = await fetch('/api/threat-intel/pause', { method: 'POST' });
+        const target = tiClusterApi('/api/threat-intel/pause');
+        const resp = await fetch(target.url, { method: 'POST' });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(data.error || 'Server error');
         // Emergency-off must NOT silently leave peers enforcing. Surface
@@ -31726,7 +31809,8 @@ async function tiPause() {
 
 async function tiResume() {
     try {
-        const resp = await fetch('/api/threat-intel/resume', { method: 'POST' });
+        const target = tiClusterApi('/api/threat-intel/resume');
+        const resp = await fetch(target.url, { method: 'POST' });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(data.error || 'Server error');
         const failedCount = ((data.peers || []).filter(p => !p.ok).length)
@@ -31748,7 +31832,9 @@ async function tiLookup() {
     const out = document.getElementById('ti-lookup-result');
     if (!ip) { out.textContent = 'Enter an IP to check.'; return; }
     try {
-        const resp = await fetch('/api/threat-intel/lookup/' + encodeURIComponent(ip));
+        // Lookup checks the active blocklist on the target cluster's node.
+        const target = tiClusterApi('/api/threat-intel/lookup/' + encodeURIComponent(ip));
+        const resp = await fetch(target.url);
         const data = await resp.json();
         if (!resp.ok) { out.innerHTML = '<span style="color:var(--danger);">' + tiEsc(data.error || 'Lookup failed') + '</span>'; return; }
         if (data.blocked) {
