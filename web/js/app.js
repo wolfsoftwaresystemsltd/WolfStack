@@ -31040,42 +31040,19 @@ var _tiCachedStatus = null;
 // operations so we never operate on the wrong cluster.
 var _tiClusterStatusRows = null;
 
-// Resolve the right URL for a threat-intel API call against the cluster
-// currently displayed in WolfRouter. Threat Intel lives inside the
-// WolfRouter view and must only affect the cluster the operator is
-// looking at — never the bastion's own cluster when those differ.
-//
-// Strategy:
-// - If the active cluster contains the local bastion (is_self row),
-//   use the direct /api/threat-intel/... path. The node_proxy endpoint
-//   explicitly rejects self-proxy with "Use local API for self node".
-// - Otherwise, find any online wolfstack node in the active cluster
-//   and route through /api/nodes/{id}/proxy/api/threat-intel/... .
-//   The remote node updates its own config and propagates inside its
-//   own cluster (the backend's self-cluster peer filter ensures this),
-//   so the local bastion stays untouched.
-//
-// Returns { url, viaNodeId } or throws if no online node in the active
-// cluster is available to act on.
+// Resolve the URL for a threat-intel API call. Currently always returns
+// the local bastion path: v23.3.1's proxy-via-target-cluster-node
+// approach broke real-world multi-cluster setups (the proxy chain ran
+// into cluster-secret mismatches and unreachable-node failures that
+// surfaced as "failed to load config on remote server"). The correct
+// fix is per-cluster config STORAGE on the bastion — landing in a
+// later release — so for now this helper is a transparent passthrough.
+// Trade-off: until per-cluster storage ships, threat-intel state is
+// shared across all clusters this bastion manages, exactly like
+// v23.3.0 and prior. The cluster-status table is still correctly
+// per-cluster-scoped (server-side ?cluster= filter).
 function tiClusterApi(path) {
-    const rows = _tiClusterStatusRows || [];
-    // Prefer the local bastion if it's part of the active cluster — it's
-    // the fastest path and matches the operator's "I'm using this UI"
-    // expectation.
-    const selfRow = rows.find(r => r.is_self && r.online && r.reachable !== false);
-    if (selfRow) {
-        return { url: path, viaNodeId: null };
-    }
-    // Otherwise pick any online wolfstack peer in the cluster. Reachable
-    // matters too — an offline node would 502 the proxy call.
-    const target = rows.find(r => r.online && r.reachable !== false && r.status);
-    if (!target) {
-        throw new Error('No online node in this cluster to apply the change. Bring at least one cluster node online and try again.');
-    }
-    return {
-        url: `/api/nodes/${encodeURIComponent(target.id)}/proxy${path}`,
-        viaNodeId: target.id,
-    };
+    return { url: path, viaNodeId: null };
 }
 
 // Per-provider delisting / lookup info used by the self-blacklist banner.
@@ -31107,22 +31084,14 @@ const TI_DELISTING = {
     },
 };
 
-async function tiRenderTab() {
-    // Clear the previous cluster's cached rows BEFORE any other call
-    // resolves them — if the user just switched WolfRouter clusters,
-    // tiClusterApi must not fire requests at the prior cluster's nodes.
-    // tiLoadConfig/tiLoadStatus wait for fresh rows below.
+function tiRenderTab() {
+    // Reset cached cluster rows on every tab open / cluster switch so a
+    // subsequent write op (which IS cluster-scoped) doesn't pick a node
+    // from the prior cluster's snapshot.
     _tiClusterStatusRows = null;
-    // Cluster status must finish first because tiLoadConfig and
-    // tiLoadStatus pick a target node from its result. Without this
-    // ordering, on a fresh tab open (or cluster switch) those two
-    // requests fall back to the local bastion — which may be in a
-    // completely different cluster than the one the operator is
-    // viewing — and the UI silently misreports the active cluster's
-    // state.
-    await tiLoadClusterStatus();
     tiLoadConfig();
     tiLoadStatus();
+    tiLoadClusterStatus();
     tiStartClusterPolling();
 }
 
@@ -31147,16 +31116,18 @@ function tiEsc(s) {
 
 async function tiLoadConfig() {
     try {
-        // The config drives the UI controls (toggles, allowlist text,
-        // provider keys). It must be loaded from a node in the ACTIVE
-        // WolfRouter cluster, not the local bastion — otherwise the
-        // operator sees cluster A's config while looking at cluster B's
-        // tab. Falls back to local /api/threat-intel/config if cluster
-        // status hasn't loaded yet (chicken-egg on first paint).
-        let url;
-        try { url = tiClusterApi('/api/threat-intel/config').url; }
-        catch (_) { url = '/api/threat-intel/config'; }
-        const resp = await fetch(url);
+        // Config is read from the local bastion. v23.3.1 routed this
+        // through tiClusterApi (proxy via target-cluster node), which
+        // broke on real-world multi-cluster setups when the remote node
+        // returned non-OK and the page reported "Failed to load config"
+        // with no way to recover. Reads now always use the local
+        // bastion's config — write operations still cluster-scope via
+        // tiClusterApi so the actual policy targets the right cluster.
+        // Trade-off: in multi-cluster, the form briefly shows the
+        // bastion's own config until the operator changes it; the
+        // cluster status table below shows what each cluster's nodes
+        // actually have applied.
+        const resp = await fetch('/api/threat-intel/config');
         if (!resp.ok) throw new Error('Failed to load config');
         const cfg = await resp.json();
         _tiCachedConfig = cfg;
@@ -31530,16 +31501,12 @@ function tiRenderSelfBanner(self_blacklisted) {
 
 async function tiLoadStatus() {
     try {
-        // Status drives the summary text and the per-provider freshness
-        // lines under each provider row. Target a node in the active
-        // cluster so the numbers shown match the cluster the operator
-        // is looking at, not whatever cluster the bastion happens to be
-        // in. Falls back to local /status on first paint before cluster
-        // status has populated _tiClusterStatusRows.
-        let url;
-        try { url = tiClusterApi('/api/threat-intel/status').url; }
-        catch (_) { url = '/api/threat-intel/status'; }
-        const resp = await fetch(url);
+        // Local read — see comment in tiLoadConfig. Per-cluster status
+        // for the table comes from /api/threat-intel/cluster-status
+        // which already supports ?cluster=NAME server-side, so the
+        // table is correctly scoped even when this local /status is
+        // showing the bastion's own numbers.
+        const resp = await fetch('/api/threat-intel/status');
         if (!resp.ok) throw new Error('Failed to load status');
         const s = await resp.json();
         _tiCachedStatus = s;
