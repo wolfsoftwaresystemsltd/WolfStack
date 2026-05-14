@@ -3308,7 +3308,7 @@ function buildServerTree(nodes) {
                 <span class="tree-toggle ${shouldExpandCluster ? 'expanded' : ''}" id="toggle-${clusterId}">▶</span>
                 <span class="server-dot ${anyOnline ? 'online' : 'offline'}"></span>
                 <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><span style="position:relative;display:inline-block;margin-right:6px;"><span style="position:absolute;bottom:-4px;right:-6px;min-width:15px;height:15px;line-height:15px;text-align:center;font-size:9px;font-weight:700;color:#fff;background:#16a34a;border-radius:50%;z-index:2;">${clusterNodes.length}</span></span>${clusterName}</span>
-                <span class="remove-server-btn" onclick="event.stopPropagation(); openWsClusterSettings('${escapedName}')" title="Cluster settings" style="margin-left:4px;"></span>
+                <span class="remove-server-btn" onclick="event.stopPropagation(); openWsClusterSettings('${escapedName}')" title="Cluster settings" style="margin-left:4px;"><span class="ws-icon-clean-wrap" data-icon="settings"></span></span>
             </div>
             <div class="server-node-children ${shouldExpandCluster ? 'expanded' : ''}" id="children-${clusterId}">
                 <a class="nav-item server-child-item statuspage-cluster-item" data-cluster="${escapedName}" data-view="statuspage" onclick="showStatusPagesForCluster('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
@@ -3342,8 +3342,8 @@ function buildServerTree(nodes) {
                         <span class="tree-toggle ${shouldExpandNode ? 'expanded' : ''}" id="toggle-${node.id}" onclick="event.stopPropagation(); toggleServerNode('${node.id}')">▶</span>
                         <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
                         <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${node.hostname}</span>
-                        <span class="remove-server-btn" onclick="event.stopPropagation(); openNodeSettings('${node.id}')" title="Node settings" style="margin-left:4px;"></span>
-                        ${node.is_self ? '<span class="self-badge">this</span>' : `<span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemoveServer('${node.id}', '${node.hostname}')" title="Remove server"></span>`}
+                        <span class="remove-server-btn" onclick="event.stopPropagation(); openNodeSettings('${node.id}')" title="Node settings" style="margin-left:4px;"><span class="ws-icon-clean-wrap" data-icon="settings"></span></span>
+                        ${node.is_self ? '<span class="self-badge">this</span>' : `<span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemoveServer('${node.id}', '${node.hostname}')" title="Remove server"><span class="ws-icon-clean-wrap" data-icon="trash"></span></span>`}
                     </div>
                     <div class="server-node-children ${shouldExpandNode ? 'expanded' : ''}" id="children-${node.id}">
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="dashboard" onclick="selectServerView('${node.id}', 'dashboard')">
