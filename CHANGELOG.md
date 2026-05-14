@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v23.2.0: Real protection for WolfStack + Proxmox clusters** _(2026-05-14 — [`c2f334d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c2f334d91983da16ee2d3c2aee0c6e417e9369d3))_
 - **v23.1.2: compromise_indicators predictive analyzer with auto-remediation** _(2026-05-14 — [`2751ad4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2751ad49d6fba8d404b74a76e61c772a831c2a29))_
 - **v23.1.1: WolfRouter subnet-route diagnostics + wolfnetd CIDR self-heal** _(2026-05-13 — [`c77ddd5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c77ddd5db9ea4f96346e55531ccfa3a17db4d29d))_
 - **v23.1.0: HTTP proxy edge strategies — Hetzner/DO LBs + Cloudflare Tunnel + auto-teardown** _(2026-05-13 — [`7e59995`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7e599955922f5b517f975e227500729cc3bd93b1))_
