@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v23.5.2: fix invisible settings/delete icons in sidebar node tree** _(2026-05-14 — [`0945083`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/09450833e46ee709ad03f7b416bde90f9e0c0817))_
 - **v23.5.1: per-CVE upgrade commands + no more wrong-PM menus** _(2026-05-14 — [`3cfc4af`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3cfc4af7134592dca74c6d1e539fd4e16e18fa97))_
 - **v23.5.0: CVE inbox grouped by exploit category (klasSponsor)** _(2026-05-14 — [`af68f5f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/af68f5f0d65bb38ed6f8ee13ce6e8c53de68fb33))_
 - **v23.4.1: certbot detection — verbose error trace + whereis probe** _(2026-05-14 — [`ef0863f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ef0863f1d0668e7f0dc9a2654bad97d275006c7a))_
