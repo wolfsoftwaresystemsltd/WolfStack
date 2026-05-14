@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v23.4.0: per-cluster threat-intel + robust certbot detection** _(2026-05-14 — [`c176e00`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c176e004bdf682cafb55c4525644f1b19b0d849b))_
 - **v23.3.2: hotfix — threat-intel UI back to working state** _(2026-05-14 — [`4f776a7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4f776a77e5d31dd87aeb4a2ddaa0003da42431b2))_
 - **v23.3.1: threat-intel operations honour the active WolfRouter cluster** _(2026-05-14 — [`fad593b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/fad593bb586643ce836c792f7eb45104e8c28845))_
 - **v23.3.0: threat-intel cluster-wide visibility — surface peer divergence** _(2026-05-14 — [`805353b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/805353b8e7fd21a4816e8c212cabf110a2c5f69e))_
