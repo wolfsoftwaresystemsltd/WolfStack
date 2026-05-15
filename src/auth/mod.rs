@@ -14,6 +14,7 @@ pub mod users;
 pub mod oidc;
 #[allow(dead_code)]
 pub mod webauthn;
+pub mod log_monitor;
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -23,10 +24,9 @@ use tracing::warn;
 /// Session token lifetime (8 hours)
 const SESSION_LIFETIME: Duration = Duration::from_secs(8 * 3600);
 
-/// Maximum failed login attempts per IP before lockout
-const MAX_LOGIN_ATTEMPTS: u32 = 10;
-/// Lockout window — failed attempts are counted within this period
-const LOGIN_LOCKOUT_WINDOW: Duration = Duration::from_secs(300); // 5 minutes
+// Old static MAX_LOGIN_ATTEMPTS / LOGIN_LOCKOUT_WINDOW constants were
+// removed when the lockout system became operator-configurable.
+// See `LoginLockoutConfig` for the per-policy fields.
 
 /// Built-in cluster secret shared by all WolfStack installations.
 const CLUSTER_SECRET: &str = "wsk_a7f3b9e2c1d4f6a8b0e3d5c7f9a1b3d5e7f9a1c3b5d7e9f0a2b4c6d8e0f1a3";
@@ -283,55 +283,642 @@ fn native_crypt(password: &str, salt: &str) -> Option<String> {
     }
 }
 
-/// IP-based login rate limiter to prevent brute-force attacks
+/// Operator-tunable lockout policy. Defaults are aggressive — designed
+/// for fleets that are exposed to the public internet. An attacker who
+/// learns one root password can try at most `max_failures` times in any
+/// `window_seconds` rolling window before being hard-blocked for
+/// `lockout_seconds`. 10 attempts and 48-hour blocks make typical
+/// password-spray attacks economically impossible.
+///
+/// The operator can adjust any of these via the Security settings UI
+/// or by editing `/etc/wolfstack/auth-lockout.json` directly. Trusted
+/// IPs / CIDRs bypass the lockout entirely so the operator can never
+/// lock themselves out from their own networks.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LoginLockoutConfig {
+    /// How many failures within the detection window trigger a hard lockout.
+    #[serde(default = "default_max_failures")]
+    pub max_failures: u32,
+    /// Sliding window for counting failures (seconds).
+    #[serde(default = "default_window_seconds")]
+    pub window_seconds: u64,
+    /// Hard lockout duration once `max_failures` is hit (seconds).
+    /// Default: 48 hours. The operator chose this — appropriate when
+    /// the threat model is "real attacker with leaked credentials".
+    #[serde(default = "default_lockout_seconds")]
+    pub lockout_seconds: u64,
+    /// IPs or CIDRs that bypass the lockout entirely. Examples:
+    /// `192.168.1.5`, `192.168.0.0/24`, `2a01:4f8:151:7225::/64`.
+    /// IPv4 and IPv6 supported.
+    #[serde(default)]
+    pub trusted_ips: Vec<String>,
+    /// Master switch. If false, no lockout is applied at all (useful
+    /// for debugging — NOT recommended for production).
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_max_failures() -> u32 { 10 }
+fn default_window_seconds() -> u64 { 300 }
+fn default_lockout_seconds() -> u64 { 48 * 3600 }  // 48 hours
+fn default_enabled() -> bool { true }
+
+impl Default for LoginLockoutConfig {
+    fn default() -> Self {
+        Self {
+            max_failures: default_max_failures(),
+            window_seconds: default_window_seconds(),
+            lockout_seconds: default_lockout_seconds(),
+            trusted_ips: Vec::new(),
+            enabled: default_enabled(),
+        }
+    }
+}
+
+impl LoginLockoutConfig {
+    fn config_path() -> String {
+        format!("{}/auth-lockout.json", crate::paths::get().config_dir)
+    }
+    pub fn load() -> Self {
+        std::fs::read_to_string(Self::config_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+    pub fn save(&self) -> Result<(), String> {
+        let path = Self::config_path();
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        crate::paths::write_secure(&path, &json)
+            .map_err(|e| format!("save lockout config: {}", e))
+    }
+    /// True if `ip` matches any trusted entry. Single-IP and CIDR forms
+    /// supported; malformed entries are silently ignored (operator
+    /// typos in the file shouldn't lock them out).
+    pub fn is_trusted(&self, ip: &str) -> bool {
+        let target: std::net::IpAddr = match ip.parse() {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+        for entry in &self.trusted_ips {
+            // CIDR?
+            if let Some((net_str, prefix_str)) = entry.split_once('/') {
+                let net: std::net::IpAddr = match net_str.parse() { Ok(a) => a, Err(_) => continue };
+                let prefix: u8 = match prefix_str.parse() { Ok(p) => p, Err(_) => continue };
+                if ip_in_cidr(&target, &net, prefix) { return true; }
+            } else if let Ok(parsed) = entry.parse::<std::net::IpAddr>() {
+                if parsed == target { return true; }
+            }
+        }
+        false
+    }
+}
+
+fn ip_in_cidr(target: &std::net::IpAddr, net: &std::net::IpAddr, prefix: u8) -> bool {
+    match (target, net) {
+        (std::net::IpAddr::V4(t), std::net::IpAddr::V4(n)) => {
+            if prefix > 32 { return false; }
+            let mask = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
+            (u32::from(*t) & mask) == (u32::from(*n) & mask)
+        }
+        (std::net::IpAddr::V6(t), std::net::IpAddr::V6(n)) => {
+            if prefix > 128 { return false; }
+            let mask = if prefix == 0 { 0 } else { !0u128 << (128 - prefix) };
+            (u128::from(*t) & mask) == (u128::from(*n) & mask)
+        }
+        _ => false,
+    }
+}
+
+/// Per-IP record. `failures` is the sliding-window count; `locked_until`
+/// is the hard-block expiry (only set once the threshold is hit). The
+/// two are independent: a slow trickle of failures never hits the
+/// threshold and gradually expires; a fast burst hits the threshold
+/// and triggers the hard block.
+#[derive(Debug, Default)]
+struct AttemptRecord {
+    failures: Vec<Instant>,
+    locked_until: Option<Instant>,
+    /// Username last seen — surfaced in the audit log so the operator
+    /// can tell if it's an attacker spraying "admin", "root", "test" or
+    /// somebody fat-fingering their own login.
+    last_username: String,
+}
+
+/// One row in the audit log. Bounded buffer (newest 500 entries) so we
+/// don't grow unbounded over time.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuthLogEntry {
+    /// Unix epoch seconds.
+    pub timestamp: u64,
+    pub ip: String,
+    pub username: String,
+    pub success: bool,
+    /// Plain-English reason: "ok", "bad password", "locked out", "trusted ip skipped lockout", etc.
+    pub reason: String,
+    /// True when the attempt was blocked because the IP was already locked.
+    pub was_locked: bool,
+}
+
+const AUDIT_LOG_MAX: usize = 500;
+
+/// IP-based login rate limiter with hard lockouts, trusted-IP allowlist,
+/// and an in-memory audit log. The operator-facing API is unchanged
+/// (is_locked_out / record_failure / clear) so existing callers keep
+/// working; new methods expose the audit log and the config.
+/// Hook callbacks installed by the API/runtime layer so the limiter
+/// can trigger fleet propagation without owning ClusterState directly.
+/// Set once at startup; called by the limiter whenever a lock/unlock
+/// happens regardless of the source surface (WolfStack UI, sshd, PVE).
+pub type PropagateBlockHook = std::sync::Arc<dyn Fn(&str, u64) + Send + Sync>;
+pub type PropagateUnblockHook = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct LoginRateLimiter {
-    attempts: RwLock<HashMap<String, Vec<Instant>>>,
+    attempts: RwLock<HashMap<String, AttemptRecord>>,
+    audit: RwLock<std::collections::VecDeque<AuthLogEntry>>,
+    config: RwLock<LoginLockoutConfig>,
+    propagate_block: RwLock<Option<PropagateBlockHook>>,
+    propagate_unblock: RwLock<Option<PropagateUnblockHook>>,
 }
 
 impl LoginRateLimiter {
     pub fn new() -> Self {
         Self {
             attempts: RwLock::new(HashMap::new()),
+            audit: RwLock::new(std::collections::VecDeque::with_capacity(AUDIT_LOG_MAX)),
+            config: RwLock::new(LoginLockoutConfig::load()),
+            propagate_block: RwLock::new(None),
+            propagate_unblock: RwLock::new(None),
         }
     }
 
-    /// Record a failed login attempt for an IP. Returns true if the IP is now locked out.
+    /// Install hooks the limiter will call whenever a lock/unlock
+    /// happens. The hooks own (or clone) the cluster state and fan
+    /// out via the existing inter-node API. Set ONCE at startup.
+    pub fn install_propagation_hooks(&self,
+        on_block: PropagateBlockHook,
+        on_unblock: PropagateUnblockHook,
+    ) {
+        *self.propagate_block.write().unwrap() = Some(on_block);
+        *self.propagate_unblock.write().unwrap() = Some(on_unblock);
+    }
+
+    fn fire_block_hook(&self, ip: &str, seconds: u64) {
+        let hook = self.propagate_block.read().unwrap().clone();
+        if let Some(h) = hook {
+            h(ip, seconds);
+        }
+    }
+
+    fn fire_unblock_hook(&self, ip: &str) {
+        let hook = self.propagate_unblock.read().unwrap().clone();
+        if let Some(h) = hook {
+            h(ip);
+        }
+    }
+
+    /// Snapshot the current config.
+    pub fn config(&self) -> LoginLockoutConfig {
+        self.config.read().unwrap().clone()
+    }
+
+    /// Replace the config (and persist to disk). Returns the saved
+    /// shape so the caller can echo it back to the operator.
+    pub fn set_config(&self, new: LoginLockoutConfig) -> Result<LoginLockoutConfig, String> {
+        new.save()?;
+        *self.config.write().unwrap() = new.clone();
+        Ok(new)
+    }
+
+    /// Append an audit row. Bounded — oldest entry dropped when full.
+    fn audit_push(&self, entry: AuthLogEntry) {
+        let mut log = self.audit.write().unwrap();
+        if log.len() >= AUDIT_LOG_MAX {
+            log.pop_front();
+        }
+        log.push_back(entry);
+    }
+
+    /// Read the audit log (newest first).
+    pub fn audit_log(&self) -> Vec<AuthLogEntry> {
+        let log = self.audit.read().unwrap();
+        log.iter().rev().cloned().collect()
+    }
+
+    /// Currently-locked IPs (with remaining seconds). Useful for the UI.
+    pub fn current_lockouts(&self) -> Vec<(String, u64, String)> {
+        let attempts = self.attempts.read().unwrap();
+        let now = Instant::now();
+        attempts.iter()
+            .filter_map(|(ip, rec)| {
+                rec.locked_until.and_then(|until| {
+                    if until > now {
+                        Some((ip.clone(), until.duration_since(now).as_secs(), rec.last_username.clone()))
+                    } else { None }
+                })
+            })
+            .collect()
+    }
+
+    /// Manually clear a lockout for a specific IP. Operator escape hatch.
+    pub fn unblock(&self, ip: &str) {
+        let mut attempts = self.attempts.write().unwrap();
+        attempts.remove(ip);
+        drop(attempts);
+        // Drop the kernel rule too — operator unblocking expects full recovery.
+        kernel_unblock_ip(ip);
+        self.persist_lockouts();
+        self.fire_unblock_hook(ip);
+        self.audit_push(AuthLogEntry {
+            timestamp: now_secs(),
+            ip: ip.to_string(),
+            username: String::new(),
+            success: false,
+            reason: "manually unblocked by operator".into(),
+            was_locked: false,
+        });
+    }
+
+    /// Add a kernel block from a peer's propagation. Skips trusted IPs
+    /// (each node has its own trusted list — the receiver always re-
+    /// validates, so an attacker can't trick a peer into blocking your
+    /// admin IP just because it's not trusted on their node). Records
+    /// in the audit log so the operator sees fleet-wide propagation.
+    pub fn add_propagated_lockout(&self, ip: &str, lockout_seconds: u64, source_node: &str) {
+        let cfg = self.config.read().unwrap().clone();
+        if cfg.is_trusted(ip) {
+            tracing::info!(
+                "auth: refused propagated lockout for {} (trusted on this node) — source: {}",
+                ip, source_node
+            );
+            self.audit_push(AuthLogEntry {
+                timestamp: now_secs(),
+                ip: ip.to_string(),
+                username: String::new(),
+                success: false,
+                reason: format!("propagated lockout from {} REFUSED — IP is trusted here", source_node),
+                was_locked: false,
+            });
+            return;
+        }
+        let mut attempts = self.attempts.write().unwrap();
+        let rec = attempts.entry(ip.to_string()).or_default();
+        let new_until = Instant::now() + Duration::from_secs(lockout_seconds);
+        // Extend if a longer lockout arrives, never shorten.
+        rec.locked_until = Some(match rec.locked_until {
+            Some(existing) if existing > new_until => existing,
+            _ => new_until,
+        });
+        drop(attempts);
+        kernel_block_ip(ip);
+        self.persist_lockouts();
+        tracing::warn!(
+            "auth: kernel-blocked {} via fleet propagation from {} ({}s)",
+            ip, source_node, lockout_seconds
+        );
+        self.audit_push(AuthLogEntry {
+            timestamp: now_secs(),
+            ip: ip.to_string(),
+            username: String::new(),
+            success: false,
+            reason: format!("kernel-blocked via fleet propagation from {}", source_node),
+            was_locked: false,
+        });
+    }
+
+    /// Record a failed login attempt. Returns true if the IP just hit
+    /// the threshold (was not previously locked, now is).
     pub fn record_failure(&self, ip: &str) -> bool {
+        self.record_failure_with(ip, "")
+    }
+
+    /// Variant that records the username and audit reason for the row.
+    pub fn record_failure_with(&self, ip: &str, username: &str) -> bool {
+        let cfg = self.config.read().unwrap().clone();
+        // Trusted IPs never accumulate failures.
+        if cfg.is_trusted(ip) {
+            self.audit_push(AuthLogEntry {
+                timestamp: now_secs(),
+                ip: ip.to_string(),
+                username: username.to_string(),
+                success: false,
+                reason: "bad password (trusted IP — no lockout)".into(),
+                was_locked: false,
+            });
+            tracing::info!("auth: failed login for {} from trusted IP {} (no lockout)", username, ip);
+            return false;
+        }
+        if !cfg.enabled {
+            self.audit_push(AuthLogEntry {
+                timestamp: now_secs(),
+                ip: ip.to_string(),
+                username: username.to_string(),
+                success: false,
+                reason: "bad password (lockout disabled in config)".into(),
+                was_locked: false,
+            });
+            return false;
+        }
+        let window = Duration::from_secs(cfg.window_seconds);
+        let lockout = Duration::from_secs(cfg.lockout_seconds);
         let mut attempts = self.attempts.write().unwrap();
         let entry = attempts.entry(ip.to_string()).or_default();
         let now = Instant::now();
-        // Prune old entries outside the window
-        entry.retain(|t| now.duration_since(*t) < LOGIN_LOCKOUT_WINDOW);
-        entry.push(now);
-        entry.len() >= MAX_LOGIN_ATTEMPTS as usize
+        entry.failures.retain(|t| now.duration_since(*t) < window);
+        entry.failures.push(now);
+        entry.last_username = username.to_string();
+        let just_locked = entry.failures.len() >= cfg.max_failures as usize && entry.locked_until.is_none();
+        if just_locked {
+            entry.locked_until = Some(now + lockout);
+            tracing::warn!(
+                "auth: IP {} hit {} failed logins in {}s — locked out for {}s",
+                ip, cfg.max_failures, cfg.window_seconds, cfg.lockout_seconds
+            );
+        }
+        drop(attempts);
+        // Apply the kernel-level block AFTER releasing the write lock
+        // (Command::new can take a few ms and we don't want to hold
+        // the attempts lock across it).
+        if just_locked {
+            kernel_block_ip(ip);
+            self.persist_lockouts();
+            self.fire_block_hook(ip, cfg.lockout_seconds);
+        }
+        self.audit_push(AuthLogEntry {
+            timestamp: now_secs(),
+            ip: ip.to_string(),
+            username: username.to_string(),
+            success: false,
+            reason: if just_locked { "bad password — threshold hit, IP locked".into() } else { "bad password".into() },
+            was_locked: false,
+        });
+        just_locked
     }
 
-    /// Check if an IP is currently locked out (too many recent failures)
+    /// Currently locked out?
     pub fn is_locked_out(&self, ip: &str) -> bool {
+        let cfg = self.config.read().unwrap();
+        if cfg.is_trusted(ip) || !cfg.enabled { return false; }
+        drop(cfg);
         let attempts = self.attempts.read().unwrap();
-        if let Some(entry) = attempts.get(ip) {
-            let now = Instant::now();
-            let recent = entry.iter().filter(|t| now.duration_since(**t) < LOGIN_LOCKOUT_WINDOW).count();
-            recent >= MAX_LOGIN_ATTEMPTS as usize
-        } else {
-            false
+        match attempts.get(ip) {
+            Some(rec) => match rec.locked_until {
+                Some(until) => until > Instant::now(),
+                None => false,
+            },
+            None => false,
         }
     }
 
-    /// Clear failures for an IP (called on successful login)
-    pub fn clear(&self, ip: &str) {
-        let mut attempts = self.attempts.write().unwrap();
-        attempts.remove(ip);
+    /// Remaining lockout seconds (0 if not locked).
+    pub fn lockout_remaining(&self, ip: &str) -> u64 {
+        let attempts = self.attempts.read().unwrap();
+        match attempts.get(ip).and_then(|r| r.locked_until) {
+            Some(until) => {
+                let now = Instant::now();
+                if until > now { until.duration_since(now).as_secs() } else { 0 }
+            }
+            None => 0,
+        }
     }
 
-    /// Periodic cleanup of expired entries
-    pub fn cleanup(&self) {
+    /// Successful login — clear failures, audit the success.
+    pub fn clear(&self, ip: &str) {
+        self.clear_with(ip, "")
+    }
+
+    pub fn clear_with(&self, ip: &str, username: &str) {
         let mut attempts = self.attempts.write().unwrap();
-        let now = Instant::now();
-        attempts.retain(|_, entries| {
-            entries.retain(|t| now.duration_since(*t) < LOGIN_LOCKOUT_WINDOW);
-            !entries.is_empty()
+        attempts.remove(ip);
+        drop(attempts);
+        self.audit_push(AuthLogEntry {
+            timestamp: now_secs(),
+            ip: ip.to_string(),
+            username: username.to_string(),
+            success: true,
+            reason: "ok".into(),
+            was_locked: false,
         });
+        tracing::info!("auth: successful login for {} from {}", username, ip);
+    }
+
+    /// Audit-only: record a "blocked because already locked" attempt.
+    pub fn audit_blocked(&self, ip: &str, username: &str) {
+        self.audit_push(AuthLogEntry {
+            timestamp: now_secs(),
+            ip: ip.to_string(),
+            username: username.to_string(),
+            success: false,
+            reason: format!("rejected — IP locked for {}s more", self.lockout_remaining(ip)),
+            was_locked: true,
+        });
+    }
+
+    /// Periodic cleanup of expired entries (called from the background
+    /// task). Removes kernel iptables rules for any lockouts that
+    /// expired since the last tick — the rules persist across restarts,
+    /// so without this they'd accumulate forever.
+    pub fn cleanup(&self) {
+        let cfg = self.config.read().unwrap().clone();
+        let window = Duration::from_secs(cfg.window_seconds);
+        let now = Instant::now();
+        let mut to_unblock: Vec<String> = Vec::new();
+        {
+            let mut attempts = self.attempts.write().unwrap();
+            attempts.retain(|ip, rec| {
+                rec.failures.retain(|t| now.duration_since(*t) < window);
+                let still_locked = matches!(rec.locked_until, Some(u) if u > now);
+                let just_expired = matches!(rec.locked_until, Some(u) if u <= now);
+                if just_expired {
+                    to_unblock.push(ip.clone());
+                }
+                !rec.failures.is_empty() || still_locked
+            });
+        }
+        for ip in to_unblock {
+            kernel_unblock_ip(&ip);
+            tracing::info!("auth: lockout for {} expired — kernel rule removed", ip);
+        }
+        if !to_unblock_was_empty(&self.attempts) {
+            self.persist_lockouts();
+        }
+    }
+}
+
+fn to_unblock_was_empty(attempts: &RwLock<HashMap<String, AttemptRecord>>) -> bool {
+    attempts.read().unwrap().is_empty()
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Kernel-level IP blocking — "act like the server isn't there"
+// ════════════════════════════════════════════════════════════════════
+//
+// When the rate limiter decides an IP has crossed the threshold, we
+// install an iptables DROP rule for that source. New TCP packets get
+// silently discarded by the kernel — no SYN-ACK, no RST, no HTTP
+// response. From the attacker's side the server appears offline.
+//
+// Existing TCP connections from a blocked IP keep working briefly
+// (they're already established) but they'll timeout on the next ACK
+// the kernel can't deliver. New connections fail at SYN.
+//
+// Trusted IPs are NEVER kernel-blocked — the operator can always reach
+// the box from their declared admin networks.
+//
+// State is persisted to /etc/wolfstack/auth-active-lockouts.json so
+// WolfStack can restore iptables rules on restart (kernel rules persist
+// across WolfStack restarts; the file just lets us track what we own).
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedLockout {
+    ip: String,
+    locked_at: u64,         // unix secs
+    lockout_seconds: u64,   // total duration
+}
+
+fn lockouts_file() -> String {
+    format!("{}/auth-active-lockouts.json", crate::paths::get().config_dir)
+}
+
+/// Add a kernel DROP rule for `ip` (v4 or v6). Idempotent — uses
+/// iptables -C to check before adding. Silent when iptables is missing
+/// (the HTTP-level Forbidden fallback still applies).
+pub fn kernel_block_ip(ip: &str) {
+    let target: std::net::IpAddr = match ip.parse() {
+        Ok(a) => a,
+        Err(_) => {
+            tracing::warn!("auth: cannot kernel-block invalid IP '{}'", ip);
+            return;
+        }
+    };
+    let cmd = match target {
+        std::net::IpAddr::V4(_) => "iptables",
+        std::net::IpAddr::V6(_) => "ip6tables",
+    };
+    let check = std::process::Command::new(cmd)
+        .args(["-C", "INPUT", "-s", ip, "-j", "DROP"])
+        .output();
+    if let Ok(out) = check {
+        if out.status.success() {
+            // Rule already present — nothing to do.
+            return;
+        }
+    }
+    let r = std::process::Command::new(cmd)
+        .args(["-I", "INPUT", "1", "-s", ip, "-j", "DROP"])
+        .output();
+    match r {
+        Ok(o) if o.status.success() => {
+            tracing::warn!("auth: kernel-blocked {} via {}", ip, cmd);
+        }
+        Ok(o) => {
+            tracing::error!(
+                "auth: kernel-block failed for {}: {}",
+                ip, String::from_utf8_lossy(&o.stderr).trim()
+            );
+        }
+        Err(e) => {
+            tracing::error!("auth: could not run {} to block {}: {}", cmd, ip, e);
+        }
+    }
+}
+
+/// Remove the kernel DROP rule for `ip`. Loops while the rule exists
+/// (in case duplicate INSERTs happened across restarts).
+pub fn kernel_unblock_ip(ip: &str) {
+    let target: std::net::IpAddr = match ip.parse() {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    let cmd = match target {
+        std::net::IpAddr::V4(_) => "iptables",
+        std::net::IpAddr::V6(_) => "ip6tables",
+    };
+    for _ in 0..10 {
+        let r = std::process::Command::new(cmd)
+            .args(["-D", "INPUT", "-s", ip, "-j", "DROP"])
+            .output();
+        match r {
+            Ok(o) if o.status.success() => continue,
+            _ => break,
+        }
+    }
+    tracing::info!("auth: kernel-unblocked {}", ip);
+}
+
+impl LoginRateLimiter {
+    /// Snapshot of currently-locked entries → persistence file. Called
+    /// on every state change so reloads are consistent.
+    fn persist_lockouts(&self) {
+        let now = Instant::now();
+        let now_unix = now_secs();
+        let attempts = self.attempts.read().unwrap();
+        let mut snapshot: Vec<PersistedLockout> = Vec::new();
+        let cfg = self.config.read().unwrap().clone();
+        for (ip, rec) in attempts.iter() {
+            if let Some(until) = rec.locked_until {
+                if until > now {
+                    let remaining = until.duration_since(now).as_secs();
+                    // The lockout total isn't stored on the record (we
+                    // only have an Instant); approximate from the config.
+                    // This is good enough for cross-restart restoration.
+                    let total = cfg.lockout_seconds;
+                    snapshot.push(PersistedLockout {
+                        ip: ip.clone(),
+                        locked_at: now_unix.saturating_sub(total.saturating_sub(remaining)),
+                        lockout_seconds: total,
+                    });
+                }
+            }
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
+            let _ = crate::paths::write_secure(&lockouts_file(), &json);
+        }
+    }
+
+    /// Restore kernel-block state from disk on startup. Call once after
+    /// `LoginRateLimiter::new()`. For each non-expired entry: re-apply
+    /// the iptables DROP rule and re-register the record in memory.
+    /// Expired entries are dropped silently (caller-removed rules are
+    /// fine — kernel_unblock is idempotent if they were never set).
+    pub fn restore_persisted_lockouts(&self) {
+        let json = match std::fs::read_to_string(lockouts_file()) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let snapshot: Vec<PersistedLockout> = match serde_json::from_str(&json) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let now = now_secs();
+        let cfg = self.config.read().unwrap().clone();
+        for entry in snapshot {
+            if cfg.is_trusted(&entry.ip) { continue; }
+            let expires_at_unix = entry.locked_at.saturating_add(entry.lockout_seconds);
+            if expires_at_unix <= now {
+                // Already expired — nuke any leftover kernel rule.
+                kernel_unblock_ip(&entry.ip);
+                continue;
+            }
+            let remaining = expires_at_unix - now;
+            kernel_block_ip(&entry.ip);
+            let mut attempts = self.attempts.write().unwrap();
+            let rec = attempts.entry(entry.ip.clone()).or_default();
+            rec.locked_until = Some(Instant::now() + Duration::from_secs(remaining));
+            tracing::warn!(
+                "auth: restored kernel-block for {} ({}s remaining)",
+                entry.ip, remaining
+            );
+        }
     }
 }
 
@@ -436,5 +1023,137 @@ mod secret_tests {
         tampered.pop();
         tampered.push('b');  // flip last byte
         assert!(!validate_cluster_secret(&s, &tampered));
+    }
+}
+
+#[cfg(test)]
+mod lockout_tests {
+    use super::*;
+
+    fn make_limiter(cfg: LoginLockoutConfig) -> LoginRateLimiter {
+        let l = LoginRateLimiter::new();
+        *l.config.write().unwrap() = cfg;
+        l
+    }
+
+    #[test]
+    fn lockout_triggers_after_threshold() {
+        let cfg = LoginLockoutConfig {
+            max_failures: 3, window_seconds: 60, lockout_seconds: 60,
+            trusted_ips: vec![], enabled: true,
+        };
+        let l = make_limiter(cfg);
+        assert!(!l.is_locked_out("1.2.3.4"));
+        assert!(!l.record_failure_with("1.2.3.4", "u"));
+        assert!(!l.record_failure_with("1.2.3.4", "u"));
+        // Third failure is the threshold — should trigger.
+        assert!(l.record_failure_with("1.2.3.4", "u"), "third failure must trigger lockout");
+        assert!(l.is_locked_out("1.2.3.4"));
+        // Subsequent failures don't re-trigger (already locked).
+        assert!(!l.record_failure_with("1.2.3.4", "u"));
+        assert!(l.is_locked_out("1.2.3.4"));
+    }
+
+    #[test]
+    fn trusted_single_ip_never_locks_out() {
+        let cfg = LoginLockoutConfig {
+            max_failures: 2, window_seconds: 60, lockout_seconds: 60,
+            trusted_ips: vec!["10.0.0.5".into()], enabled: true,
+        };
+        let l = make_limiter(cfg);
+        for _ in 0..50 {
+            assert!(!l.record_failure_with("10.0.0.5", "u"),
+                "trusted IP must never trigger lockout");
+        }
+        assert!(!l.is_locked_out("10.0.0.5"));
+    }
+
+    #[test]
+    fn trusted_cidr_v4_never_locks_out() {
+        let cfg = LoginLockoutConfig {
+            max_failures: 2, window_seconds: 60, lockout_seconds: 60,
+            trusted_ips: vec!["10.0.0.0/8".into()], enabled: true,
+        };
+        let l = make_limiter(cfg);
+        for ip in ["10.1.2.3", "10.255.255.255", "10.0.0.1"] {
+            for _ in 0..10 { l.record_failure_with(ip, "u"); }
+            assert!(!l.is_locked_out(ip), "IP {} in trusted CIDR must not lock", ip);
+        }
+        // An IP outside the CIDR DOES lock.
+        for _ in 0..2 { l.record_failure_with("11.0.0.1", "u"); }
+        assert!(l.is_locked_out("11.0.0.1"));
+    }
+
+    #[test]
+    fn trusted_cidr_v6_never_locks_out() {
+        let cfg = LoginLockoutConfig {
+            max_failures: 2, window_seconds: 60, lockout_seconds: 60,
+            trusted_ips: vec!["2a01:4f8:151:7225::/64".into()], enabled: true,
+        };
+        let l = make_limiter(cfg);
+        for _ in 0..10 { l.record_failure_with("2a01:4f8:151:7225::5", "u"); }
+        assert!(!l.is_locked_out("2a01:4f8:151:7225::5"));
+        // Different /64 → not trusted → does lock.
+        for _ in 0..2 { l.record_failure_with("2a01:4f8:151:7226::5", "u"); }
+        assert!(l.is_locked_out("2a01:4f8:151:7226::5"));
+    }
+
+    #[test]
+    fn disabled_config_skips_lockout_entirely() {
+        let cfg = LoginLockoutConfig {
+            max_failures: 1, window_seconds: 60, lockout_seconds: 60,
+            trusted_ips: vec![], enabled: false,
+        };
+        let l = make_limiter(cfg);
+        for _ in 0..50 { l.record_failure_with("9.9.9.9", "u"); }
+        assert!(!l.is_locked_out("9.9.9.9"), "disabled config must never lock");
+    }
+
+    #[test]
+    fn unblock_clears_lockout() {
+        let cfg = LoginLockoutConfig {
+            max_failures: 1, window_seconds: 60, lockout_seconds: 60,
+            trusted_ips: vec![], enabled: true,
+        };
+        let l = make_limiter(cfg);
+        l.record_failure_with("8.8.8.8", "u");
+        assert!(l.is_locked_out("8.8.8.8"));
+        l.unblock("8.8.8.8");
+        assert!(!l.is_locked_out("8.8.8.8"));
+    }
+
+    #[test]
+    fn audit_log_capped_at_500() {
+        let cfg = LoginLockoutConfig::default();
+        let l = make_limiter(cfg);
+        // Force-feed 600 audit rows via clear_with (success path —
+        // doesn't trigger lockout).
+        for i in 0..600 {
+            l.clear_with(&format!("1.2.3.{}", i % 250), "test");
+        }
+        let log = l.audit_log();
+        assert!(log.len() <= 500, "audit log capped at 500, got {}", log.len());
+    }
+
+    #[test]
+    fn block_hook_fires_on_threshold() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let calls_h = calls.clone();
+        let cfg = LoginLockoutConfig {
+            max_failures: 2, window_seconds: 60, lockout_seconds: 60,
+            trusted_ips: vec![], enabled: true,
+        };
+        let l = make_limiter(cfg);
+        l.install_propagation_hooks(
+            std::sync::Arc::new(move |_ip, _secs| { calls_h.fetch_add(1, Ordering::SeqCst); }),
+            std::sync::Arc::new(|_ip| {}),
+        );
+        l.record_failure_with("7.7.7.7", "u");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "hook must not fire before threshold");
+        l.record_failure_with("7.7.7.7", "u");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "hook fires exactly once at threshold");
+        l.record_failure_with("7.7.7.7", "u");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "hook does not re-fire on subsequent failures");
     }
 }

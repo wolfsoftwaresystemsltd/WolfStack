@@ -626,6 +626,45 @@ async fn main() -> std::io::Result<()> {
             xo: Arc::new(std::sync::RwLock::new(xo::XoStore::load())),
         });
 
+        // Wire fleet-wide lockout propagation hooks into the limiter.
+        // The limiter calls these whenever a lock/unlock happens —
+        // regardless of whether the source was the WolfStack web UI,
+        // sshd, or pvedaemon. One pathway, three covered surfaces.
+        {
+            let cluster_block = app_state.cluster.clone();
+            let cluster_unblock = app_state.cluster.clone();
+            let self_id_block = app_state.cluster.self_id.clone();
+            let secret_block = crate::auth::default_cluster_secret().to_string();
+            let secret_unblock = secret_block.clone();
+            app_state.login_limiter.install_propagation_hooks(
+                std::sync::Arc::new(move |ip, secs| {
+                    let cluster = cluster_block.clone();
+                    let secret = secret_block.clone();
+                    let ip = ip.to_string();
+                    let self_id = self_id_block.clone();
+                    tokio::spawn(async move {
+                        api::propagate_kernel_block_to_peers(cluster, secret, ip, secs, self_id).await;
+                    });
+                }),
+                std::sync::Arc::new(move |ip| {
+                    let cluster = cluster_unblock.clone();
+                    let secret = secret_unblock.clone();
+                    let ip = ip.to_string();
+                    tokio::spawn(async move {
+                        api::propagate_kernel_unblock_to_peers(cluster, secret, ip).await;
+                    });
+                }),
+            );
+        }
+        // Restore kernel iptables rules for any non-expired lockouts
+        // from the previous WolfStack process. Kernel rules survive a
+        // service restart; this keeps our in-memory state aligned.
+        app_state.login_limiter.restore_persisted_lockouts();
+        // Start the sshd/pvedaemon log monitor. Feeds the same limiter
+        // so SSH and Proxmox brute-force attacks trigger the same
+        // kernel-block + fleet propagation as WolfStack-UI attacks.
+        crate::auth::log_monitor::start_monitor(app_state.login_limiter.clone());
+
         // Storage-array health watcher — every 60s, scan /proc/mdstat
         // and per-disk SMART. Fire an alert_log entry on first
         // observation of a degraded array, faulty disk, or

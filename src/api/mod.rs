@@ -474,12 +474,17 @@ pub struct LoginRequest {
 
 /// POST /api/auth/login — authenticate with Linux or WolfStack credentials + optional 2FA
 pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json<LoginRequest>) -> HttpResponse {
-    // Rate limiting — extract client IP
-    let client_ip = req.connection_info().peer_addr().unwrap_or("unknown").to_string();
+    // Rate limiting — extract client IP. Strip the :port suffix that
+    // actix attaches to peer_addr() so the limiter keys on bare IP
+    // (otherwise every connection from the same client gets its own
+    // bucket because the source port changes).
+    let raw_ip = req.connection_info().peer_addr().unwrap_or("unknown").to_string();
+    let client_ip = strip_port(&raw_ip);
     if state.login_limiter.is_locked_out(&client_ip) {
-        return HttpResponse::TooManyRequests().json(serde_json::json!({
+        state.login_limiter.audit_blocked(&client_ip, &body.username);
+        return HttpResponse::Forbidden().json(serde_json::json!({
             "success": false,
-            "error": "Too many failed login attempts. Please try again later."
+            "error": "Access denied — this IP is blocked. Contact the operator.",
         }));
     }
 
@@ -521,7 +526,7 @@ pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json
                 }
             }
 
-            state.login_limiter.clear(&client_ip);
+            state.login_limiter.clear_with(&client_ip, &body.username);
             let token = state.sessions.create_session(&body.username);
             let mut cookie = Cookie::build("wolfstack_session", &token)
                 .path("/")
@@ -544,7 +549,7 @@ pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json
     // Try Linux system auth (if mode is "linux" or "both")
     if mode == "linux" || mode == "both" {
         if crate::auth::authenticate_user(&body.username, &body.password) {
-            state.login_limiter.clear(&client_ip);
+            state.login_limiter.clear_with(&client_ip, &body.username);
             let token = state.sessions.create_session(&body.username);
             let mut cookie = Cookie::build("wolfstack_session", &token)
                 .path("/")
@@ -564,11 +569,260 @@ pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json
         }
     }
 
-    state.login_limiter.record_failure(&client_ip);
+    // record_failure_with fires the limiter's propagation hook
+    // automatically when the threshold is hit — installed by main.rs
+    // at startup. No manual fanout needed here; the same hook also
+    // fires for sshd / pvedaemon failures detected by log_monitor.
+    state.login_limiter.record_failure_with(&client_ip, &body.username);
     HttpResponse::Unauthorized().json(serde_json::json!({
         "success": false,
         "error": "Invalid username or password"
     }))
+}
+
+/// Fan out a kernel-block decision to every WolfStack peer in the
+/// cluster. Each peer receives `{ip, lockout_seconds, source_node}` and
+/// re-validates against its own trusted-IP list before applying. Called
+/// from the limiter's installed hook (main.rs wires it).
+pub async fn propagate_kernel_block_to_peers(
+    cluster: std::sync::Arc<crate::agent::ClusterState>,
+    secret: String,
+    ip: String,
+    lockout_seconds: u64,
+    source_node: String,
+) {
+    let nodes: Vec<crate::agent::Node> = {
+        let n = cluster.nodes.read().unwrap();
+        n.values()
+            .filter(|p| p.id != cluster.self_id && p.node_type == "wolfstack")
+            .cloned()
+            .collect()
+    };
+    if nodes.is_empty() { return; }
+    let payload = serde_json::json!({
+        "ip": ip,
+        "lockout_seconds": lockout_seconds,
+        "source_node": source_node,
+    });
+    let client = match reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => { tracing::error!("kernel-block fanout: client build: {}", e); return; }
+    };
+    for node in nodes {
+        let urls = [
+            format!("https://{}:{}/api/security/kernel-block-ip", node.address, node.port),
+            format!("http://{}:{}/api/security/kernel-block-ip", node.address, node.port + 1),
+        ];
+        for url in &urls {
+            let r = client.post(url)
+                .header("X-WolfStack-Secret", &secret)
+                .json(&payload)
+                .send().await;
+            match r {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!("kernel-block fanout: {} ack'd block of {}", node.hostname, ip);
+                    break;
+                }
+                Ok(_) | Err(_) => continue,
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct KernelBlockRequest {
+    pub ip: String,
+    #[serde(default = "default_propagated_lockout")]
+    pub lockout_seconds: u64,
+    #[serde(default)]
+    pub source_node: String,
+}
+
+fn default_propagated_lockout() -> u64 { 48 * 3600 }
+
+/// POST /api/security/kernel-block-ip — receive a fleet-propagated
+/// block. Authenticates via X-WolfStack-Secret (peer call) OR session
+/// (operator manually triggering). Each receiver re-validates against
+/// its own trusted-IP list before applying — an attacker can't cause
+/// your admin IP to be blocked elsewhere just because one node treats
+/// it as untrusted.
+pub async fn security_kernel_block_ip(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<KernelBlockRequest>,
+) -> HttpResponse {
+    // Either cluster-secret or operator session.
+    let has_secret = req.headers().get("X-WolfStack-Secret")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == crate::auth::default_cluster_secret())
+        .unwrap_or(false);
+    if !has_secret {
+        if let Err(e) = require_auth(&req, &state) { return e; }
+    }
+    let body = body.into_inner();
+    let source = if body.source_node.is_empty() {
+        "operator".to_string()
+    } else {
+        body.source_node.clone()
+    };
+    state.login_limiter.add_propagated_lockout(&body.ip, body.lockout_seconds, &source);
+    HttpResponse::Ok().json(serde_json::json!({
+        "ok": true,
+        "ip": body.ip,
+        "applied": true,
+    }))
+}
+
+/// GET /api/security/auth-config — current lockout settings.
+pub async fn security_auth_config_get(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(state.login_limiter.config())
+}
+
+/// POST /api/security/auth-config — update lockout settings.
+pub async fn security_auth_config_set(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<crate::auth::LoginLockoutConfig>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match state.login_limiter.set_config(body.into_inner()) {
+        Ok(saved) => HttpResponse::Ok().json(saved),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/security/auth-lockouts — currently-locked IPs and audit log.
+pub async fn security_auth_lockouts(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let lockouts: Vec<_> = state.login_limiter.current_lockouts()
+        .into_iter()
+        .map(|(ip, secs, user)| serde_json::json!({
+            "ip": ip,
+            "remaining_seconds": secs,
+            "last_username": user,
+        }))
+        .collect();
+    HttpResponse::Ok().json(serde_json::json!({
+        "lockouts": lockouts,
+        "audit": state.login_limiter.audit_log(),
+        "config": state.login_limiter.config(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct UnblockRequest {
+    pub ip: String,
+    /// If true, also tell every peer to unblock. Defaults to true so
+    /// the operator's "unblock my home IP" works fleet-wide.
+    #[serde(default = "default_true_propagate")]
+    pub propagate: bool,
+}
+
+fn default_true_propagate() -> bool { true }
+
+/// POST /api/security/auth-unblock — operator-triggered IP unblock.
+pub async fn security_auth_unblock(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<UnblockRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let body = body.into_inner();
+    state.login_limiter.unblock(&body.ip);
+    if body.propagate {
+        let cluster = state.cluster.clone();
+        let secret = crate::auth::default_cluster_secret().to_string();
+        let ip = body.ip.clone();
+        tokio::spawn(async move {
+            propagate_kernel_unblock_to_peers(cluster, secret, ip).await;
+        });
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "ok": true, "ip": body.ip }))
+}
+
+pub async fn propagate_kernel_unblock_to_peers(
+    cluster: std::sync::Arc<crate::agent::ClusterState>,
+    secret: String,
+    ip: String,
+) {
+    let nodes: Vec<crate::agent::Node> = {
+        let n = cluster.nodes.read().unwrap();
+        n.values()
+            .filter(|p| p.id != cluster.self_id && p.node_type == "wolfstack")
+            .cloned()
+            .collect()
+    };
+    let client = match reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let payload = serde_json::json!({ "ip": ip, "propagate": false });
+    for node in nodes {
+        let urls = [
+            format!("https://{}:{}/api/security/auth-unblock-peer", node.address, node.port),
+            format!("http://{}:{}/api/security/auth-unblock-peer", node.address, node.port + 1),
+        ];
+        for url in &urls {
+            let r = client.post(url)
+                .header("X-WolfStack-Secret", &secret)
+                .json(&payload)
+                .send().await;
+            if matches!(r, Ok(ref resp) if resp.status().is_success()) { break; }
+        }
+    }
+}
+
+/// POST /api/security/auth-unblock-peer — receive a fleet-propagated
+/// unblock. Cluster-secret only.
+pub async fn security_auth_unblock_peer(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<UnblockRequest>,
+) -> HttpResponse {
+    let has_secret = req.headers().get("X-WolfStack-Secret")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == crate::auth::default_cluster_secret())
+        .unwrap_or(false);
+    if !has_secret {
+        return HttpResponse::Unauthorized().json(serde_json::json!({ "error": "cluster secret required" }));
+    }
+    state.login_limiter.unblock(&body.ip);
+    HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
+}
+
+/// Strip the trailing `:port` from a `peer_addr()` string. Actix
+/// returns `1.2.3.4:56789` (or `[::1]:56789` for v6) — we want the
+/// bare IP for the rate limiter so all connections from one client
+/// share a bucket.
+fn strip_port(addr: &str) -> String {
+    if let Some(stripped) = addr.strip_prefix('[') {
+        if let Some(end) = stripped.find(']') {
+            return stripped[..end].to_string();
+        }
+    }
+    if let Some(idx) = addr.rfind(':') {
+        // Only strip if everything after `:` is digits (a port).
+        let port_part = &addr[idx + 1..];
+        if !port_part.is_empty() && port_part.chars().all(|c| c.is_ascii_digit()) {
+            return addr[..idx].to_string();
+        }
+    }
+    addr.to_string()
 }
 
 /// GET /api/settings/login-disabled — check if direct login is disabled (no auth needed)
@@ -27956,6 +28210,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // Emergency security actions — fleet-wide root password rotation
         .route("/api/security/rotate-root-local", web::post().to(security_rotate_root_local))
         .route("/api/security/rotate-fleet", web::post().to(security_rotate_fleet))
+        // Brute-force lockout management
+        .route("/api/security/auth-config", web::get().to(security_auth_config_get))
+        .route("/api/security/auth-config", web::post().to(security_auth_config_set))
+        .route("/api/security/auth-lockouts", web::get().to(security_auth_lockouts))
+        .route("/api/security/auth-unblock", web::post().to(security_auth_unblock))
+        .route("/api/security/auth-unblock-peer", web::post().to(security_auth_unblock_peer))
+        .route("/api/security/kernel-block-ip", web::post().to(security_kernel_block_ip))
         .route("/api/networking/vlan/parse-config", web::post().to(vlan_parse_config))
         .route("/api/networking/vlan/apply", web::post().to(vlan_apply))
         .route("/api/networking/vlan/attachments", web::post().to(vlan_upsert))

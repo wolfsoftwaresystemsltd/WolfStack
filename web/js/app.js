@@ -15373,6 +15373,152 @@ function emergencyRotateResults(data) {
 
 window.emergencyRotateRootPasswords = emergencyRotateRootPasswords;
 window.emergencyRotateResults = emergencyRotateResults;
+
+// ─── Brute-force lockout management ─────────────────────────────────
+//
+// Loads the current policy, surfaces blocked IPs, and shows the audit
+// log of recent auth attempts (success + fail). The whole panel is
+// driven by /api/security/auth-lockouts which returns config + active
+// lockouts + audit in one shot.
+
+async function securityRefreshLockouts() {
+    let data;
+    try {
+        const resp = await fetch(apiUrl('/api/security/auth-lockouts'));
+        if (!resp.ok) {
+            document.getElementById('security-lockout-status').textContent = 'Failed to load lockout state.';
+            return;
+        }
+        data = await resp.json();
+    } catch (e) {
+        document.getElementById('security-lockout-status').textContent = `Error: ${e.message || e}`;
+        return;
+    }
+    const cfg = data.config || {};
+    const lockouts = data.lockouts || [];
+    const audit = data.audit || [];
+
+    // Populate the policy form.
+    document.getElementById('sec-max-failures').value = cfg.max_failures ?? 10;
+    document.getElementById('sec-window-seconds').value = cfg.window_seconds ?? 300;
+    document.getElementById('sec-lockout-seconds').value = cfg.lockout_seconds ?? 172800;
+    document.getElementById('sec-enabled').checked = cfg.enabled !== false;
+    document.getElementById('sec-trusted-ips').value = (cfg.trusted_ips || []).join('\n');
+
+    // Status summary.
+    const status = cfg.enabled === false
+        ? '<span style="color:#ef4444;">Lockout disabled.</span> Failed login attempts are recorded but no IPs will be blocked.'
+        : `<span style="color:#22c55e;">Lockout active.</span> ${cfg.max_failures} failures in ${cfg.window_seconds}s triggers a ${Math.round(cfg.lockout_seconds / 3600)}h kernel block. ${cfg.trusted_ips?.length || 0} trusted IP${cfg.trusted_ips?.length === 1 ? '' : 's'} configured.`;
+    document.getElementById('security-lockout-status').innerHTML = status;
+
+    // Currently locked IPs.
+    const lockoutEl = document.getElementById('security-lockout-list');
+    if (lockouts.length === 0) {
+        lockoutEl.innerHTML = '<div style="font-size:12px; color:var(--text-muted);">No IPs are currently blocked.</div>';
+    } else {
+        lockoutEl.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="text-align:left; border-bottom:1px solid var(--border);">
+                <th style="padding:6px 10px;">IP</th>
+                <th style="padding:6px 10px;">Time remaining</th>
+                <th style="padding:6px 10px;">Last username</th>
+                <th style="padding:6px 10px;"></th>
+            </tr></thead>
+            <tbody>${lockouts.map(l => {
+                const hours = Math.floor(l.remaining_seconds / 3600);
+                const mins = Math.floor((l.remaining_seconds % 3600) / 60);
+                const tStr = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+                return `<tr>
+                    <td style="padding:6px 10px; font-family:var(--font-mono);">${vlanEsc(l.ip)}</td>
+                    <td style="padding:6px 10px; color:#fbbf24;">${tStr}</td>
+                    <td style="padding:6px 10px; color:var(--text-muted); font-size:11px;">${vlanEsc(l.last_username || '—')}</td>
+                    <td style="padding:6px 10px;"><button class="btn btn-sm" onclick="securityUnblockIp('${vlanEsc(l.ip)}')" style="font-size:11px;">Unblock</button></td>
+                </tr>`;
+            }).join('')}</tbody>
+        </table>`;
+    }
+
+    // Audit log — newest 100 entries.
+    const auditEl = document.getElementById('security-auth-log');
+    if (audit.length === 0) {
+        auditEl.innerHTML = '<div style="padding:12px; font-size:12px; color:var(--text-muted);">No attempts logged yet.</div>';
+    } else {
+        const rows = audit.slice(0, 100).map(e => {
+            const colour = e.success ? '#22c55e' : (e.was_locked ? '#a855f7' : '#ef4444');
+            const status = e.success ? 'OK' : (e.was_locked ? 'BLOCKED' : 'FAIL');
+            const ago = ((Date.now() / 1000) - e.timestamp) | 0;
+            const agoStr = ago < 60 ? `${ago}s ago` : ago < 3600 ? `${(ago / 60) | 0}m ago` : `${(ago / 3600) | 0}h ago`;
+            return `<tr>
+                <td style="padding:4px 10px; font-size:11px; color:var(--text-muted);">${agoStr}</td>
+                <td style="padding:4px 10px;"><span style="display:inline-block; padding:1px 6px; background:${colour}20; color:${colour}; border-radius:3px; font-size:10px; font-weight:600;">${status}</span></td>
+                <td style="padding:4px 10px; font-family:var(--font-mono); font-size:11px;">${vlanEsc(e.ip)}</td>
+                <td style="padding:4px 10px; font-size:11px;">${vlanEsc(e.username || '—')}</td>
+                <td style="padding:4px 10px; font-size:11px; color:var(--text-muted);">${vlanEsc(e.reason || '')}</td>
+            </tr>`;
+        }).join('');
+        auditEl.innerHTML = `<table style="width:100%; border-collapse:collapse;">
+            <thead><tr style="text-align:left; border-bottom:1px solid var(--border); background:var(--bg-secondary); position:sticky; top:0;">
+                <th style="padding:6px 10px; font-size:11px;">When</th>
+                <th style="padding:6px 10px; font-size:11px;">Status</th>
+                <th style="padding:6px 10px; font-size:11px;">IP</th>
+                <th style="padding:6px 10px; font-size:11px;">Username</th>
+                <th style="padding:6px 10px; font-size:11px;">Reason</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+    }
+}
+
+async function securitySaveLockoutConfig() {
+    const trustedRaw = document.getElementById('sec-trusted-ips').value;
+    const trusted = trustedRaw.split('\n').map(l => l.trim()).filter(Boolean);
+    const body = {
+        max_failures: parseInt(document.getElementById('sec-max-failures').value, 10),
+        window_seconds: parseInt(document.getElementById('sec-window-seconds').value, 10),
+        lockout_seconds: parseInt(document.getElementById('sec-lockout-seconds').value, 10),
+        enabled: document.getElementById('sec-enabled').checked,
+        trusted_ips: trusted,
+    };
+    try {
+        const resp = await fetch(apiUrl('/api/security/auth-config'), {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            showToast(`Save failed: ${d.error || resp.statusText}`, 'error');
+            return;
+        }
+        showToast('Lockout policy saved', 'success');
+        securityRefreshLockouts();
+    } catch (e) {
+        showToast(`Save failed: ${e.message || e}`, 'error');
+    }
+}
+
+async function securityUnblockIp(ip) {
+    if (!await wolfConfirm(`Unblock ${ip} on this node AND all peers? This removes the kernel iptables DROP rule fleet-wide.`, 'Unblock IP')) return;
+    try {
+        const resp = await fetch(apiUrl('/api/security/auth-unblock'), {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ ip, propagate: true }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast(data.error || 'Unblock failed', 'error');
+            return;
+        }
+        showToast(`Unblocked ${ip} fleet-wide`, 'success');
+        securityRefreshLockouts();
+    } catch (e) {
+        showToast(`Unblock failed: ${e.message || e}`, 'error');
+    }
+}
+
+window.securityRefreshLockouts = securityRefreshLockouts;
+window.securitySaveLockoutConfig = securitySaveLockoutConfig;
+window.securityUnblockIp = securityUnblockIp;
 window.vlanProviderChanged = vlanProviderChanged;
 window.vlanSyncBridgeName = vlanSyncBridgeName;
 window.vlanSave = vlanSave;
@@ -29125,6 +29271,11 @@ async function loadNodeSecurity() {
         window._securityData = { node, data };
         container.innerHTML = renderSecurityComponents(node, data);
         loadSecurityConfigFiles();
+        // Refresh the brute-force lockout panel (independent of the
+        // security-components grid; renders into its own fixed IDs).
+        if (typeof securityRefreshLockouts === 'function') {
+            securityRefreshLockouts();
+        }
     } catch (e) {
         container.innerHTML = `<div class="card" style="border-color:rgba(239,68,68,0.3); grid-column:1/-1;"><div class="card-body" style="padding:24px;"><div style="color:#ef4444; font-size:14px;">Failed to retrieve security status: ${escapeHtml(e.message)}</div></div></div>`;
     }
