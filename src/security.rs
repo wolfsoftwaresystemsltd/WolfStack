@@ -710,3 +710,131 @@ fn scan_ip_conflicts(out: &mut Vec<DependencyCheck>) {
         ));
     }
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Emergency root-password rotation
+// ════════════════════════════════════════════════════════════════════
+//
+// Designed for the moment an operator realises an attacker has SSH
+// credentials and wants to lock them out everywhere at once. The fleet
+// coordinator (any node the operator is logged into) fans out
+// authenticated rotation requests via the existing X-WolfStack-Secret
+// channel; each node generates its own password locally with the
+// system CSPRNG, applies it via chpasswd, and returns it ONCE to the
+// coordinator. The coordinator surfaces the per-node passwords in the
+// API response — they're not stored in WolfStack state anywhere.
+//
+// Belt-and-braces: each node also appends its new password to
+// /root/.wolfstack-emergency-passwords.txt (mode 0600) so the operator
+// can recover if the UI display fails or the browser closes.
+
+use std::io::Write as _IoWrite;
+use std::process::Stdio;
+
+/// Generate a 32-character random password using only characters that
+/// are safe inside shell pipelines (alphanumeric — no `$`, `'`, `"`,
+/// `\\`, space). 32 alphanumeric is ~190 bits of entropy.
+pub fn generate_strong_password() -> String {
+    use rand::Rng;
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = rand::thread_rng();
+    (0..32)
+        .map(|_| {
+            let idx = rng.gen_range(0..CHARS.len());
+            CHARS[idx] as char
+        })
+        .collect()
+}
+
+/// Set the given user's password by piping `user:password` to chpasswd
+/// via stdin. The password NEVER appears in argv — so it doesn't show
+/// up in `ps`, audit args, or shell history.
+pub fn set_password(user: &str, password: &str) -> Result<(), String> {
+    let mut child = Command::new("chpasswd")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn chpasswd: {}", e))?;
+    {
+        let stdin = child.stdin.as_mut()
+            .ok_or_else(|| "chpasswd stdin unavailable".to_string())?;
+        writeln!(stdin, "{}:{}", user, password)
+            .map_err(|e| format!("write chpasswd stdin: {}", e))?;
+    }
+    let output = child.wait_with_output()
+        .map_err(|e| format!("wait chpasswd: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "chpasswd failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Append (timestamp, hostname, user, password) to the emergency backup
+/// file. Mode 0600, append-only — preserves earlier rotations.
+pub fn record_emergency_password(user: &str, password: &str) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = "/root/.wolfstack-emergency-passwords.txt";
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let when = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("open {}: {}", path, e))?;
+    writeln!(f, "{}\t{}\t{}\t{}", when, hostname, user, password)
+        .map_err(|e| format!("write {}: {}", path, e))?;
+    Ok(())
+}
+
+/// Rotate root password locally: generate, apply, record, kick any
+/// active root SSH sessions, return the new password.
+pub fn rotate_local_root() -> Result<String, String> {
+    let pw = generate_strong_password();
+    set_password("root", &pw)?;
+    if let Err(e) = record_emergency_password("root", &pw) {
+        eprintln!("warning: emergency-password backup write failed: {}", e);
+    }
+    // Kill active root SSH sessions so the attacker drops at the same
+    // moment as the password change. We target per-session sshd
+    // children only (the listening daemon is unaffected because its
+    // process title doesn't include "@"). The WolfStack process is
+    // not an sshd child so this can't affect us — but the operator's
+    // own SSH session WILL terminate, which is intended.
+    let _ = Command::new("pkill")
+        .args(["-KILL", "-f", "sshd: root@"])
+        .output();
+    Ok(pw)
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+
+    #[test]
+    fn generated_passwords_are_32_chars_and_alphanumeric() {
+        for _ in 0..50 {
+            let pw = generate_strong_password();
+            assert_eq!(pw.len(), 32);
+            assert!(pw.chars().all(|c| c.is_ascii_alphanumeric()),
+                "non-alphanumeric in password: {}", pw);
+        }
+    }
+
+    #[test]
+    fn generated_passwords_have_high_diversity() {
+        let a = generate_strong_password();
+        let b = generate_strong_password();
+        assert_ne!(a, b, "two consecutive passwords matched — RNG broken");
+    }
+}

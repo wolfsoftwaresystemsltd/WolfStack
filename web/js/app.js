@@ -15204,6 +15204,175 @@ window.vlanShowAddDialog = vlanShowAddDialog;
 window.vlanShowPreview = vlanShowPreview;
 window.vlanShowDiscover = vlanShowDiscover;
 window.vlanShowImportFromServer = vlanShowImportFromServer;
+
+// ─── Emergency: rotate root passwords across the fleet ─────────────
+//
+// Two-step modal. Step 1 requires the operator to type the literal
+// phrase "ROTATE ALL PASSWORDS" — defends against accidental clicks and
+// matches what the backend validates server-side. Step 2 displays the
+// per-node passwords ONCE. They're not stored anywhere else in
+// WolfStack state; the operator must copy them to a password manager
+// before closing the modal. Each node also wrote /root/.wolfstack-
+// emergency-passwords.txt as a recovery backup.
+
+function emergencyRotateRootPasswords() {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100001;display:flex;align-items:center;justify-content:center';
+    const modal = document.createElement('div');
+    modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid #dc2626;border-radius:12px;padding:24px 28px;max-width:560px;width:92%;max-height:88vh;overflow-y:auto;box-shadow:0 20px 60px rgba(220,38,38,0.4);color:var(--text-primary,#e4e4e7);font-family:inherit';
+    modal.innerHTML = `
+        <div style="font-size:18px; font-weight:700; color:#fca5a5; margin-bottom:8px;">Rotate root passwords fleet-wide</div>
+        <div style="font-size:13px; color:var(--text-secondary); line-height:1.55; margin-bottom:16px;">
+            This will generate fresh 32-character random passwords on <strong>every WolfStack-managed node</strong> in the cluster, apply them via <code>chpasswd</code>, and kill all active root SSH sessions.
+            <br><br>
+            <strong style="color:#fca5a5;">YOUR OWN SSH SESSIONS WILL BE TERMINATED.</strong> The new passwords are returned to this screen ONCE — copy them immediately. Each node also writes a local backup to <code>/root/.wolfstack-emergency-passwords.txt</code>.
+            <br><br>
+            Proxmox-only nodes (no WolfStack agent) will be listed as skipped — rotate those manually via the Proxmox UI.
+        </div>
+        <div class="form-group">
+            <label for="erp-confirm" style="font-size:12px; color:var(--text-muted);">Type <strong style="color:#fca5a5;">ROTATE ALL PASSWORDS</strong> to confirm:</label>
+            <input class="form-control" id="erp-confirm" placeholder="ROTATE ALL PASSWORDS" autocomplete="off" style="font-family:var(--font-mono); margin-top:6px;">
+        </div>
+        <label style="display:flex; align-items:center; gap:8px; font-size:12px; margin-top:10px; color:var(--text-secondary);">
+            <input type="checkbox" id="erp-include-self" checked> Also rotate THIS node (recommended — but kills your current session)
+        </label>
+        <div id="erp-status" style="font-size:12px; color:var(--text-muted); margin-top:12px; min-height:18px;"></div>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">
+            <button id="erp-cancel" style="background:var(--bg-secondary,#2d2f3a);color:var(--text-primary,#e4e4e7);border:1px solid var(--border-color,#3d3f4a);border-radius:6px;padding:8px 18px;cursor:pointer;font-size:13px;">Cancel</button>
+            <button id="erp-go" disabled style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:8px 18px;cursor:not-allowed;font-size:13px;opacity:0.4;font-weight:600;">Rotate now</button>
+        </div>`;
+    overlay.appendChild(modal);
+    (document.fullscreenElement || document.body).appendChild(overlay);
+
+    const cleanup = () => overlay.remove();
+    const goBtn = modal.querySelector('#erp-go');
+    const cancelBtn = modal.querySelector('#erp-cancel');
+    const confirmInput = modal.querySelector('#erp-confirm');
+    const includeSelf = modal.querySelector('#erp-include-self');
+    const statusEl = modal.querySelector('#erp-status');
+
+    confirmInput.addEventListener('input', () => {
+        const ok = confirmInput.value === 'ROTATE ALL PASSWORDS';
+        goBtn.disabled = !ok;
+        goBtn.style.opacity = ok ? '1' : '0.4';
+        goBtn.style.cursor = ok ? 'pointer' : 'not-allowed';
+    });
+    cancelBtn.addEventListener('click', cleanup);
+    confirmInput.focus();
+
+    goBtn.addEventListener('click', async () => {
+        if (goBtn.disabled) return;
+        goBtn.disabled = true;
+        goBtn.textContent = 'Rotating...';
+        goBtn.style.opacity = '0.6';
+        statusEl.innerHTML = '<span style="color:#fbbf24;">Fanning out to nodes — this can take up to 30 seconds per node. Don\'t close this window.</span>';
+        try {
+            const resp = await fetch(apiUrl('/api/security/rotate-fleet'), {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({
+                    confirmation: 'ROTATE ALL PASSWORDS',
+                    include_self: includeSelf.checked,
+                }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+                statusEl.innerHTML = `<span style="color:#ef4444;">Failed: ${vlanEsc(data.error || 'unknown error')}</span>`;
+                goBtn.disabled = false;
+                goBtn.textContent = 'Retry';
+                goBtn.style.opacity = '1';
+                return;
+            }
+            cleanup();
+            emergencyRotateResults(data);
+        } catch (e) {
+            statusEl.innerHTML = `<span style="color:#ef4444;">Network error: ${vlanEsc(e.message || String(e))}</span>`;
+            goBtn.disabled = false;
+            goBtn.textContent = 'Retry';
+            goBtn.style.opacity = '1';
+        }
+    });
+}
+
+// Render the per-node password results. Designed to be the OPERATOR'S
+// ONLY chance to copy these — they're not stored anywhere else (except
+// the local backup file on each node). Includes a CSV download button
+// for password-manager import.
+function emergencyRotateResults(data) {
+    const results = data.results || [];
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100001;display:flex;align-items:center;justify-content:center';
+    const modal = document.createElement('div');
+    modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid #fbbf24;border-radius:12px;padding:24px 28px;max-width:880px;width:96%;max-height:92vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit';
+    const rows = results.map(r => {
+        const colour = r.status === 'ok' ? '#22c55e' : r.status === 'failed' ? '#ef4444' : '#fbbf24';
+        const pwCell = r.new_password
+            ? `<code style="font-family:var(--font-mono); font-size:12px; background:var(--bg-input); padding:3px 6px; border-radius:3px; user-select:all;">${vlanEsc(r.new_password)}</code>
+               <button onclick="navigator.clipboard.writeText('${vlanEsc(r.new_password)}'); this.textContent='copied'; setTimeout(()=>this.textContent='copy',1500);" style="margin-left:6px; padding:2px 8px; font-size:10px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:3px; cursor:pointer; color:var(--text-primary);">copy</button>`
+            : `<span style="color:var(--text-muted); font-size:11px;">${vlanEsc(r.error || '—')}</span>`;
+        return `<tr>
+            <td style="padding:6px 10px; border-bottom:1px solid var(--border);"><span style="display:inline-block; padding:2px 8px; background:${colour}20; color:${colour}; border-radius:3px; font-size:11px; font-weight:600;">${vlanEsc(r.status)}</span></td>
+            <td style="padding:6px 10px; border-bottom:1px solid var(--border); font-family:var(--font-mono); font-size:12px;">${vlanEsc(r.hostname || r.node_id)}</td>
+            <td style="padding:6px 10px; border-bottom:1px solid var(--border); font-family:var(--font-mono); font-size:11px; color:var(--text-muted);">${vlanEsc(r.address)}</td>
+            <td style="padding:6px 10px; border-bottom:1px solid var(--border);">${pwCell}</td>
+        </tr>`;
+    }).join('');
+    modal.innerHTML = `
+        <div style="font-size:18px; font-weight:700; color:#fbbf24; margin-bottom:6px;">Save these passwords NOW</div>
+        <div style="font-size:13px; color:var(--text-secondary); line-height:1.55; margin-bottom:14px;">
+            ${vlanEsc(data.summary || '')}.
+            These passwords are <strong>not stored anywhere in WolfStack</strong>. Copy them into your password manager before closing this dialog.
+            Each node also has a local backup at <code>/root/.wolfstack-emergency-passwords.txt</code> (mode 0600).
+            <br><br>
+            <strong style="color:#fbbf24;">Important:</strong> ${vlanEsc(data.important || '')}
+        </div>
+        <div style="margin-bottom:12px;">
+            <button id="erp-download" style="background:var(--accent,#3b82f6); color:#fff; border:none; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:13px; margin-right:8px;">Download as CSV</button>
+            <button id="erp-copyall" style="background:var(--bg-secondary); color:var(--text-primary); border:1px solid var(--border); border-radius:6px; padding:8px 16px; cursor:pointer; font-size:13px;">Copy all (TSV)</button>
+        </div>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="text-align:left; border-bottom:2px solid var(--border);">
+                <th style="padding:6px 10px;">Status</th>
+                <th style="padding:6px 10px;">Hostname</th>
+                <th style="padding:6px 10px;">Address</th>
+                <th style="padding:6px 10px;">New password</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:18px;">
+            <button id="erp-close" style="background:#dc2626; color:#fff; border:none; border-radius:6px; padding:10px 24px; cursor:pointer; font-size:13px; font-weight:600;">I've saved them — close</button>
+        </div>`;
+    overlay.appendChild(modal);
+    (document.fullscreenElement || document.body).appendChild(overlay);
+
+    const csv = ['hostname,address,status,new_password,error'].concat(
+        results.map(r => [
+            JSON.stringify(r.hostname || ''),
+            JSON.stringify(r.address || ''),
+            JSON.stringify(r.status || ''),
+            JSON.stringify(r.new_password || ''),
+            JSON.stringify(r.error || ''),
+        ].join(','))
+    ).join('\n');
+    modal.querySelector('#erp-download').addEventListener('click', () => {
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `wolfstack-emergency-passwords-${Date.now()}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+    });
+    modal.querySelector('#erp-copyall').addEventListener('click', () => {
+        const tsv = results.map(r => `${r.hostname || ''}\t${r.address || ''}\t${r.new_password || ''}`).join('\n');
+        navigator.clipboard.writeText(tsv);
+        showToast('Copied all rows to clipboard (TSV)', 'success');
+    });
+    modal.querySelector('#erp-close').addEventListener('click', () => overlay.remove());
+}
+
+window.emergencyRotateRootPasswords = emergencyRotateRootPasswords;
+window.emergencyRotateResults = emergencyRotateResults;
 window.vlanProviderChanged = vlanProviderChanged;
 window.vlanSyncBridgeName = vlanSyncBridgeName;
 window.vlanSave = vlanSave;

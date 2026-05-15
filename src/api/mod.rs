@@ -10450,6 +10450,223 @@ pub async fn vlan_parse_config(
 /// the case of incompatible topologies like vlan-aware bridges, gives
 /// them a clear "don't add this through WolfStack, you'd conflict"
 /// warning).
+// ────────────────────────────────────────────────────────────────────
+// Emergency security actions
+// ────────────────────────────────────────────────────────────────────
+
+/// POST /api/security/rotate-root-local — rotate THIS node's root
+/// password and return the new password to the caller. Designed to be
+/// invoked either:
+///   - directly by a logged-in operator (via the UI on this node)
+///   - by another WolfStack node acting as a fleet-rotation coordinator
+///     (via X-WolfStack-Secret auth)
+///
+/// The password is generated locally with the system CSPRNG. It is
+/// also appended to /root/.wolfstack-emergency-passwords.txt (mode
+/// 0600) as a belt-and-braces backup in case the UI display fails.
+/// Existing SSH sessions for root are killed so any active attacker
+/// session drops at the same moment.
+pub async fn security_rotate_root_local(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let result = tokio::task::spawn_blocking(crate::security::rotate_local_root).await;
+    match result {
+        Ok(Ok(pw)) => HttpResponse::Ok().json(serde_json::json!({
+            "ok": true,
+            "password": pw,
+            "hostname": hostname::get()
+                .map(|h| h.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "ok": false,
+            "error": e,
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "ok": false,
+            "error": format!("rotation task panicked: {}", e),
+        })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct FleetRotateRequest {
+    /// Operator typed confirmation phrase — must equal "ROTATE ALL PASSWORDS".
+    /// Defense against accidental clicks; the UI requires this be typed
+    /// before enabling the submit button.
+    pub confirmation: String,
+    /// If true, also rotate the coordinator node's own password. Defaults
+    /// to true. Set false if the operator wants to rotate peers first
+    /// (e.g. they're SSH'd into the coordinator and want to keep that
+    /// session alive a bit longer).
+    #[serde(default = "default_true_include_self")]
+    pub include_self: bool,
+}
+
+fn default_true_include_self() -> bool { true }
+
+#[derive(Serialize)]
+pub struct FleetRotateNodeResult {
+    pub node_id: String,
+    pub hostname: String,
+    pub address: String,
+    pub node_type: String,
+    pub status: String,        // "ok" | "failed" | "skipped"
+    pub new_password: Option<String>,
+    pub error: Option<String>,
+}
+
+/// POST /api/security/rotate-fleet — coordinator endpoint. Fans the
+/// rotation out to every WolfStack-managed node in the cluster
+/// (including this one if include_self=true), collects results, and
+/// returns the per-node passwords ONCE. The operator MUST save them
+/// immediately — they're not stored anywhere else in WolfStack's state.
+///
+/// Proxmox-only nodes (where WolfStack isn't installed) are surfaced
+/// as "skipped" with a hint that the operator must rotate via the
+/// Proxmox UI or SSH.
+pub async fn security_rotate_fleet(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<FleetRotateRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let body = body.into_inner();
+    if body.confirmation.trim() != "ROTATE ALL PASSWORDS" {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "confirmation phrase must equal 'ROTATE ALL PASSWORDS' exactly",
+        }));
+    }
+
+    // Snapshot the cluster state so we don't hold the lock across async work.
+    let (self_id, nodes) = {
+        let n = state.cluster.nodes.read().unwrap();
+        (state.cluster.self_id.clone(), n.values().cloned().collect::<Vec<_>>())
+    };
+
+    let secret = crate::auth::default_cluster_secret().to_string();
+    let mut futures = Vec::new();
+
+    for node in nodes {
+        let secret_c = secret.clone();
+        let self_id_c = self_id.clone();
+        let include_self = body.include_self;
+        futures.push(async move {
+            let is_self = node.id == self_id_c;
+            // Proxmox-only nodes can't be remotely rotated by us —
+            // surface as skipped with a clear instruction.
+            if node.node_type != "wolfstack" {
+                return FleetRotateNodeResult {
+                    node_id: node.id,
+                    hostname: node.hostname,
+                    address: node.address,
+                    node_type: node.node_type,
+                    status: "skipped".into(),
+                    new_password: None,
+                    error: Some("Proxmox-only node — WolfStack agent not installed. Rotate manually via Proxmox UI or SSH.".into()),
+                };
+            }
+            if is_self && !include_self {
+                return FleetRotateNodeResult {
+                    node_id: node.id,
+                    hostname: node.hostname,
+                    address: node.address,
+                    node_type: node.node_type,
+                    status: "skipped".into(),
+                    new_password: None,
+                    error: Some("Skipped (include_self=false). Rotate this node manually when ready.".into()),
+                };
+            }
+            // For self, run rotation in-process — avoids the loopback HTTP
+            // call and the risk that the coordinator's own SSH session
+            // (if any) gets killed before the rotation completes.
+            if is_self {
+                match tokio::task::spawn_blocking(crate::security::rotate_local_root).await {
+                    Ok(Ok(pw)) => FleetRotateNodeResult {
+                        node_id: node.id, hostname: node.hostname, address: node.address,
+                        node_type: node.node_type, status: "ok".into(),
+                        new_password: Some(pw), error: None,
+                    },
+                    Ok(Err(e)) => FleetRotateNodeResult {
+                        node_id: node.id, hostname: node.hostname, address: node.address,
+                        node_type: node.node_type, status: "failed".into(),
+                        new_password: None, error: Some(e),
+                    },
+                    Err(e) => FleetRotateNodeResult {
+                        node_id: node.id, hostname: node.hostname, address: node.address,
+                        node_type: node.node_type, status: "failed".into(),
+                        new_password: None,
+                        error: Some(format!("panic: {}", e)),
+                    },
+                }
+            } else {
+                // Remote peer — call its /api/security/rotate-root-local
+                // with the cluster secret. Try HTTPS on the registered
+                // port first, fall back to HTTP on port+1 (matches the
+                // pattern used by poll_remote_nodes).
+                let urls = [
+                    format!("https://{}:{}/api/security/rotate-root-local", node.address, node.port),
+                    format!("http://{}:{}/api/security/rotate-root-local", node.address, node.port + 1),
+                    format!("http://{}:{}/api/security/rotate-root-local", node.address, node.port),
+                ];
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build();
+                let client = match client {
+                    Ok(c) => c,
+                    Err(e) => return FleetRotateNodeResult {
+                        node_id: node.id, hostname: node.hostname, address: node.address,
+                        node_type: node.node_type, status: "failed".into(),
+                        new_password: None,
+                        error: Some(format!("client build: {}", e)),
+                    },
+                };
+                let mut last_err = String::new();
+                for url in &urls {
+                    let resp = client.post(url)
+                        .header("X-WolfStack-Secret", &secret_c)
+                        .send().await;
+                    match resp {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(j) = r.json::<serde_json::Value>().await {
+                                let pw = j.get("password").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                return FleetRotateNodeResult {
+                                    node_id: node.id, hostname: node.hostname, address: node.address,
+                                    node_type: node.node_type, status: "ok".into(),
+                                    new_password: pw, error: None,
+                                };
+                            }
+                            last_err = "remote returned 200 but no parseable JSON".into();
+                        }
+                        Ok(r) => { last_err = format!("HTTP {}", r.status()); }
+                        Err(e) => { last_err = format!("transport: {}", e); }
+                    }
+                }
+                FleetRotateNodeResult {
+                    node_id: node.id, hostname: node.hostname, address: node.address,
+                    node_type: node.node_type, status: "failed".into(),
+                    new_password: None,
+                    error: Some(format!("all transports failed; last: {}", last_err)),
+                }
+            }
+        });
+    }
+
+    let results = futures::future::join_all(futures).await;
+    let ok = results.iter().filter(|r| r.status == "ok").count();
+    let failed = results.iter().filter(|r| r.status == "failed").count();
+    let skipped = results.iter().filter(|r| r.status == "skipped").count();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "summary": format!("{} rotated, {} failed, {} skipped", ok, failed, skipped),
+        "results": results,
+        "important": "These passwords are NOT stored anywhere in WolfStack. Save them to your password manager immediately. Each node also has a backup at /root/.wolfstack-emergency-passwords.txt (mode 0600).",
+    }))
+}
+
 pub async fn vlan_discover(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
     let store = crate::networking::vlan::VlanStore::load();
@@ -27736,6 +27953,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/networking/vlan/preview", web::get().to(vlan_preview))
         .route("/api/networking/vlan/preflight", web::post().to(vlan_preflight))
         .route("/api/networking/vlan/discover", web::get().to(vlan_discover))
+        // Emergency security actions — fleet-wide root password rotation
+        .route("/api/security/rotate-root-local", web::post().to(security_rotate_root_local))
+        .route("/api/security/rotate-fleet", web::post().to(security_rotate_fleet))
         .route("/api/networking/vlan/parse-config", web::post().to(vlan_parse_config))
         .route("/api/networking/vlan/apply", web::post().to(vlan_apply))
         .route("/api/networking/vlan/attachments", web::post().to(vlan_upsert))
