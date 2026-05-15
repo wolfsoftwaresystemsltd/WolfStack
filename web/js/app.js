@@ -14087,74 +14087,107 @@ function vlanShowAddDialog(existing) {
             && !i.name.startsWith('vmbr'))
         .map(i => `<option value="${vlanEsc(i.name)}" ${i.name === ex.parent_iface ? 'selected' : ''}>${vlanEsc(i.name)}${i.mac ? ` (${vlanEsc(i.mac)})` : ''}</option>`)
         .join('');
+    // Inline styles compose with the codebase's .form-group / .form-control
+    // helpers so labels stack as block, inputs span full width, and the
+    // dark theme picks up correctly. Two big "what is this" explainers are
+    // tucked into <details> so they default closed and don't shove the form
+    // below the fold.
+    const helperStyle = 'color:var(--text-muted); font-size:11px; margin-top:4px; display:block; line-height:1.5;';
+    const detailsStyle = 'background:var(--bg-input,rgba(255,255,255,0.03)); border:1px solid var(--border,#2d2f3a); border-radius:6px; padding:8px 12px; font-size:12px; color:var(--text-secondary);';
+    const summaryStyle = 'cursor:pointer; user-select:none; font-weight:500; color:var(--text-primary); padding:2px 0;';
     const html = `
         <div class="modal-overlay active" id="vlan-add-modal">
-            <div class="modal" style="max-width:640px;">
+            <div class="modal" style="max-width:560px;">
                 <div class="modal-header">
                     <h3>Add VLAN attachment</h3>
                     <button class="modal-close" onclick="document.getElementById('vlan-add-modal').remove()">&times;</button>
                 </div>
-                <div class="modal-body" style="display:flex; flex-direction:column; gap:10px;">
-                    <div style="padding:10px 12px; background:rgba(99,102,241,0.08); border:1px solid rgba(99,102,241,0.25); border-radius:6px; font-size:12px; color:var(--text-secondary); line-height:1.55;">
-                        <strong style="color:var(--text-primary);">Before you start — what your provider needs to be set up</strong>
-                        <p style="margin:6px 0;">A VLAN attachment requires that the upstream switch port for this server is configured as a trunk and is already passing traffic for this VLAN ID. WolfStack only configures the host side — the provider/upstream side has to be in place first.</p>
-                        <p style="margin:6px 0;">For each provider that's the same idea, just dressed up differently:</p>
-                        <ul style="margin:6px 0 6px 18px; padding:0;">
-                            <li>Cloud providers (Hetzner vSwitch, OVH vRack, Equinix Metal Layer-2, Vultr VPC, Linode VLAN, etc.): create the private network in the provider's panel, attach this server to it, note the VLAN ID. Allow ~60 seconds after attaching before saving here so the provider's switch finishes propagating.</li>
-                            <li>Self-managed switches: configure the upstream port as 802.1Q trunk allowing this VLAN ID. Frames arrive tagged.</li>
-                        </ul>
-                    </div>
-                    <div style="padding:10px 12px; background:rgba(234,179,8,0.10); border:1px solid rgba(234,179,8,0.30); border-radius:6px; font-size:12px; color:var(--text-secondary); line-height:1.55;">
-                        <strong style="color:#fbbf24;">MTU on a VLAN — what to set and why</strong>
-                        <p style="margin:6px 0;">A 802.1Q tag adds 4 bytes to each Ethernet frame. Modern switches handle the slightly larger 1522-byte frame transparently, so the IP MTU on a VLAN sub-interface is normally still <strong>1500</strong>. Some providers cap it lower because their internal backbone uses additional encapsulation (VXLAN, MPLS, etc.) that eats more bytes.</p>
-                        <p style="margin:6px 0;">Use the provider preset's MTU unless you have a documented reason to change it:</p>
-                        <ul style="margin:6px 0 6px 18px; padding:0;">
-                            <li><strong>Hetzner vSwitch:</strong> 1400 (mandatory — their switches silently drop tagged frames larger than this).</li>
-                            <li><strong>OVH vRack, Equinix Metal, most cloud private networks:</strong> 1500 (no penalty for the tag).</li>
-                            <li><strong>Old/strict 802.1Q switches that don't accept 1522-byte frames:</strong> 1496 (1500 - 4 for the tag).</li>
-                            <li><strong>Tunnelled overlays (WireGuard, IPSec, GRE):</strong> usually 1420 or lower depending on the encapsulation.</li>
-                        </ul>
-                        <p style="margin:6px 0;">If you see "small pings work but big transfers stall" after saving, drop the MTU by 8 bytes and re-test — that's the universal symptom of MTU set too high somewhere along the path.</p>
-                        <p style="margin:6px 0;"><strong>Whatever MTU you set, every guest attached to this bridge must use the same value.</strong> A container at 1500 talking to a bridge at 1400 will drop replies larger than 1400 silently. Match the values:</p>
-                        <ul style="margin:6px 0 6px 18px; padding:0;">
-                            <li>LXC: <code>lxc.net.0.mtu = ${ex.mtu}</code> in the container config.</li>
-                            <li>Docker custom network: <code>--opt com.docker.network.driver.mtu=${ex.mtu}</code>.</li>
-                            <li>VMs: set the guest's NIC MTU inside the guest OS.</li>
-                        </ul>
-                    </div>
-                    <label>Provider preset
-                        <select id="vlan-provider" onchange="vlanProviderChanged()">
+                <div class="modal-body">
+                    <details style="${detailsStyle} margin-bottom:12px;">
+                        <summary style="${summaryStyle}">What does my provider need set up first?</summary>
+                        <div style="padding:8px 0 4px; line-height:1.55;">
+                            The upstream switch port for this server must already be a 802.1Q trunk passing traffic for this VLAN ID. WolfStack only configures the host side.
+                            <ul style="margin:8px 0 4px 18px; padding:0;">
+                                <li>Cloud providers (Hetzner vSwitch, OVH vRack, Equinix Metal, Vultr VPC, Linode VLAN): create the private network in the provider panel, attach this server, note the VLAN ID. Wait ~60 seconds after attaching before saving here.</li>
+                                <li>Self-managed switches: configure the upstream port as 802.1Q trunk allowing this VLAN ID.</li>
+                            </ul>
+                        </div>
+                    </details>
+                    <details style="${detailsStyle} margin-bottom:16px;">
+                        <summary style="${summaryStyle}">What MTU should I pick?</summary>
+                        <div style="padding:8px 0 4px; line-height:1.55;">
+                            802.1Q adds 4 bytes per frame. The provider preset is almost always right:
+                            <ul style="margin:8px 0; padding-left:18px;">
+                                <li><strong>Hetzner vSwitch:</strong> 1400 (mandatory — silently drops larger).</li>
+                                <li><strong>OVH vRack, Equinix Metal, most cloud private networks:</strong> 1500.</li>
+                                <li><strong>Old/strict 802.1Q switches:</strong> 1496.</li>
+                                <li><strong>Tunnelled overlays (WireGuard, IPSec, GRE):</strong> 1420 or lower.</li>
+                            </ul>
+                            "Small pings work, big transfers stall" = MTU too high somewhere. Drop 8 bytes and retest. <strong>Every guest on this bridge must use the same MTU as the bridge</strong> — set <code>lxc.net.0.mtu = ${ex.mtu}</code> on LXC, <code>--opt com.docker.network.driver.mtu=${ex.mtu}</code> on Docker, and the NIC MTU inside guest VMs.
+                        </div>
+                    </details>
+
+                    <div class="form-group">
+                        <label for="vlan-provider">Provider preset</label>
+                        <select class="form-control" id="vlan-provider" onchange="vlanProviderChanged()">
                             <option value="hetzner" ${ex.provider==='hetzner'?'selected':''}>Hetzner vSwitch (VLAN 4000-4091, MTU 1400)</option>
                             <option value="ovh" ${ex.provider==='ovh'?'selected':''}>OVH vRack (any VLAN, MTU 1500)</option>
                             <option value="equinix" ${ex.provider==='equinix'?'selected':''}>Equinix Metal (any VLAN, MTU 1500)</option>
                             <option value="custom" ${ex.provider==='custom'?'selected':''}>Custom 802.1Q (any VLAN, any MTU)</option>
                         </select>
-                    </label>
-                    <label>Name <input id="vlan-name" value="${vlanEsc(ex.name)}" placeholder="production-vswitch"></label>
-                    <label>Parent NIC
-                        <select id="vlan-parent">${nicOptions || '<option value="">— no physical NICs detected —</option>'}</select>
-                        <small style="color:var(--text-muted); font-size:11px;">The physical NIC connected to your provider's switch. Don't pick a virtual interface (docker, wolfnet, etc.).</small>
-                    </label>
-                    <div style="display:flex; gap:10px;">
-                        <label style="flex:1;">VLAN ID <input id="vlan-id" type="number" min="1" max="4094" value="${ex.vlan_id}" oninput="vlanSyncBridgeName()">
-                            <small style="color:var(--text-muted); font-size:11px;">The number your provider gave you. Hetzner: Robot &gt; vSwitches &gt; <em>your vSwitch</em> &gt; "VLAN ID" field. OVH: Manager &gt; Bare Metal Cloud &gt; vRack &gt; the VLAN you created.</small>
-                        </label>
-                        <label style="flex:1;">MTU <input id="vlan-mtu" type="number" min="576" max="9216" value="${ex.mtu}"></label>
                     </div>
-                    <label>Bridge name <input id="vlan-bridge" value="${vlanEsc(ex.bridge_name)}" placeholder="vmbr4000">
-                        <small style="color:var(--text-muted); font-size:11px;">This is what containers/VMs attach to. Default <code>vmbr&lt;VLAN&gt;</code> matches Proxmox naming.</small>
-                    </label>
-                    <label>Subnet (CIDR) <input id="vlan-subnet" value="${vlanEsc(ex.subnet)}" placeholder="10.0.1.0/24">
-                        <small style="color:var(--text-muted); font-size:11px;">RFC1918 range you've chosen for the VLAN. All servers on the same VLAN should agree.</small>
-                    </label>
-                    <label>This server's IP on the subnet <input id="vlan-self-ip" value="${vlanEsc(ex.self_ip)}" placeholder="10.0.1.5">
-                        <small style="color:var(--text-muted); font-size:11px;">Pick a unique IP within the subnet, not the network/broadcast addresses. Convention: <code>.1</code> = the cloud-network gateway (if any), <code>.2-.254</code> for your servers. Each WolfStack server on this same VLAN needs a different self IP — coordinate by hand for now (the auto-picker on attach respects allocations across the WolfStack admin cluster, but a separate WolfStack install on another machine sharing the vSwitch is invisible until you add it as an external reservation).</small>
-                    </label>
-                    <label>Optional gateway routes (one per line, format: <code>DEST_CIDR via VIA_IP</code>)
-                        <textarea id="vlan-routes" rows="2" placeholder="10.0.0.0/16 via 10.0.1.1">${(ex.routes||[]).map(r => `${vlanEsc(r.destination)} via ${vlanEsc(r.via)}`).join('\n')}</textarea>
-                        <small style="color:var(--text-muted); font-size:11px;">For Hetzner Cloud-Network bridging: <code>10.0.0.0/16 via 10.0.1.1</code> where .1 is the cloud network gateway.</small>
-                    </label>
-                    <label>Notes <input id="vlan-notes" value="${vlanEsc(ex.notes)}" placeholder="Used by region servers"></label>
+
+                    <div class="form-group">
+                        <label for="vlan-name">Name</label>
+                        <input class="form-control" id="vlan-name" value="${vlanEsc(ex.name)}" placeholder="production-vswitch">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="vlan-parent">Parent NIC</label>
+                        <select class="form-control" id="vlan-parent">${nicOptions || '<option value="">— no physical NICs detected —</option>'}</select>
+                        <small style="${helperStyle}">The physical NIC connected to your provider's switch. Don't pick a virtual interface (docker, wolfnet, etc.).</small>
+                    </div>
+
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                        <div class="form-group" style="margin-bottom:8px;">
+                            <label for="vlan-id">VLAN ID</label>
+                            <input class="form-control" id="vlan-id" type="number" min="1" max="4094" value="${ex.vlan_id}" oninput="vlanSyncBridgeName()">
+                        </div>
+                        <div class="form-group" style="margin-bottom:8px;">
+                            <label for="vlan-mtu">MTU</label>
+                            <input class="form-control" id="vlan-mtu" type="number" min="576" max="9216" value="${ex.mtu}">
+                        </div>
+                    </div>
+                    <small style="${helperStyle} margin-top:0; margin-bottom:16px;">VLAN ID: the number your provider gave you. Hetzner: Robot &gt; vSwitches &gt; <em>your vSwitch</em>. OVH: Manager &gt; Bare Metal Cloud &gt; vRack.</small>
+
+                    <div class="form-group">
+                        <label for="vlan-bridge">Bridge name</label>
+                        <input class="form-control" id="vlan-bridge" value="${vlanEsc(ex.bridge_name)}" placeholder="vmbr4000">
+                        <small style="${helperStyle}">What containers/VMs attach to. Default <code>vmbr&lt;VLAN&gt;</code> matches Proxmox naming.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="vlan-subnet">Subnet (CIDR)</label>
+                        <input class="form-control" id="vlan-subnet" value="${vlanEsc(ex.subnet)}" placeholder="10.0.1.0/24">
+                        <small style="${helperStyle}">RFC1918 range for this VLAN. All servers on the same VLAN must agree.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="vlan-self-ip">This server's IP on the subnet</label>
+                        <input class="form-control" id="vlan-self-ip" value="${vlanEsc(ex.self_ip)}" placeholder="10.0.1.5">
+                        <small style="${helperStyle}">A unique IP in the subnet (avoid network/broadcast). Convention: <code>.1</code> = gateway, <code>.2-.254</code> for servers. Each WolfStack peer on this VLAN needs a different self IP. The auto-picker on attach respects allocations across this admin cluster — separate WolfStack installs on the same vSwitch are invisible unless added as external reservations.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="vlan-routes">Optional gateway routes</label>
+                        <textarea class="form-control" id="vlan-routes" rows="2" placeholder="10.0.0.0/16 via 10.0.1.1">${(ex.routes||[]).map(r => `${vlanEsc(r.destination)} via ${vlanEsc(r.via)}`).join('\n')}</textarea>
+                        <small style="${helperStyle}">One per line, format <code>DEST_CIDR via VIA_IP</code>. Hetzner Cloud-Network bridging: <code>10.0.0.0/16 via 10.0.1.1</code>.</small>
+                    </div>
+
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label for="vlan-notes">Notes</label>
+                        <input class="form-control" id="vlan-notes" value="${vlanEsc(ex.notes)}" placeholder="Used by region servers">
+                    </div>
                 </div>
                 <div class="modal-footer">
                     <button class="btn" onclick="document.getElementById('vlan-add-modal').remove()">Cancel</button>
@@ -14390,6 +14423,9 @@ function publicIpShowAddDialog(existing) {
             && !i.name.startsWith('lo'))
         .map(i => `<option value="${vlanEsc(i.name)}" ${i.name === ex.egress_iface ? 'selected' : ''}>${vlanEsc(i.name)}</option>`)
         .join('');
+    const helperStyle = 'color:var(--text-muted); font-size:11px; margin-top:4px; display:block; line-height:1.5;';
+    const detailsStyle = 'background:var(--bg-input,rgba(255,255,255,0.03)); border:1px solid var(--border,#2d2f3a); border-radius:6px; padding:8px 12px; font-size:12px; color:var(--text-secondary); margin-bottom:12px;';
+    const summaryStyle = 'cursor:pointer; user-select:none; font-weight:500; color:var(--text-primary); padding:2px 0;';
     const html = `
         <div class="modal-overlay active" id="pip-add-modal">
             <div class="modal" style="max-width:520px;">
@@ -14397,40 +14433,52 @@ function publicIpShowAddDialog(existing) {
                     <h3>Add routed public IP</h3>
                     <button class="modal-close" onclick="document.getElementById('pip-add-modal').remove()">&times;</button>
                 </div>
-                <div class="modal-body" style="display:flex; flex-direction:column; gap:10px;">
-                    <div style="padding:10px 12px; background:rgba(99,102,241,0.08); border:1px solid rgba(99,102,241,0.25); border-radius:6px; font-size:12px; color:var(--text-secondary); line-height:1.55;">
-                        <strong style="color:var(--text-primary);">How this works (routed mode)</strong>
-                        <ul style="margin:6px 0 6px 18px; padding:0;">
+                <div class="modal-body">
+                    <details style="${detailsStyle}">
+                        <summary style="${summaryStyle}">How does routed-mode work?</summary>
+                        <ul style="margin:8px 0 4px 18px; padding:0; line-height:1.55;">
                             <li>The IP must already be <strong>assigned to this server in your provider's panel</strong> (Hetzner Robot &gt; IPs, OVH manager, etc.). WolfStack can't reassign IPs at the provider level.</li>
-                            <li>The host claims the IP on <code>lo</code>, enables proxy-ARP on the egress NIC so it answers ARP for the IP.</li>
-                            <li>iptables DNAT redirects inbound traffic to the container's internal IP; SNAT rewrites the container's outbound traffic to use the public IP as source.</li>
-                            <li>The container itself doesn't need any public-IP config — it sees only its internal IP. The host handles the translation.</li>
+                            <li>The host claims the IP on <code>lo</code> and enables proxy-ARP on the egress NIC so it answers ARP for the IP.</li>
+                            <li>iptables DNAT redirects inbound to the container's internal IP; SNAT rewrites outbound back to the public IP.</li>
+                            <li>The container itself doesn't need any public-IP config — it only sees its internal IP.</li>
                         </ul>
-                    </div>
-                    <div style="padding:10px 12px; background:rgba(234,179,8,0.10); border:1px solid rgba(234,179,8,0.30); border-radius:6px; font-size:12px; color:var(--text-secondary); line-height:1.55;">
-                        <strong style="color:#fbbf24;">Provider-side gotchas</strong>
-                        <ul style="margin:6px 0 6px 18px; padding:0;">
-                            <li><strong>Hetzner virtual MAC:</strong> If the IP has a virtual MAC bound in Robot, outbound packets get dropped at Hetzner's switch unless they leave with that exact MAC. Ask the IP owner to remove the virtual MAC binding (most common fix) OR generate one and tell us — bridged-mode support coming later.</li>
-                            <li><strong>Hetzner stale routing:</strong> If the IP previously belonged to a destroyed/reimaged server, Hetzner's core may take 5-30 min to refresh routing. Symptoms: <code>Destination Net Unreachable</code> from a Hetzner core IP.</li>
-                            <li><strong>OVH IP block routing:</strong> Make sure the IP is in your "additional IPs" not "block routed to vRack" — those need different config.</li>
+                    </details>
+                    <details style="${detailsStyle}">
+                        <summary style="${summaryStyle}">Provider-side gotchas</summary>
+                        <ul style="margin:8px 0 4px 18px; padding:0; line-height:1.55;">
+                            <li><strong>Hetzner virtual MAC:</strong> If the IP has a virtual MAC bound in Robot, outbound packets are dropped at Hetzner's switch unless they leave with that exact MAC. Remove the binding in Robot (most common fix).</li>
+                            <li><strong>Hetzner stale routing:</strong> An IP from a destroyed/reimaged server may take 5-30 min for Hetzner's core to re-route. Symptom: <code>Destination Net Unreachable</code> from a Hetzner core IP.</li>
+                            <li><strong>OVH:</strong> Make sure the IP is "additional IP" not "block routed to vRack" — those need different config.</li>
                         </ul>
-                    </div>
-                    <label>Provider
-                        <select id="pip-provider">
+                    </details>
+
+                    <div class="form-group">
+                        <label for="pip-provider">Provider</label>
+                        <select class="form-control" id="pip-provider">
                             <option value="hetzner" ${ex.provider==='hetzner'?'selected':''}>Hetzner additional IP</option>
                             <option value="ovh" ${ex.provider==='ovh'?'selected':''}>OVH additional IP</option>
                             <option value="equinix" ${ex.provider==='equinix'?'selected':''}>Equinix Metal</option>
                             <option value="custom" ${ex.provider==='custom'?'selected':''}>Custom / other</option>
                         </select>
-                    </label>
-                    <label>Name <input id="pip-name" value="${vlanEsc(ex.name)}" placeholder="regions80-public"></label>
-                    <label>Public IP <input id="pip-ip" value="${vlanEsc(ex.ip)}" placeholder="159.69.169.116"></label>
-                    <label>Container's internal IP (the one DNAT delivers to)
-                        <input id="pip-internal" value="${vlanEsc(ex.container_internal_ip)}" placeholder="10.0.3.100">
-                    </label>
-                    <label>Egress NIC (the public-reachable interface)
-                        <select id="pip-egress">${nicOptions || '<option value="">— no NICs detected —</option>'}</select>
-                    </label>
+                    </div>
+                    <div class="form-group">
+                        <label for="pip-name">Name</label>
+                        <input class="form-control" id="pip-name" value="${vlanEsc(ex.name)}" placeholder="regions80-public">
+                    </div>
+                    <div class="form-group">
+                        <label for="pip-ip">Public IP</label>
+                        <input class="form-control" id="pip-ip" value="${vlanEsc(ex.ip)}" placeholder="159.69.169.116">
+                    </div>
+                    <div class="form-group">
+                        <label for="pip-internal">Container's internal IP</label>
+                        <input class="form-control" id="pip-internal" value="${vlanEsc(ex.container_internal_ip)}" placeholder="10.0.3.100">
+                        <small style="${helperStyle}">The IP that DNAT delivers inbound traffic to. Must be reachable from the host (e.g. on an existing internal bridge).</small>
+                    </div>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label for="pip-egress">Egress NIC</label>
+                        <select class="form-control" id="pip-egress">${nicOptions || '<option value="">— no NICs detected —</option>'}</select>
+                        <small style="${helperStyle}">The public-reachable NIC the host uses to receive traffic for this IP.</small>
+                    </div>
                 </div>
                 <div class="modal-footer">
                     <button class="btn" onclick="document.getElementById('pip-add-modal').remove()">Cancel</button>
@@ -14556,20 +14604,24 @@ async function vlanShowAttachDialog(vlan) {
             <strong style="color:#fbbf24;">Heads up:</strong> the auto-picker can only see WolfStack peers in your own admin cluster. If you have other servers on this same vSwitch that aren't part of this WolfStack install (a colleague's box, a standalone server, the cloud-network gateway), close this dialog and click <strong>Reservations</strong> on the VLAN row to declare those IPs. Otherwise the auto-picker might double-allocate.
            </div>`
         : '';
+    const helperStyle = 'color:var(--text-muted); font-size:11px; margin-top:4px; display:block; line-height:1.5;';
     const html = `
         <div class="modal-overlay active" id="vlan-attach-modal">
-            <div class="modal" style="max-width:560px;">
+            <div class="modal" style="max-width:520px;">
                 <div class="modal-header">
                     <h3>Attach to VLAN ${vlanEsc(vlan.name)}</h3>
                     <button class="modal-close" onclick="document.getElementById('vlan-attach-modal').remove()">&times;</button>
                 </div>
-                <div class="modal-body" style="display:flex; flex-direction:column; gap:10px;">
-                    <div style="padding:8px 10px; background:rgba(99,102,241,0.08); border:1px solid rgba(99,102,241,0.25); border-radius:6px; font-size:12px;">
+                <div class="modal-body">
+                    <div style="padding:10px 12px; background:rgba(99,102,241,0.08); border:1px solid rgba(99,102,241,0.25); border-radius:6px; font-size:12px; margin-bottom:14px;">
                         <div>Bridge: <code>${vlanEsc(vlan.bridge_name)}</code> · Subnet: <code>${vlanEsc(vlan.subnet)}</code> · MTU: <code>${vlan.mtu}</code></div>
                         <div style="margin-top:4px; color:var(--text-muted);">${usedSummary}</div>
                     </div>
-                    <label>What are you attaching?
-                        <select id="va-kind" onchange="vlanAttachBackendChanged()">
+                    ${crossClusterHint ? `<div style="margin-bottom:14px;">${crossClusterHint}</div>` : ''}
+
+                    <div class="form-group">
+                        <label for="va-kind">What are you attaching?</label>
+                        <select class="form-control" id="va-kind" onchange="vlanAttachBackendChanged()">
                             <option value="lxc_native">LXC container on this server</option>
                             <option value="lxc_proxmox">Proxmox LXC container</option>
                             <option value="docker">Docker container</option>
@@ -14577,18 +14629,24 @@ async function vlanShowAttachDialog(vlan) {
                             <option value="vm_native">Virtual machine (libvirt / native)</option>
                             <option value="manual">Just reserve the IP (no backend changes)</option>
                         </select>
-                    </label>
-                    <label>Target name <input id="va-target" placeholder="">
-                        <small id="va-target-hint" style="color:var(--text-muted); font-size:11px;"></small>
-                    </label>
-                    <label>Label (optional) <input id="va-label" placeholder="regions80-vswitch"></label>
-                    <label>IP address
+                    </div>
+                    <div class="form-group">
+                        <label for="va-target">Target name</label>
+                        <input class="form-control" id="va-target" placeholder="">
+                        <small id="va-target-hint" style="${helperStyle}"></small>
+                    </div>
+                    <div class="form-group">
+                        <label for="va-label">Label (optional)</label>
+                        <input class="form-control" id="va-label" placeholder="regions80-vswitch">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label for="va-ip">IP address</label>
                         <div style="display:flex; gap:6px;">
-                            <input id="va-ip" placeholder="leave blank for auto-pick" style="flex:1;">
+                            <input class="form-control" id="va-ip" placeholder="leave blank for auto-pick" style="flex:1;">
                             <button class="btn btn-sm" type="button" onclick='vlanAutoPickIp(${JSON.stringify(vlan).replace(/'/g, "&#39;")})'>Pick next free</button>
                         </div>
-                        <small style="color:var(--text-muted); font-size:11px;">Must be inside <code>${vlanEsc(vlan.subnet)}</code>. Leave blank to let WolfStack pick the next free IP on save.</small>
-                    </label>
+                        <small style="${helperStyle}">Must be inside <code>${vlanEsc(vlan.subnet)}</code>. Leave blank to let WolfStack pick the next free IP on save.</small>
+                    </div>
                 </div>
                 <div class="modal-footer">
                     <button class="btn" onclick="document.getElementById('vlan-attach-modal').remove()">Cancel</button>
