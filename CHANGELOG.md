@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v23.7.0: emergency fleet-wide root password rotation (incident response)** _(2026-05-15 — [`31f4ebe`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/31f4ebecce2cbedcd99c64f08aae8206e1e1ea27))_
 - **v23.6.2: VLAN import — discover existing local config, paste from another server, better Save validation** _(2026-05-15 — [`dbb8f2a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/dbb8f2af880d47732b72cd524e928e674a1a6908))_
 - **v23.6.1: clean up VLAN dialogs — labels + inputs were laid out inline, info blocks shoved the form below the fold** _(2026-05-15 — [`717e3e9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/717e3e95c746b9fe2b2d7a3dc51d338519394d59))_
 - **v23.6.0: provider-agnostic vSwitch (VLAN + routed public IPs) with multi-distro persistence and pre-flight safety** _(2026-05-15 — [`b0e417c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b0e417cdd0dfc974f4029024b44d5f92889ba239))_
