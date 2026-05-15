@@ -213,6 +213,18 @@ async fn index_handler(req: HttpRequest, state: web::Data<api::AppState>) -> Htt
                 // fetch fresh JS/CSS after an upgrade without Ctrl+Shift+R.
                 // this has become a bit of a problem on chrome browsers. PC
                 let content = content
+// FIX: 安全检查 — 防止目录穿越
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
                     .replace("/css/style.css\"", &format!("/css/style.css?v={}\"", APP_VERSION))
                     .replace("/js/app.js\"", &format!("/js/app.js?v={}\"", APP_VERSION));
                 HttpResponse::Ok()

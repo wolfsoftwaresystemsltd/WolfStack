@@ -271,6 +271,12 @@ fn normalise_path(path: &str) -> String {
     }
     // Collapse any `/./` segments.
     while out.contains("/./") {
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
         out = out.replace("/./", "/");
     }
     out

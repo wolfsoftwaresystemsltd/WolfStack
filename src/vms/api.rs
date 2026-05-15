@@ -1288,6 +1288,12 @@ async fn vm_migrate_external(
     let staging_dir = body.staging_dir.clone();
     let tgt_staging_val = body.target_staging_dir.as_deref().unwrap_or("").to_string();
     let proxmox_val = body.proxmox;
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
     let target_label = target_url.replace("https://", "").replace("http://", "").split('/').next().unwrap_or(&target_url).to_string();
 
     tokio::spawn(async move {
