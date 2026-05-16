@@ -11026,11 +11026,12 @@ where
                     error: Some(format!("client build: {}", e)),
                 },
             };
-            // Capture WHY each attempt failed so the UI can show the
-            // operator a useful reason (HTTP 403 vs 404 vs JSON parse
-            // vs transport timeout) instead of an opaque "all
-            // transports failed".
-            let mut last_err = String::from("no attempts made");
+            // Capture WHY each attempt failed. We collect EVERY url's
+            // error rather than overwriting — otherwise the operator
+            // only sees the last attempt's failure (the HTTP-on-port+1
+            // fallback) and the actual root cause on the primary URL
+            // (HTTPS) stays hidden.
+            let mut errors: Vec<String> = Vec::new();
             for url in &urls {
                 let resp = client.get(url).header("X-WolfStack-Secret", &secret_c).send().await;
                 match resp {
@@ -11041,7 +11042,7 @@ where
                                 status: "ok".into(), data: Some(v), error: None,
                             },
                             Err(e) => {
-                                last_err = format!("{} -> 200 OK but JSON parse failed: {}", url, e);
+                                errors.push(format!("{} -> 200 OK but JSON parse failed: {}", url, e));
                             }
                         }
                     }
@@ -11049,17 +11050,17 @@ where
                         let status = r.status();
                         let body = r.text().await.unwrap_or_default();
                         let preview = body.chars().take(200).collect::<String>();
-                        last_err = format!("{} -> HTTP {}: {}", url, status, preview);
+                        errors.push(format!("{} -> HTTP {}: {}", url, status, preview));
                     }
                     Err(e) => {
-                        last_err = format!("{} -> transport: {}", url, e);
+                        errors.push(format!("{} -> transport: {}", url, e));
                     }
                 }
             }
             FleetNodeResult {
                 node_id: node.id, hostname: node.hostname, address: node.address,
                 status: "failed".into(), data: None,
-                error: Some(last_err),
+                error: Some(errors.join(" | ")),
             }
         });
     }
