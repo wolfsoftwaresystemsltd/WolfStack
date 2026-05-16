@@ -15855,6 +15855,7 @@ async function fleetLoadScanDetector() {
         document.getElementById('scan-action').value = c.action || 'kill_and_block';
         document.getElementById('scan-enabled').checked = c.enabled !== false;
         document.getElementById('scan-allowlist').value = (c.allowlist_comms || []).join('\n');
+        document.getElementById('scan-allowlist-uids').value = (c.allowlist_uids || []).join('\n');
     }
     const totalEvents = nodes.reduce((s, n) => s + ((n.data && n.data.events) ? n.data.events.length : 0), 0);
     const enabled = okNodes.filter(n => n.data && n.data.config && n.data.config.enabled !== false).length;
@@ -15895,6 +15896,21 @@ async function fleetLoadScanDetector() {
 async function fleetPushScanDetector() {
     const allowlistRaw = document.getElementById('scan-allowlist').value;
     const allowlist = allowlistRaw.split('\n').map(l => l.trim()).filter(Boolean);
+    // UID allowlist — parse numeric, drop anything that doesn't parse
+    // cleanly (operator might have left a username in by accident).
+    const uidsRaw = document.getElementById('scan-allowlist-uids').value;
+    const uidsParsed = uidsRaw.split('\n')
+        .map(l => l.trim())
+        .filter(Boolean)
+        .map(l => parseInt(l, 10))
+        .filter(n => Number.isInteger(n) && n >= 0 && n <= 4294967295);
+    const uidsRejected = uidsRaw.split('\n')
+        .map(l => l.trim())
+        .filter(Boolean)
+        .filter(l => !Number.isInteger(parseInt(l, 10)));
+    if (uidsRejected.length > 0) {
+        showToast(`UID allowlist: dropped ${uidsRejected.length} non-numeric entries (${uidsRejected.slice(0, 3).join(', ')}${uidsRejected.length > 3 ? '…' : ''}). Use the numeric UID, not the username.`, 'warning', 6000);
+    }
     const body = {
         threshold_destinations: parseInt(document.getElementById('scan-threshold').value, 10),
         window_seconds: parseInt(document.getElementById('scan-window').value, 10),
@@ -15902,6 +15918,7 @@ async function fleetPushScanDetector() {
         action: document.getElementById('scan-action').value,
         enabled: document.getElementById('scan-enabled').checked,
         allowlist_comms: allowlist,
+        allowlist_uids: uidsParsed,
     };
     const status = document.getElementById('fleet-scan-policy-status');
     status.innerHTML = '<span style="color:#fbbf24;">Pushing…</span>';

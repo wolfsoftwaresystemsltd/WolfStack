@@ -978,7 +978,12 @@
                     <div class="form-group">
                         <label for="scan-allowlist">Allowlist comm names (one per line)</label>
                         <textarea class="form-control" id="scan-allowlist" rows="4" style="font-family:var(--font-mono); font-size:12px;" placeholder="apt&#10;dockerd&#10;ceph-osd"></textarea>
-                        <small style="color:var(--text-muted); font-size:11px;">Process names that bypass detection (legitimate fan-out tools). Pre-filled with sane defaults for Proxmox/WolfStack/Ceph hosts.</small>
+                        <small style="color:var(--text-muted); font-size:11px;">Process names that bypass detection (legitimate fan-out tools). Pre-filled with sane defaults for Proxmox/WolfStack/Ceph hosts. Matches by `comm` (15-char Linux process name) — if your workload runs under a generic interpreter like <code>python</code>, prefer the UID allowlist below instead, otherwise EVERY python process gets exempted.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="scan-allowlist-uids">Allowlist UIDs (one per line, numeric)</label>
+                        <textarea class="form-control" id="scan-allowlist-uids" rows="3" style="font-family:var(--font-mono); font-size:12px;" placeholder="1000&#10;1001"></textarea>
+                        <small style="color:var(--text-muted); font-size:11px;">Numeric UIDs whose processes bypass detection entirely. Use this for dedicated service accounts running legitimate high-fanout software (data-analysis pipelines, multi-API integrations). Find a UID: <code>id -u &lt;username&gt;</code> or <code>getent passwd &lt;username&gt; | cut -d: -f3</code>. <strong>Safer than comm allowlisting</strong> when the workload uses a shared interpreter — only YOUR analytics user is exempted, not every python/node process.</small>
                     </div>
                     <button class="btn btn-primary" onclick="fleetPushScanDetector()">Push policy to every node</button>
                     <div id="fleet-scan-policy-status" style="margin-top:10px; font-size:12px; color:var(--text-secondary);"></div>

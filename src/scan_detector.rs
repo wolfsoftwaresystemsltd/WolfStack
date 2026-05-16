@@ -60,6 +60,18 @@ pub struct ScanDetectorConfig {
     /// legitimate fan-out processes.
     #[serde(default = "default_allowlist")]
     pub allowlist_comms: Vec<String>,
+    /// Numeric UIDs that bypass detection entirely. Use this for
+    /// dedicated service accounts running legitimate high-fanout
+    /// software (data-analysis pipelines, multi-API integrations).
+    /// Safer than comm-name allowlisting when the process runs under
+    /// a generic interpreter like `python` or `node` — operator can
+    /// allowlist just the analytics user without exempting EVERY
+    /// python process on the box.
+    ///
+    /// Find a user's UID: `id -u <username>` or
+    /// `getent passwd <username> | cut -d: -f3`.
+    #[serde(default)]
+    pub allowlist_uids: Vec<u32>,
     /// What to do on detection. "alert_only" | "kill_and_block" (default).
     #[serde(default = "default_action")]
     pub action: String,
@@ -93,6 +105,7 @@ impl Default for ScanDetectorConfig {
             window_seconds: default_window(),
             sample_interval_seconds: default_sample(),
             allowlist_comms: default_allowlist(),
+            allowlist_uids: Vec::new(),
             action: default_action(),
         }
     }
@@ -235,6 +248,9 @@ impl ScanDetector {
             let comm = read_comm(*pid).unwrap_or_else(|| "?".into());
             if allowlist.contains(comm.as_str()) { continue; }
             let uid = read_uid(*pid).unwrap_or(0);
+            // UID allowlist — dedicated service accounts for legit
+            // high-fanout software bypass detection entirely.
+            if cfg.allowlist_uids.contains(&uid) { continue; }
             to_action.push((*pid, comm, uid, distinct.clone()));
         }
         for (pid, comm, uid, dests) in to_action {
@@ -494,9 +510,36 @@ mod tests {
         let mut cfg = ScanDetectorConfig::default();
         cfg.threshold_destinations = 75;
         cfg.action = "alert_only".into();
+        cfg.allowlist_uids = vec![1000, 1001];
         let json = serde_json::to_string(&cfg).unwrap();
         let back: ScanDetectorConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.threshold_destinations, 75);
         assert_eq!(back.action, "alert_only");
+        assert_eq!(back.allowlist_uids, vec![1000, 1001]);
+    }
+
+    #[test]
+    fn uid_allowlist_default_is_empty() {
+        let cfg = ScanDetectorConfig::default();
+        assert!(cfg.allowlist_uids.is_empty(),
+            "default config must NOT auto-allowlist any UIDs — operator opts in explicitly");
+    }
+
+    #[test]
+    fn deserialise_without_allowlist_uids_field_defaults_to_empty() {
+        // Backwards-compat: existing config files written by v23.10.0
+        // (no allowlist_uids field) must still load without error.
+        let old_json = r#"{
+            "enabled": true,
+            "threshold_destinations": 50,
+            "window_seconds": 60,
+            "sample_interval_seconds": 15,
+            "allowlist_comms": ["apt"],
+            "action": "kill_and_block"
+        }"#;
+        let cfg: ScanDetectorConfig = serde_json::from_str(old_json).unwrap();
+        assert!(cfg.allowlist_uids.is_empty(),
+            "missing allowlist_uids field must default to empty Vec");
+        assert_eq!(cfg.threshold_destinations, 50);
     }
 }
