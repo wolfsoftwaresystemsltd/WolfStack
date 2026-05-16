@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v23.10.1: scan-detector UID allowlist — exempt dedicated service accounts without exempting every python/node process** _(2026-05-16 — [`cfefb23`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cfefb23bd9bc5b077f76eea6bb81f06d12602ab8))_
 - **v23.10.0: Fleet Security Tier 1 — outbound scan detection, host+container audit, cluster secret rotation, SSH hardening push, cluster-aware alert routing** _(2026-05-16 — [`bf38935`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bf389354be6328a786627e615ae7555f3c4b0099))_
 - **v23.9.0: Fleet Security page — cross-cluster ops in one screen** _(2026-05-15 — [`07be3c8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/07be3c84daa34353519c5266ec8d1f261a655ed8))_
 - **v23.8.0: brute-force lockout — kernel-level IP blocking with fleet propagation, unified across WolfStack UI / SSH / Proxmox** _(2026-05-15 — [`6e54cdd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6e54cdd7bf38beba21fda45b1aea4fa90095ff39))_
