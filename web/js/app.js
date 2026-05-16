@@ -15588,13 +15588,48 @@ async function fleetLoadBlockedIps() {
         totalAttempts += (n.data.audit || []).length;
     }
     const ips = Object.values(byIp).sort((a, b) => b.max_remaining - a.max_remaining);
-    const failedNodes = nodes.filter(n => n.status === 'failed').length;
-    const summary = `${ips.length} unique IP${ips.length === 1 ? '' : 's'} blocked across ${nodes.filter(n => n.status === 'ok').length} node${nodes.length === 1 ? '' : 's'}` +
-                    (failedNodes > 0 ? ` (<span style="color:#fbbf24;">${failedNodes} node${failedNodes === 1 ? '' : 's'} unreachable</span>)` : '') +
+    const okNodesList = nodes.filter(n => n.status === 'ok');
+    const failedNodesList = nodes.filter(n => n.status === 'failed');
+    const skippedNodesList = nodes.filter(n => n.status === 'skipped');
+    const summary = `${ips.length} unique IP${ips.length === 1 ? '' : 's'} blocked across ${okNodesList.length} node${nodes.length === 1 ? '' : 's'}` +
+                    (failedNodesList.length > 0 ? ` (<span style="color:#fbbf24;">${failedNodesList.length} node${failedNodesList.length === 1 ? '' : 's'} unreachable</span>)` : '') +
+                    (skippedNodesList.length > 0 ? ` (<span style="color:var(--text-muted);">${skippedNodesList.length} skipped</span>)` : '') +
                     ` · ${totalAttempts} recent auth events`;
+
+    // Per-node breakdown — operator needs to know WHICH peers are
+    // failing so they know where to SSH for diagnosis. The aggregation
+    // already returns per-node status + error message; render it.
+    let breakdownHtml = '';
+    if (failedNodesList.length > 0 || skippedNodesList.length > 0) {
+        const rowsForFailed = failedNodesList.map(n => `<tr>
+            <td style="padding:3px 8px; font-family:var(--font-mono); font-size:11px;">${vlanEsc(n.hostname || n.node_id)}</td>
+            <td style="padding:3px 8px; font-family:var(--font-mono); font-size:11px; color:var(--text-muted);">${vlanEsc(n.address)}</td>
+            <td style="padding:3px 8px;"><span style="color:#ef4444; font-size:11px; font-weight:600;">FAILED</span></td>
+            <td style="padding:3px 8px; font-size:11px; color:var(--text-muted);">${vlanEsc(n.error || '(no detail)')}</td>
+        </tr>`).join('');
+        const rowsForSkipped = skippedNodesList.map(n => `<tr>
+            <td style="padding:3px 8px; font-family:var(--font-mono); font-size:11px;">${vlanEsc(n.hostname || n.node_id)}</td>
+            <td style="padding:3px 8px; font-family:var(--font-mono); font-size:11px; color:var(--text-muted);">${vlanEsc(n.address)}</td>
+            <td style="padding:3px 8px;"><span style="color:var(--text-muted); font-size:11px; font-weight:600;">SKIPPED</span></td>
+            <td style="padding:3px 8px; font-size:11px; color:var(--text-muted);">${vlanEsc(n.error || '(no detail)')}</td>
+        </tr>`).join('');
+        breakdownHtml = `<details style="margin:8px 0 14px; padding:8px 12px; background:var(--bg-input); border:1px solid var(--border); border-radius:6px;">
+            <summary style="cursor:pointer; font-size:12px; color:var(--text-secondary); user-select:none;">Show which nodes didn't respond</summary>
+            <table style="width:100%; border-collapse:collapse; margin-top:8px;">
+                <thead><tr style="text-align:left; border-bottom:1px solid var(--border);">
+                    <th style="padding:4px 8px; font-size:11px;">Hostname</th>
+                    <th style="padding:4px 8px; font-size:11px;">Address</th>
+                    <th style="padding:4px 8px; font-size:11px;">Status</th>
+                    <th style="padding:4px 8px; font-size:11px;">Reason</th>
+                </tr></thead>
+                <tbody>${rowsForFailed}${rowsForSkipped}</tbody>
+            </table>
+        </details>`;
+    }
 
     if (ips.length === 0) {
         el.innerHTML = `<div style="font-size:13px; color:var(--text-secondary); margin-bottom:6px;">${summary}</div>
+                        ${breakdownHtml}
                         <div style="color:var(--text-muted); font-size:12px;">No IPs are currently blocked on any node.</div>`;
         return;
     }
@@ -15604,6 +15639,7 @@ async function fleetLoadBlockedIps() {
     };
     el.innerHTML = `
         <div style="font-size:13px; color:var(--text-secondary); margin-bottom:10px;">${summary}</div>
+        ${breakdownHtml}
         <table style="width:100%; border-collapse:collapse; font-size:13px;">
             <thead><tr style="text-align:left; border-bottom:2px solid var(--border);">
                 <th style="padding:6px 10px;">IP</th>
