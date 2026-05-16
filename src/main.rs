@@ -633,6 +633,19 @@ async fn main() -> std::io::Result<()> {
         // The limiter calls these whenever a lock/unlock happens —
         // regardless of whether the source was the WolfStack web UI,
         // sshd, or pvedaemon. One pathway, three covered surfaces.
+        //
+        // **CRITICAL THREADING**: these hooks are called from BOTH
+        // the async actix-web handlers (tokio context, fine) AND from
+        // log_monitor's blocking std::thread (NOT in tokio context).
+        // Using bare `tokio::spawn(..)` panics when called from a
+        // non-tokio thread, which silently killed the log_monitor
+        // thread and made SSH/PVE brute-force blocks never propagate.
+        //
+        // Fix: capture a `tokio::runtime::Handle` at hook install
+        // time and use `handle.spawn(..)` from inside the closure.
+        // Handle is the runtime-agnostic spawn API — callable from
+        // any thread that knows the runtime exists.
+        let rt_handle = tokio::runtime::Handle::current();
         {
             let cluster_block = app_state.cluster.clone();
             let cluster_unblock = app_state.cluster.clone();
@@ -645,13 +658,15 @@ async fn main() -> std::io::Result<()> {
             // sender always authenticates correctly.
             let secret_block = app_state.cluster_secret.clone();
             let secret_unblock = secret_block.clone();
+            let rt_block = rt_handle.clone();
+            let rt_unblock = rt_handle.clone();
             app_state.login_limiter.install_propagation_hooks(
                 std::sync::Arc::new(move |ip, secs| {
                     let cluster = cluster_block.clone();
                     let secret = secret_block.clone();
                     let ip = ip.to_string();
                     let self_id = self_id_block.clone();
-                    tokio::spawn(async move {
+                    rt_block.spawn(async move {
                         api::propagate_kernel_block_to_peers(cluster, secret, ip, secs, self_id).await;
                     });
                 }),
@@ -659,7 +674,7 @@ async fn main() -> std::io::Result<()> {
                     let cluster = cluster_unblock.clone();
                     let secret = secret_unblock.clone();
                     let ip = ip.to_string();
-                    tokio::spawn(async move {
+                    rt_unblock.spawn(async move {
                         api::propagate_kernel_unblock_to_peers(cluster, secret, ip).await;
                     });
                 }),
@@ -671,24 +686,29 @@ async fn main() -> std::io::Result<()> {
         // cluster name + hostname. Both modules call the same shape
         // of hook (title, body) — the hook decorates with node context
         // and dispatches via alerting::send_node_alert.
+        //
+        // Same threading caveat as the propagation hooks above —
+        // scan_detector's run_loop is a std::thread, so use rt_handle.
         {
             let cluster_for_alert_lim = app_state.cluster.clone();
+            let rt_alert_lim = rt_handle.clone();
             app_state.login_limiter.install_alert_hook(std::sync::Arc::new(move |title, body| {
                 let cluster_name = cluster_for_alert_lim.get_self_cluster_name();
                 let hostname = hostname::get()
                     .map(|h| h.to_string_lossy().to_string())
                     .unwrap_or_else(|_| "unknown".into());
-                tokio::spawn(async move {
+                rt_alert_lim.spawn(async move {
                     crate::alerting::send_node_alert(&cluster_name, &hostname, &title, &body).await;
                 });
             }));
             let cluster_for_alert_scan = app_state.cluster.clone();
+            let rt_alert_scan = rt_handle.clone();
             app_state.scan_detector.install_alert_hook(std::sync::Arc::new(move |title, body| {
                 let cluster_name = cluster_for_alert_scan.get_self_cluster_name();
                 let hostname = hostname::get()
                     .map(|h| h.to_string_lossy().to_string())
                     .unwrap_or_else(|_| "unknown".into());
-                tokio::spawn(async move {
+                rt_alert_scan.spawn(async move {
                     crate::alerting::send_node_alert(&cluster_name, &hostname, &title, &body).await;
                 });
             }));
