@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v23.10.7: fleet aggregation now reports the real failure reason per node** _(2026-05-16 — [`7c54319`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7c5431974bbf8e61f713e14348736e8c859aaa34))_
 - **v23.10.6: Fleet Security refresh button now shows it's working** _(2026-05-16 — [`961a79a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/961a79a024253de717d4e89b4fe1a6a92e06bcd5))_
 - **v23.10.5: surface WHICH nodes are unreachable in the Fleet Security UI** _(2026-05-16 — [`91cd1a6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/91cd1a6c343a77230ed4e2651ab7ea51b98fbc4c))_
 - **v23.10.4: fix tokio::spawn panic from std::thread — log_monitor + scan_detector hooks now use a captured runtime handle** _(2026-05-16 — [`682ab67`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/682ab67d5e207ecfc4f68878c35d12109f30367e))_
