@@ -27997,12 +27997,32 @@ async function issuesUpgradeNode(nodeId) {
     var node = allNodes.find(function (n) { return n.id === nodeId; });
     var name = node ? node.hostname : nodeId;
 
+    // HTTPS-by-default warning: if the user is currently on http://,
+    // they're about to lose access via their current URL because v23.11+
+    // serves HTTPS-only by default. Surface this BEFORE they click
+    // upgrade, not after they're locked out.
+    var httpsWarning = '';
+    if (window.location.protocol === 'http:') {
+        httpsWarning = '<div style="margin-top:14px; padding:12px; background:rgba(234,179,8,0.12); border:1px solid rgba(234,179,8,0.45); border-radius:6px; color:var(--text-primary); font-size:13px;">'
+            + '<strong style="color:#fbbf24;">\u26A0 HTTPS-by-default change in v23.11:</strong><br>'
+            + 'You\'re viewing this over <code>http://</code>. After upgrade, WolfStack will '
+            + 'auto-generate a self-signed cert and serve <strong>HTTPS only</strong> on port '
+            + window.location.port + '.<br><br>'
+            + 'Your current URL will stop working. After the restart, switch to '
+            + '<code>https://' + window.location.host + '/</code> and either click through '
+            + 'the one-time browser warning or import the cert from <code>/etc/wolfstack/tls/cert.pem</code>.<br><br>'
+            + 'Want to keep HTTP-only? After upgrade, SSH in and add <code>--no-tls</code> to '
+            + 'the ExecStart line in <code>/etc/systemd/system/wolfstack.service</code>, then '
+            + 'restart. Not recommended \u2014 credentials currently travel in cleartext.'
+            + '</div>';
+    }
     try {
         await showIssuesConfirm('\u26A1', 'Upgrade WolfStack on ' + escapeHtml(name) + '?',
             'The upgrade runs in the background and may take several minutes '
             + '(up to ~50 minutes on slow hardware like a Raspberry Pi). '
             + 'The server will restart automatically once the new binary is built. '
-            + 'Progress is tracked in the task log and survives a browser refresh.',
+            + 'Progress is tracked in the task log and survives a browser refresh.'
+            + httpsWarning,
             [], '\u26A1 Upgrade', '#f59e0b');
     } catch (e) { return; }
 
@@ -28020,10 +28040,50 @@ async function issuesUpgradeNode(nodeId) {
     }
 
     modal.setTitle('Upgrade In Progress');
+    // If we're upgrading the current node we're connected to, build a
+    // "Continue to HTTPS login" target that the operator can click
+    // once the upgrade finishes. For non-self nodes we don't know
+    // their final URL with certainty (could be hostname OR IP), so
+    // we only offer the redirect for self-upgrades.
+    var redirectTarget = '';
+    var redirectExplainer = '';
+    if (!node || node.is_self) {
+        // Build https://<current-host>:<current-port>/login.html
+        // even if we're currently on http:// \u2014 that's the new URL
+        // after v23.11 auto-generates the self-signed cert.
+        redirectTarget = 'https://' + window.location.hostname
+            + ':' + (window.location.port || '8553') + '/login.html';
+        if (window.location.protocol === 'http:') {
+            redirectExplainer = '<div style="margin-top:14px; padding:12px; background:rgba(234,179,8,0.12); border:1px solid rgba(234,179,8,0.45); border-radius:6px; color:var(--text-primary); font-size:12px; text-align:left;">'
+                + '<strong style="color:#fbbf24;">\u26A0 Switching to HTTPS</strong><br>'
+                + 'After the upgrade, this server serves HTTPS only on port '
+                + (window.location.port || '8553') + '. Your current <code>http://</code> URL '
+                + 'will stop working.<br><br>'
+                + '<strong>Your browser will warn about the self-signed certificate</strong> the '
+                + 'first time you visit. That\'s expected. To accept:<br>'
+                + '&bull; <strong>Chrome / Edge:</strong> click <em>Advanced</em> &rarr; <em>Proceed to '
+                + window.location.hostname + ' (unsafe)</em><br>'
+                + '&bull; <strong>Firefox:</strong> click <em>Advanced</em> &rarr; <em>Accept the Risk and Continue</em><br>'
+                + '&bull; <strong>Safari:</strong> click <em>Show Details</em> &rarr; <em>visit this website</em><br><br>'
+                + 'For a warning-free experience long-term, request a real CA cert via '
+                + 'Settings &rarr; Certificates after you\'re logged back in.'
+                + '</div>';
+        }
+    }
     modal.setFooter('<div style="background:rgba(234,179,8,0.1); border:1px solid rgba(234,179,8,0.3); border-radius:10px; padding:16px; text-align:center;">'
         + '<div style="font-size:24px; margin-bottom:8px;">\u23F3</div>'
         + '<div style="font-weight:600; color:var(--text-primary); font-size:14px; margin-bottom:4px;">Please wait approximately 5 minutes</div>'
-        + '<div style="color:var(--text-secondary); font-size:12px;">The server is upgrading and will restart automatically.<br>Refresh your browser once complete.</div>'
+        + '<div style="color:var(--text-secondary); font-size:12px;">The server is upgrading and will restart automatically.</div>'
+        + (redirectTarget
+            ? '<div style="margin-top:12px;">'
+              + '<button onclick="window.location.href=\'' + redirectTarget + '\'" '
+              + 'style="background:var(--accent,#3b82f6); color:#fff; border:none; border-radius:6px; padding:10px 20px; cursor:pointer; font-size:13px; font-weight:600;">'
+              + 'Continue to HTTPS login &rarr;'
+              + '</button>'
+              + '<div style="font-size:11px; color:var(--text-muted); margin-top:6px;">Click after ~5 minutes once the upgrade finishes</div>'
+              + '</div>'
+            : '<div style="color:var(--text-secondary); font-size:12px; margin-top:6px;">Refresh your browser once complete.</div>')
+        + redirectExplainer
         + '</div>');
     modal.showDone();
 }
@@ -28048,7 +28108,27 @@ async function issuesUpgradeAll() {
             'Each node runs its upgrade independently in the background — <strong>fan-out, not sequential</strong>. '
             + 'Typical completion is a few minutes per node; slow hardware (Raspberry Pi, low-core VPS) can take up to ~50 minutes. '
             + 'Each server restarts automatically once its new binary is built. '
-            + 'Progress is tracked in the task log and persists across browser refresh.',
+            + 'Progress is tracked in the task log and persists across browser refresh.'
+            + (function () {
+                // HTTPS-by-default warning. Fleet operators are most
+                // likely to have a mix of HTTP/HTTPS nodes \u2014 warn
+                // when crossing the v23.11 boundary.
+                var likelyHttp = window.location.protocol === 'http:'
+                    || targets.some(function (r) {
+                        var v = (r.version || '').replace(/[^0-9.]/g, '');
+                        var parts = v.split('.').map(Number);
+                        return parts.length >= 2 && (parts[0] < 23 || (parts[0] === 23 && parts[1] < 11));
+                    });
+                if (!likelyHttp) return '';
+                return '<div style="margin-top:14px; padding:12px; background:rgba(234,179,8,0.12); border:1px solid rgba(234,179,8,0.45); border-radius:6px; color:var(--text-primary); font-size:13px;">'
+                    + '<strong style="color:#fbbf24;">\u26A0 HTTPS-by-default change in v23.11:</strong><br>'
+                    + 'Any node in this batch on plain HTTP (no TLS configured) '
+                    + 'will auto-generate a self-signed cert and serve HTTPS only after upgrade. '
+                    + 'Current <code>http://&lt;node&gt;:port/</code> URLs will stop working &mdash; '
+                    + 'switch to <code>https://</code> after the restart. Browser will warn once per '
+                    + 'node until the self-signed cert is trusted (or replaced via Settings &rarr; Certificates).'
+                    + '</div>';
+            })(),
             nodeList, '\u26A1 Upgrade All', '#f59e0b');
     } catch (e) { return; }
 
@@ -28084,6 +28164,36 @@ async function issuesUpgradeAll() {
         + '<div style="font-size:24px; margin-bottom:8px;">\u23F3</div>'
         + '<div style="font-weight:600; color:var(--text-primary); font-size:14px; margin-bottom:4px;">Upgrades in progress — tracking in task log</div>'
         + '<div style="color:var(--text-secondary); font-size:12px;">Raspberry Pi may take up to 50 minutes. Tracking persists across browser refresh.</div>'
+        + ((function () {
+            var httpsSwitchFleet = window.location.protocol === 'http:'
+                || targets.some(function (r) {
+                    var v = (r.version || '').replace(/[^0-9.]/g, '');
+                    var parts = v.split('.').map(Number);
+                    return parts.length >= 2 && (parts[0] < 23 || (parts[0] === 23 && parts[1] < 11));
+                });
+            if (!httpsSwitchFleet) return '';
+            var selfRedirectFleet = 'https://' + window.location.hostname
+                + ':' + (window.location.port || '8553') + '/login.html';
+            return '<div style="margin-top:14px; padding:12px; background:rgba(234,179,8,0.12); border:1px solid rgba(234,179,8,0.45); border-radius:6px; color:var(--text-primary); font-size:12px; text-align:left;">'
+              + '<strong style="color:#fbbf24;">⚠ HTTPS switchover (v23.11)</strong><br>'
+              + 'Each upgraded node will serve <strong>HTTPS only</strong> on its port after restart. '
+              + 'Bookmarks / scripts must switch from <code>http://</code> to <code>https://</code>.<br><br>'
+              + '<strong>Browser will warn about the self-signed certificate</strong> on first visit '
+              + 'to each node &mdash; accept it once per node:<br>'
+              + '&bull; <strong>Chrome / Edge:</strong> <em>Advanced</em> &rarr; <em>Proceed (unsafe)</em><br>'
+              + '&bull; <strong>Firefox:</strong> <em>Advanced</em> &rarr; <em>Accept the Risk and Continue</em><br>'
+              + '&bull; <strong>Safari:</strong> <em>Show Details</em> &rarr; <em>visit this website</em><br><br>'
+              + 'For a warning-free deployment, install a CA cert per node via '
+              + 'Settings &rarr; Certificates after upgrade.'
+              + '<div style="margin-top:10px; text-align:center;">'
+              + '<button onclick="window.location.href=\'' + selfRedirectFleet + '\'" '
+              + 'style="background:var(--accent,#3b82f6); color:#fff; border:none; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:12px; font-weight:600;">'
+              + 'Reconnect to this node via HTTPS &rarr;'
+              + '</button>'
+              + '<div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Click after this node finishes upgrading</div>'
+              + '</div>'
+              + '</div>';
+        })())
         + '</div>');
     modal.showDone();
 
