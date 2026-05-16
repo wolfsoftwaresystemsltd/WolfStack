@@ -256,10 +256,32 @@ done
 # preserves the OLD join-token, cluster secret, and nodes.json, which on a
 # fresh box looks like an upgrade but on a moved-disk-to-new-host can mean
 # the new node ends up trying to join its old cluster with stale state.
+IS_UPGRADE=false
 if [ -d /etc/wolfstack ] && [ "$(ls -A /etc/wolfstack 2>/dev/null)" ]; then
+    IS_UPGRADE=true
     echo "  ℹ /etc/wolfstack already exists with content — treating this as an upgrade. Existing config, cluster secret, and join token will be preserved."
     if [ -f /etc/wolfstack/custom-cluster-secret ]; then
         echo "    • Custom cluster secret is set on this node. If joining a NEW cluster, delete /etc/wolfstack/custom-cluster-secret and /etc/wolfstack/nodes.json before adding this node from the master."
+    fi
+fi
+
+# Detect whether this upgrade is crossing the v23.11 boundary (when
+# WolfStack started serving HTTPS by default on the main port). Only
+# matters for upgraders who were running with NO TLS configured —
+# they're about to switch from HTTP to HTTPS and their old http://
+# URLs will stop working. We can't know the prior version reliably
+# (the upgrade script might be running before the new binary lands),
+# so we detect "was running HTTP-only" by absence of any TLS cert.
+WAS_HTTP_ONLY=false
+if [ "$IS_UPGRADE" = true ]; then
+    if [ ! -f /etc/wolfstack/tls/cert.pem ] \
+        && [ ! -f /etc/wolfstack/cert.pem ] \
+        && [ ! -d /etc/letsencrypt/live ] \
+        && ! grep -q '^[[:space:]]*tls_cert' /etc/wolfstack/config.toml 2>/dev/null \
+        && ! grep -q '\-\-no-tls' /etc/systemd/system/wolfstack.service 2>/dev/null \
+        && ! grep -q '\-\-tls-cert' /etc/systemd/system/wolfstack.service 2>/dev/null
+    then
+        WAS_HTTP_ONLY=true
     fi
 fi
 
@@ -2076,6 +2098,26 @@ else
     echo "  Login:      Use your Linux system username and password"
 fi
 echo ""
+if [ "$WAS_HTTP_ONLY" = true ]; then
+    echo "  ⚠ UPGRADER NOTICE — HTTPS-by-default is new in v23.11"
+    echo "  ─────────────────────────────────────"
+    echo "  This server was previously running on HTTP (no TLS cert configured)."
+    echo "  v23.11 now auto-generates a self-signed cert and serves HTTPS on"
+    echo "  port ${WS_PORT}. **Your old http://${WS_BIND:-host}:${WS_PORT}/ URLs will stop working.**"
+    echo ""
+    echo "  Action needed:"
+    echo "    1. Update browser bookmarks: http://  →  https://"
+    echo "    2. Update any scripts hitting the API to use https:// (and -k"
+    echo "       if they don't already accept self-signed certs)"
+    echo "    3. Browser will warn 'connection not private' once — click"
+    echo "       through, or import /etc/wolfstack/tls/cert.pem as trusted"
+    echo ""
+    echo "  Want to keep HTTP-only? Edit /etc/systemd/system/wolfstack.service"
+    echo "  and add --no-tls to the ExecStart line, then 'systemctl daemon-reload"
+    echo "  && systemctl restart wolfstack'. Strongly NOT recommended — your"
+    echo "  login credentials currently travel in cleartext over the network."
+    echo ""
+fi
 echo "  TLS:"
 echo "    WolfStack auto-generates a self-signed cert at"
 echo "    /etc/wolfstack/tls/cert.pem on first start (valid 10 years)."
