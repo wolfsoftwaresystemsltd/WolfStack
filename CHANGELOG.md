@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v23.10.3: log propagation failures loudly — silent fanout failures hid the v23.10.0/.1 auth bug** _(2026-05-16 — [`13272a3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/13272a3f43ada506514cff1f0d87010565779b35))_
 - **v23.10.2: fix fleet-security propagation auth — peers with custom cluster secrets were rejecting block/unblock/policy push** _(2026-05-16 — [`5eebe44`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5eebe44457084392d555e6d2feb06ec7432387a1))_
 - **v23.10.1: scan-detector UID allowlist — exempt dedicated service accounts without exempting every python/node process** _(2026-05-16 — [`cfefb23`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cfefb23bd9bc5b077f76eea6bb81f06d12602ab8))_
 - **v23.10.0: Fleet Security Tier 1 — outbound scan detection, host+container audit, cluster secret rotation, SSH hardening push, cluster-aware alert routing** _(2026-05-16 — [`bf38935`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bf389354be6328a786627e615ae7555f3c4b0099))_
