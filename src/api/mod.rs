@@ -618,6 +618,8 @@ pub async fn propagate_kernel_block_to_peers(
             format!("https://{}:{}/api/security/kernel-block-ip", node.address, node.port),
             format!("http://{}:{}/api/security/kernel-block-ip", node.address, node.port + 1),
         ];
+        let mut last_err = String::from("no attempts");
+        let mut acked = false;
         for url in &urls {
             let r = client.post(url)
                 .header("X-WolfStack-Secret", &secret)
@@ -626,10 +628,27 @@ pub async fn propagate_kernel_block_to_peers(
             match r {
                 Ok(resp) if resp.status().is_success() => {
                     tracing::info!("kernel-block fanout: {} ack'd block of {}", node.hostname, ip);
+                    acked = true;
                     break;
                 }
-                Ok(_) | Err(_) => continue,
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    let body_preview = body.chars().take(200).collect::<String>();
+                    last_err = format!("{} -> HTTP {}: {}", url, status, body_preview);
+                }
+                Err(e) => {
+                    last_err = format!("{} -> transport: {}", url, e);
+                }
             }
+        }
+        if !acked {
+            // Log loudly — silent failure on a fleet-security
+            // operation is exactly what hid the v23.10.0/.1 auth bug.
+            tracing::error!(
+                "kernel-block fanout to {} ({}) FAILED — block was applied locally but did NOT propagate. Last error: {}",
+                node.hostname, node.address, last_err
+            );
         }
     }
 }
@@ -775,12 +794,30 @@ pub async fn propagate_kernel_unblock_to_peers(
             format!("https://{}:{}/api/security/auth-unblock-peer", node.address, node.port),
             format!("http://{}:{}/api/security/auth-unblock-peer", node.address, node.port + 1),
         ];
+        let mut last_err = String::from("no attempts");
+        let mut acked = false;
         for url in &urls {
             let r = client.post(url)
                 .header("X-WolfStack-Secret", &secret)
                 .json(&payload)
                 .send().await;
-            if matches!(r, Ok(ref resp) if resp.status().is_success()) { break; }
+            match r {
+                Ok(resp) if resp.status().is_success() => { acked = true; break; }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    last_err = format!("{} -> HTTP {}: {}", url, status, body.chars().take(200).collect::<String>());
+                }
+                Err(e) => { last_err = format!("{} -> transport: {}", url, e); }
+            }
+        }
+        if !acked {
+            tracing::error!(
+                "kernel-unblock fanout to {} ({}) FAILED. Last error: {}",
+                node.hostname, node.address, last_err
+            );
+        } else {
+            tracing::info!("kernel-unblock fanout: {} ack'd unblock of {}", node.hostname, ip);
         }
     }
 }
