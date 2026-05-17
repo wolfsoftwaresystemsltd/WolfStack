@@ -12102,10 +12102,31 @@ async function nginxReloadService() {
 // issuance modal defaults to webroot challenges (zero-downtime — no
 // need to stop WolfProxy) with DNS-01 as an advanced toggle for
 // wildcards.
+//
+// v23.12.2 added a "Scope" toggle (This node / Whole cluster) so the
+// operator can manage every node's certs from one screen. In cluster
+// mode the list pulls from /api/certs/cluster (aggregated) and every
+// action (Issue / Renew / Delete) routes through the existing
+// /api/nodes/{id}/proxy/... so the target node's local certbot does
+// the work. Key material never leaves the node that owns it.
+
+// Persisted across re-renders so the user's choice survives the
+// Back-to-sites → Cert manager round-trip without surprise.
+let _certScope = (localStorage.getItem('wolfstack_cert_scope') === 'cluster') ? 'cluster' : 'local';
+
+function setCertScope(scope) {
+    _certScope = (scope === 'cluster') ? 'cluster' : 'local';
+    try { localStorage.setItem('wolfstack_cert_scope', _certScope); } catch (_) {}
+    loadCertManager();
+}
 
 async function loadCertManager() {
     document.getElementById('configurator-title').textContent = 'SSL Certificates';
+    const scopeChip = _certScope === 'cluster'
+        ? '<button class="btn btn-sm" onclick="setCertScope(\'local\')" title="Show only this node">Scope: Whole cluster ▾</button>'
+        : '<button class="btn btn-sm" onclick="setCertScope(\'cluster\')" title="Show every node\'s certs in one list">Scope: This node ▾</button>';
     document.getElementById('configurator-header-actions').innerHTML = `
+        ${scopeChip}
         <button class="btn btn-primary btn-sm" onclick="certIssueDialog()">+ Issue new cert</button>
         <button class="btn btn-sm" onclick="certConfigDialog()">Settings</button>
         <button class="btn btn-sm" onclick="loadNginxConfigurator()">← Back to sites</button>
@@ -12113,20 +12134,27 @@ async function loadCertManager() {
     const body = document.getElementById('configurator-body');
     body.innerHTML = renderBlockSkeleton({lines:3});
     try {
-        const resp = await fetch('/api/certs');
-        if (handleAuthError(resp)) return;
-        const data = await resp.json();
-        if (!data.installed) {
-            body.innerHTML = `<div style="padding:18px; border:1px solid var(--border); border-radius:8px; background:var(--bg-panel);">
-                <h3 style="margin-top:0;">certbot not installed</h3>
-                <p style="color:var(--text-secondary);">Install certbot on this node to manage Let's Encrypt certificates from here.</p>
-                <pre style="background:var(--bg-input); padding:10px; border-radius:6px; font-size:12px;">apt install certbot         # Debian / Ubuntu
+        if (_certScope === 'cluster') {
+            const resp = await fetch('/api/certs/cluster');
+            if (handleAuthError(resp)) return;
+            const data = await resp.json();
+            renderCertClusterList(data);
+        } else {
+            const resp = await fetch('/api/certs');
+            if (handleAuthError(resp)) return;
+            const data = await resp.json();
+            if (!data.installed) {
+                body.innerHTML = `<div style="padding:18px; border:1px solid var(--border); border-radius:8px; background:var(--bg-panel);">
+                    <h3 style="margin-top:0;">certbot not installed</h3>
+                    <p style="color:var(--text-secondary);">Install certbot on this node to manage Let's Encrypt certificates from here.</p>
+                    <pre style="background:var(--bg-input); padding:10px; border-radius:6px; font-size:12px;">apt install certbot         # Debian / Ubuntu
 dnf install certbot         # RHEL / Fedora / Alma
 pacman -S certbot           # Arch</pre>
-            </div>`;
-            return;
+                </div>`;
+                return;
+            }
+            renderCertList(data);
         }
-        renderCertList(data);
     } catch (e) {
         body.innerHTML = `<div style="color:var(--danger);">Failed to load certs: ${escapeHtml(e.message)}</div>`;
     }
@@ -12167,17 +12195,119 @@ function renderCertList(data) {
         </table>`;
 }
 
+// Cluster-scope view: flat table of every cert on every node, plus a
+// banner for nodes that failed to respond. Actions are routed through
+// the existing /api/nodes/{id}/proxy/api/certs/... by certRenew /
+// certDelete when called with a node_id second argument.
+function renderCertClusterList(data) {
+    const body = document.getElementById('configurator-body');
+    const nodes = data.nodes || [];
+
+    let totalCerts = 0;
+    let unreachable = [];
+    let notInstalled = [];
+    let rows = '';
+
+    nodes.forEach(n => {
+        if (n.error) {
+            unreachable.push(n);
+            return;
+        }
+        if (n.installed === false) {
+            notInstalled.push(n);
+            return;
+        }
+        const certs = n.certs || [];
+        totalCerts += certs.length;
+        certs.forEach(c => {
+            const d = c.days_remaining;
+            const colour = d < 7 ? 'var(--danger)' : d < 30 ? '#f59e0b' : '#10b981';
+            const status = d < 0 ? `Expired ${-d}d ago` : `${d} day${d === 1 ? '' : 's'}`;
+            const selfBadge = n.is_self
+                ? '<span style="color:var(--text-muted);font-size:10px;">(this)</span>'
+                : '';
+            // Pass node_id so certRenew/certDelete can route via the
+            // proxy. For "this" node, node_id is empty — the action
+            // hits the local endpoint directly (no proxy round-trip).
+            const targetArg = n.is_self ? '' : `, '${escapeAttr(n.node_id)}'`;
+            rows += `<tr>
+                <td><strong>${escapeHtml(n.hostname || '')}</strong> ${selfBadge}</td>
+                <td><code>${escapeHtml(c.name)}</code></td>
+                <td style="font-size:12px;">${(c.domains || []).map(escapeHtml).join('<br>')}</td>
+                <td><span style="color:${colour};font-weight:600;">${status}</span><br>
+                    <span style="font-size:11px;color:var(--text-muted);">${escapeHtml(c.expires || '')}</span></td>
+                <td style="text-align:right;">
+                    <button class="btn btn-sm" onclick="certRenew('${escapeAttr(c.name)}'${targetArg})">Renew</button>
+                    <button class="btn btn-sm btn-danger" onclick="certDelete('${escapeAttr(c.name)}'${targetArg})">Delete</button>
+                </td>
+            </tr>`;
+        });
+    });
+
+    let banners = '';
+    if (unreachable.length) {
+        banners += `<div role="alert" style="margin-bottom:10px;padding:10px 14px;background:rgba(239,68,68,0.10);border:1px solid rgba(239,68,68,0.40);border-radius:8px;font-size:12px;color:var(--text-primary);">
+            <strong>${unreachable.length} node${unreachable.length === 1 ? '' : 's'} unreachable:</strong>
+            ${unreachable.map(n => escapeHtml(n.hostname || n.node_id || '?')).join(', ')}
+            <span style="color:var(--text-muted);">— their certs aren\'t included below.</span>
+        </div>`;
+    }
+    if (notInstalled.length) {
+        banners += `<div style="margin-bottom:10px;padding:10px 14px;background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.35);border-radius:8px;font-size:12px;color:var(--text-primary);">
+            <strong>certbot not installed on:</strong>
+            ${notInstalled.map(n => escapeHtml(n.hostname || n.node_id || '?')).join(', ')}
+            <span style="color:var(--text-muted);">— install certbot there to manage certs from here.</span>
+        </div>`;
+    }
+
+    if (totalCerts === 0 && rows === '') {
+        body.innerHTML = banners + `<div style="text-align:center;padding:28px;color:var(--text-muted);">
+            No certificates anywhere in this cluster.<br>
+            <button class="btn btn-primary btn-sm" style="margin-top:10px;" onclick="certIssueDialog()">Issue the first one</button>
+        </div>`;
+        return;
+    }
+
+    body.innerHTML = banners + `
+        <div style="margin-bottom:10px; font-size:12px; color:var(--text-muted);">
+            ${totalCerts} certificate${totalCerts === 1 ? '' : 's'} across ${nodes.length - unreachable.length - notInstalled.length} node${nodes.length - unreachable.length - notInstalled.length === 1 ? '' : 's'}.
+            Auto-renewal runs daily on each node via <code>certbot renew</code>.
+        </div>
+        <table class="data-table" style="width:100%;">
+            <thead><tr><th>Node</th><th>Name</th><th>Domains</th><th>Expiry</th><th style="text-align:right;">Actions</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+}
+
 function certIssueDialog() {
     const existing = document.getElementById('cert-issue-modal');
     if (existing) existing.remove();
     const overlay = document.createElement('div');
     overlay.id = 'cert-issue-modal';
     overlay.className = 'modal-overlay active';
+    // In cluster scope, surface a node picker so the operator chooses
+    // WHICH node issues (and serves) the cert. Falls back to "this node"
+    // for local scope or single-node clusters. The node select is
+    // populated from the cluster state via the same `nodes` array the
+    // sidebar uses; if it's not initialised yet, the picker shows only
+    // "this node" and the operator gets the legacy behaviour.
+    let nodePickerHtml = '';
+    if (_certScope === 'cluster' && typeof nodes !== 'undefined' && Array.isArray(nodes)) {
+        const opts = nodes
+            .filter(n => n.online && n.node_type === 'wolfstack')
+            .map(n => `<option value="${escapeAttr(n.is_self ? '' : n.id)}">${escapeHtml(n.hostname || n.id)}${n.is_self ? ' (this)' : ''}</option>`)
+            .join('');
+        if (opts) {
+            nodePickerHtml = `<label>Target node
+                <select id="cert-target-node" style="width:100%;">${opts}</select></label>`;
+        }
+    }
     overlay.innerHTML = `
         <div class="modal" style="max-width:520px;">
             <div class="modal-header"><h3>Issue SSL Certificate</h3>
                 <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">&times;</button></div>
             <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;">
+                ${nodePickerHtml}
                 <label>Domains <span style="color:var(--text-muted);font-weight:400;">(one per line)</span>
                     <textarea id="cert-domains" style="width:100%;height:80px;font-family:var(--font-mono);" placeholder="example.com&#10;www.example.com"></textarea></label>
                 <label>Contact email
@@ -12216,10 +12346,14 @@ async function certIssueSubmit() {
     const challenge = (document.getElementById('cert-challenge')?.value || 'webroot');
     const dnsCreds = (document.getElementById('cert-dns-creds')?.value || '').trim();
     const dryRun = document.getElementById('cert-dry-run')?.checked || false;
+    const targetNode = (document.getElementById('cert-target-node')?.value || '').trim();
     document.getElementById('cert-issue-modal')?.remove();
-    showToast('Requesting certificate… this can take up to a minute', 'info');
+    const url = targetNode
+        ? `/api/nodes/${encodeURIComponent(targetNode)}/proxy/api/certs`
+        : '/api/certs';
+    showToast(targetNode ? 'Requesting cert on remote node… this can take up to a minute' : 'Requesting certificate… this can take up to a minute', 'info');
     try {
-        const resp = await fetch('/api/certs', {
+        const resp = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ domains, email, challenge, dns_credentials_path: dnsCreds, dry_run: dryRun }),
@@ -12236,10 +12370,16 @@ async function certIssueSubmit() {
     }
 }
 
-async function certRenew(name) {
+// `nodeId` (optional) routes the action through /api/nodes/{id}/proxy
+// when the cert lives on a different node — local actions still hit
+// /api/certs directly to keep the existing single-node path zero-overhead.
+async function certRenew(name, nodeId) {
     if (!(await wolfConfirm(`Force-renew ${name}? This bypasses certbot's 30-day freshness window.`, 'Renew'))) return;
+    const url = nodeId
+        ? `/api/nodes/${encodeURIComponent(nodeId)}/proxy/api/certs/${encodeURIComponent(name)}/renew`
+        : `/api/certs/${encodeURIComponent(name)}/renew`;
     try {
-        const resp = await fetch(`/api/certs/${encodeURIComponent(name)}/renew`, { method: 'POST' });
+        const resp = await fetch(url, { method: 'POST' });
         const data = await resp.json();
         if (!resp.ok) {
             showModal(`<pre style="white-space:pre-wrap;color:var(--danger);">${escapeHtml(data.error || 'Renew failed')}</pre>`, 'Renew failed');
@@ -12250,10 +12390,13 @@ async function certRenew(name) {
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
-async function certDelete(name) {
+async function certDelete(name, nodeId) {
     if (!(await wolfConfirm(`Delete ${name}? This revokes the cert and removes it from /etc/letsencrypt.`, 'Delete'))) return;
+    const url = nodeId
+        ? `/api/nodes/${encodeURIComponent(nodeId)}/proxy/api/certs/${encodeURIComponent(name)}`
+        : `/api/certs/${encodeURIComponent(name)}`;
     try {
-        const resp = await fetch(`/api/certs/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        const resp = await fetch(url, { method: 'DELETE' });
         const data = await resp.json();
         if (!resp.ok) {
             showModal(`<pre style="white-space:pre-wrap;color:var(--danger);">${escapeHtml(data.error || 'Delete failed')}</pre>`, 'Delete failed');

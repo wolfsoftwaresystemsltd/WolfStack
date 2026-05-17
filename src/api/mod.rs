@@ -5829,6 +5829,94 @@ pub async fn certs_list(req: HttpRequest, state: web::Data<AppState>) -> HttpRes
     }))
 }
 
+/// GET /api/certs/cluster — aggregated cert list across every node in
+/// this cluster. Each row carries `node_id` / `hostname` so the UI can
+/// show a single screen of every cert on every node and route the
+/// Issue/Renew/Delete buttons through `/api/nodes/{id}/proxy/api/certs`.
+///
+/// (klasSponsor + PapaSchlumpf 2026-05-17: "allow one node to provision
+/// and monitor all certs for all nodes in cluster" — they don't want
+/// keys replicated, just one screen.)
+pub async fn certs_cluster_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let nodes = state.cluster.get_all_nodes();
+    let self_id = crate::agent::self_node_id();
+    let secret = state.cluster_secret.clone();
+
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+
+    // Local first — direct call, no HTTP round-trip.
+    if let Some(self_node) = nodes.iter().find(|n| n.is_self).cloned() {
+        rows.push(serde_json::json!({
+            "node_id": self_node.id,
+            "hostname": self_node.hostname,
+            "cluster_name": self_node.cluster_name,
+            "is_self": true,
+            "installed": crate::certbot::is_installed(),
+            "config": crate::certbot::CertbotConfig::load(),
+            "certs": crate::certbot::list_certs(),
+        }));
+    }
+
+    // Then every other online wolfstack node in parallel.
+    let mut futs: Vec<_> = Vec::new();
+    for node in nodes.iter() {
+        if node.is_self || node.id == self_id { continue; }
+        if !node.online { continue; }
+        if node.node_type != "wolfstack" { continue; }
+        let node = node.clone();
+        let secret = secret.clone();
+        futs.push(async move {
+            let urls = build_node_urls(&node.address, node.port, "/api/certs");
+            let client = &*API_HTTP_CLIENT;
+            let mut last_err = String::new();
+            for url in &urls {
+                match client.get(url)
+                    .header("X-WolfStack-Secret", &secret)
+                    .timeout(std::time::Duration::from_secs(8))
+                    .send().await
+                {
+                    Ok(r) if r.status().is_success() => {
+                        match r.json::<serde_json::Value>().await {
+                            Ok(mut v) => {
+                                // Stamp node identity onto the row so the
+                                // UI can group + route. cluster_name on
+                                // each row also lets a future fleet view
+                                // (v23.13) merge multiple clusters.
+                                if let Some(obj) = v.as_object_mut() {
+                                    obj.insert("node_id".into(), serde_json::json!(node.id));
+                                    obj.insert("hostname".into(), serde_json::json!(node.hostname));
+                                    obj.insert("cluster_name".into(), serde_json::json!(node.cluster_name));
+                                    obj.insert("is_self".into(), serde_json::json!(false));
+                                }
+                                return v;
+                            }
+                            Err(e) => { last_err = format!("decode: {}", e); continue; }
+                        }
+                    }
+                    Ok(r) => { last_err = format!("HTTP {}", r.status()); continue; }
+                    Err(e) => { last_err = format!("{}: {}", url, e); continue; }
+                }
+            }
+            // Emit an error row so the operator sees WHICH nodes were
+            // unreachable rather than them silently disappearing from
+            // the aggregated view. Matches the Fleet Security pattern
+            // (v23.10.5: "surface WHICH nodes are unreachable").
+            serde_json::json!({
+                "node_id": node.id,
+                "hostname": node.hostname,
+                "cluster_name": node.cluster_name,
+                "is_self": false,
+                "error": last_err,
+            })
+        });
+    }
+    let peer_rows = futures::future::join_all(futs).await;
+    rows.extend(peer_rows);
+
+    HttpResponse::Ok().json(serde_json::json!({ "nodes": rows }))
+}
+
 #[derive(Deserialize)]
 pub struct CertIssueRequest {
     pub domains: Vec<String>,
@@ -5985,7 +6073,10 @@ pub async fn dns_providers_list(req: HttpRequest, state: web::Data<AppState>) ->
     }))
 }
 
-/// POST /api/dns-providers — add a new provider.
+/// POST /api/dns-providers — add a new provider. Replicates the full
+/// store to every cluster peer so the provider is usable from any node
+/// (PapaSchlumpf 2026-05-17: "dns provider 'id' not found" when issuing
+/// a cert from a different node than the one the provider was added on).
 pub async fn dns_providers_add(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -6002,6 +6093,7 @@ pub async fn dns_providers_add(
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
     }
     let provider = store.get(&id).map(|p| p.redacted());
+    replicate_dns_providers_to_cluster(state.cluster.clone(), state.cluster_secret.clone(), store);
     HttpResponse::Ok().json(serde_json::json!({
         "id": id,
         "provider": provider,
@@ -6029,13 +6121,16 @@ pub async fn dns_providers_update(
     if let Err(e) = store.save() {
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
     }
+    let provider = store.get(&id).map(|p| p.redacted());
+    replicate_dns_providers_to_cluster(state.cluster.clone(), state.cluster_secret.clone(), store);
     HttpResponse::Ok().json(serde_json::json!({
         "updated": true,
-        "provider": store.get(&id).map(|p| p.redacted()),
+        "provider": provider,
     }))
 }
 
-/// DELETE /api/dns-providers/{id} — remove a provider.
+/// DELETE /api/dns-providers/{id} — remove a provider and replicate the
+/// deletion to every peer.
 pub async fn dns_providers_remove(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -6052,7 +6147,108 @@ pub async fn dns_providers_remove(
     if let Err(e) = store.save() {
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
     }
+    replicate_dns_providers_to_cluster(state.cluster.clone(), state.cluster_secret.clone(), store);
     HttpResponse::Ok().json(serde_json::json!({ "removed": true }))
+}
+
+/// POST /api/dns-providers/sync — peer-to-peer receiver. Accepts the
+/// sender's full DnsProviderStore and replaces the local store with it.
+/// Authenticated by `X-WolfStack-Secret` only (the operator never calls
+/// this directly — it's the fan-out target of `replicate_dns_providers_
+/// to_cluster`).
+///
+/// Replace-semantics (rather than merge) mirror the existing router
+/// config replication pattern (`networking/router/api.rs::
+/// replicate_config_to_cluster`). The trade-off: if two operators add
+/// providers on different nodes concurrently, the second write wipes
+/// the first. v23.13 will move to a proper merge once we add per-
+/// provider timestamps and a tombstone log.
+pub async fn dns_providers_sync(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<crate::dns_providers::DnsProviderStore>,
+) -> HttpResponse {
+    // Cluster-secret only — operators never call this.
+    let supplied = req.headers()
+        .get("X-WolfStack-Secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if supplied.is_empty() || supplied != state.cluster_secret {
+        return HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "X-WolfStack-Secret missing or invalid"
+        }));
+    }
+    let incoming = body.into_inner();
+    if let Err(e) = incoming.save() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+    HttpResponse::Ok().json(serde_json::json!({
+        "applied": true,
+        "count": incoming.providers.len(),
+    }))
+}
+
+/// Push the current DnsProviderStore to every other cluster node so the
+/// list (and the obfuscated credentials with it — both ends share the
+/// same XOR key) stays in sync. Fired (in the background, doesn't block
+/// the originating user request) after every successful add/update/
+/// remove. Mirrors `networking::router::api::replicate_config_to_cluster`.
+fn replicate_dns_providers_to_cluster(
+    cluster: std::sync::Arc<crate::agent::ClusterState>,
+    cluster_secret: String,
+    store: crate::dns_providers::DnsProviderStore,
+) {
+    tokio::spawn(async move {
+        let nodes = cluster.get_all_nodes();
+        let self_id = crate::agent::self_node_id();
+        let body = match serde_json::to_string(&store) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("dns-providers replicate: serialise failed: {}", e);
+                return;
+            }
+        };
+        let client = &*API_HTTP_CLIENT;
+        for node in nodes {
+            if node.is_self || node.id == self_id { continue; }
+            if !node.online { continue; }
+            if node.node_type != "wolfstack" { continue; }
+            let urls = build_node_urls(&node.address, node.port, "/api/dns-providers/sync");
+            let mut replicated = false;
+            let mut last_err = String::new();
+            for url in &urls {
+                match client.post(url)
+                    .header("X-WolfStack-Secret", &cluster_secret)
+                    .header("Content-Type", "application/json")
+                    .timeout(std::time::Duration::from_secs(10))
+                    .body(body.clone())
+                    .send().await
+                {
+                    Ok(r) if r.status().is_success() => {
+                        tracing::debug!("dns-providers replicated to {} via {}", node.id, url);
+                        let _ = r.bytes().await;
+                        replicated = true;
+                        break;
+                    }
+                    Ok(r) => {
+                        last_err = format!("HTTP {} from {}", r.status(), url);
+                        let _ = r.bytes().await;
+                    }
+                    Err(e) => {
+                        last_err = format!("{} ({})", e, url);
+                    }
+                }
+            }
+            if !replicated {
+                // Loud — a silent replicate failure here is exactly what
+                // PapaSchlumpf hit when the provider lived on one node
+                // only. Log so the operator can see why peers are out of
+                // sync rather than discovering it at cert-issue time.
+                tracing::warn!("dns-providers replicate to {} ({}) FAILED — last error: {}",
+                    node.hostname, node.address, last_err);
+            }
+        }
+    });
 }
 
 /// GET /api/dns-providers/plugins — report which certbot DNS plugins
@@ -28926,6 +29122,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/cluster/leave", web::post().to(cluster_leave))
         .route("/api/dns-providers", web::get().to(dns_providers_list))
         .route("/api/dns-providers", web::post().to(dns_providers_add))
+        .route("/api/dns-providers/sync", web::post().to(dns_providers_sync))
         .route("/api/dns-providers/plugins", web::get().to(dns_providers_plugins))
         .route("/api/dns-providers/plugins/{plugin}/install", web::post().to(dns_providers_plugin_install))
         .route("/api/dns-providers/{id}", web::put().to(dns_providers_update))
@@ -29366,6 +29563,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/reverse-proxy/config", web::post().to(reverse_proxy_config_save))
         .route("/api/certs", web::get().to(certs_list))
         .route("/api/certs", web::post().to(certs_issue))
+        .route("/api/certs/cluster", web::get().to(certs_cluster_list))
         .route("/api/certs/config", web::post().to(certs_config_save))
         .route("/api/certs/{name}/renew", web::post().to(certs_renew))
         .route("/api/certs/{name}", web::delete().to(certs_delete))
