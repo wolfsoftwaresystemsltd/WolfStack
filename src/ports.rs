@@ -3,15 +3,20 @@
 
 //! Persistent port configuration.
 //!
-//! WolfStack listens on three ports:
-//! - `api` — main HTTP(S) API and dashboard (default 8553)
-//! - `inter_node` — plain HTTP for inter-node calls when TLS is on (default api+1)
-//! - `status` — public status pages (default 8550)
+//! WolfStack listens on up to three ports:
+//! - `api` — main HTTP(S) API and dashboard (default 8553) — always bound
+//! - `inter_node` — plain HTTP for legacy inter-node fallback + cluster-home
+//!   browser flow (default api+1) — **only bound when the loaded TLS cert is
+//!   self-signed**. Operators with a real CA-signed cert never bind this
+//!   listener, eliminating the 8554/RTSP conflict with Frigate/MediaMTX/etc.
+//!   See v23.12 release notes for the rationale.
+//! - `status` — public status pages (default 8550) — always bound
 //!
 //! Per-node config lives in `/etc/wolfstack/ports.json`. A CLI `--port` flag
-//! still overrides the API port for one-off launches. The status port has an
-//! auto-fallback (`reserve_status_port`) so a colliding service (e.g. WolfDisk
-//! grabbing 8550) doesn't stop the daemon from starting.
+//! still overrides the API port for one-off launches. Both `inter_node` and
+//! `status` have auto-fallbacks (`reserve_inter_node_port`, `reserve_status_port`)
+//! so a colliding service (e.g. WolfDisk on 8550, Frigate on 8554) doesn't
+//! stop the daemon from starting.
 
 use serde::{Deserialize, Serialize};
 use std::net::TcpListener;
@@ -87,6 +92,38 @@ pub fn reserve_status_port(bind: &str, preferred: u16, range: std::ops::RangeInc
         }
     }
     warn!("no free status port found in scan range, leaving as {}", preferred);
+    preferred
+}
+
+/// Same as `reserve_status_port`, but for the inter-node HTTP port. Only
+/// called from the self-signed-cert branch in `main.rs` (real-cert nodes
+/// don't bind a second listener at all in v23.12+). Skips any port already
+/// claimed by the api/status listeners — `avoid` carries those.
+pub fn reserve_inter_node_port(
+    bind: &str,
+    preferred: u16,
+    range: std::ops::RangeInclusive<u16>,
+    avoid: &[u16],
+) -> u16 {
+    if !avoid.contains(&preferred) && port_is_free(bind, preferred) {
+        return preferred;
+    }
+    for p in range {
+        if p == preferred { continue; }
+        if avoid.contains(&p) { continue; }
+        if port_is_free(bind, p) {
+            warn!("inter-node port {} taken, falling back to {}", preferred, p);
+            let mut cfg = PortConfig::load();
+            if cfg.inter_node != p {
+                cfg.inter_node = p;
+                if let Err(e) = cfg.save() {
+                    warn!("failed to persist new inter-node port to ports.json: {}", e);
+                }
+            }
+            return p;
+        }
+    }
+    warn!("no free inter-node port found in scan range, leaving as {}", preferred);
     preferred
 }
 

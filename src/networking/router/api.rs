@@ -133,20 +133,16 @@ fn replicate_config_to_cluster(state: S) {
             if !node.online { continue; }
             if node.node_type != "wolfstack" { continue; }
             let host = resolve_node_address(&node.address);
-            // Try the same 3-URL fallback chain the agent poll and
-            // proxy_router_get_to_node use: internal HTTP on port+1
-            // first (this is the cluster-private channel and is the
-            // URL that keeps working when 8553 is firewalled off at
-            // the edge), then HTTPS on the main port, then plain HTTP
-            // on the main port. Previously this path only tried HTTPS
-            // on the main port, which silently failed for any customer
-            // whose domain routes through a public-facing firewall
-            // that restricts 8553.
-            let urls = [
-                format!("http://{}:{}/api/router/config-receive",  host, node.port + 1),
-                format!("https://{}:{}/api/router/config-receive", host, node.port),
-                format!("http://{}:{}/api/router/config-receive",  host, node.port),
-            ];
+            // v23.12: canonical HTTPS-first chain via build_node_urls.
+            // The pre-v23.12 chain led with http://addr:port+1 because
+            // edge firewalls often whitelisted only 8554 between cluster
+            // nodes; with the second listener gone for CA-signed-cert
+            // peers, that approach silently dropped them, so we now
+            // lead with HTTPS on the main port (cert bypass enabled).
+            // Operators who rely on a firewall-isolated 8554 channel
+            // either run self-signed (and still have it) or should
+            // open 8553 between cluster nodes.
+            let urls = crate::api::build_node_urls(&host, node.port, "/api/router/config-receive");
             let mut replicated = false;
             let mut last_err = String::new();
             for url in &urls {
@@ -186,10 +182,9 @@ fn replicate_config_to_cluster(state: S) {
 ///
 /// Mirrors the URL fallback + auth style of the existing
 /// `replicate_config_to_cluster` and top-level `node_proxy`: try HTTPS
-/// on the main port first, then plaintext HTTP on the internal port
-/// (port+1, WolfNet-only), then plaintext HTTP on the main port. Every
-/// attempt carries the cluster secret header so the peer authorises
-/// the request.
+/// on the main port first, then plaintext HTTP on the main port (legacy
+/// pre-v23.11 peers). Every attempt carries the cluster secret header so
+/// the peer authorises the request.
 ///
 /// Returns an `HttpResponse` that passes through the upstream status
 /// and body. If every URL fails, returns 502 Bad Gateway.
@@ -208,13 +203,9 @@ async fn proxy_router_get_to_node(
     }
 
     let qs = if query_string.is_empty() { String::new() } else { format!("?{}", query_string) };
-    let internal_port = node.port + 1;
     let host = resolve_node_address(&node.address);
-    let urls = [
-        format!("https://{}:{}/api/{}{}", host, node.port, api_path, qs),
-        format!("http://{}:{}/api/{}{}", host, internal_port, api_path, qs),
-        format!("http://{}:{}/api/{}{}", host, node.port, api_path, qs),
-    ];
+    let path = format!("/api/{}{}", api_path, qs);
+    let urls = crate::api::build_node_urls(&host, node.port, &path);
 
     // Process-wide pool — see ROUTER_RPC_CLIENT. Per-request timeout
     // replaces what used to be a per-call builder (30s overall, 3s
@@ -279,13 +270,9 @@ async fn proxy_router_post_to_node(
     if node.is_self {
         return HttpResponse::BadRequest().body("refusing to proxy to self");
     }
-    let internal_port = node.port + 1;
     let host = resolve_node_address(&node.address);
-    let urls = [
-        format!("https://{}:{}/api/{}", host, node.port, api_path),
-        format!("http://{}:{}/api/{}", host, internal_port, api_path),
-        format!("http://{}:{}/api/{}", host, node.port, api_path),
-    ];
+    let path = format!("/api/{}", api_path);
+    let urls = crate::api::build_node_urls(&host, node.port, &path);
     let client = &*ROUTER_RPC_CLIENT;
     let mut last_err = String::new();
     for url in &urls {
@@ -858,18 +845,9 @@ pub async fn get_topology(
             // is cheap — Client is internally refcounted.
             let client_c: reqwest::Client = reqwest::Client::clone(client);
             futures.push(async move {
-                // URL order matches the agent poll path (src/agent/mod.rs):
-                // internal HTTP on port+1 FIRST. That's the cluster-
-                // private channel; it keeps working when the customer's
-                // edge firewall restricts 8553 to admin IPs, which is
-                // the common setup for nodes addressed by public domain.
-                // Fall through to HTTPS and plain HTTP on the main port
-                // for clusters that don't have a port+1 listener.
-                let urls = [
-                    format!("http://{}:{}/api/router/topology-local",  host, port + 1),
-                    format!("https://{}:{}/api/router/topology-local", host, port),
-                    format!("http://{}:{}/api/router/topology-local",  host, port),
-                ];
+                // v23.12: HTTPS-first via build_node_urls (cert bypass on
+                // the shared client makes self-signed peers reachable).
+                let urls = crate::api::build_node_urls(&host, port, "/api/router/topology-local");
                 let mut last_err = String::new();
                 let mut backoff_ms = 100u64;
                 for attempt in 1..=5 {
@@ -2882,16 +2860,9 @@ pub async fn packet_capture(
             // self_id mismatch happens.
             let mut proxy_body = r.clone();
             proxy_body.node_id = None;
-            // Internal HTTP on port+1 first (matches topology + poll
-            // fan-out), then HTTPS on the main port, then plain HTTP.
-            // Firewalls that restrict 8553 to admin IPs will pass 8554
-            // for cluster traffic.
+            // v23.12: HTTPS-first chain via build_node_urls.
             let target_host = resolve_node_address(&target_node.address);
-            let urls = [
-                format!("http://{}:{}/api/router/capture",  target_host, target_node.port + 1),
-                format!("https://{}:{}/api/router/capture", target_host, target_node.port),
-                format!("http://{}:{}/api/router/capture",  target_host, target_node.port),
-            ];
+            let urls = crate::api::build_node_urls(&target_host, target_node.port, "/api/router/capture");
             // Shared pool — see ROUTER_RPC_CLIENT. Per-request timeout
             // below (user-controlled capture window + 10s slack)
             // replaces the client-level timeout that used to be set
@@ -3349,14 +3320,8 @@ pub async fn interface_up(
             // set per-request below replaces the old client-level one.
             let client = &*ROUTER_RPC_CLIENT;
             let target_host = resolve_node_address(&target_node.address);
-            // Internal HTTP on port+1 first — same reasoning as the
-            // other router fan-outs: firewalls that restrict 8553
-            // typically still allow 8554 between cluster nodes.
-            let urls = [
-                format!("http://{}:{}/api/router/interface-up",  target_host, target_node.port + 1),
-                format!("https://{}:{}/api/router/interface-up", target_host, target_node.port),
-                format!("http://{}:{}/api/router/interface-up",  target_host, target_node.port),
-            ];
+            // v23.12: HTTPS-first chain via build_node_urls.
+            let urls = crate::api::build_node_urls(&target_host, target_node.port, "/api/router/interface-up");
             for url in &urls {
                 if let Ok(resp) = client.post(url)
                     .header("X-WolfStack-Secret", &secret)
@@ -5441,11 +5406,7 @@ pub async fn wolfnet_routes_resync(req: HttpRequest, state: S) -> HttpResponse {
         // `poll_remote_nodes` so we don't waste a 10-second timeout on
         // every Proxmox peer in the cluster.
         if node.node_type == "proxmox" { continue; }
-        let urls = [
-            format!("http://{}:{}/api/agent/status", node.address, node.port + 1),
-            format!("https://{}:{}/api/agent/status", node.address, node.port),
-            format!("http://{}:{}/api/agent/status", node.address, node.port),
-        ];
+        let urls = crate::api::build_node_urls(&node.address, node.port, "/api/agent/status");
         let mut got = false;
         for url in &urls {
             let resp = client.get(url)
@@ -6002,7 +5963,12 @@ pub async fn get_cluster_preflight(
     let self_node = nodes.iter().find(|n| n.is_self).cloned();
     if include_self { if let Some(sn) = self_node {
         let host = resolve_node_address(&sn.address);
-        let url = format!("http://127.0.0.1:{}/api/router/preflight", sn.port + 1);
+        // v23.12: self-loopback over HTTPS on the api port (cert bypass
+        // on ROUTER_RPC_CLIENT covers our own self-signed cert if any).
+        // The pre-v23.12 path hit `http://127.0.0.1:{port+1}` which
+        // only worked when the second listener was bound; for CA-cert
+        // operators it now isn't.
+        let url = format!("https://127.0.0.1:{}/api/router/preflight", sn.port);
         let secret = state.cluster_secret.clone();
         let res = client.get(&url)
             .header("X-WolfStack-Secret", &secret)
@@ -6039,11 +6005,7 @@ pub async fn get_cluster_preflight(
             if &node_cluster != want { continue; }
         }
         let host = resolve_node_address(&node.address);
-        let urls = [
-            format!("https://{}:{}/api/router/preflight", host, node.port),
-            format!("http://{}:{}/api/router/preflight", host, node.port + 1),
-            format!("http://{}:{}/api/router/preflight", host, node.port),
-        ];
+        let urls = crate::api::build_node_urls(&host, node.port, "/api/router/preflight");
         let secret = state.cluster_secret.clone();
         let nid = node.id.clone();
         let cluster = node.cluster_name.clone().unwrap_or_default();
@@ -6178,11 +6140,7 @@ pub async fn get_cluster_validation(
             if &node_cluster != want { continue; }
         }
         let host = resolve_node_address(&node.address);
-        let urls = [
-            format!("https://{}:{}/api/router/validation", host, node.port),
-            format!("http://{}:{}/api/router/validation", host, node.port + 1),
-            format!("http://{}:{}/api/router/validation", host, node.port),
-        ];
+        let urls = crate::api::build_node_urls(&host, node.port, "/api/router/validation");
         let secret = state.cluster_secret.clone();
         let nid = node.id.clone();
         let cluster = node.cluster_name.clone().unwrap_or_default();

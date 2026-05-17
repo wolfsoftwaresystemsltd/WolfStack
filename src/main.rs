@@ -385,10 +385,13 @@ async fn main() -> std::io::Result<()> {
     // Load persistent port config; CLI --port still overrides the API port
     // for one-off launches and pulls inter_node along with it (api+1) so the
     // pair stays coherent — matches the previous behaviour where inter_node
-    // was always derived from --port.
+    // was always derived from --port. inter_node here is just the *preferred*
+    // value — the actual bind (only on self-signed installs in v23.12+) goes
+    // through ports::reserve_inter_node_port and may shift if 8554 is taken
+    // by Frigate/MediaMTX/etc.
     let port_cfg = ports::PortConfig::load();
     let api_port: u16 = cli.port.unwrap_or(port_cfg.api);
-    let inter_node_port: u16 = match cli.port {
+    let inter_node_pref: u16 = match cli.port {
         Some(p) => p + 1,
         None => port_cfg.inter_node,
     };
@@ -2841,20 +2844,43 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
 
         if let Some(ssl_builder) = ssl_builder {
             let (cert_path, key_path) = tls_paths.as_ref().unwrap();
+            // v23.12: only bind the secondary plain-HTTP listener if the
+            // loaded cert is self-signed. CA-signed-cert operators get
+            // HTTPS-only and never collide with Frigate/MediaMTX/go2rtc/
+            // GStreamer RTSP server etc. on 8554. The self-signed branch
+            // also gets the auto-fallback scan (8554..=8599) so even
+            // those operators can run alongside the same applications.
+            // See src/installer/self_signed.rs:cert_appears_self_signed.
+            let cert_is_self_signed = installer::self_signed::cert_appears_self_signed(cert_path);
+            let inter_node_port: Option<u16> = if cert_is_self_signed {
+                Some(ports::reserve_inter_node_port(
+                    &cli.bind,
+                    inter_node_pref,
+                    8554..=8599,
+                    &[api_port, status_port],
+                ))
+            } else {
+                None
+            };
+
             info!("  🔒 TLS enabled");
-            info!("     Cert: {}", cert_path);
+            info!("     Cert: {} ({})", cert_path,
+                if cert_is_self_signed { "self-signed" } else { "CA-signed" });
             info!("     Key:  {}", key_path);
             info!("     HTTPS: https://{}:{}", cli.bind, api_port);
-            info!("     HTTP (inter-node): http://{}:{}", cli.bind, inter_node_port);
+            match inter_node_port {
+                Some(p) => info!("     HTTP (inter-node legacy + cluster-home): http://{}:{}", cli.bind, p),
+                None => info!("     HTTP (inter-node): not bound — CA-signed cert means peers use HTTPS"),
+            }
             info!("     Status pages: http://{}:{}", cli.bind, status_port);
             info!("");
 
-            // Clone web_dir for second closure
+            // Clone web_dir for status-page closure (always needed) + the
+            // optional second listener closure (only constructed when bound).
             let web_dir2 = web_dir.clone();
             let app_state2 = app_state.clone();
             let app_state3 = app_state.clone();
 
-            // Start HTTPS server on main port + HTTP server on port+1 for inter-node
             let https_bind = format!("{}:{}", cli.bind, api_port);
             let https_server = HttpServer::new(move || {
                 let app = App::new()
@@ -2886,30 +2912,40 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             })?
             .run();
 
-            let http_bind = format!("{}:{}", cli.bind, inter_node_port);
-            let http_server = HttpServer::new(move || {
-                let app = App::new()
-                    .app_data(app_state2.clone())
-                    .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
-                    .app_data(actix_web::web::PayloadConfig::new(2 * 1024 * 1024 * 1024))
-                    .configure(api::configure);
-                if agent_mode {
-                    app.default_service(web::to(agent_index_handler))
-                } else {
-                    app
-                        .route("/", web::get().to(index_handler))
-                        .service(actix_files::Files::new("/", &web_dir2).index_file("login.html"))
+            // Secondary plain-HTTP listener — only on self-signed installs.
+            // Construct the Option<server> upfront so the tokio::join!
+            // arities stay static (join! macro can't accept a runtime
+            // optional future cleanly).
+            let http_server_opt = match inter_node_port {
+                Some(p) => {
+                    let http_bind = format!("{}:{}", cli.bind, p);
+                    let srv = HttpServer::new(move || {
+                        let app = App::new()
+                            .app_data(app_state2.clone())
+                            .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
+                            .app_data(actix_web::web::PayloadConfig::new(2 * 1024 * 1024 * 1024))
+                            .configure(api::configure);
+                        if agent_mode {
+                            app.default_service(web::to(agent_index_handler))
+                        } else {
+                            app
+                                .route("/", web::get().to(index_handler))
+                                .service(actix_files::Files::new("/", &web_dir2).index_file("login.html"))
+                        }
+                    })
+                    .keep_alive(std::time::Duration::from_secs(2))
+                    .client_request_timeout(std::time::Duration::from_secs(3))
+                    .client_disconnect_timeout(std::time::Duration::from_millis(500))
+                    .bind(&http_bind)
+                    .map_err(|e| {
+                        tracing::error!("❌ Failed to bind HTTP on {}: {}", http_bind, e);
+                        e
+                    })?
+                    .run();
+                    Some(srv)
                 }
-            })
-            .keep_alive(std::time::Duration::from_secs(2))
-            .client_request_timeout(std::time::Duration::from_secs(3))
-            .client_disconnect_timeout(std::time::Duration::from_millis(500))
-            .bind(&http_bind)
-            .map_err(|e| {
-                tracing::error!("❌ Failed to bind HTTP on {}: {}", http_bind, e);
-                e
-            })?
-            .run();
+                None => None,
+            };
 
             // Dedicated status page listener — plain HTTP on the configured status port
             let sp_bind = format!("{}:{}", cli.bind, status_port);
@@ -2924,15 +2960,25 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                 e
             });
 
-            match sp_server {
-                Ok(sp) => {
-                    let (r1, r2, r3) = tokio::join!(https_server, http_server, sp.run());
+            // Run the active set of listeners. Combinatorial: HTTPS is
+            // always present; HTTP and SP each may or may not be. Four
+            // branches; explicit so tokio::join!'s arity is fixed in
+            // each.
+            match (http_server_opt, sp_server) {
+                (Some(http), Ok(sp)) => {
+                    let (r1, r2, r3) = tokio::join!(https_server, http, sp.run());
                     r1?; r2?; r3?;
                 }
-                Err(_) => {
-                    // Status page port unavailable — run without it
-                    let (r1, r2) = tokio::join!(https_server, http_server);
+                (Some(http), Err(_)) => {
+                    let (r1, r2) = tokio::join!(https_server, http);
                     r1?; r2?;
+                }
+                (None, Ok(sp)) => {
+                    let (r1, r2) = tokio::join!(https_server, sp.run());
+                    r1?; r2?;
+                }
+                (None, Err(_)) => {
+                    https_server.await?;
                 }
             }
             Ok(())
@@ -3002,11 +3048,16 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
     }
 }
 
-/// Build the preferred inter-node HTTP URL for a given node and API path.
-/// TLS nodes serve HTTPS on main port and plain HTTP on port+1 for inter-node calls.
+/// Build the preferred inter-node URL for a given node and API path.
+///
+/// v23.12: returns HTTPS for TLS-enabled peers (with the surrounding HTTP
+/// clients using `danger_accept_invalid_certs(true)` so self-signed certs
+/// are accepted), plain HTTP for legacy `--no-tls` peers. The pre-v23.12
+/// behaviour returned `http://addr:port+1` for TLS peers, which broke
+/// against CA-signed-cert nodes that no longer bind the second listener.
 fn node_api_url(node: &crate::agent::Node, path: &str) -> String {
     if node.tls {
-        format!("http://{}:{}{}", node.address, node.port + 1, path)
+        format!("https://{}:{}{}", node.address, node.port, path)
     } else {
         format!("http://{}:{}{}", node.address, node.port, path)
     }
@@ -3060,12 +3111,10 @@ async fn gather_reboot_reason_remote(
         ("Kernel panic check", "journalctl -b -1 --no-pager -k 2>/dev/null | grep -i -E 'panic|oom|killed|segfault|error|watchdog' | tail -10"),
     ];
 
-    // Build URL — try inter-node HTTP on port+1 first if TLS, else main port
+    // HTTPS-first for TLS peers (client must accept self-signed); plain
+    // HTTP on the main port for legacy `--no-tls` peers.
     let urls: Vec<String> = if tls {
-        vec![
-            format!("http://{}:{}/api/ai/exec", address, port + 1),
-            format!("https://{}:{}/api/ai/exec", address, port),
-        ]
+        vec![format!("https://{}:{}/api/ai/exec", address, port)]
     } else {
         vec![format!("http://{}:{}/api/ai/exec", address, port)]
     };

@@ -890,13 +890,12 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
         }
 
         // ── Poll WolfStack node via agent ──
-        // When TLS is enabled, the main port serves HTTPS and inter-node HTTP is on port+1.
-        // Try: 1) HTTP port+1 (inter-node), 2) HTTPS main port, 3) HTTP main port (legacy)
-        let urls = vec![
-            format!("http://{}:{}/api/agent/status", node.address, node.port + 1),
-            format!("https://{}:{}/api/agent/status", node.address, node.port),
-            format!("http://{}:{}/api/agent/status", node.address, node.port),
-        ];
+        // v23.12: HTTPS-first via build_node_urls. CA-signed-cert peers no
+        // longer bind the second listener, so the pre-v23.12 chain that
+        // led with http://addr:port+1 silently dropped them. The shared
+        // POLL_CLIENT below has danger_accept_invalid_certs so self-signed
+        // peers still answer on HTTPS.
+        let urls = crate::api::build_node_urls(&node.address, node.port, "/api/agent/status");
 
 
         let client = {
@@ -943,10 +942,15 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                     if let Ok(msg) = resp.json::<AgentMessage>().await {
                         if let AgentMessage::StatusReport { node_id: peer_self_id, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes, deleted_ids, wolfnet_ips, has_docker, has_lxc, has_kvm, workload_subnets: peer_workload_subnets, license_key } = msg {
                             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-                            // Detect TLS: HTTP on port+1 means TLS is on the main port,
-                            // HTTPS on main port also means TLS. Only plain HTTP on the
-                            // main port means no TLS.
-                            let node_tls = *url != format!("http://{}:{}/api/agent/status", node.address, node.port);
+                            // Detect TLS by the URL scheme that actually
+                            // answered. v23.12 chain is HTTPS → HTTP-over-
+                            // WolfNet → legacy plaintext; only the last
+                            // (plain http://addr:port) implies a `--no-tls`
+                            // peer. The WolfNet HTTP overlay step is also
+                            // a TLS peer (the peer binds the second
+                            // listener only because it's self-signed).
+                            let node_tls = url.starts_with("https://")
+                                || !url.starts_with(&format!("http://{}:{}/", node.address, node.port));
                             // Capture fresh hostname + public_ip BEFORE the move into
                             // update_remote so we can pass them to the wolfnet endpoint
                             // reconciler below without re-locking cluster state.

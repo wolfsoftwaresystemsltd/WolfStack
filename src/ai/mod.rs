@@ -746,7 +746,12 @@ impl AiAgent {
         &self,
         user_message: &str,
         system_context: &str,
-        cluster_nodes: &[(String, String, String, String)],  // (id, hostname, base_url_primary, base_url_fallback)
+        // (id, hostname, base_urls_in_preference_order). v23.12 changed
+        // this from a fixed (primary, fallback) pair to a Vec so callers
+        // can pass the full `api::build_node_urls` chain — needed because
+        // CA-signed-cert peers no longer bind the second listener and
+        // the chain now leads with HTTPS.
+        cluster_nodes: &[(String, String, Vec<String>)],
         cluster_secret: &str,
     ) -> Result<(String, Vec<AiAction>), String> {
         let config = self.config.lock().unwrap().clone();
@@ -868,14 +873,18 @@ impl AiAgent {
                         }
                     ));
 
-                    // Run on all remote cluster nodes
-                    for (node_id, node_hostname, url_primary, url_fallback) in cluster_nodes {
-                        // Try primary URL first (port+1 for HTTPS nodes), fall back to original port
-                        let urls = [url_primary.as_str(), url_fallback.as_str()];
+                    // Run on all remote cluster nodes. URLs come from
+                    // build_node_urls (HTTPS → HTTP-over-WolfNet → legacy
+                    // plaintext) so the loop tries the secure URL first.
+                    // Use the shared API_HTTP_CLIENT — it has the cert
+                    // bypass needed to reach self-signed peers over HTTPS.
+                    // self.client has strict cert validation for external
+                    // AI provider calls; we don't want to weaken it.
+                    for (node_id, node_hostname, base_urls) in cluster_nodes {
                         let mut output = String::new();
-                        for base_url in &urls {
+                        for base_url in base_urls {
                             let remote_url = format!("{}/api/ai/exec", base_url);
-                            let remote_result = self.client
+                            let remote_result = crate::api::API_HTTP_CLIENT
                                 .post(&remote_url)
                                 .header("X-WolfStack-Secret", cluster_secret)
                                 .json(&serde_json::json!({ "command": cmd }))
@@ -1080,7 +1089,7 @@ impl AiAgent {
         &self,
         action_id: &str,
         approved_by: &str,
-        cluster_nodes: &[(String, String, String, String)],
+        cluster_nodes: &[(String, String, Vec<String>)],
         cluster_secret: &str,
     ) -> Result<String, String> {
         let mut action = {
@@ -1118,13 +1127,14 @@ impl AiAgent {
                 Err(e) => output.push_str(&format!("=== {} (local) ===\nERROR: {}\n\n", hostname, e)),
             }
 
-            // Remote execution
-            for (_node_id, node_hostname, url_primary, url_fallback) in cluster_nodes {
-                let urls = [url_primary.as_str(), url_fallback.as_str()];
+            // Remote execution — see notes in chat() above on why we
+            // use API_HTTP_CLIENT (cert bypass for self-signed peers)
+            // rather than self.client (strict, for external providers).
+            for (_node_id, node_hostname, base_urls) in cluster_nodes {
                 let mut node_output = String::new();
-                for base_url in &urls {
+                for base_url in base_urls {
                     let remote_url = format!("{}/api/ai/action/exec", base_url);
-                    match self.client
+                    match crate::api::API_HTTP_CLIENT
                         .post(&remote_url)
                         .header("X-WolfStack-Secret", cluster_secret)
                         .json(&serde_json::json!({ "command": action.command }))

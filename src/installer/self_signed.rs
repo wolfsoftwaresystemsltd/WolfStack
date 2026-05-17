@@ -59,6 +59,55 @@ const CERT_VALID_DAYS: u32 = 365 * 10;
 /// Regenerate if the existing cert expires within this many days.
 const REGEN_IF_EXPIRES_WITHIN_DAYS: i64 = 30;
 
+/// Inspect a cert PEM file and return true iff it appears to be self-signed
+/// (subject DN == issuer DN). v23.12 uses this to decide whether to bind the
+/// secondary plain-HTTP listener on `inter_node_port`: operators with a real
+/// CA-signed cert (Let's Encrypt, etc.) get HTTPS-only and never hit the
+/// 8554/RTSP conflict with Frigate, MediaMTX, go2rtc, GStreamer RTSP, etc.
+///
+/// Returns `false` on any read/parse error — that's the conservative answer
+/// because a false negative just keeps the legacy listener for one more
+/// startup, while a false positive (treating a real cert as self-signed)
+/// could leave the listener bound when it shouldn't be. Errors are logged
+/// at debug, not warn — they're not actionable for the operator.
+pub fn cert_appears_self_signed(cert_path: &str) -> bool {
+    let bytes = match std::fs::read(cert_path) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::debug!("cert_appears_self_signed: read {} failed: {}", cert_path, e);
+            return false;
+        }
+    };
+    let cert = match openssl::x509::X509::from_pem(&bytes) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!("cert_appears_self_signed: parse {} failed: {}", cert_path, e);
+            return false;
+        }
+    };
+    // OpenSSL X509_NAME comparison: subject DN bytes vs issuer DN bytes.
+    // `build_self_signed()` below calls `set_subject_name(&name)` and
+    // `set_issuer_name(&name)` with the *same* X509Name (lines 225-226),
+    // so our auto-generated certs always satisfy this. Externally-supplied
+    // self-signed certs (mkcert, manually-issued internal CA root, etc.)
+    // also satisfy it. CA-issued certs do not.
+    let subject_bytes = match cert.subject_name().to_der() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::debug!("cert_appears_self_signed: subject DER {} failed: {}", cert_path, e);
+            return false;
+        }
+    };
+    let issuer_bytes = match cert.issuer_name().to_der() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::debug!("cert_appears_self_signed: issuer DER {} failed: {}", cert_path, e);
+            return false;
+        }
+    };
+    subject_bytes == issuer_bytes
+}
+
 /// Ensure a self-signed TLS cert exists at the standard WolfStack path.
 ///
 /// Returns `(cert_path, key_path)` on success. The paths are constants
@@ -416,5 +465,99 @@ mod tests {
     // mocking. Its behaviour is best verified by running on a real
     // host. The function returns Vec::new() on any failure (no `ip`,
     // bad JSON), so it can't crash the cert-generation path.
+
+    /// Helper: write a PEM to /tmp/wolfstack-test-<rand>.pem and return path.
+    fn write_temp_pem(pem: &[u8]) -> String {
+        let path = format!("/tmp/wolfstack-cert-test-{}.pem", std::process::id());
+        std::fs::write(&path, pem).expect("temp write");
+        path
+    }
+
+    #[test]
+    fn cert_appears_self_signed_detects_our_own_cert() {
+        let (cert_pem, _) = build_self_signed("self.example.com", &[]).unwrap();
+        let path = write_temp_pem(&cert_pem);
+        assert!(cert_appears_self_signed(&path), "auto-generated cert must be detected as self-signed");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cert_appears_self_signed_handles_missing_file() {
+        // Non-existent path is conservatively "not self-signed" so we
+        // don't accidentally suppress the second listener bind on a
+        // botched install.
+        assert!(!cert_appears_self_signed("/tmp/this-path-definitely-does-not-exist-xyz123.pem"));
+    }
+
+    #[test]
+    fn cert_appears_self_signed_handles_unparseable_file() {
+        let path = format!("/tmp/wolfstack-bogus-{}.pem", std::process::id());
+        std::fs::write(&path, b"this is not a PEM").unwrap();
+        assert!(!cert_appears_self_signed(&path));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cert_appears_self_signed_rejects_ca_issued_cert() {
+        // Build a tiny chain: a CA cert (self-signed) and a leaf cert
+        // signed by it. The leaf's subject is "leaf.example.com" and
+        // its issuer is "ca.example.com" — they MUST differ.
+        use openssl::asn1::Asn1Time;
+        use openssl::bn::{BigNum, MsbOption};
+        use openssl::hash::MessageDigest;
+        use openssl::pkey::PKey;
+        use openssl::rsa::Rsa;
+        use openssl::x509::{X509, X509Name, X509Builder};
+        use openssl::nid::Nid;
+
+        // CA key + cert
+        let ca_rsa = Rsa::generate(2048).unwrap();
+        let ca_key = PKey::from_rsa(ca_rsa).unwrap();
+        let mut ca_name = X509Name::builder().unwrap();
+        ca_name.append_entry_by_nid(Nid::COMMONNAME, "ca.example.com").unwrap();
+        let ca_name = ca_name.build();
+        let mut ca = X509Builder::new().unwrap();
+        ca.set_version(2).unwrap();
+        let mut sn = BigNum::new().unwrap();
+        sn.rand(159, MsbOption::MAYBE_ZERO, false).unwrap();
+        ca.set_serial_number(&sn.to_asn1_integer().unwrap()).unwrap();
+        ca.set_subject_name(&ca_name).unwrap();
+        ca.set_issuer_name(&ca_name).unwrap();
+        ca.set_pubkey(&ca_key).unwrap();
+        ca.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+        ca.set_not_after(&Asn1Time::days_from_now(365).unwrap()).unwrap();
+        ca.sign(&ca_key, MessageDigest::sha256()).unwrap();
+        let ca_cert: X509 = ca.build();
+
+        // Leaf cert signed by CA
+        let leaf_rsa = Rsa::generate(2048).unwrap();
+        let leaf_key = PKey::from_rsa(leaf_rsa).unwrap();
+        let mut leaf_name = X509Name::builder().unwrap();
+        leaf_name.append_entry_by_nid(Nid::COMMONNAME, "leaf.example.com").unwrap();
+        let leaf_name = leaf_name.build();
+        let mut leaf = X509Builder::new().unwrap();
+        leaf.set_version(2).unwrap();
+        let mut leaf_sn = BigNum::new().unwrap();
+        leaf_sn.rand(159, MsbOption::MAYBE_ZERO, false).unwrap();
+        leaf.set_serial_number(&leaf_sn.to_asn1_integer().unwrap()).unwrap();
+        leaf.set_subject_name(&leaf_name).unwrap();
+        leaf.set_issuer_name(ca_cert.subject_name()).unwrap();  // issuer = CA subject
+        leaf.set_pubkey(&leaf_key).unwrap();
+        leaf.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+        leaf.set_not_after(&Asn1Time::days_from_now(90).unwrap()).unwrap();
+        leaf.sign(&ca_key, MessageDigest::sha256()).unwrap();
+        let leaf_cert: X509 = leaf.build();
+
+        let leaf_pem = leaf_cert.to_pem().unwrap();
+        let path = format!("/tmp/wolfstack-leaf-{}.pem", std::process::id());
+        std::fs::write(&path, &leaf_pem).unwrap();
+
+        assert!(
+            !cert_appears_self_signed(&path),
+            "CA-issued leaf cert (subject != issuer) must NOT be detected as self-signed"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
 }
 

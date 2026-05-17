@@ -750,12 +750,15 @@ async fn remote_console_bridge(
         "pct-vnc" => format!("/ws/container-vnc/pct/{}", encoded_name),
         _ => format!("/ws/console/{}/{}", ctype, encoded_name),
     };
-    let internal_port = remote_port + 1;
-
-    // URLs to try in order: wss main, ws internal, ws main
+    // v23.12: wss-first chain. The pre-v23.12 list included a
+    // ws://addr:port+1 attempt for the second listener; CA-signed-cert
+    // peers don't bind that listener any more, so the attempt fails
+    // fast and the loop falls through to ws://addr:port for legacy
+    // pre-v23.11 peers running `--no-tls`. Self-signed peers still
+    // bind it, so ws://addr:port+1 still resolves where applicable.
     let urls = vec![
         format!("wss://{}:{}{}", remote_host, remote_port, ws_path),
-        format!("ws://{}:{}{}", remote_host, internal_port, ws_path),
+        format!("ws://{}:{}{}", remote_host, remote_port + 1, ws_path),
         format!("ws://{}:{}{}", remote_host, remote_port, ws_path),
     ];
 

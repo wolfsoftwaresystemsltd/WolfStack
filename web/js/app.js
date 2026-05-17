@@ -28194,6 +28194,36 @@ async function issuesUpgradeAll() {
               + '</div>'
               + '</div>';
         })())
+        + ((function () {
+            // v23.12: when the node has a CA-signed cert (Let's Encrypt
+            // or operator-supplied), WolfStack no longer binds the
+            // secondary HTTP listener on inter_node_port (default 8554).
+            // This eliminates the long-standing clash with Frigate /
+            // MediaMTX / go2rtc / GStreamer RTSP server etc. that share
+            // the IANA-registered RTSP port 8554. Self-signed installs
+            // still bind it for the cluster-home browser flow and the
+            // WolfNet HTTP overlay path.
+            var portChangeFleet = targets.some(function (r) {
+                var v = (r.version || '').replace(/[^0-9.]/g, '');
+                var parts = v.split('.').map(Number);
+                return parts.length >= 2 && (parts[0] < 23 || (parts[0] === 23 && parts[1] < 12));
+            });
+            if (!portChangeFleet) return '';
+            return '<div style="margin-top:14px; padding:12px; background:rgba(56,189,248,0.10); border:1px solid rgba(56,189,248,0.40); border-radius:6px; color:var(--text-primary); font-size:12px; text-align:left;">'
+              + '<strong style="color:#38bdf8;">ℹ️ Inter-node port change (v23.12)</strong><br>'
+              + 'Nodes that have a <strong>real (CA-signed) TLS certificate</strong> &mdash; e.g. via '
+              + 'Settings &rarr; Certificates &rarr; Let&rsquo;s Encrypt &mdash; will <strong>no longer bind '
+              + 'port 8554</strong> (plain-HTTP inter-node fallback). All cluster traffic stays on HTTPS '
+              + 'over the main port (default 8553).<br><br>'
+              + '<strong>Action needed only if:</strong><br>'
+              + '&bull; Your firewall <em>only</em> allows 8554 between cluster regions and blocks 8553 &mdash; '
+              + 'open 8553 (HTTPS) between cluster nodes.<br>'
+              + '&bull; You run Frigate / MediaMTX / go2rtc on the same host &mdash; the upgrade will '
+              + '<em>fix</em> your existing 8554 conflict; nothing else to do.<br><br>'
+              + 'Self-signed installs are unaffected: 8554 keeps binding, with auto-fallback to '
+              + '8555..8599 if another service grabs 8554 first.'
+              + '</div>';
+        })())
         + '</div>');
     modal.showDone();
 

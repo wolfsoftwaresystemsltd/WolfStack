@@ -116,21 +116,26 @@ fn lookup_node_wolfnet_ip(address: &str) -> Option<String> {
 }
 
 /// Build the URLs to try for an inter-node API call, in preference order:
-/// 1. HTTPS on the main port (TLS — secure)
-/// 2. HTTP on the peer's WolfNet IP, internal port (HTTP-over-encrypted-overlay)
-/// 3. HTTP on the main address, internal port (plain — LAN trust)
-/// 4. HTTP on the main address, main port (plain — last resort, legacy)
+/// 1. HTTPS on the main port (TLS — secure; outbound clients all use
+///    `danger_accept_invalid_certs(true)` so self-signed peers work too)
+/// 2. HTTP on the peer's WolfNet IP, internal port (encrypted at L3 by
+///    the WolfNet overlay; only works if the peer is self-signed and
+///    therefore still binds the second listener, AND we've seen its
+///    WolfNet IP via a StatusReport)
+/// 3. HTTP on the main address, main port (plain — last resort, only
+///    succeeds against genuinely-HTTP-only peers, i.e. pre-v23.11
+///    installs running with `--no-tls`)
 ///
-/// Step 2 only appears once we've heard a StatusReport from the peer
-/// containing its `wolfnet_ips`. Empty cache or non-WolfNet peer = the
-/// classic 3-URL chain, identical to behaviour pre-v20.9.9.
+/// v23.12 removed the `http://address:port+1` step. CA-signed-cert peers
+/// no longer bind the second listener at all (Frigate clash avoidance);
+/// HTTPS-with-cert-bypass on the main port reaches every TLS peer including
+/// those still on a self-signed cert.
 pub fn build_node_urls(address: &str, port: u16, path: &str) -> Vec<String> {
-    let mut urls = Vec::with_capacity(4);
+    let mut urls = Vec::with_capacity(3);
     urls.push(format!("https://{}:{}{}", address, port, path));
     if let Some(wn) = lookup_node_wolfnet_ip(address) {
         urls.push(format!("http://{}:{}{}", wn, port + 1, path));
     }
-    urls.push(format!("http://{}:{}{}", address, port + 1, path));
     urls.push(format!("http://{}:{}{}", address, port, path));
     urls
 }
@@ -174,12 +179,16 @@ pub fn build_external_urls(target_url: &str, path: &str) -> Vec<String> {
         urls.push(format!("{}{}", with_scheme, path));
     }
 
-    // Always try WolfStack ports
+    // Always try WolfStack's main HTTPS port. The old code also tried
+    // http://host:8554 (legacy inter-node), but v23.12 dropped the
+    // second listener for CA-signed-cert peers — and HTTPS-with-cert-
+    // bypass already reaches self-signed peers via the main port, so
+    // the 8554 attempt was always redundant when the main port is
+    // reachable. Cross-cluster operators wanting plain HTTP can still
+    // pass an explicit `http://host:port` URL — that's why we try the
+    // user-supplied URL first above.
     if user_port != Some(8553) {
         urls.push(format!("https://{}:8553{}", host, path));
-    }
-    if user_port != Some(8554) {
-        urls.push(format!("http://{}:8554{}", host, path));
     }
 
     urls
@@ -614,10 +623,12 @@ pub async fn propagate_kernel_block_to_peers(
         Err(e) => { tracing::error!("kernel-block fanout: client build: {}", e); return; }
     };
     for node in nodes {
-        let urls = [
-            format!("https://{}:{}/api/security/kernel-block-ip", node.address, node.port),
-            format!("http://{}:{}/api/security/kernel-block-ip", node.address, node.port + 1),
-        ];
+        // v23.12: build_node_urls is the canonical HTTPS-first chain
+        // (HTTPS → HTTP-over-WolfNet if known → legacy plaintext for
+        // pre-v23.11 peers). The old hardcoded {HTTPS, HTTP-port+1}
+        // pair stopped working against CA-signed-cert peers in v23.12
+        // because they no longer bind 8554.
+        let urls = build_node_urls(&node.address, node.port, "/api/security/kernel-block-ip");
         let mut last_err = String::from("no attempts");
         let mut acked = false;
         for url in &urls {
@@ -790,10 +801,7 @@ pub async fn propagate_kernel_unblock_to_peers(
     };
     let payload = serde_json::json!({ "ip": ip, "propagate": false });
     for node in nodes {
-        let urls = [
-            format!("https://{}:{}/api/security/auth-unblock-peer", node.address, node.port),
-            format!("http://{}:{}/api/security/auth-unblock-peer", node.address, node.port + 1),
-        ];
+        let urls = build_node_urls(&node.address, node.port, "/api/security/auth-unblock-peer");
         let mut last_err = String::from("no attempts");
         let mut acked = false;
         for url in &urls {
@@ -2928,14 +2936,9 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
         }));
     }
 
-    // Call the remote server to verify the token
-    // Try HTTPS on the given port first (accept self-signed certs), then HTTP on port+1 (inter-node port)
+    // Call the remote server to verify the token.
     let verify_path = format!("/api/cluster/verify-token?token={}", join_token);
-    let urls = vec![
-        format!("https://{}:{}{}", body.address, port, verify_path),
-        format!("http://{}:{}{}", body.address, port + 1, verify_path),
-        format!("http://{}:{}{}", body.address, port, verify_path),
-    ];
+    let urls = build_node_urls(&body.address, port, &verify_path);
 
     let client = &*API_HTTP_CLIENT;
 
@@ -3093,7 +3096,6 @@ pub async fn remove_node(req: HttpRequest, state: web::Data<AppState>, path: web
             let client = &*API_HTTP_CLIENT;
             for node in &nodes {
                 if node.is_self || !node.online { continue; }
-                // Try HTTPS first, then HTTP on port+1, then HTTP on main port
                 let urls = build_node_urls(&node.address, node.port, &format!("/api/nodes/{}", delete_id));
                 for url in &urls {
                     if let Ok(resp) = client.delete(url)
@@ -3645,12 +3647,7 @@ pub async fn cluster_diagnose(req: HttpRequest, state: web::Data<AppState>, body
             continue;
         }
 
-        // Try HTTP on port+1 first (inter-node), then HTTPS on main port, then HTTP on main port
-        let urls = vec![
-            format!("http://{}:{}/api/agent/status", node.address, node.port + 1),
-            format!("https://{}:{}/api/agent/status", node.address, node.port),
-            format!("http://{}:{}/api/agent/status", node.address, node.port),
-        ];
+        let urls = build_node_urls(&node.address, node.port, "/api/agent/status");
 
         let mut api_result = serde_json::json!({
             "reachable": false,
@@ -5035,19 +5032,10 @@ pub async fn node_proxy(
     let content_type = req.headers().get("content-type").and_then(|ct| ct.to_str().ok()).unwrap_or("application/json").to_string();
     let body_vec = body.to_vec();
 
-    // Build URLs to try in order (security-first):
-    // 1. HTTPS on the main port — preferred, encrypted end-to-end
-    // 2. HTTP on internal port (port + 1) — only exists when TLS is on main port,
-    //    accessible only via WolfNet (encrypted tunnel) so still secure
-    // 3. HTTP on the main port — last resort (dev/local only)
-    let internal_port = node.port + 1;
     let qs = req.query_string();
     let query_suffix = if qs.is_empty() { String::new() } else { format!("?{}", qs) };
-    let urls = vec![
-        format!("https://{}:{}/api/{}{}", node.address, node.port, api_path, query_suffix),
-        format!("http://{}:{}/api/{}{}", node.address, internal_port, api_path, query_suffix),
-        format!("http://{}:{}/api/{}{}", node.address, node.port, api_path, query_suffix),
-    ];
+    let path_with_query = format!("/api/{}{}", api_path, query_suffix);
+    let urls = build_node_urls(&node.address, node.port, &path_with_query);
 
     let timeout_secs = if method == actix_web::http::Method::POST || method == actix_web::http::Method::PUT { 300 } else { 120 };
 
@@ -5119,8 +5107,8 @@ pub async fn node_proxy(
 
     // All URLs failed
     HttpResponse::BadGateway().json(serde_json::json!({
-        "error": format!("Could not reach node {} ({}:{}). Tried HTTP/HTTPS on ports {}/{} — last error: {}",
-            node.hostname, node.address, node.port, internal_port, node.port, last_error)
+        "error": format!("Could not reach node {} ({}:{}) — last error: {}",
+            node.hostname, node.address, node.port, last_error)
     }))
 }
 
@@ -7120,12 +7108,8 @@ pub async fn cluster_browser_list(req: HttpRequest, state: web::Data<AppState>) 
     
     let client = &*API_HTTP_CLIENT;
     for node in nodes {
-        let scheme = if node.tls { "https" } else { "http" };
-        let urls = vec![
-            format!("{}://{}:{}/api/cluster-browser/sessions", scheme, node.address, node.port),
-            format!("http://{}:{}/api/cluster-browser/sessions", node.address, node.port + 1),
-        ];
-        
+        let urls = build_node_urls(&node.address, node.port, "/api/cluster-browser/sessions");
+
         for url in urls {
             match client
                 .get(&url)
@@ -9573,16 +9557,21 @@ pub async fn ai_chat(
         )
     };
 
-    // Build cluster node list for remote command execution
-    // Include ALL online nodes (including Proxmox nodes that have WolfStack agents)
-    let cluster_nodes: Vec<(String, String, String, String)> = {
+    // Build cluster node list for remote command execution.
+    // Include ALL online nodes (including Proxmox nodes that have WolfStack agents).
+    // URLs come from build_node_urls so the AI agent inherits the same
+    // HTTPS-first chain federation uses; v23.12 dropped the implicit
+    // http://addr:port+1 attempt that this code used pre-migration.
+    let cluster_nodes: Vec<(String, String, Vec<String>)> = {
         let nodes = state.cluster.get_all_nodes();
         nodes.iter()
             .filter(|n| !n.is_self && n.online)
             .map(|n| {
-                let url1 = format!("http://{}:{}", n.address, n.port + 1);
-                let url2 = format!("http://{}:{}", n.address, n.port);
-                (n.id.clone(), n.hostname.clone(), url1, url2)
+                // The AI agent appends "/api/ai/exec" etc to the base URL,
+                // so we strip the path component: build_node_urls with an
+                // empty path returns scheme://host:port URLs.
+                let urls = build_node_urls(&n.address, n.port, "");
+                (n.id.clone(), n.hostname.clone(), urls)
             })
             .collect()
     };
@@ -10967,14 +10956,9 @@ pub async fn security_rotate_fleet(
                 }
             } else {
                 // Remote peer — call its /api/security/rotate-root-local
-                // with the cluster secret. Try HTTPS on the registered
-                // port first, fall back to HTTP on port+1 (matches the
-                // pattern used by poll_remote_nodes).
-                let urls = [
-                    format!("https://{}:{}/api/security/rotate-root-local", node.address, node.port),
-                    format!("http://{}:{}/api/security/rotate-root-local", node.address, node.port + 1),
-                    format!("http://{}:{}/api/security/rotate-root-local", node.address, node.port),
-                ];
+                // with the cluster secret using the canonical HTTPS-first
+                // chain.
+                let urls = build_node_urls(&node.address, node.port, "/api/security/rotate-root-local");
                 let client = reqwest::Client::builder()
                     .danger_accept_invalid_certs(true)
                     .timeout(std::time::Duration::from_secs(30))
@@ -11092,10 +11076,7 @@ where
                     error: Some("non-WolfStack node".into()),
                 };
             }
-            let urls = [
-                format!("https://{}:{}{}", node.address, node.port, path),
-                format!("http://{}:{}{}", node.address, node.port + 1, path),
-            ];
+            let urls = build_node_urls(&node.address, node.port, &path);
             let client = match reqwest::Client::builder()
                 .danger_accept_invalid_certs(true)
                 .timeout(std::time::Duration::from_secs(8))
@@ -11109,9 +11090,8 @@ where
             };
             // Capture WHY each attempt failed. We collect EVERY url's
             // error rather than overwriting — otherwise the operator
-            // only sees the last attempt's failure (the HTTP-on-port+1
-            // fallback) and the actual root cause on the primary URL
-            // (HTTPS) stays hidden.
+            // only sees the last attempt's failure and the actual root
+            // cause on the primary URL (HTTPS) stays hidden.
             let mut errors: Vec<String> = Vec::new();
             for url in &urls {
                 let resp = client.get(url).header("X-WolfStack-Secret", &secret_c).send().await;
@@ -11275,10 +11255,7 @@ pub async fn fleet_security_push_lockout_policy(
     let mut node_results: Vec<serde_json::Value> = Vec::new();
     if let Some(client) = client {
         for node in peers {
-            let urls = [
-                format!("https://{}:{}/api/security/auth-config", node.address, node.port),
-                format!("http://{}:{}/api/security/auth-config", node.address, node.port + 1),
-            ];
+            let urls = build_node_urls(&node.address, node.port, "/api/security/auth-config");
             let mut ok = false;
             let mut err = String::new();
             for url in &urls {
@@ -11339,10 +11316,7 @@ pub async fn fleet_security_force_logout_all(
     let mut failed = 0usize;
     if let Some(client) = client {
         for node in peers {
-            let urls = [
-                format!("https://{}:{}/api/security/sessions-destroy-all", node.address, node.port),
-                format!("http://{}:{}/api/security/sessions-destroy-all", node.address, node.port + 1),
-            ];
+            let urls = build_node_urls(&node.address, node.port, "/api/security/sessions-destroy-all");
             let mut ok = false;
             for url in &urls {
                 let r = client.post(url)
@@ -11464,10 +11438,7 @@ pub async fn fleet_security_rotate_cluster_secret(
     };
     let mut peer_results: Vec<serde_json::Value> = Vec::new();
     for node in peers {
-        let urls = [
-            format!("https://{}:{}/api/security/cluster-secret/receive", node.address, node.port),
-            format!("http://{}:{}/api/security/cluster-secret/receive", node.address, node.port + 1),
-        ];
+        let urls = build_node_urls(&node.address, node.port, "/api/security/cluster-secret/receive");
         let body = serde_json::json!({ "new_secret": new_secret });
         let mut ok = false;
         let mut err = String::new();
@@ -11722,10 +11693,7 @@ pub async fn fleet_security_ssh_hardening(
 
     let mut peer_results: Vec<serde_json::Value> = Vec::new();
     for node in peers {
-        let urls = [
-            format!("https://{}:{}/api/security/ssh-hardening-local", node.address, node.port),
-            format!("http://{}:{}/api/security/ssh-hardening-local", node.address, node.port + 1),
-        ];
+        let urls = build_node_urls(&node.address, node.port, "/api/security/ssh-hardening-local");
         let mut ok = false;
         let mut err = String::new();
         for url in &urls {
@@ -11876,10 +11844,7 @@ pub async fn fleet_security_push_scan_detector(
     let mut peer_results = Vec::new();
     if let Some(client) = client {
         for node in peers {
-            let urls = [
-                format!("https://{}:{}/api/security/scan-detector", node.address, node.port),
-                format!("http://{}:{}/api/security/scan-detector", node.address, node.port + 1),
-            ];
+            let urls = build_node_urls(&node.address, node.port, "/api/security/scan-detector");
             let mut ok = false;
             let mut err = String::new();
             for url in &urls {
@@ -28849,11 +28814,7 @@ pub async fn cluster_bootstrap_add(
 
     // Verify against the follower's daemon, mirroring add_node:2339.
     let verify_path = format!("/api/cluster/verify-token?token={}", r.join_token.trim());
-    let urls = vec![
-        format!("https://{}:{}{}", r.address.trim(), port, verify_path),
-        format!("http://{}:{}{}", r.address.trim(), port + 1, verify_path),
-        format!("http://{}:{}{}", r.address.trim(), port, verify_path),
-    ];
+    let urls = build_node_urls(r.address.trim(), port, &verify_path);
     let client = &*API_HTTP_CLIENT;
     let mut verified = false;
     let mut last_error = String::new();
