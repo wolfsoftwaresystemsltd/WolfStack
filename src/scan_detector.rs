@@ -77,13 +77,26 @@ pub struct ScanDetectorConfig {
     pub action: String,
 }
 
-fn default_enabled() -> bool { true }
+// v23.12.3: default OFF. v23.10.0–v23.12.2 shipped this enabled-by-
+// default with action=kill_and_block, which on Proxmox hosts could
+// SIGKILL pmxcfs (cluster-fs replication burst during a backup run),
+// taking /etc/pve / pveproxy / pvedaemon down with it. Reddit report
+// 2026-05-17 — exact "comes online for a few then stops working"
+// pattern.
+//
+// Operators who want outbound-scan detection back can flip it on in
+// Fleet Security → Scan Detector. The ESSENTIAL_SAFETY_COMMS list
+// (defined below) still protects the OS / cluster / DB / virt critical
+// services even if the operator enables it AND mis-allowlists.
+// Existing installs whose config file already says `enabled: true`
+// keep their setting — this default only applies to fresh installs.
+fn default_enabled() -> bool { false }
 fn default_threshold() -> usize { 50 }
 fn default_window() -> u64 { 60 }
 fn default_sample() -> u64 { 15 }
 fn default_action() -> String { "kill_and_block".into() }
 fn default_allowlist() -> Vec<String> {
-    vec![
+    let mut v: Vec<String> = vec![
         "apt".into(), "apt-get".into(), "dpkg".into(), "unattended-upgr".into(),
         "dockerd".into(), "containerd".into(), "docker".into(),
         "ceph-osd".into(), "ceph-mon".into(), "ceph-mgr".into(), "ceph-mds".into(),
@@ -94,8 +107,120 @@ fn default_allowlist() -> Vec<String> {
         "chronyd".into(), "systemd-resolve".into(), "systemd-network".into(),
         "tailscaled".into(), "tailscale".into(), "wg-quick".into(),
         "node_exporter".into(), "prometheus".into(),
-    ]
+    ];
+    // Also surface the essential-safety set in the editable allowlist
+    // so operators see (and can audit) what's protected. The
+    // ESSENTIAL_SAFETY_COMMS list below remains the hard guarantee —
+    // even if the operator removes one of these entries from the UI
+    // allowlist, `tick()` still skips it. (v23.12.3.)
+    for comm in ESSENTIAL_SAFETY_COMMS {
+        v.push((*comm).into());
+    }
+    v
 }
+
+/// Hard-coded "do not kill under any circumstances" list. Checked
+/// BEFORE the operator-configurable `allowlist_comms`, so removing
+/// these from the UI allowlist still doesn't expose them.
+///
+/// Added in v23.12.3 after a Proxmox host on Reddit was bricked: the
+/// detector hit pmxcfs (cluster-fs replication burst during a backup
+/// cycle), SIGKILL'd it, /etc/pve FUSE mount dropped, pveproxy /
+/// pvedaemon / qm / pct all failed, host appeared dead on every
+/// reboot.
+///
+/// Membership criterion: "killing this process takes the host down,
+/// makes it unreachable, or causes data loss". Inconvenience alone
+/// (nginx, mariadb, etc.) doesn't qualify — those belong in the
+/// editable `default_allowlist` so operators can prune them.
+///
+/// When deciding whether to add something here, ask:
+///   - Does killing it lose data mid-write?  (DBs, backup writers, mail queues)
+///   - Does killing it break cluster quorum or membership?  (corosync, etcd, consul)
+///   - Does killing it take down a FUSE/kernel mount?  (pmxcfs, lxcfs, fuse-*)
+///   - Does killing it brick the OS networking stack?  (NetworkManager, systemd-networkd)
+///   - Does killing it kill running guests (data loss for VM tenants)?  (libvirtd, qemu-kvm)
+/// If yes to any, it goes here.
+pub const ESSENTIAL_SAFETY_COMMS: &[&str] = &[
+    // ── Proxmox VE cluster filesystem + services ─────────────────
+    // pmxcfs → /etc/pve. corosync → quorum. HA stack → fence-on-kill.
+    "pmxcfs", "corosync", "pve-firewall", "pve-ha-crm", "pve-ha-lrm",
+    "pve-cluster", "spiceproxy", "pvescheduler", "pvefw-logger",
+    // Proxmox Backup Server / client + vzdump — backup runs are the
+    // single most common false-positive trigger (many storage targets).
+    "proxmox-backup", "proxmox-backup-proxy", "proxmox-backup-client",
+    "vzdump",
+
+    // ── Container runtimes (data loss on kill) ───────────────────
+    "lxc-start", "lxc-monitord", "lxc-attach", "lxcfs",
+    "runc", "crun", "containerd-shim", "containerd-shim-runc-v2",
+    "kata-runtime", "kata-agent",
+
+    // ── Virtualization (kill = guest data loss) ──────────────────
+    "qemu-kvm", "qemu-system-x86_64", "qemu-system-aarch64",
+    "libvirtd", "virtqemud", "virtlogd", "virtlockd",
+
+    // ── Cluster coordination (kill = split brain / fence) ────────
+    "etcd", "consul", "pacemaker", "pacemakerd", "pacemaker-attrd",
+    "pacemaker-execd", "pacemaker-fenced", "pacemaker-schedulerd",
+    "crm_mon", "crmd",
+    // Kubernetes control plane + node agents
+    "kube-apiserver", "kube-controller", "kube-scheduler",
+    "kubelet", "kube-proxy", "k3s", "k3s-agent", "k3s-server",
+
+    // ── Distributed storage (kill mid-IO = corruption risk) ──────
+    "glusterd", "glusterfsd", "ganesha.nfsd",
+    "ceph-osd", "ceph-mon", "ceph-mgr", "ceph-mds", "ceph-fuse",
+    "moosefs-master", "mfsmaster",
+
+    // ── Local storage daemons ────────────────────────────────────
+    "zed", "zfs", "zpool",
+    "mdadm", "multipathd",
+    "iscsid", "iscsiadm",
+    // NFS server stack — killing nfsd while clients are mounted
+    // hangs every client.
+    "nfsd", "rpc.mountd", "rpc.statd", "rpcbind",
+    // SMB server stack
+    "smbd", "nmbd", "winbindd",
+
+    // ── Databases (kill mid-write = corruption / journal recovery) ─
+    "mariadbd", "mysqld", "mysqld_safe",
+    "postgres", "postmaster",
+    "mongod", "mongos",
+    "redis-server", "redis-sentinel",
+    "cassandra", "scylla",
+    "influxd", "clickhouse-server",
+    // Galera cluster sync needs all peers alive
+    "garbd", "wsrep_sst_rsync", "wsrep_sst_xtrabackup",
+
+    // ── Mail (kill queue runner = message loss) ──────────────────
+    "postfix", "smtpd", "qmgr", "pickup", "exim4", "sendmail",
+    "dovecot", "opensmtpd",
+
+    // ── Routing daemons (kill = traffic blackhole) ───────────────
+    "frr", "bgpd", "ospfd", "ospf6d", "zebra", "ripd", "isisd",
+    "bird", "bird6",
+    // VPN tunnels
+    "openvpn", "strongswan", "charon", "pluto", "wg-quick",
+
+    // ── Core OS daemons (kill = host unreachable / unbootable) ───
+    "systemd",   // PID 1 is already protected, but defence in depth
+    "init",
+    "NetworkManager", "nm-applet",
+    "systemd-networkd", "systemd-resolved", "systemd-udevd",
+    "systemd-logind", "systemd-journald",
+    "dbus-daemon", "dbus-broker",
+    "polkitd", "accountsservice",
+    "rsyslogd", "syslog-ng",
+    "udevadm",
+
+    // ── DNS / DHCP (kill = network goes dark) ────────────────────
+    "dnsmasq", "named", "unbound", "bind9", "kresd", "knot",
+    "dhclient", "dhcpd", "dhcrelay",
+
+    // ── Time sync (kill = clock drift breaks auth, TLS, kerberos) ─
+    "chronyd", "ntpd",
+];
 
 impl Default for ScanDetectorConfig {
     fn default() -> Self {
@@ -235,6 +360,7 @@ impl ScanDetector {
         // ahead of the iter_mut so we don't hold conflicting borrows
         // on `inner` simultaneously.
         let allowlist: HashSet<&str> = cfg.allowlist_comms.iter().map(|s| s.as_str()).collect();
+        let essential: HashSet<&str> = ESSENTIAL_SAFETY_COMMS.iter().copied().collect();
         let recently_actioned: HashMap<i32, Instant> = inner.actioned.clone();
         let mut to_action: Vec<(i32, String, u32, HashSet<String>)> = Vec::new();
         for (pid, entries) in inner.samples.iter_mut() {
@@ -246,6 +372,18 @@ impl ScanDetector {
                 if now.duration_since(*when) < Duration::from_secs(300) { continue; }
             }
             let comm = read_comm(*pid).unwrap_or_else(|| "?".into());
+            // Essential-safety list checked BEFORE the operator allowlist.
+            // Even if an operator removes pmxcfs from their visible
+            // allowlist, we never kill it. Logged at debug rather than
+            // ignored silently so an operator hunting through journals
+            // can see what fired.
+            if essential.contains(comm.as_str()) {
+                tracing::debug!(
+                    "scan-detect: PID {} ({}) crossed threshold but is on the essential-safety list — skipping",
+                    pid, comm
+                );
+                continue;
+            }
             if allowlist.contains(comm.as_str()) { continue; }
             let uid = read_uid(*pid).unwrap_or(0);
             // UID allowlist — dedicated service accounts for legit
@@ -480,6 +618,48 @@ mod tests {
         assert!(cfg.allowlist_comms.contains(&"wolfstack".to_string()));
         assert!(cfg.allowlist_comms.contains(&"ceph-osd".to_string()));
         assert!(cfg.threshold_destinations >= 10, "default threshold should be permissive enough not to false-positive");
+    }
+
+    /// v23.12.3 flipped the default to OFF after a Reddit user lost a
+    /// Proxmox host. Pin this so a future refactor can't silently
+    /// re-enable detection-by-default.
+    #[test]
+    fn config_default_is_disabled() {
+        let cfg = ScanDetectorConfig::default();
+        assert!(!cfg.enabled, "detector must default to disabled — re-enabling by default is what bricked the Reddit reporter's PVE host");
+    }
+
+    /// The essential-safety list is the hard guarantee — if any of
+    /// these get dropped from the const, hosts running Proxmox /
+    /// libvirt / mariadb / NetworkManager / etc. can lose them to
+    /// SIGKILL even if the operator hasn't customised their allowlist.
+    /// Pin the critical entries explicitly so the next refactor surfaces
+    /// the intent.
+    #[test]
+    fn essential_safety_protects_the_critical_set() {
+        let essential: HashSet<&str> = ESSENTIAL_SAFETY_COMMS.iter().copied().collect();
+        // Proxmox VE cluster fs / quorum / HA — the bug that motivated v23.12.3
+        for must in &["pmxcfs", "corosync", "pve-cluster", "pve-ha-crm", "pve-ha-lrm",
+                      "vzdump", "proxmox-backup-client", "lxcfs", "lxc-start"] {
+            assert!(essential.contains(must), "essential-safety list must contain {must}");
+        }
+        // Virtualization / container runtimes — kill = guest data loss
+        for must in &["qemu-kvm", "libvirtd", "runc", "containerd-shim"] {
+            assert!(essential.contains(must), "essential-safety list must contain {must}");
+        }
+        // Cluster coordination — kill = split brain
+        for must in &["etcd", "consul", "pacemaker", "kubelet"] {
+            assert!(essential.contains(must), "essential-safety list must contain {must}");
+        }
+        // Databases — kill mid-write = corruption
+        for must in &["mariadbd", "mysqld", "postgres", "mongod", "redis-server"] {
+            assert!(essential.contains(must), "essential-safety list must contain {must}");
+        }
+        // Core OS / networking — kill = host unreachable
+        for must in &["systemd", "NetworkManager", "systemd-networkd",
+                      "dnsmasq", "named", "chronyd"] {
+            assert!(essential.contains(must), "essential-safety list must contain {must}");
+        }
     }
 
     #[test]

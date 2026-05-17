@@ -16076,7 +16076,9 @@ async function fleetLoadScanDetector() {
         document.getElementById('scan-window').value = c.window_seconds ?? 60;
         document.getElementById('scan-sample').value = c.sample_interval_seconds ?? 15;
         document.getElementById('scan-action').value = c.action || 'kill_and_block';
-        document.getElementById('scan-enabled').checked = c.enabled !== false;
+        // v23.12.3 flipped the default to disabled, so we no longer treat
+        // an absent `enabled` field as "on" — we honour it literally.
+        document.getElementById('scan-enabled').checked = c.enabled === true;
         document.getElementById('scan-allowlist').value = (c.allowlist_comms || []).join('\n');
         document.getElementById('scan-allowlist-uids').value = (c.allowlist_uids || []).join('\n');
     }
@@ -16133,6 +16135,42 @@ async function fleetPushScanDetector() {
         .filter(l => !Number.isInteger(parseInt(l, 10)));
     if (uidsRejected.length > 0) {
         showToast(`UID allowlist: dropped ${uidsRejected.length} non-numeric entries (${uidsRejected.slice(0, 3).join(', ')}${uidsRejected.length > 3 ? '…' : ''}). Use the numeric UID, not the username.`, 'warning', 6000);
+    }
+    const enabling = document.getElementById('scan-enabled').checked;
+    const action = document.getElementById('scan-action').value;
+    // v23.12.3: strict confirmation when the operator turns the detector
+    // ON. v23.10.0–v23.12.2 shipped this enabled by default with
+    // action=kill_and_block; a Reddit user lost a Proxmox host because
+    // pmxcfs (cluster-fs replication burst during a backup) hit the
+    // threshold and got SIGKILL'd. ESSENTIAL_SAFETY_COMMS now protects
+    // the worst false-positives in the daemon, but enabling kill_and_block
+    // still carries real "blast radius" — make the operator look at it.
+    if (enabling && action === 'kill_and_block') {
+        const phrase = await wolfPrompt(
+            'You are about to ENABLE the outbound scan detector with action = '
+            + '"Kill process + block UID outbound" on EVERY node in this cluster.\n\n'
+            + 'What this does on detection:\n'
+            + '  • SIGTERM → SIGKILL 2s later for the offending PID\n'
+            + '  • iptables OUTPUT REJECT rule against that UID\n\n'
+            + 'Known risk: legitimate high-fanout software (mass mail, backup '
+            + 'runs hitting many storage targets, monitoring agents talking to '
+            + 'lots of endpoints) can trip the threshold and get killed. '
+            + 'Critical Proxmox / cluster / DB / virt services are protected '
+            + 'by an internal safety list, but anything outside that list is '
+            + 'fair game.\n\n'
+            + 'Safer first step: pick "Alert only (no kill)" for a few days, '
+            + 'review what fires under "Recent detections" below, add false '
+            + 'positives to the allowlist, THEN flip to kill_and_block.\n\n'
+            + 'Type ENABLE (uppercase) to confirm:',
+            '',
+            'Enable scan detector — destructive action',
+            { okText: 'Enable on every node', placeholder: 'ENABLE' }
+        );
+        if ((phrase || '').trim() !== 'ENABLE') {
+            document.getElementById('fleet-scan-policy-status').innerHTML =
+                '<span style="color:var(--text-muted);">Cancelled — detector left as it was.</span>';
+            return;
+        }
     }
     const body = {
         threshold_destinations: parseInt(document.getElementById('scan-threshold').value, 10),
