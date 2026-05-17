@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v23.12.3: scan detector OFF by default + essential-safety list + strict enable confirmation** _(2026-05-17 — [`e906701`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e9067019fa92d3ca65a526216b9df4ae6e124e10))_
 - **v23.12.2: cluster-wide DNS providers + cluster cert manager screen** _(2026-05-17 — [`ef95ff2`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ef95ff2907d521eb7c2e6ed0fb4290735ccb7849))_
 - **v23.12.1: DNS Provider Test uses saved Certbot email — no more "no place to put" dead-end** _(2026-05-17 — [`92f6c7e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/92f6c7e43eff409a8b894f9fba2a6736b7649a04))_
 - **v23.12.0: HTTPS-everywhere inter-node — drop 8554 listener for CA-cert installs, fixes Frigate/RTSP clash** _(2026-05-17 — [`000c5d5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/000c5d503c0131d287fba254a57e023e7c3d9fd5))_
