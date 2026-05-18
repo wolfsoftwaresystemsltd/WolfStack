@@ -15704,6 +15704,7 @@ async function renderFleetSecurity() {
         wrap(fleetPrefillPolicy()),
         wrap(fleetLoadScanDetector()),
         wrap(fleetLoadHostAudit()),
+        wrap(fleetLoadAntivirus()),
     ]);
     fleetSecMarkRefreshDone();
 }
@@ -16300,11 +16301,343 @@ async function fleetLoadHostAudit() {
     }).join('');
 }
 
+// ─── Fleet antivirus / rootkit scanning ────────────────────────────
+
+// Cached self_id from the most recent /api/fleet/antivirus/status
+// response — used to choose between the local API and node_proxy for
+// per-node ops (restore/delete) so we don't hit node_proxy's "Use local
+// API for self node" guard.
+let _fleetAvSelfId = null;
+
+function _fleetAvOpUrl(nodeId, subpath) {
+    if (_fleetAvSelfId && nodeId === _fleetAvSelfId) {
+        return apiUrl(subpath);
+    }
+    return apiUrl(`/api/nodes/${encodeURIComponent(nodeId)}/proxy${subpath}`);
+}
+
+async function fleetLoadAntivirus() {
+    // Pull status + findings + quarantine in parallel.
+    const statusEl = document.getElementById('fleet-av-status');
+    const findingsEl = document.getElementById('fleet-av-findings');
+    const quarantineEl = document.getElementById('fleet-av-quarantine');
+    if (statusEl) statusEl.innerHTML = '<div style="color:var(--text-muted); font-size:13px;">Loading…</div>';
+    const [statusResp, findingsResp, quarantineResp] = await Promise.all([
+        fetch(apiUrl('/api/fleet/antivirus/status')).then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch(apiUrl('/api/fleet/antivirus/findings')).then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch(apiUrl('/api/fleet/antivirus/quarantine')).then(r => r.ok ? r.json() : null).catch(() => null),
+    ]);
+    if (statusResp && typeof statusResp.self_id === 'string') {
+        _fleetAvSelfId = statusResp.self_id;
+    }
+    renderFleetAvStatus(statusResp);
+    renderFleetAvFindings(findingsResp);
+    renderFleetAvQuarantine(quarantineResp);
+    // Prefill the schedule/policy form from the local node's config
+    // (each node has its own config; this surface lets the operator
+    // edit it and push to every node at once via Save).
+    if (statusResp && statusResp.nodes && statusResp.nodes.length > 0) {
+        const me = statusResp.nodes.find(n => n.status === 'ok' && n.data && n.data.config) || statusResp.nodes.find(n => n.data && n.data.config);
+        if (me && me.data && me.data.config) {
+            const c = me.data.config;
+            const el = id => document.getElementById(id);
+            if (el('fleet-av-enabled'))         el('fleet-av-enabled').value = c.enabled ? 'true' : 'false';
+            if (el('fleet-av-schedule'))        el('fleet-av-schedule').value = c.schedule_hours ?? 24;
+            if (el('fleet-av-auto-quarantine')) el('fleet-av-auto-quarantine').value = c.auto_quarantine ? 'true' : 'false';
+            if (el('fleet-av-auto-kill'))       el('fleet-av-auto-kill').value = c.auto_kill ? 'true' : 'false';
+            if (el('fleet-av-run-clamav'))      el('fleet-av-run-clamav').value = c.run_clamav ? 'true' : 'false';
+            if (el('fleet-av-run-rkhunter'))    el('fleet-av-run-rkhunter').value = c.run_rkhunter ? 'true' : 'false';
+            if (el('fleet-av-run-chkrootkit'))  el('fleet-av-run-chkrootkit').value = c.run_chkrootkit ? 'true' : 'false';
+        }
+    }
+}
+
+function renderFleetAvStatus(data) {
+    const el = document.getElementById('fleet-av-status');
+    if (!el) return;
+    if (!data || !data.nodes) {
+        el.innerHTML = '<div style="color:#ef4444; font-size:13px;">Failed to load fleet antivirus status.</div>';
+        return;
+    }
+    const nodes = data.nodes || [];
+    if (nodes.length === 0) {
+        el.innerHTML = '<div style="color:var(--text-muted); font-size:13px;">No nodes in this cluster.</div>';
+        return;
+    }
+    const rows = nodes.map(n => {
+        if (n.status !== 'ok' || !n.data) {
+            return `<tr>
+                <td style="padding:6px 10px; font-family:var(--font-mono); font-size:12px;">${vlanEsc(n.hostname || n.node_id)}</td>
+                <td style="padding:6px 10px; color:#ef4444; font-size:12px;" colspan="6">${n.status === 'skipped' ? 'skipped' : 'unreachable'} — ${vlanEsc(n.error || '(no detail)')}</td>
+            </tr>`;
+        }
+        const d = n.data;
+        const inst = d.install || {};
+        const tool = (t, name) => {
+            if (!t) return `<span style="color:var(--text-muted);">${name}: ?</span>`;
+            if (t.not_available_on_distro) return `<span style="color:var(--text-muted);" title="not available on this distro">${name}: n/a</span>`;
+            if (!t.installed) return `<span style="color:#ef4444;">${name}: ✗</span>`;
+            return `<span style="color:#22c55e;" title="${vlanEsc(t.version || '')}${t.last_db_update ? ' · sigs ' + vlanEsc(t.last_db_update) : ''}">${name}: ✓</span>`;
+        };
+        const scan = d.scan || {};
+        const scanCell = scan.running
+            ? `<span style="color:#fbbf24;">⏳ ${vlanEsc(scan.active_scanner || 'scanning')} — ${vlanEsc(scan.progress_message || '')}</span>`
+            : scan.last_clamav_run || scan.last_rkhunter_run || scan.last_chkrootkit_run
+                ? `<span style="color:var(--text-secondary); font-size:11px;">Last: ClamAV ${scan.last_clamav_run ? vlanEsc(scan.last_clamav_run.slice(0,19)) : '—'} · rkhunter ${scan.last_rkhunter_run ? vlanEsc(scan.last_rkhunter_run.slice(0,19)) : '—'} · chkrootkit ${scan.last_chkrootkit_run ? vlanEsc(scan.last_chkrootkit_run.slice(0,19)) : '—'}</span>`
+                : '<span style="color:var(--text-muted);">never scanned</span>';
+        const findingCount = d.finding_count || 0;
+        const qCount = d.quarantine_count || 0;
+        const findingColour = findingCount > 0 ? '#ef4444' : 'var(--text-muted)';
+        const qColour = qCount > 0 ? '#fbbf24' : 'var(--text-muted)';
+        return `<tr>
+            <td style="padding:6px 10px; font-family:var(--font-mono); font-size:12px;">${vlanEsc(n.hostname || n.node_id)}</td>
+            <td style="padding:6px 10px; font-size:11px; color:var(--text-muted);">${vlanEsc(inst.distro || '?')}/${vlanEsc(inst.package_manager || '?')}</td>
+            <td style="padding:6px 10px;">${tool(inst.clamav, 'clamav')}</td>
+            <td style="padding:6px 10px;">${tool(inst.rkhunter, 'rkhunter')}</td>
+            <td style="padding:6px 10px;">${tool(inst.chkrootkit, 'chkrootkit')}</td>
+            <td style="padding:6px 10px;">${scanCell}</td>
+            <td style="padding:6px 10px; text-align:right; font-size:12px;">
+                <span style="color:${findingColour};">${findingCount} finding${findingCount === 1 ? '' : 's'}</span>
+                · <span style="color:${qColour};">${qCount} quarantined</span>
+            </td>
+        </tr>`;
+    }).join('');
+    el.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:13px;">
+        <thead><tr style="text-align:left; border-bottom:2px solid var(--border);">
+            <th style="padding:6px 10px;">Node</th>
+            <th style="padding:6px 10px;">Distro</th>
+            <th style="padding:6px 10px;">ClamAV</th>
+            <th style="padding:6px 10px;">rkhunter</th>
+            <th style="padding:6px 10px;">chkrootkit</th>
+            <th style="padding:6px 10px;">Scan state</th>
+            <th style="padding:6px 10px; text-align:right;">Counts</th>
+        </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderFleetAvFindings(data) {
+    const el = document.getElementById('fleet-av-findings');
+    if (!el) return;
+    if (!data || !data.nodes) {
+        el.innerHTML = '<div style="padding:12px; color:#ef4444; font-size:13px;">Failed to load.</div>';
+        return;
+    }
+    const rows = [];
+    for (const n of data.nodes) {
+        if (n.status !== 'ok' || !n.data || !Array.isArray(n.data.findings)) continue;
+        for (const f of n.data.findings) {
+            rows.push({ ...f, hostname: n.hostname });
+        }
+    }
+    rows.sort((a, b) => (b.detected_at || '').localeCompare(a.detected_at || ''));
+    if (rows.length === 0) {
+        el.innerHTML = '<div style="padding:12px; font-size:12px; color:var(--text-muted);">No findings on any node. (Either nothing has been detected, or no scans have been run yet.)</div>';
+        return;
+    }
+    el.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:12px;">
+        <thead><tr style="text-align:left; border-bottom:1px solid var(--border); background:var(--bg-input);">
+            <th style="padding:6px 10px;">When</th>
+            <th style="padding:6px 10px;">Node</th>
+            <th style="padding:6px 10px;">Scanner</th>
+            <th style="padding:6px 10px;">Severity</th>
+            <th style="padding:6px 10px;">Threat / message</th>
+            <th style="padding:6px 10px;">Action</th>
+        </tr></thead><tbody>${rows.slice(0, 200).map(f => {
+            const sevColour = f.severity === 'critical' ? '#ef4444' : f.severity === 'warning' ? '#fbbf24' : '#3b82f6';
+            return `<tr style="border-bottom:1px solid var(--border);">
+                <td style="padding:5px 10px; color:var(--text-muted); font-family:var(--font-mono); font-size:11px;">${vlanEsc((f.detected_at || '').slice(0,19))}</td>
+                <td style="padding:5px 10px; font-family:var(--font-mono); font-size:11px;">${vlanEsc(f.hostname || '?')}</td>
+                <td style="padding:5px 10px; color:var(--text-muted);">${vlanEsc(f.scanner)}</td>
+                <td style="padding:5px 10px;"><span style="color:${sevColour}; font-weight:600; font-size:11px;">${vlanEsc(f.severity)}</span></td>
+                <td style="padding:5px 10px; font-size:11px;">${vlanEsc(f.title)}${f.path ? `<div style="color:var(--text-muted); font-size:10px; margin-top:2px; font-family:var(--font-mono);">${vlanEsc(f.path)}</div>` : ''}</td>
+                <td style="padding:5px 10px; font-size:11px; color:var(--text-muted);">${vlanEsc((f.action_taken || '').replace(/_/g, ' '))}${(f.killed_pids && f.killed_pids.length) ? ` (PIDs: ${f.killed_pids.join(',')})` : ''}</td>
+            </tr>`;
+        }).join('')}</tbody></table>`;
+}
+
+function renderFleetAvQuarantine(data) {
+    const el = document.getElementById('fleet-av-quarantine');
+    if (!el) return;
+    if (!data || !data.nodes) {
+        el.innerHTML = '<div style="padding:12px; color:#ef4444; font-size:13px;">Failed to load.</div>';
+        return;
+    }
+    const rows = [];
+    for (const n of data.nodes) {
+        if (n.status !== 'ok' || !n.data || !Array.isArray(n.data.quarantine)) continue;
+        for (const q of n.data.quarantine) {
+            rows.push({ ...q, hostname: n.hostname, node_id: n.node_id });
+        }
+    }
+    rows.sort((a, b) => (b.quarantined_at || '').localeCompare(a.quarantined_at || ''));
+    if (rows.length === 0) {
+        el.innerHTML = '<div style="padding:12px; font-size:12px; color:var(--text-muted);">No files in quarantine on any node.</div>';
+        return;
+    }
+    const fmtSize = b => b < 1024 ? `${b} B` : b < 1024*1024 ? `${(b/1024).toFixed(1)} KB` : `${(b/(1024*1024)).toFixed(2)} MB`;
+    el.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:12px;">
+        <thead><tr style="text-align:left; border-bottom:1px solid var(--border); background:var(--bg-input);">
+            <th style="padding:6px 10px;">When</th>
+            <th style="padding:6px 10px;">Node</th>
+            <th style="padding:6px 10px;">Threat</th>
+            <th style="padding:6px 10px;">Original path</th>
+            <th style="padding:6px 10px;">Size</th>
+            <th style="padding:6px 10px;">Actions</th>
+        </tr></thead><tbody>${rows.map(q => `<tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:5px 10px; color:var(--text-muted); font-family:var(--font-mono); font-size:11px;">${vlanEsc((q.quarantined_at || '').slice(0,19))}</td>
+            <td style="padding:5px 10px; font-family:var(--font-mono); font-size:11px;">${vlanEsc(q.hostname || '?')}</td>
+            <td style="padding:5px 10px; color:#ef4444; font-size:11px;">${vlanEsc(q.threat_name || '?')}</td>
+            <td style="padding:5px 10px; font-family:var(--font-mono); font-size:10px;">${vlanEsc(q.original_path || '')}</td>
+            <td style="padding:5px 10px; font-size:11px; color:var(--text-muted);">${fmtSize(q.size_bytes || 0)}</td>
+            <td style="padding:5px 10px;">
+                <button class="btn btn-sm" onclick="fleetAntivirusRestore('${vlanEsc(q.node_id)}','${vlanEsc(q.id)}')" style="font-size:11px; margin-right:4px;">Restore</button>
+                <button class="btn btn-sm btn-danger" onclick="fleetAntivirusDelete('${vlanEsc(q.node_id)}','${vlanEsc(q.id)}')" style="font-size:11px;">Delete</button>
+            </td>
+        </tr>`).join('')}</tbody></table>`;
+}
+
+async function fleetAntivirusInstall() {
+    if (!await wolfConfirm(
+        'Install ClamAV + rkhunter + chkrootkit on EVERY WolfStack node in this cluster?\n\nThis will run apt-get / dnf / pacman / zypper install on each node. Initial signature download can take a few minutes per node.',
+        'Fleet install'
+    )) return;
+    const btn = document.getElementById('fleet-av-install-btn');
+    const status = document.getElementById('fleet-av-action-status');
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+    if (status) status.innerHTML = '<span style="color:#fbbf24;">Installing on every node — this can take a few minutes…</span>';
+    try {
+        const r = await fetch(apiUrl('/api/fleet/antivirus/install'), { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+        const d = await r.json();
+        const nodes = d.nodes || [];
+        const ok = nodes.filter(n => n.status === 'ok' && n.data && n.data.ok).length;
+        const failed = nodes.filter(n => n.status !== 'ok' || (n.data && !n.data.ok)).length;
+        if (status) status.innerHTML = ok > 0
+            ? `<span style="color:#22c55e;">✓ Installed on ${ok} node(s)</span>${failed > 0 ? ` <span style="color:#ef4444;">· ${failed} failed</span>` : ''}`
+            : `<span style="color:#ef4444;">✗ Install failed on every node — check the per-node details.</span>`;
+        showToast(`Install complete: ${ok} OK, ${failed} failed`, ok > 0 ? 'success' : 'error');
+        await fleetLoadAntivirus();
+    } catch (e) {
+        if (status) status.innerHTML = `<span style="color:#ef4444;">${vlanEsc(e.message || e)}</span>`;
+        showToast(`Install failed: ${e.message || e}`, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+    }
+}
+
+async function fleetAntivirusScan() {
+    if (!await wolfConfirm(
+        'Start a full antivirus scan on EVERY node in the cluster?\n\nClamAV walks the entire host filesystem (excluding /sys, /proc, /dev, network mounts, and live VM disk images). A full scan typically takes 10-60 minutes per node depending on disk size. Progress is visible per-node in the table below.',
+        'Fleet scan'
+    )) return;
+    const btn = document.getElementById('fleet-av-scan-btn');
+    const status = document.getElementById('fleet-av-action-status');
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+    if (status) status.innerHTML = '<span style="color:#fbbf24;">Starting scans on every node…</span>';
+    try {
+        const r = await fetch(apiUrl('/api/fleet/antivirus/scan'), { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+        const d = await r.json();
+        const nodes = d.nodes || [];
+        const started = nodes.filter(n => n.status === 'ok' && n.data && n.data.started).length;
+        const skipped = nodes.filter(n => n.status === 'ok' && n.data && n.data.skipped).length;
+        const failed = nodes.filter(n => n.status !== 'ok').length;
+        if (status) status.innerHTML = `<span style="color:#22c55e;">✓ Scans started on ${started} node(s)</span>${skipped > 0 ? ` <span style="color:var(--text-muted);">· ${skipped} already running</span>` : ''}${failed > 0 ? ` <span style="color:#ef4444;">· ${failed} unreachable</span>` : ''}`;
+        showToast(`Scans started: ${started} OK, ${skipped} skipped, ${failed} failed`, 'success');
+        await fleetLoadAntivirus();
+    } catch (e) {
+        if (status) status.innerHTML = `<span style="color:#ef4444;">${vlanEsc(e.message || e)}</span>`;
+        showToast(`Fleet scan failed: ${e.message || e}`, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+    }
+}
+
+async function fleetAntivirusSaveConfig() {
+    const cfg = {
+        enabled:          document.getElementById('fleet-av-enabled').value === 'true',
+        schedule_hours:   parseInt(document.getElementById('fleet-av-schedule').value, 10) || 24,
+        auto_quarantine:  document.getElementById('fleet-av-auto-quarantine').value === 'true',
+        auto_kill:        document.getElementById('fleet-av-auto-kill').value === 'true',
+        run_clamav:       document.getElementById('fleet-av-run-clamav').value === 'true',
+        run_rkhunter:     document.getElementById('fleet-av-run-rkhunter').value === 'true',
+        run_chkrootkit:   document.getElementById('fleet-av-run-chkrootkit').value === 'true',
+        scan_roots:       ['/'],
+        extra_excludes:   [],
+    };
+    const status = document.getElementById('fleet-av-config-status');
+    if (status) status.innerHTML = '<span style="color:#fbbf24;">Pushing to every node…</span>';
+    try {
+        const r = await fetch(apiUrl('/api/fleet/antivirus/push-config'), {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify(cfg),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+            if (status) status.innerHTML = `<span style="color:#ef4444;">${vlanEsc(d.error || 'push failed')}</span>`;
+            showToast(`Save failed: ${d.error || 'unknown'}`, 'error');
+            return;
+        }
+        const peers = d.peers || [];
+        const peerOk = peers.filter(p => p.ok).length;
+        const peerFail = peers.filter(p => !p.ok).length;
+        // self_applied = 1 + per-peer counts.
+        if (status) status.innerHTML = `<span style="color:#22c55e;">✓ Saved on self + ${peerOk} peer(s)</span>${peerFail > 0 ? ` <span style="color:#ef4444;">· ${peerFail} failed</span>` : ''}`;
+        showToast(`Policy saved on ${1 + peerOk} node(s)${peerFail > 0 ? `, ${peerFail} failed` : ''}`, peerFail === 0 ? 'success' : 'error');
+    } catch (e) {
+        if (status) status.innerHTML = `<span style="color:#ef4444;">${vlanEsc(e.message || e)}</span>`;
+        showToast(`Save failed: ${e.message || e}`, 'error');
+    }
+}
+
+async function fleetAntivirusRestore(nodeId, qid) {
+    if (!await wolfConfirm(
+        'Restore this quarantined file to its original path?\n\nDo this ONLY if you have confirmed the detection was a false positive. The file will be returned with its original permissions and owner.',
+        'Restore from quarantine'
+    )) return;
+    try {
+        const url = _fleetAvOpUrl(nodeId, '/api/antivirus/quarantine/restore');
+        const r = await fetch(url, {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ id: qid }),
+        });
+        const d = await r.json();
+        if (!r.ok) { showToast(d.error || 'Restore failed', 'error'); return; }
+        showToast('Restored from quarantine', 'success');
+        await fleetLoadAntivirus();
+    } catch (e) {
+        showToast(`Restore failed: ${e.message || e}`, 'error');
+    }
+}
+
+async function fleetAntivirusDelete(nodeId, qid) {
+    if (!await wolfConfirm(
+        'PERMANENTLY DELETE this quarantined file?\n\nThe file will be shredded (or unlinked if shred is unavailable) and cannot be recovered. Use this once you have confirmed it is malicious and you don\'t need it for forensics.',
+        'Delete from quarantine'
+    )) return;
+    try {
+        const url = _fleetAvOpUrl(nodeId, '/api/antivirus/quarantine/delete');
+        const r = await fetch(url, {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ id: qid }),
+        });
+        const d = await r.json();
+        if (!r.ok) { showToast(d.error || 'Delete failed', 'error'); return; }
+        showToast('Quarantined file deleted', 'success');
+        await fleetLoadAntivirus();
+    } catch (e) {
+        showToast(`Delete failed: ${e.message || e}`, 'error');
+    }
+}
+
 window.fleetRotateClusterSecret = fleetRotateClusterSecret;
 window.fleetPushSshHardening = fleetPushSshHardening;
 window.fleetLoadScanDetector = fleetLoadScanDetector;
 window.fleetPushScanDetector = fleetPushScanDetector;
 window.fleetLoadHostAudit = fleetLoadHostAudit;
+window.fleetLoadAntivirus = fleetLoadAntivirus;
+window.fleetAntivirusInstall = fleetAntivirusInstall;
+window.fleetAntivirusScan = fleetAntivirusScan;
+window.fleetAntivirusSaveConfig = fleetAntivirusSaveConfig;
+window.fleetAntivirusRestore = fleetAntivirusRestore;
+window.fleetAntivirusDelete = fleetAntivirusDelete;
 window.vlanProviderChanged = vlanProviderChanged;
 window.vlanSyncBridgeName = vlanSyncBridgeName;
 window.vlanSave = vlanSave;

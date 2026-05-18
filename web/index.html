@@ -1008,6 +1008,103 @@
                 </div>
             </div>
 
+            <!-- ── Antivirus / rootkit scanning (fleet-wide) ── -->
+            <div class="card" style="margin-bottom:20px;">
+                <div class="card-header">
+                    <h3 style="margin:0;">🦠 Antivirus &amp; rootkit scanning</h3>
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">
+                        Host-installed <strong>ClamAV</strong> + <strong>rkhunter</strong> + <strong>chkrootkit</strong> running on every node. One install per host covers every LXC, every Docker container, and the host filesystem (ClamAV reads directly into <code>/var/lib/lxc</code>, <code>/var/lib/vz</code>, <code>/var/lib/docker</code>).
+                        ClamAV hits are <strong>quarantined</strong> (chmod 000 + moved to <code>/var/quarantine/wolfstack/</code>) and any processes using the file are <strong>killed</strong>.
+                        rkhunter / chkrootkit findings are alert-only (false-positive rate is too high for auto-action).
+                        <span style="color:#fbbf24;">VMs are not scanned</span> — their disks are locked while running; that's a separate libguestfs/guest-agent feature.
+                    </div>
+                </div>
+                <div class="card-body">
+                    <!-- Fleet controls -->
+                    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:14px;">
+                        <button class="btn btn-primary" onclick="fleetAntivirusInstall()" id="fleet-av-install-btn">📥 Install on entire fleet</button>
+                        <button class="btn btn-primary" onclick="fleetAntivirusScan()" id="fleet-av-scan-btn">▶ Run scan on entire fleet</button>
+                        <button class="btn btn-secondary" onclick="fleetLoadAntivirus()">↻ Refresh</button>
+                        <span id="fleet-av-action-status" style="font-size:12px; color:var(--text-muted); margin-left:4px;"></span>
+                    </div>
+
+                    <!-- Schedule + per-scanner config -->
+                    <details style="margin:0 0 14px; padding:8px 12px; background:var(--bg-input); border:1px solid var(--border); border-radius:6px;">
+                        <summary style="cursor:pointer; font-size:13px; color:var(--text-secondary); user-select:none;">Schedule &amp; auto-action policy (per-node)</summary>
+                        <div style="margin-top:10px; display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:12px;">
+                            <div class="form-group">
+                                <label for="fleet-av-enabled">Enabled</label>
+                                <select class="form-control" id="fleet-av-enabled">
+                                    <option value="false" selected>No (manual scans only)</option>
+                                    <option value="true">Yes (run on schedule)</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="fleet-av-schedule">Schedule (hours between scans)</label>
+                                <input type="number" class="form-control" id="fleet-av-schedule" min="1" max="168" value="24">
+                            </div>
+                            <div class="form-group">
+                                <label for="fleet-av-auto-quarantine">Auto-quarantine ClamAV hits</label>
+                                <select class="form-control" id="fleet-av-auto-quarantine">
+                                    <option value="true" selected>Yes (move file to /var/quarantine/wolfstack)</option>
+                                    <option value="false">No (alert only)</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="fleet-av-auto-kill">Auto-kill processes using the file</label>
+                                <select class="form-control" id="fleet-av-auto-kill">
+                                    <option value="true" selected>Yes (SIGKILL processes opening the file)</option>
+                                    <option value="false">No</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="fleet-av-run-clamav">Run ClamAV</label>
+                                <select class="form-control" id="fleet-av-run-clamav">
+                                    <option value="true" selected>Yes</option>
+                                    <option value="false">No</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="fleet-av-run-rkhunter">Run rkhunter</label>
+                                <select class="form-control" id="fleet-av-run-rkhunter">
+                                    <option value="true" selected>Yes</option>
+                                    <option value="false">No</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="fleet-av-run-chkrootkit">Run chkrootkit</label>
+                                <select class="form-control" id="fleet-av-run-chkrootkit">
+                                    <option value="true" selected>Yes</option>
+                                    <option value="false">No</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div style="margin-top:10px; display:flex; gap:8px; align-items:center;">
+                            <button class="btn btn-primary" onclick="fleetAntivirusSaveConfig()">💾 Save policy to every node</button>
+                            <span id="fleet-av-config-status" style="font-size:12px; color:var(--text-muted);"></span>
+                        </div>
+                    </details>
+
+                    <!-- Per-node status grid -->
+                    <h4 style="margin:14px 0 6px; font-size:13px; color:var(--text-secondary);">Per-node status</h4>
+                    <div id="fleet-av-status">
+                        <div style="color:var(--text-muted); font-size:13px;">Loading…</div>
+                    </div>
+
+                    <!-- Recent findings -->
+                    <h4 style="margin:18px 0 6px; font-size:13px; color:var(--text-secondary);">Recent findings (fleet-wide)</h4>
+                    <div id="fleet-av-findings" style="max-height:300px; overflow-y:auto; border:1px solid var(--border); border-radius:6px;">
+                        <div style="padding:12px; font-size:12px; color:var(--text-muted);">Loading…</div>
+                    </div>
+
+                    <!-- Quarantine inventory -->
+                    <h4 style="margin:18px 0 6px; font-size:13px; color:var(--text-secondary);">Quarantined files (fleet-wide)</h4>
+                    <div id="fleet-av-quarantine" style="max-height:300px; overflow-y:auto; border:1px solid var(--border); border-radius:6px;">
+                        <div style="padding:12px; font-size:12px; color:var(--text-muted);">Loading…</div>
+                    </div>
+                </div>
+            </div>
+
             <!-- ── SSH hardening push ── -->
             <div class="card" style="margin-bottom:20px;">
                 <div class="card-header">

@@ -290,6 +290,10 @@ pub struct AppState {
     /// XO via its REST API, the same way it drives Proxmox via PVE
     /// API. Each entry stores a base URL + an obfuscated API token.
     pub xo: Arc<std::sync::RwLock<crate::xo::XoStore>>,
+    /// Host antivirus / rootkit scanning state — ClamAV + rkhunter +
+    /// chkrootkit, with quarantine + process-kill on ClamAV hits.
+    /// Per-host state; fleet aggregation via the fleet_fanout_get pattern.
+    pub antivirus: Arc<crate::antivirus::AntivirusState>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -12095,6 +12099,444 @@ pub async fn fleet_security_host_audit(
     let local = move || crate::security_audit::collect_host_audit();
     let results = fleet_fanout_get::<crate::security_audit::HostAudit, _>(
         &state, "/api/security/host-audit", local,
+    ).await;
+    HttpResponse::Ok().json(serde_json::json!({ "nodes": results }))
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Antivirus / rootkit scanning — ClamAV + rkhunter + chkrootkit
+// Fleet-wide install/scan/quarantine. See src/antivirus/mod.rs.
+// ════════════════════════════════════════════════════════════════════
+
+/// Fan a POST out to every WolfStack peer in the cluster. Mirrors
+/// `fleet_fanout_get` but uses POST + JSON body. The local closure
+/// runs in-process for "this" node so we don't waste a loopback HTTP
+/// round-trip.
+async fn fleet_fanout_post<Resp, Local>(
+    state: &web::Data<AppState>,
+    path: &str,
+    body: serde_json::Value,
+    local: Local,
+) -> Vec<FleetNodeResult<Resp>>
+where
+    Resp: serde::de::DeserializeOwned + Serialize + Send + 'static,
+    Local: FnOnce() -> Resp,
+{
+    let (self_id, peers) = {
+        let n = state.cluster.nodes.read().unwrap();
+        let self_id = state.cluster.self_id.clone();
+        let peers: Vec<crate::agent::Node> = n.values().cloned().collect();
+        (self_id, peers)
+    };
+    let secret = state.cluster_secret.clone();
+    let local_result = std::sync::Mutex::new(Some(local()));
+    let mut tasks = Vec::new();
+    for node in peers {
+        let is_self = node.id == self_id;
+        let secret_c = secret.clone();
+        let path = path.to_string();
+        let body_c = body.clone();
+        let local_ref = if is_self {
+            let mut g = local_result.lock().unwrap();
+            g.take()
+        } else { None };
+        tasks.push(async move {
+            if let Some(data) = local_ref {
+                return FleetNodeResult {
+                    node_id: node.id, hostname: node.hostname, address: node.address,
+                    status: "ok".into(), data: Some(data), error: None,
+                };
+            }
+            if node.node_type != "wolfstack" {
+                return FleetNodeResult {
+                    node_id: node.id, hostname: node.hostname, address: node.address,
+                    status: "skipped".into(), data: None,
+                    error: Some("non-WolfStack node".into()),
+                };
+            }
+            let urls = build_node_urls(&node.address, node.port, &path);
+            // 5-minute timeout — `apt-get install` on a fresh mirror
+            // refresh can legitimately take a couple of minutes.
+            let client = match reqwest::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .timeout(std::time::Duration::from_secs(300))
+                .build() {
+                Ok(c) => c,
+                Err(e) => return FleetNodeResult {
+                    node_id: node.id, hostname: node.hostname, address: node.address,
+                    status: "failed".into(), data: None,
+                    error: Some(format!("client build: {}", e)),
+                },
+            };
+            let mut errors: Vec<String> = Vec::new();
+            for url in &urls {
+                let resp = client.post(url)
+                    .header("X-WolfStack-Secret", &secret_c)
+                    .json(&body_c)
+                    .send().await;
+                match resp {
+                    Ok(r) if r.status().is_success() => {
+                        match r.json::<Resp>().await {
+                            Ok(v) => return FleetNodeResult {
+                                node_id: node.id, hostname: node.hostname, address: node.address,
+                                status: "ok".into(), data: Some(v), error: None,
+                            },
+                            Err(e) => errors.push(format!("{} -> 200 OK but JSON parse failed: {}", url, e)),
+                        }
+                    }
+                    Ok(r) => {
+                        let status = r.status();
+                        let body = r.text().await.unwrap_or_default();
+                        let preview = body.chars().take(300).collect::<String>();
+                        errors.push(format!("{} -> HTTP {}: {}", url, status, preview));
+                    }
+                    Err(e) => errors.push(format!("{} -> transport: {}", url, e)),
+                }
+            }
+            FleetNodeResult {
+                node_id: node.id, hostname: node.hostname, address: node.address,
+                status: "failed".into(), data: None,
+                error: Some(errors.join(" | ")),
+            }
+        });
+    }
+    futures::future::join_all(tasks).await
+}
+
+#[derive(Serialize)]
+struct AntivirusStatusView {
+    install: crate::antivirus::InstallStatus,
+    scan: crate::antivirus::ScanState,
+    config: crate::antivirus::AntivirusConfig,
+    finding_count: usize,
+    quarantine_count: usize,
+    /// Newest finding timestamp seen on this node (RFC3339), or None.
+    last_finding_at: Option<String>,
+}
+
+fn build_antivirus_status_view(state: &AppState) -> AntivirusStatusView {
+    state.antivirus.refresh_install_status();
+    let install = state.antivirus.install_status.read().unwrap().clone();
+    let scan = state.antivirus.scan_state.read().unwrap().clone();
+    let config = state.antivirus.config.read().unwrap().clone();
+    let findings = state.antivirus.findings.read().unwrap();
+    let finding_count = findings.len();
+    let last_finding_at = findings.first().map(|f| f.detected_at.clone());
+    let quarantine_count = state.antivirus.quarantine.read().unwrap().len();
+    AntivirusStatusView {
+        install, scan, config, finding_count, quarantine_count, last_finding_at,
+    }
+}
+
+/// GET /api/antivirus/status — installed tools, scan progress, counts.
+pub async fn antivirus_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(build_antivirus_status_view(&state))
+}
+
+/// POST /api/antivirus/install — install ClamAV/rkhunter/chkrootkit
+/// on this node via the host's native package manager. Blocking work
+/// (apt-get / dnf / pacman / zypper) is offloaded to web::block so the
+/// actix runtime stays responsive.
+pub async fn antivirus_install(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let av = state.antivirus.clone();
+    let result = match web::block(move || {
+        let r = crate::antivirus::install_tools();
+        av.refresh_install_status();
+        r
+    }).await {
+        Ok(r) => r,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("install task panicked: {}", e),
+        })),
+    };
+    HttpResponse::Ok().json(result)
+}
+
+/// POST /api/antivirus/scan — fire a full scan in a background thread.
+/// Returns immediately with 202 + the scan state so the UI can poll
+/// /api/antivirus/status for progress.
+pub async fn antivirus_scan_start(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    // Refuse to start a new scan if one is already running on this
+    // node — keeps the "did I press the button twice?" race from
+    // double-spawning clamscan (which would thrash the disk + double
+    // the freshclam DB load).
+    {
+        let s = state.antivirus.scan_state.read().unwrap();
+        if s.running {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "scan already in progress on this node",
+                "started_at": s.started_at,
+                "active_scanner": s.active_scanner,
+            }));
+        }
+    }
+    let av = state.antivirus.clone();
+    std::thread::spawn(move || {
+        let _ = crate::antivirus::run_full_scan(&av);
+    });
+    HttpResponse::Accepted().json(serde_json::json!({
+        "ok": true,
+        "message": "scan started; poll /api/antivirus/status for progress",
+    }))
+}
+
+/// GET /api/antivirus/config — current configuration.
+pub async fn antivirus_config_get(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let cfg = state.antivirus.config.read().unwrap().clone();
+    HttpResponse::Ok().json(cfg)
+}
+
+/// PUT /api/antivirus/config — replace configuration.
+pub async fn antivirus_config_set(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<crate::antivirus::AntivirusConfig>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let mut cfg = body.into_inner();
+    // Clamp schedule to a sane range.
+    if cfg.schedule_hours != 0 {
+        cfg.schedule_hours = cfg.schedule_hours.clamp(1, 168);
+    }
+    {
+        let mut g = state.antivirus.config.write().unwrap();
+        *g = cfg.clone();
+    }
+    if let Err(e) = cfg.save() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("save failed: {}", e),
+        }));
+    }
+    HttpResponse::Ok().json(cfg)
+}
+
+/// GET /api/antivirus/findings — recent findings, newest first.
+pub async fn antivirus_findings(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let f = state.antivirus.findings.read().unwrap().clone();
+    HttpResponse::Ok().json(serde_json::json!({ "findings": f }))
+}
+
+/// GET /api/antivirus/quarantine — current quarantine inventory.
+pub async fn antivirus_quarantine_list(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let q = state.antivirus.quarantine.read().unwrap().clone();
+    HttpResponse::Ok().json(serde_json::json!({ "quarantine": q }))
+}
+
+#[derive(Deserialize)]
+pub struct QuarantineIdBody { pub id: String }
+
+/// POST /api/antivirus/quarantine/restore — restore a quarantined
+/// file to its original path with original mode + owner.
+pub async fn antivirus_quarantine_restore(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<QuarantineIdBody>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let av = state.antivirus.clone();
+    let id = body.id.clone();
+    let r = web::block(move || crate::antivirus::restore_quarantined(&av, &id)).await;
+    match r {
+        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("restore task panicked: {}", e),
+        })),
+    }
+}
+
+/// POST /api/antivirus/quarantine/delete — permanently delete a
+/// quarantined payload (shred if available, else unlink).
+pub async fn antivirus_quarantine_delete(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<QuarantineIdBody>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let av = state.antivirus.clone();
+    let id = body.id.clone();
+    let r = web::block(move || crate::antivirus::delete_quarantined(&av, &id)).await;
+    match r {
+        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("delete task panicked: {}", e),
+        })),
+    }
+}
+
+// ───────── Fleet aggregation ─────────
+
+/// GET /api/fleet/antivirus/status — aggregated per-node install +
+/// scan state across every WolfStack peer in the cluster. Also
+/// returns `self_id` so the UI can route per-node actions (restore,
+/// delete) to the local API for this node and node-proxy for peers.
+pub async fn fleet_antivirus_status(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let self_id = state.cluster.self_id.clone();
+    let state_for_local = state.clone();
+    let local = move || serde_json::to_value(build_antivirus_status_view(&state_for_local))
+        .unwrap_or(serde_json::Value::Null);
+    let results = fleet_fanout_get::<serde_json::Value, _>(
+        &state, "/api/antivirus/status", local,
+    ).await;
+    HttpResponse::Ok().json(serde_json::json!({
+        "nodes": results,
+        "self_id": self_id,
+    }))
+}
+
+/// POST /api/fleet/antivirus/install — install antivirus tools on
+/// every node in the cluster.
+pub async fn fleet_antivirus_install(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let state_for_local = state.clone();
+    let local = move || {
+        let r = crate::antivirus::install_tools();
+        state_for_local.antivirus.refresh_install_status();
+        serde_json::to_value(r).unwrap_or(serde_json::Value::Null)
+    };
+    let results = fleet_fanout_post::<serde_json::Value, _>(
+        &state, "/api/antivirus/install", serde_json::json!({}), local,
+    ).await;
+    HttpResponse::Ok().json(serde_json::json!({ "nodes": results }))
+}
+
+/// POST /api/fleet/antivirus/scan — kick off a scan on every node.
+pub async fn fleet_antivirus_scan(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let state_for_local = state.clone();
+    let local = move || {
+        // Mirror the per-node refusal: if a scan is running, return
+        // a structured "skipped" rather than starting a second one.
+        let already_running = state_for_local.antivirus.scan_state.read()
+            .map(|s| s.running).unwrap_or(false);
+        if already_running {
+            return serde_json::json!({ "ok": false, "skipped": "scan already in progress" });
+        }
+        let av = state_for_local.antivirus.clone();
+        std::thread::spawn(move || { let _ = crate::antivirus::run_full_scan(&av); });
+        serde_json::json!({ "ok": true, "started": true })
+    };
+    let results = fleet_fanout_post::<serde_json::Value, _>(
+        &state, "/api/antivirus/scan", serde_json::json!({}), local,
+    ).await;
+    HttpResponse::Ok().json(serde_json::json!({ "nodes": results }))
+}
+
+/// GET /api/fleet/antivirus/findings — fleet-wide findings.
+pub async fn fleet_antivirus_findings(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let state_for_local = state.clone();
+    let local = move || {
+        let f = state_for_local.antivirus.findings.read().unwrap().clone();
+        serde_json::json!({ "findings": f })
+    };
+    let results = fleet_fanout_get::<serde_json::Value, _>(
+        &state, "/api/antivirus/findings", local,
+    ).await;
+    HttpResponse::Ok().json(serde_json::json!({ "nodes": results }))
+}
+
+/// POST /api/fleet/antivirus/push-config — apply config locally, then
+/// PUT it to every WolfStack peer in the cluster. Mirrors the
+/// `fleet_security_push_scan_detector` pattern: one click in the UI
+/// reaches every node with no per-node loop on the frontend.
+pub async fn fleet_antivirus_push_config(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<crate::antivirus::AntivirusConfig>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let mut cfg = body.into_inner();
+    if cfg.schedule_hours != 0 {
+        cfg.schedule_hours = cfg.schedule_hours.clamp(1, 168);
+    }
+    // Apply locally.
+    {
+        let mut g = state.antivirus.config.write().unwrap();
+        *g = cfg.clone();
+    }
+    if let Err(e) = cfg.save() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("local save: {}", e),
+        }));
+    }
+    let (self_id, peers) = {
+        let n = state.cluster.nodes.read().unwrap();
+        let self_id = state.cluster.self_id.clone();
+        let peers: Vec<crate::agent::Node> = n.values()
+            .filter(|p| p.id != self_id && p.node_type == "wolfstack")
+            .cloned().collect();
+        (self_id, peers)
+    };
+    let _ = self_id;
+    let secret = state.cluster_secret.clone();
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(10))
+        .build().ok();
+    let mut peer_results = Vec::new();
+    if let Some(client) = client {
+        for node in peers {
+            let urls = build_node_urls(&node.address, node.port, "/api/antivirus/config");
+            let mut ok = false;
+            let mut err = String::new();
+            for url in &urls {
+                let r = client.put(url)
+                    .header("X-WolfStack-Secret", &secret)
+                    .json(&cfg)
+                    .send().await;
+                match r {
+                    Ok(resp) if resp.status().is_success() => { ok = true; break; }
+                    Ok(resp) => { err = format!("HTTP {}", resp.status()); }
+                    Err(e) => { err = format!("transport: {}", e); }
+                }
+            }
+            peer_results.push(serde_json::json!({
+                "hostname": node.hostname, "address": node.address,
+                "ok": ok, "error": if ok { String::new() } else { err },
+            }));
+        }
+    }
+    HttpResponse::Ok().json(serde_json::json!({
+        "ok": true, "self_applied": true, "peers": peer_results,
+    }))
+}
+
+/// GET /api/fleet/antivirus/quarantine — fleet-wide quarantine inventory.
+pub async fn fleet_antivirus_quarantine(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let state_for_local = state.clone();
+    let local = move || {
+        let q = state_for_local.antivirus.quarantine.read().unwrap().clone();
+        serde_json::json!({ "quarantine": q })
+    };
+    let results = fleet_fanout_get::<serde_json::Value, _>(
+        &state, "/api/antivirus/quarantine", local,
     ).await;
     HttpResponse::Ok().json(serde_json::json!({ "nodes": results }))
 }
@@ -29457,6 +29899,23 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/security/scan-detector", web::post().to(security_scan_detector_set))
         .route("/api/fleet/security/scan-detector", web::get().to(fleet_security_scan_detector))
         .route("/api/fleet/security/push-scan-detector", web::post().to(fleet_security_push_scan_detector))
+        // Antivirus / rootkit scanning — per-node primitives
+        .route("/api/antivirus/status", web::get().to(antivirus_status))
+        .route("/api/antivirus/install", web::post().to(antivirus_install))
+        .route("/api/antivirus/scan", web::post().to(antivirus_scan_start))
+        .route("/api/antivirus/config", web::get().to(antivirus_config_get))
+        .route("/api/antivirus/config", web::put().to(antivirus_config_set))
+        .route("/api/antivirus/findings", web::get().to(antivirus_findings))
+        .route("/api/antivirus/quarantine", web::get().to(antivirus_quarantine_list))
+        .route("/api/antivirus/quarantine/restore", web::post().to(antivirus_quarantine_restore))
+        .route("/api/antivirus/quarantine/delete", web::post().to(antivirus_quarantine_delete))
+        // Antivirus — fleet aggregation + fanout
+        .route("/api/fleet/antivirus/status", web::get().to(fleet_antivirus_status))
+        .route("/api/fleet/antivirus/install", web::post().to(fleet_antivirus_install))
+        .route("/api/fleet/antivirus/scan", web::post().to(fleet_antivirus_scan))
+        .route("/api/fleet/antivirus/findings", web::get().to(fleet_antivirus_findings))
+        .route("/api/fleet/antivirus/quarantine", web::get().to(fleet_antivirus_quarantine))
+        .route("/api/fleet/antivirus/push-config", web::post().to(fleet_antivirus_push_config))
         .route("/api/networking/vlan/parse-config", web::post().to(vlan_parse_config))
         .route("/api/networking/vlan/apply", web::post().to(vlan_apply))
         .route("/api/networking/vlan/attachments", web::post().to(vlan_upsert))

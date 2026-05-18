@@ -71,6 +71,7 @@ mod edge;
 mod threat_intel;
 mod security_audit;
 mod scan_detector;
+mod antivirus;
 #[allow(dead_code)]
 mod integrations;
 
@@ -662,6 +663,7 @@ async fn main() -> std::io::Result<()> {
             gateway_cluster_cache: Arc::new(std::sync::Mutex::new(None)),
             array_cluster_cache: Arc::new(std::sync::Mutex::new(None)),
             xo: Arc::new(std::sync::RwLock::new(xo::XoStore::load())),
+            antivirus: Arc::new(antivirus::AntivirusState::load()),
         });
 
         // Wire fleet-wide lockout propagation hooks into the limiter.
@@ -1070,6 +1072,22 @@ async fn main() -> std::io::Result<()> {
         // Start the WolfRouter safe-mode watcher — auto-reverts firewall
         // changes if the user doesn't confirm within the safe-mode window.
         crate::networking::router::spawn_rollback_watcher(app_state.router.clone());
+
+        // Antivirus scheduler — every 5 minutes, check whether the
+        // configured schedule_hours interval has elapsed since the
+        // last completed scan; if so, fire a background scan thread.
+        // Per-node (each host scans its own filesystem), so no
+        // leader election required.
+        let av_state = app_state.antivirus.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+            // Skip the very first immediate fire — boot is busy enough.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                crate::antivirus::maybe_run_scheduled_scan(av_state.clone());
+            }
+        });
 
         // Security scanner background loop — runs posture + active-attack
         // checks on a timer and fires alerts via Discord/Slack/Telegram/
