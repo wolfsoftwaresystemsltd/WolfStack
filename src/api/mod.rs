@@ -594,6 +594,68 @@ pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json
     }))
 }
 
+/// Fan out a kernel-block decision to every federation registered on
+/// this WolfStack. Uses each federation's stored api_key as a Bearer
+/// token to authenticate against the federation's
+/// `/api/security/fleet-kernel-block-ip` endpoint — which applies the
+/// block locally AND fans out within the federation's own cluster.
+///
+/// Crucially the receiving endpoint does NOT push back to federations,
+/// preventing the obvious A→B→A loop. Only the original local block
+/// trigger ever calls this function.
+pub async fn propagate_kernel_block_to_federations(
+    federations: std::sync::Arc<std::sync::RwLock<crate::federation::FederationStore>>,
+    ip: String,
+    lockout_seconds: u64,
+    source_node: String,
+) {
+    let entries: Vec<crate::federation::FederatedCluster> = {
+        let g = match federations.read() { Ok(g) => g, Err(_) => return };
+        g.clusters.clone()
+    };
+    if entries.is_empty() { return; }
+    let payload = serde_json::json!({
+        "ip": ip,
+        "lockout_seconds": lockout_seconds,
+        "source_node": source_node,
+    });
+    for fed in entries {
+        let client = match reqwest::Client::builder()
+            .danger_accept_invalid_certs(fed.insecure_tls)
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => { tracing::error!("federation kernel-block: client build for '{}': {}", fed.name, e); continue; }
+        };
+        let url = format!("{}/api/security/fleet-kernel-block-ip", fed.base_url.trim_end_matches('/'));
+        match client.post(&url)
+            .header("Authorization", format!("Bearer {}", fed.api_key))
+            .json(&payload)
+            .send().await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!(
+                    "federation kernel-block: '{}' ({}) ack'd block of {}",
+                    fed.name, fed.base_url, ip);
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                tracing::error!(
+                    "federation kernel-block to '{}' ({}) FAILED: HTTP {}: {}",
+                    fed.name, fed.base_url, status,
+                    body.chars().take(200).collect::<String>());
+            }
+            Err(e) => {
+                tracing::error!(
+                    "federation kernel-block to '{}' ({}) FAILED: transport: {}",
+                    fed.name, fed.base_url, e);
+            }
+        }
+    }
+}
+
 /// Fan out a kernel-block decision to every WolfStack peer in the
 /// cluster. Each peer receives `{ip, lockout_seconds, source_node}` and
 /// re-validates against its own trusted-IP list before applying. Called
@@ -706,6 +768,48 @@ pub async fn security_kernel_block_ip(
         "ok": true,
         "ip": body.ip,
         "applied": true,
+    }))
+}
+
+/// POST /api/security/fleet-kernel-block-ip — federation entry point.
+/// Accepts a block triggered by another (federated) cluster, applies
+/// it locally, and fans it out across THIS cluster's WolfStack peers
+/// via `propagate_kernel_block_to_peers`. Crucially does NOT push
+/// back to federations — that's how we break the A→B→A→B propagation
+/// loop. The original-trigger cluster is the only one that calls
+/// every federation; receivers only fan within their own ring.
+///
+/// Auth: require_auth — accepts cluster_secret OR Bearer api_key
+/// (federations use the latter) OR an authenticated session.
+pub async fn security_fleet_kernel_block_ip(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<KernelBlockRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let body = body.into_inner();
+    let source = if body.source_node.is_empty() {
+        "federation".to_string()
+    } else {
+        format!("federation:{}", body.source_node)
+    };
+    // 1. Apply locally — kernel-block + lockout list update.
+    state.login_limiter.add_propagated_lockout(&body.ip, body.lockout_seconds, &source);
+    // 2. Fan out within THIS cluster — every peer of ours sees it.
+    //    Skipping any further federation push to avoid loops.
+    let cluster = state.cluster.clone();
+    let secret = state.cluster_secret.clone();
+    let ip = body.ip.clone();
+    let secs = body.lockout_seconds;
+    let source_node = state.cluster.self_id.clone();
+    tokio::spawn(async move {
+        propagate_kernel_block_to_peers(cluster, secret, ip, secs, source_node).await;
+    });
+    HttpResponse::Ok().json(serde_json::json!({
+        "ok": true,
+        "ip": body.ip,
+        "applied": true,
+        "fanning_out_to_cluster": true,
     }))
 }
 
@@ -11329,8 +11433,12 @@ where
 }
 
 /// GET /api/fleet/security/lockouts — aggregated blocked-IP view
-/// across every WolfStack node. UI uses this to power the "Fleet
-/// blocked IPs" table on the Fleet Security page.
+/// across every WolfStack node in this cluster AND every federated
+/// cluster registered here. UI uses this to power the "Fleet blocked
+/// IPs" + "Last N blocked" panels on the Fleet Security page. Each
+/// federation is fetched in parallel using its stored api_key as a
+/// Bearer token; failures are surfaced per-federation so the operator
+/// can see which one is unreachable without blocking the whole view.
 pub async fn fleet_security_lockouts(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -11346,10 +11454,112 @@ pub async fn fleet_security_lockouts(
             "config": limiter.config(),
         })
     };
-    let results = fleet_fanout_get::<serde_json::Value, _>(
+    // Cluster fanout: every WolfStack peer in this cluster.
+    let cluster_results = fleet_fanout_get::<serde_json::Value, _>(
         &state, "/api/security/auth-lockouts", local,
     ).await;
-    HttpResponse::Ok().json(serde_json::json!({ "nodes": results }))
+    // Federation fanout: every registered federation, in parallel.
+    let federation_results = fetch_federation_lockouts(&state).await;
+    HttpResponse::Ok().json(serde_json::json!({
+        "nodes": cluster_results,
+        "federations": federation_results,
+    }))
+}
+
+/// Per-federation lockout snapshot used by `fleet_security_lockouts`.
+#[derive(Serialize)]
+struct FederationLockoutResult {
+    /// Federation identifier (matches the `id` in FederationStore).
+    federation_id: String,
+    /// Operator-friendly name shown in the UI.
+    name: String,
+    /// Federation's base URL (informational).
+    base_url: String,
+    /// "ok" | "failed" — top-level transport status.
+    status: String,
+    /// Same payload shape as a single cluster node's response:
+    /// `{ lockouts: [...], audit: [...], config: {...} }`. None when
+    /// status != "ok".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+async fn fetch_federation_lockouts(state: &web::Data<AppState>) -> Vec<FederationLockoutResult> {
+    let federations: Vec<crate::federation::FederatedCluster> = match state.federations.read() {
+        Ok(g) => g.clusters.clone(),
+        Err(_) => return Vec::new(),
+    };
+    if federations.is_empty() { return Vec::new(); }
+
+    let mut tasks = Vec::new();
+    for fed in federations {
+        tasks.push(async move {
+            let client = match reqwest::Client::builder()
+                .danger_accept_invalid_certs(fed.insecure_tls)
+                .timeout(std::time::Duration::from_secs(8))
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => return FederationLockoutResult {
+                    federation_id: fed.id.clone(),
+                    name: fed.name.clone(),
+                    base_url: fed.base_url.clone(),
+                    status: "failed".into(),
+                    data: None,
+                    error: Some(format!("client build: {}", e)),
+                },
+            };
+            let url = format!("{}/api/security/auth-lockouts",
+                fed.base_url.trim_end_matches('/'));
+            let resp = client.get(&url)
+                .header("Authorization", format!("Bearer {}", fed.api_key))
+                .send().await;
+            match resp {
+                Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                    Ok(v) => FederationLockoutResult {
+                        federation_id: fed.id.clone(),
+                        name: fed.name.clone(),
+                        base_url: fed.base_url.clone(),
+                        status: "ok".into(),
+                        data: Some(v),
+                        error: None,
+                    },
+                    Err(e) => FederationLockoutResult {
+                        federation_id: fed.id.clone(),
+                        name: fed.name.clone(),
+                        base_url: fed.base_url.clone(),
+                        status: "failed".into(),
+                        data: None,
+                        error: Some(format!("200 OK but JSON parse failed: {}", e)),
+                    },
+                },
+                Ok(r) => {
+                    let status_code = r.status();
+                    let body = r.text().await.unwrap_or_default();
+                    FederationLockoutResult {
+                        federation_id: fed.id.clone(),
+                        name: fed.name.clone(),
+                        base_url: fed.base_url.clone(),
+                        status: "failed".into(),
+                        data: None,
+                        error: Some(format!("HTTP {}: {}", status_code,
+                            body.chars().take(200).collect::<String>())),
+                    }
+                }
+                Err(e) => FederationLockoutResult {
+                    federation_id: fed.id.clone(),
+                    name: fed.name.clone(),
+                    base_url: fed.base_url.clone(),
+                    status: "failed".into(),
+                    data: None,
+                    error: Some(format!("transport: {}", e)),
+                },
+            }
+        });
+    }
+    futures::future::join_all(tasks).await
 }
 
 /// GET /api/fleet/security/listening-ports — what's listening on
@@ -30014,6 +30224,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/security/auth-unblock", web::post().to(security_auth_unblock))
         .route("/api/security/auth-unblock-peer", web::post().to(security_auth_unblock_peer))
         .route("/api/security/kernel-block-ip", web::post().to(security_kernel_block_ip))
+        .route("/api/security/fleet-kernel-block-ip", web::post().to(security_fleet_kernel_block_ip))
         .route("/api/security/listening-ports-local", web::get().to(security_listening_ports_local))
         .route("/api/security/sessions-destroy-all", web::post().to(security_sessions_destroy_all))
         // Fleet-wide aggregation and operations

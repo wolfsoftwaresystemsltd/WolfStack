@@ -15650,17 +15650,28 @@ async function securityRefreshLockouts() {
     if (audit.length === 0) {
         auditEl.innerHTML = '<div style="padding:12px; font-size:12px; color:var(--text-muted);">No attempts logged yet.</div>';
     } else {
+        // Track which IPs are already in the locked list so we don't
+        // offer a Block button for ones already blocked.
+        const lockedSet = new Set(lockouts.map(l => l.ip));
         const rows = audit.slice(0, 100).map(e => {
             const colour = e.success ? '#22c55e' : (e.was_locked ? '#06b6d4' : '#ef4444');
             const status = e.success ? 'OK' : (e.was_locked ? 'BLOCKED' : 'FAIL');
             const ago = ((Date.now() / 1000) - e.timestamp) | 0;
             const agoStr = ago < 60 ? `${ago}s ago` : ago < 3600 ? `${(ago / 60) | 0}m ago` : `${(ago / 3600) | 0}h ago`;
+            // Manual block button on FAIL rows for IPs not yet locked.
+            // Clicking immediately kernel-blocks the IP for the
+            // configured lockout duration AND propagates across the
+            // cluster + every known federation.
+            const blockBtn = (!e.success && !lockedSet.has(e.ip))
+                ? `<button class="btn btn-sm" onclick="securityManualBlockIp('${vlanEsc(e.ip)}')" style="font-size:10px; padding:2px 8px;" title="Kernel-block this IP now (propagates to every node in every cluster + federation)">Block now</button>`
+                : '';
             return `<tr>
                 <td style="padding:4px 10px; font-size:11px; color:var(--text-muted);">${agoStr}</td>
                 <td style="padding:4px 10px;"><span style="display:inline-block; padding:1px 6px; background:${colour}20; color:${colour}; border-radius:3px; font-size:10px; font-weight:600;">${status}</span></td>
                 <td style="padding:4px 10px; font-family:var(--font-mono); font-size:11px;">${vlanEsc(e.ip)}</td>
                 <td style="padding:4px 10px; font-size:11px;">${vlanEsc(e.username || '—')}</td>
                 <td style="padding:4px 10px; font-size:11px; color:var(--text-muted);">${vlanEsc(e.reason || '')}</td>
+                <td style="padding:4px 10px; text-align:right;">${blockBtn}</td>
             </tr>`;
         }).join('');
         auditEl.innerHTML = `<table style="width:100%; border-collapse:collapse;">
@@ -15670,11 +15681,36 @@ async function securityRefreshLockouts() {
                 <th style="padding:6px 10px; font-size:11px;">IP</th>
                 <th style="padding:6px 10px; font-size:11px;">Username</th>
                 <th style="padding:6px 10px; font-size:11px;">Reason</th>
+                <th style="padding:6px 10px; font-size:11px; text-align:right;">Action</th>
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>`;
     }
 }
+
+async function securityManualBlockIp(ip) {
+    if (!await wolfConfirm(
+        `Kernel-block ${ip} now?\n\nThis IP will be added to iptables DROP for the configured lockout duration (default 48h). The block propagates immediately to every node in this cluster and to every federated cluster you've added — so the IP is dropped fleet-wide, not just on this node.`,
+        'Block IP fleet-wide'
+    )) return;
+    try {
+        const resp = await fetch(apiUrl('/api/security/kernel-block-ip'), {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ ip, source_node: 'manual' }),
+        });
+        const d = await resp.json().catch(() => ({}));
+        if (!resp.ok) { showToast(d.error || 'Block failed', 'error'); return; }
+        showToast(`Blocked ${ip} — propagating to peers + federations`, 'success');
+        // Re-render to move the IP from the audit table into the
+        // "Currently blocked IPs" panel.
+        if (typeof securityRefreshLockouts === 'function') securityRefreshLockouts();
+    } catch (e) {
+        showToast(`Block failed: ${e.message || e}`, 'error');
+    }
+}
+
+window.securityManualBlockIp = securityManualBlockIp;
 
 async function securitySaveLockoutConfig() {
     const trustedRaw = document.getElementById('sec-trusted-ips').value;
@@ -15820,10 +15856,23 @@ async function fleetLoadBlockedIps() {
         return;
     }
     const nodes = data.nodes || [];
-    // Aggregate by IP across all nodes.
+    const federations = data.federations || [];
+    // Aggregate by IP across all nodes AND federations. Federation
+    // entries are folded in as virtual "nodes" so the existing
+    // breakdown table renders them uniformly with their federation
+    // name as the hostname.
     const byIp = {};
     let totalAttempts = 0;
-    for (const n of nodes) {
+    const recentBlocks = []; // { ts, ip, hostname, was_locked }
+    const allSources = nodes.map(n => ({
+        hostname: n.hostname || n.node_id, address: n.address, status: n.status,
+        data: n.data, error: n.error, federation: false,
+    })).concat(federations.map(f => ({
+        hostname: `${f.name} (federation)`,
+        address: f.base_url, status: f.status, data: f.data, error: f.error,
+        federation: true,
+    })));
+    for (const n of allSources) {
         if (n.status !== 'ok' || !n.data) continue;
         for (const l of (n.data.lockouts || [])) {
             if (!byIp[l.ip]) byIp[l.ip] = {
@@ -15835,6 +15884,17 @@ async function fleetLoadBlockedIps() {
             byIp[l.ip].nodes.push({ hostname: n.hostname, remaining: l.remaining_seconds });
             byIp[l.ip].max_remaining = Math.max(byIp[l.ip].max_remaining, l.remaining_seconds);
             if (l.last_username) byIp[l.ip].last_username = l.last_username;
+        }
+        // Collect block events from audit for the "Last 20 blocked" list.
+        for (const a of (n.data.audit || [])) {
+            if (a.was_locked) {
+                recentBlocks.push({
+                    ts: a.timestamp || 0,
+                    ip: a.ip,
+                    hostname: n.hostname,
+                    username: a.username || '',
+                });
+            }
         }
         totalAttempts += (n.data.audit || []).length;
     }
@@ -15878,18 +15938,50 @@ async function fleetLoadBlockedIps() {
         </details>`;
     }
 
+    // Last-20 sample so the operator can SEE that blocks are firing,
+    // even when nothing is currently active (e.g. blocks expired or
+    // were unblocked). Newest first.
+    const recentSorted = recentBlocks.sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 20);
+    const recentHtml = recentSorted.length === 0
+        ? `<div style="margin:14px 0; padding:10px 14px; background:var(--bg-input); border:1px solid var(--border); border-radius:6px; font-size:12px; color:var(--text-muted);">
+             <strong>Last 20 blocked IPs:</strong> no block events recorded across the fleet yet. (Blocks appear here as soon as the threshold trips on any node or federation.)
+           </div>`
+        : `<details style="margin:14px 0; padding:10px 14px; background:var(--bg-input); border:1px solid var(--border); border-radius:6px;" open>
+             <summary style="cursor:pointer; font-size:13px; color:var(--text-secondary); font-weight:600; user-select:none;">Last 20 blocked IPs (fleet-wide, newest first)</summary>
+             <table style="width:100%; border-collapse:collapse; font-size:12px; margin-top:8px;">
+               <thead><tr style="text-align:left; border-bottom:1px solid var(--border);">
+                 <th style="padding:4px 8px; font-size:11px;">When</th>
+                 <th style="padding:4px 8px; font-size:11px;">IP</th>
+                 <th style="padding:4px 8px; font-size:11px;">Triggered on</th>
+                 <th style="padding:4px 8px; font-size:11px;">Username</th>
+               </tr></thead>
+               <tbody>${recentSorted.map(e => {
+                 const ago = ((Date.now() / 1000) - (e.ts || 0)) | 0;
+                 const agoStr = ago < 60 ? `${ago}s ago` : ago < 3600 ? `${(ago / 60) | 0}m ago` : `${(ago / 3600) | 0}h ago`;
+                 return `<tr>
+                   <td style="padding:3px 8px; font-size:11px; color:var(--text-muted);">${agoStr}</td>
+                   <td style="padding:3px 8px; font-family:var(--font-mono); font-size:11px;">${vlanEsc(e.ip)}</td>
+                   <td style="padding:3px 8px; font-size:11px;">${vlanEsc(e.hostname)}</td>
+                   <td style="padding:3px 8px; font-size:11px; color:var(--text-muted);">${vlanEsc(e.username || '—')}</td>
+                 </tr>`;
+               }).join('')}</tbody>
+             </table>
+           </details>`;
+
     if (ips.length === 0) {
         el.innerHTML = `<div style="font-size:13px; color:var(--text-secondary); margin-bottom:6px;">${summary}</div>
                         ${breakdownHtml}
-                        <div style="color:var(--text-muted); font-size:12px;">No IPs are currently blocked on any node.</div>`;
+                        <div style="color:var(--text-muted); font-size:12px;">No IPs are currently blocked on any node.</div>
+                        ${recentHtml}`;
         return;
     }
     const fmtTime = s => {
         const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60);
         return h > 0 ? `${h}h ${m}m` : `${m}m`;
     };
+    const sourceTotal = nodes.length + federations.length;
     el.innerHTML = `
-        <div style="font-size:13px; color:var(--text-secondary); margin-bottom:10px;">${summary}</div>
+        <div style="font-size:13px; color:var(--text-secondary); margin-bottom:10px;">${summary}${federations.length > 0 ? ` · <span style="color:var(--text-muted);">${federations.length} federation${federations.length === 1 ? '' : 's'}</span>` : ''}</div>
         ${breakdownHtml}
         <table style="width:100%; border-collapse:collapse; font-size:13px;">
             <thead><tr style="text-align:left; border-bottom:2px solid var(--border);">
@@ -15901,12 +15993,13 @@ async function fleetLoadBlockedIps() {
             </tr></thead>
             <tbody>${ips.map(x => `<tr>
                 <td style="padding:6px 10px; font-family:var(--font-mono); font-size:12px;">${vlanEsc(x.ip)}</td>
-                <td style="padding:6px 10px; font-size:11px;">${x.nodes.map(n => vlanEsc(n.hostname)).join(', ')} <span style="color:var(--text-muted);">(${x.nodes.length}/${nodes.length})</span></td>
+                <td style="padding:6px 10px; font-size:11px;">${x.nodes.map(n => vlanEsc(n.hostname)).join(', ')} <span style="color:var(--text-muted);">(${x.nodes.length}/${sourceTotal})</span></td>
                 <td style="padding:6px 10px; color:#fbbf24;">${fmtTime(x.max_remaining)}</td>
                 <td style="padding:6px 10px; color:var(--text-muted); font-size:11px;">${vlanEsc(x.last_username || '—')}</td>
                 <td style="padding:6px 10px;"><button class="btn btn-sm" onclick="fleetUnblockIp('${vlanEsc(x.ip)}')" style="font-size:11px;">Unblock everywhere</button></td>
             </tr>`).join('')}</tbody>
-        </table>`;
+        </table>
+        ${recentHtml}`;
 }
 
 async function fleetUnblockIp(ip) {

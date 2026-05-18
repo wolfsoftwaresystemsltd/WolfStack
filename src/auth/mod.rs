@@ -328,7 +328,17 @@ pub struct LoginLockoutConfig {
     pub enabled: bool,
 }
 
-fn default_max_failures() -> u32 { 10 }
+// 3 failures in 5 minutes from a single IP triggers a 48-hour kernel
+// block. Aggressive default because in practice every brute-forcer
+// hits one of:
+//   - sshd:     Failed password / Invalid user
+//   - pveproxy: authentication failure
+//   - wolfstack: failed login on 8553
+// and all three feed the same limiter (see log_monitor.rs). Three
+// failures gives a legitimate fat-finger user one mistyped password
+// + two retries before they're locked out; anything more rapid is
+// automated scanning.
+fn default_max_failures() -> u32 { 3 }
 fn default_window_seconds() -> u64 { 300 }
 fn default_lockout_seconds() -> u64 { 48 * 3600 }  // 48 hours
 fn default_enabled() -> bool { true }
@@ -350,10 +360,25 @@ impl LoginLockoutConfig {
         format!("{}/auth-lockout.json", crate::paths::get().config_dir)
     }
     pub fn load() -> Self {
-        std::fs::read_to_string(Self::config_path())
+        let mut cfg: Self = std::fs::read_to_string(Self::config_path())
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // One-time migration: pre-v23.12.13 default was max_failures=10.
+        // v23.12.13 tightened to 3. If the saved value is the old
+        // default exactly, treat it as "operator never tuned this" and
+        // bring it down to the new default. An operator who actually
+        // wants 10 can re-save the policy from the UI; their explicit
+        // value is preserved on every subsequent load.
+        if cfg.max_failures == 10 {
+            tracing::info!(
+                "auth-lockout: migrating max_failures 10 -> 3 (post-v23.12.13 default). \
+                 To restore the older threshold, save the policy form with the value you want."
+            );
+            cfg.max_failures = 3;
+            let _ = cfg.save();
+        }
+        cfg
     }
     pub fn save(&self) -> Result<(), String> {
         let path = Self::config_path();
@@ -843,36 +868,65 @@ pub fn kernel_block_ip(ip: &str) {
         std::net::IpAddr::V4(_) => "iptables",
         std::net::IpAddr::V6(_) => "ip6tables",
     };
+    // Insert the DROP rule in BOTH the INPUT and FORWARD chains.
+    //
+    // - INPUT protects the host's own services (sshd, pveproxy on
+    //   8006, wolfstack on 8553).
+    // - FORWARD protects guests behind the host's Linux bridges /
+    //   vSwitches — VM/LXC traffic that the host is forwarding, not
+    //   consuming. Without this rule a brute-forcer who pivots from
+    //   the host management plane to a guest service can keep
+    //   attacking even after the host kicks them out.
+    //
+    // CAVEAT — FORWARD-chain rules only see bridged traffic when
+    // `br_netfilter` is loaded and `net.bridge.bridge-nf-call-iptables=1`.
+    // Proxmox enables this by default; on a vanilla Debian/Ubuntu box
+    // it may need `modprobe br_netfilter`. If the kernel module isn't
+    // present, the FORWARD rule is harmless (just inert).
+    //
+    // What this CANNOT block:
+    //   - VMs using PCI/SR-IOV passthrough — packets reach the VM
+    //     without ever touching the host kernel's netfilter
+    //   - VMs reached via a separate physical NIC that bypasses
+    //     the host's iptables (e.g. dedicated mgmt vs data NIC where
+    //     only mgmt is firewalled here)
+    // For those topologies, propagate the block to the upstream
+    // router / switch ACL or to a per-VM firewall.
+    insert_drop_rule(cmd, "INPUT", ip);
+    insert_drop_rule(cmd, "FORWARD", ip);
+}
+
+/// Idempotently insert `-I <chain> 1 -s <ip> -j DROP` for the given
+/// iptables variant. No-op if the rule already exists.
+fn insert_drop_rule(cmd: &str, chain: &str, ip: &str) {
     let check = std::process::Command::new(cmd)
-        .args(["-C", "INPUT", "-s", ip, "-j", "DROP"])
+        .args(["-C", chain, "-s", ip, "-j", "DROP"])
         .output();
     if let Ok(out) = check {
-        if out.status.success() {
-            // Rule already present — nothing to do.
-            return;
-        }
+        if out.status.success() { return; }  // rule already present
     }
     let r = std::process::Command::new(cmd)
-        .args(["-I", "INPUT", "1", "-s", ip, "-j", "DROP"])
+        .args(["-I", chain, "1", "-s", ip, "-j", "DROP"])
         .output();
     match r {
         Ok(o) if o.status.success() => {
-            tracing::warn!("auth: kernel-blocked {} via {}", ip, cmd);
+            tracing::warn!("auth: kernel-blocked {} in {}/{}", ip, cmd, chain);
         }
         Ok(o) => {
             tracing::error!(
-                "auth: kernel-block failed for {}: {}",
-                ip, String::from_utf8_lossy(&o.stderr).trim()
+                "auth: kernel-block failed for {} in {}/{}: {}",
+                ip, cmd, chain, String::from_utf8_lossy(&o.stderr).trim()
             );
         }
         Err(e) => {
-            tracing::error!("auth: could not run {} to block {}: {}", cmd, ip, e);
+            tracing::error!("auth: could not run {} to block {} in {}: {}", cmd, ip, chain, e);
         }
     }
 }
 
-/// Remove the kernel DROP rule for `ip`. Loops while the rule exists
-/// (in case duplicate INSERTs happened across restarts).
+/// Remove the kernel DROP rules for `ip` from both INPUT and FORWARD
+/// chains. Loops per chain while the rule exists (handles duplicate
+/// INSERTs that can accumulate across restarts).
 pub fn kernel_unblock_ip(ip: &str) {
     let target: std::net::IpAddr = match ip.parse() {
         Ok(a) => a,
@@ -882,16 +936,21 @@ pub fn kernel_unblock_ip(ip: &str) {
         std::net::IpAddr::V4(_) => "iptables",
         std::net::IpAddr::V6(_) => "ip6tables",
     };
+    remove_drop_rule(cmd, "INPUT", ip);
+    remove_drop_rule(cmd, "FORWARD", ip);
+    tracing::info!("auth: kernel-unblocked {} (INPUT + FORWARD)", ip);
+}
+
+fn remove_drop_rule(cmd: &str, chain: &str, ip: &str) {
     for _ in 0..10 {
         let r = std::process::Command::new(cmd)
-            .args(["-D", "INPUT", "-s", ip, "-j", "DROP"])
+            .args(["-D", chain, "-s", ip, "-j", "DROP"])
             .output();
         match r {
             Ok(o) if o.status.success() => continue,
             _ => break,
         }
     }
-    tracing::info!("auth: kernel-unblocked {}", ip);
 }
 
 impl LoginRateLimiter {
@@ -1073,6 +1132,19 @@ mod lockout_tests {
         let l = LoginRateLimiter::new();
         *l.config.write().unwrap() = cfg;
         l
+    }
+
+    #[test]
+    fn default_threshold_is_three() {
+        // v23.12.13 lowered the default to 3 so brute-force attempts
+        // get blocked after a handful of tries instead of waiting for
+        // 10 failures. Lock this in so a future config-edit doesn't
+        // silently relax the default back.
+        let cfg = LoginLockoutConfig::default();
+        assert_eq!(cfg.max_failures, 3);
+        assert_eq!(cfg.window_seconds, 300);
+        assert_eq!(cfg.lockout_seconds, 48 * 3600);
+        assert!(cfg.enabled);
     }
 
     #[test]

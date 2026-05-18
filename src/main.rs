@@ -687,6 +687,8 @@ async fn main() -> std::io::Result<()> {
             let cluster_block = app_state.cluster.clone();
             let cluster_unblock = app_state.cluster.clone();
             let self_id_block = app_state.cluster.self_id.clone();
+            let self_id_fed = self_id_block.clone();
+            let federations_block = app_state.federations.clone();
             // Use the LOADED cluster secret (the operator's custom value
             // if they have one set in /etc/wolfstack/cluster-secret),
             // NOT the hardcoded builtin default. Existing federation
@@ -703,8 +705,22 @@ async fn main() -> std::io::Result<()> {
                     let secret = secret_block.clone();
                     let ip = ip.to_string();
                     let self_id = self_id_block.clone();
+                    let federations = federations_block.clone();
+                    let self_id_fed = self_id_fed.clone();
                     rt_block.spawn(async move {
-                        api::propagate_kernel_block_to_peers(cluster, secret, ip, secs, self_id).await;
+                        // Local cluster fan-out — every WolfStack peer
+                        // in THIS cluster gets the block via the
+                        // existing X-WolfStack-Secret path.
+                        api::propagate_kernel_block_to_peers(
+                            cluster, secret, ip.clone(), secs, self_id).await;
+                        // Federation fan-out — every cross-cluster
+                        // federation we know about gets the block via
+                        // its api_key. The federation's fleet endpoint
+                        // applies + fans out within its own cluster.
+                        // Loops are prevented by the federation
+                        // endpoint NOT re-pushing to federations.
+                        api::propagate_kernel_block_to_federations(
+                            federations, ip, secs, self_id_fed).await;
                     });
                 }),
                 std::sync::Arc::new(move |ip| {
