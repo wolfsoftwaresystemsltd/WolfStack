@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v23.12.9: real-time on-access scanning (clamonacc) across all distros** _(2026-05-18 — [`240e087`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/240e087656906d3b6a7dc0519ebef6a203c6c58d))_
 - **v23.12.8: skip non-local mounts in scans, live progress, prompt-free across all distros** _(2026-05-18 — [`2d439d7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2d439d77759616f45547cedfaab2c16b6ea053f6))_
 - **v23.12.7: fix 405 on per-node antivirus ops via node-proxy** _(2026-05-18 — [`016695c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/016695c64670b9aa22e5ebed4124d8c8ac41a6d0))_
 - **v23.12.6: per-node antivirus UI, live install terminal, firewall-hole coordination** _(2026-05-18 — [`85aa116`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/85aa1165b0cea0a37c8afd8f7266b019b020c075))_
