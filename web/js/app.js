@@ -16110,10 +16110,12 @@ async function abuseReportSend() {
         showToast('Recipient, subject and body are all required', 'error');
         return;
     }
-    if (!await wolfConfirm(
-        `Send abuse report for ${ip} to ${to}?\n\nThe email goes via your configured SMTP (Settings → AI Alerting). The recipient gets the editable body shown above. This is logged in /etc/wolfstack/abuse-reports.json.`,
-        'Send abuse report'
-    )) return;
+    // No secondary wolfConfirm here. The whole modal IS the
+    // confirmation — operator typed/reviewed the recipient, subject,
+    // and body, and explicitly clicked Send. A second wolfConfirm
+    // dialog also had a z-index bug (200 vs our 2010) that made it
+    // render behind this modal and silently cancel the send when the
+    // operator closed the modal not knowing it was waiting.
 
     const btn = document.getElementById('abuse-report-send-btn');
     const status = document.getElementById('abuse-report-status');
