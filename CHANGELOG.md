@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v23.12.12: antivirus findings — quieter parsers, Dismiss button, FP warning** _(2026-05-18 — [`d8f878b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d8f878b1e2342ab6c1553bf2f7b9e2bc9ce7064d))_
 - **v23.12.11: sweep /proxy/api/ double-prefix bug — fixes threat-intel preflight 405** _(2026-05-18 — [`e257ff0`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e257ff0555e8454b542ecc7d5f3de11a4a2d53ef))_
 - **v23.12.10: wolfproxy config editor — merge-don't-replace, validate, repair** _(2026-05-18 — [`2a2a303`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2a2a3034f56e43a82ceb6de22aeeff4919a4b4df))_
 - **v23.12.9: real-time on-access scanning (clamonacc) across all distros** _(2026-05-18 — [`240e087`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/240e087656906d3b6a7dc0519ebef6a203c6c58d))_
