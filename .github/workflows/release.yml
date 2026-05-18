@@ -12,6 +12,13 @@ on:
 jobs:
   build:
     strategy:
+      # Don't cancel the other arch if one fails — we want partial
+      # builds (e.g. x86_64 succeeds, aarch64 hits a transient GHCR
+      # flake) to still produce artifacts we can release manually.
+      # Without this, the v23.12.15 build had x86_64 marked as
+      # "cancelled" because aarch64 timed out fetching the cross-rs
+      # docker image.
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
@@ -22,6 +29,9 @@ jobs:
             runner: ubuntu-latest
 
     runs-on: ${{ matrix.runner }}
+    # Bound the wall-clock so a stuck network call doesn't hold a
+    # runner for the full 6-hour GitHub default.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -36,6 +46,29 @@ jobs:
       - name: Pin libz-sys to working version
         run: |
           cargo update -p libz-sys --precise 1.1.25
+
+      - name: Pre-pull cross-rs docker image with retries
+        # `cross build` pulls ghcr.io/cross-rs/<target>:main on first
+        # invocation. GHCR's token endpoint occasionally times out and
+        # the build dies with exit 125 (docker auth failure). Pull
+        # explicitly with 5 retries + exponential-ish backoff so a
+        # transient outage doesn't fail the whole release.
+        run: |
+          IMAGE="ghcr.io/cross-rs/${{ matrix.target }}:main"
+          for attempt in 1 2 3 4 5; do
+            echo "::group::Pull attempt $attempt for $IMAGE"
+            if docker pull "$IMAGE"; then
+              echo "::endgroup::"
+              echo "✓ pulled $IMAGE on attempt $attempt"
+              exit 0
+            fi
+            echo "::endgroup::"
+            wait=$((attempt * 15))
+            echo "::warning::pull attempt $attempt failed, sleeping ${wait}s before retry"
+            sleep $wait
+          done
+          echo "::error::Failed to pull $IMAGE after 5 attempts. GHCR may be having an outage; re-run this job (gh run rerun --failed)."
+          exit 1
 
       - name: Build static binary
         run: cross build --release --target ${{ matrix.target }}
