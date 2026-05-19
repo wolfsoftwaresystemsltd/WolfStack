@@ -1873,6 +1873,12 @@ function selectView(page) {
 
     if (page === 'datacenter') {
         renderDatacenterOverview();
+        // v23.12.20 — nudge to set up Docker auto-updates if there
+        // are running containers and the watcher is still disabled.
+        // Self-gates on dismiss flag + container count + watcher state.
+        if (typeof maybeShowDockerUpdatesNudge === 'function') {
+            maybeShowDockerUpdatesNudge();
+        }
     } else if (page === 'settings') {
         // Load icon packs if icons tab is active
         const iconsTab = document.getElementById('settings-tab-icons');
@@ -1920,6 +1926,11 @@ function selectView(page) {
         renderTenants();
     } else if (page === 'fleet-security') {
         renderFleetSecurity();
+    } else if (page === 'alerts') {
+        // v24.0.0 unified Alerts page — opens to Overview by default.
+        // Each sub-panel paints itself lazily on first activation, so
+        // switching here doesn't pay the cost of rendering every panel.
+        switchAlertsSub('overview');
     }
 
     // Restore task log toggle button when leaving topology
@@ -13321,6 +13332,829 @@ function applyUpdateBadges() {
     });
 }
 
+// v23.12.20 — Docker image update badges. Distinct from `applyUpdateBadges`
+// above (which reflects INSIDE-container apt/dnf updates). Image updates
+// come from the image-watcher subsystem: it polls the upstream registry
+// for newer image digests on every running Docker container whose policy
+// isn't Ignore/Pinned. The badge appears next to the container row and
+// clicking it pops the per-container policy modal.
+let imageUpdateResults = {};
+
+async function fetchImageUpdateStatus() {
+    try {
+        const resp = await fetch(apiUrl('/api/image-watcher/status'));
+        if (!resp.ok) return;
+        const data = await resp.json();
+        // /api/image-watcher/status returns an array of ImageCheckResult.
+        const arr = Array.isArray(data) ? data : (data.results || []);
+        imageUpdateResults = {};
+        for (const r of arr) {
+            if (r && r.container_name) {
+                imageUpdateResults[r.container_name] = r;
+            }
+        }
+        applyImageUpdateBadges();
+    } catch (e) { /* silent — image watcher may be disabled */ }
+}
+
+function applyImageUpdateBadges() {
+    document.querySelectorAll('[data-image-update-badge]').forEach(el => {
+        const name = el.getAttribute('data-image-update-badge');
+        const r = imageUpdateResults[name];
+        if (!r) {
+            el.innerHTML = '';
+            return;
+        }
+        if (r.update_available) {
+            el.innerHTML = `<span role="button" tabindex="0"
+                onclick="openImageUpdateModal('${escapeAttr(name)}')"
+                onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openImageUpdateModal('${escapeAttr(name)}')}"
+                style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:#3b82f622;color:#3b82f6;border:1px solid #3b82f644;cursor:pointer;"
+                title="New Docker image available — click to update or change policy">image update</span>`;
+        } else if (r.error) {
+            el.innerHTML = `<span title="${escapeAttr(r.error)}" style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b44;">image check failed</span>`;
+        } else {
+            // Up-to-date — render quietly. We don't surface a positive
+            // badge here because the row already has the "container is
+            // running" indicator and one badge per container is enough.
+            el.innerHTML = '';
+        }
+    });
+}
+
+function escapeAttr(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function openImageUpdateModal(containerName) {
+    // Load the current per-container policy fresh — operator may have
+    // edited it elsewhere (Settings → Docker Updates, another tab).
+    let cfg, current;
+    try {
+        const resp = await fetch(apiUrl('/api/image-watcher/config'));
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        cfg = await resp.json();
+    } catch (e) {
+        showToast('Failed to load image-watcher config: ' + (e.message || e), 'error');
+        return;
+    }
+    current = (cfg.container_policies && cfg.container_policies[containerName]) || {
+        policy: cfg.default_policy || 'notify_only',
+        pinned_to: null,
+        backup_before_update: true,
+        health_check: true,
+        health_check_timeout_secs: 60,
+        auto_rollback: true,
+    };
+    const r = imageUpdateResults[containerName] || {};
+    const remote = r.remote_digest ? r.remote_digest.substring(0, 19) + '…' : '(unknown)';
+    const local = r.local_digest ? r.local_digest.split('@').pop().substring(0, 19) + '…' : '(unknown)';
+
+    const html = `
+        <div id="image-update-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="iumt"
+             style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;"
+             onclick="if(event.target===this)closeImageUpdateModal()">
+            <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:10px;padding:24px;max-width:520px;width:100%;max-height:90vh;overflow:auto;">
+                <h3 id="iumt" style="margin:0 0 16px;font-size:18px;">Docker image update — ${escapeHtml(containerName)}</h3>
+                <div style="background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:16px;font-size:12px;">
+                    <div><strong>Image:</strong> <code>${escapeHtml(r.image || '')}</code></div>
+                    <div style="color:var(--text-muted);"><strong>Local:</strong> <code>${escapeHtml(local)}</code></div>
+                    <div style="color:var(--text-muted);"><strong>Remote:</strong> <code>${escapeHtml(remote)}</code></div>
+                </div>
+
+                <label style="display:block;font-size:13px;font-weight:600;margin-bottom:6px;">Update policy</label>
+                <select id="ium-policy" class="form-control" style="margin-bottom:12px;" onchange="document.getElementById('ium-pinned-wrap').style.display=this.value==='pinned'?'block':'none'">
+                    <option value="notify_only" ${current.policy==='notify_only'?'selected':''}>Notify only — show on dashboard, never auto-apply</option>
+                    <option value="auto_update" ${current.policy==='auto_update'?'selected':''}>Auto-update — apply within maintenance window</option>
+                    <option value="ignore" ${current.policy==='ignore'?'selected':''}>Ignore — skip checks entirely</option>
+                    <option value="pinned" ${current.policy==='pinned'?'selected':''}>Pinned — lock to a specific tag or digest</option>
+                </select>
+                <div id="ium-pinned-wrap" style="display:${current.policy==='pinned'?'block':'none'};margin-bottom:12px;">
+                    <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;">Pin to (tag like <code>1.4.3</code> or <code>sha256:&hellip;</code>)</label>
+                    <input type="text" id="ium-pinned-to" class="form-control" value="${escapeAttr(current.pinned_to || '')}" placeholder="e.g. 1.4.3 or sha256:abcdef…">
+                </div>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;font-size:12px;">
+                    <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="ium-backup" ${current.backup_before_update?'checked':''}> Backup before update</label>
+                    <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="ium-health" ${current.health_check?'checked':''}> Health-check after restart</label>
+                    <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="ium-rollback" ${current.auto_rollback?'checked':''}> Auto-rollback on failure</label>
+                    <label style="display:flex;align-items:center;gap:6px;">Health timeout (s) <input type="number" id="ium-health-timeout" value="${current.health_check_timeout_secs || 60}" min="5" max="600" style="width:70px;"></label>
+                </div>
+
+                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px;">
+                    <button class="btn" onclick="closeImageUpdateModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="saveImageUpdatePolicy('${escapeAttr(containerName)}')">Save policy</button>
+                    ${r.update_available ? `<button class="btn btn-primary" onclick="applyImageUpdateNow('${escapeAttr(containerName)}', this)" style="background:#3b82f6;border-color:#3b82f6;">Update now</button>` : ''}
+                </div>
+            </div>
+        </div>`;
+    const host = document.createElement('div');
+    host.innerHTML = html;
+    document.body.appendChild(host.firstElementChild);
+}
+
+function closeImageUpdateModal() {
+    const b = document.getElementById('image-update-modal-backdrop');
+    if (b) b.remove();
+}
+
+async function saveImageUpdatePolicy(containerName) {
+    const policy = document.getElementById('ium-policy').value;
+    const pinned_to = document.getElementById('ium-pinned-to') ? document.getElementById('ium-pinned-to').value.trim() : '';
+    if (policy === 'pinned' && !pinned_to) {
+        showToast('Pinned policy requires a tag or digest', 'error');
+        return;
+    }
+    // Load full config, mutate the one container's entry, save back.
+    let cfg;
+    try {
+        const r = await fetch(apiUrl('/api/image-watcher/config'));
+        cfg = await r.json();
+    } catch (e) {
+        showToast('Failed to load config: ' + (e.message || e), 'error');
+        return;
+    }
+    cfg.container_policies = cfg.container_policies || {};
+    cfg.container_policies[containerName] = {
+        policy,
+        pinned_to: policy === 'pinned' ? pinned_to : null,
+        backup_before_update: document.getElementById('ium-backup').checked,
+        health_check: document.getElementById('ium-health').checked,
+        health_check_timeout_secs: parseInt(document.getElementById('ium-health-timeout').value, 10) || 60,
+        auto_rollback: document.getElementById('ium-rollback').checked,
+    };
+    try {
+        const r = await fetch(apiUrl('/api/image-watcher/config'), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cfg),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        showToast(`Policy saved for ${containerName}`, 'success');
+        closeImageUpdateModal();
+        fetchImageUpdateStatus();
+    } catch (e) {
+        showToast('Failed to save: ' + (e.message || e), 'error');
+    }
+}
+
+async function applyImageUpdateNow(containerName, btn) {
+    if (!await wolfConfirm(`Update Docker image for "${containerName}" now? The container will be stopped, recreated with the new image, and health-checked. Backup-before-update + auto-rollback are governed by the per-container settings above.`, 'Update Docker image')) return;
+    const origHtml = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = 'Updating…'; }
+    try {
+        const r = await fetch(apiUrl(`/api/image-watcher/apply/${encodeURIComponent(containerName)}`), { method: 'POST' });
+        const event = await r.json();
+        if (!r.ok) throw new Error(event.error || `HTTP ${r.status}`);
+        const status = event.status || 'unknown';
+        if (status === 'completed') {
+            showToast(`${containerName}: updated successfully (${(event.new_digest||'').substring(0,19)}…)`, 'success');
+        } else if (status === 'rolled_back') {
+            showToast(`${containerName}: health-check failed, rolled back to previous image`, 'error');
+        } else {
+            showToast(`${containerName}: ${status}${event.error ? ' — ' + event.error : ''}`, 'error');
+        }
+        closeImageUpdateModal();
+        fetchImageUpdateStatus();
+    } catch (e) {
+        showToast('Update failed: ' + (e.message || e), 'error');
+        if (btn) { btn.disabled = false; btn.innerHTML = origHtml; }
+    }
+}
+
+window.fetchImageUpdateStatus = fetchImageUpdateStatus;
+window.openImageUpdateModal = openImageUpdateModal;
+window.closeImageUpdateModal = closeImageUpdateModal;
+window.saveImageUpdatePolicy = saveImageUpdatePolicy;
+window.applyImageUpdateNow = applyImageUpdateNow;
+
+// v23.12.20 — Settings → Docker Updates tab. Loads the watcher config
+// and renders the recent update history. Save POSTs back via PUT.
+async function loadDockerUpdatesSettings() {
+    try {
+        const r = await fetch(apiUrl('/api/image-watcher/config'));
+        if (!r.ok) return;
+        const cfg = await r.json();
+        document.getElementById('docker-updates-enabled').checked = !!cfg.enabled;
+        const ci = document.getElementById('docker-updates-check-interval');
+        if (ci) ci.value = String(cfg.check_interval_secs || 3600);
+        const dp = document.getElementById('docker-updates-default-policy');
+        if (dp) dp.value = cfg.default_policy || 'notify_only';
+        const sc = document.getElementById('docker-updates-schedule-cron');
+        if (sc) sc.value = cfg.schedule_cron || '';
+        const wm = document.getElementById('docker-updates-window-minutes');
+        if (wm) wm.value = cfg.schedule_window_minutes || 60;
+        const mp = document.getElementById('docker-updates-max-parallel');
+        if (mp) mp.value = cfg.max_parallel_updates || 1;
+        renderDockerUpdatesHistory(cfg.update_history || []);
+    } catch (e) {
+        showToast('Failed to load Docker Updates settings: ' + (e.message || e), 'error');
+    }
+}
+
+function renderDockerUpdatesHistory(history) {
+    const host = document.getElementById('docker-updates-history');
+    if (!host) return;
+    if (!history.length) {
+        host.innerHTML = '<div style="color:var(--text-muted); font-size:13px;">No updates applied yet. History appears here after the first auto-apply or operator-triggered Update now.</div>';
+        return;
+    }
+    // Newest first.
+    const sorted = history.slice().reverse().slice(0, 30);
+    const rows = sorted.map(ev => {
+        const statusColor = ev.status === 'completed' ? '#22c55e'
+                         : ev.status === 'rolled_back' ? '#f59e0b'
+                         : ev.status === 'failed' ? '#ef4444'
+                         : '#94a3b8';
+        const when = ev.timestamp ? new Date(ev.timestamp).toLocaleString() : '—';
+        const errCell = ev.error
+            ? `<div style="font-size:11px; color:#ef4444; margin-top:2px;">${escapeHtml(ev.error)}</div>`
+            : '';
+        return `<tr>
+            <td style="padding:6px 10px; font-size:12px;">${escapeHtml(when)}</td>
+            <td style="padding:6px 10px; font-weight:500;">${escapeHtml(ev.container_name || '')}</td>
+            <td style="padding:6px 10px; font-family:var(--font-mono); font-size:11px; color:var(--text-muted);">${escapeHtml((ev.image || '').slice(0, 50))}</td>
+            <td style="padding:6px 10px;"><span style="background:${statusColor}22; color:${statusColor}; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600;">${escapeHtml(ev.status || '')}</span>${errCell}</td>
+            <td style="padding:6px 10px; font-family:var(--font-mono); font-size:11px; color:var(--text-muted);">${escapeHtml((ev.backup_id || '').slice(0, 50))}</td>
+        </tr>`;
+    }).join('');
+    host.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:13px;">
+        <thead><tr style="text-align:left; border-bottom:2px solid var(--border); color:var(--text-muted); font-size:11px; text-transform:uppercase;">
+            <th style="padding:8px 10px;">When</th>
+            <th style="padding:8px 10px;">Container</th>
+            <th style="padding:8px 10px;">Image</th>
+            <th style="padding:8px 10px;">Status</th>
+            <th style="padding:8px 10px;">Backup</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function saveDockerUpdatesConfig() {
+    // Load full config, mutate the global-scoped fields only (per-container
+    // entries are owned by the Docker page popover).
+    let cfg;
+    try {
+        const r = await fetch(apiUrl('/api/image-watcher/config'));
+        cfg = await r.json();
+    } catch (e) {
+        showToast('Failed to load config: ' + (e.message || e), 'error');
+        return;
+    }
+    cfg.enabled = document.getElementById('docker-updates-enabled').checked;
+    cfg.check_interval_secs = parseInt(document.getElementById('docker-updates-check-interval').value, 10) || 3600;
+    cfg.default_policy = document.getElementById('docker-updates-default-policy').value;
+    const cronRaw = document.getElementById('docker-updates-schedule-cron').value.trim();
+    cfg.schedule_cron = cronRaw === '' ? null : cronRaw;
+    cfg.schedule_window_minutes = parseInt(document.getElementById('docker-updates-window-minutes').value, 10) || 60;
+    cfg.max_parallel_updates = parseInt(document.getElementById('docker-updates-max-parallel').value, 10) || 1;
+    try {
+        const r = await fetch(apiUrl('/api/image-watcher/config'), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cfg),
+        });
+        if (!r.ok) {
+            const d = await r.json().catch(() => ({}));
+            throw new Error(d.error || `HTTP ${r.status}`);
+        }
+        showToast('Docker Updates settings saved', 'success');
+    } catch (e) {
+        showToast('Save failed: ' + (e.message || e), 'error');
+    }
+}
+
+window.loadDockerUpdatesSettings = loadDockerUpdatesSettings;
+window.saveDockerUpdatesConfig = saveDockerUpdatesConfig;
+
+// v23.12.20 — Dashboard onboarding nudge: surface "set up auto-updates"
+// once when the operator has Docker containers but image-watcher is
+// still disabled. Dismissible per browser via localStorage so it
+// doesn't pop up forever after the operator has consciously declined.
+const DOCKER_UPDATES_NUDGE_DISMISS_KEY = 'wolfstack_dc_docker_updates_nudge_dismissed';
+
+async function maybeShowDockerUpdatesNudge() {
+    const slot = document.getElementById('dc-docker-updates-nudge');
+    if (!slot) return;
+    if (localStorage.getItem(DOCKER_UPDATES_NUDGE_DISMISS_KEY) === '1') return;
+    try {
+        const [statusResp, cfgResp] = await Promise.all([
+            fetch(apiUrl('/api/containers/status')),
+            fetch(apiUrl('/api/image-watcher/config')),
+        ]);
+        if (!statusResp.ok || !cfgResp.ok) return;
+        const status = await statusResp.json();
+        const cfg = await cfgResp.json();
+        const dockerCount = (status.docker && status.docker.container_count) || 0;
+        if (dockerCount === 0) return;        // nothing to nudge about
+        if (cfg && cfg.enabled) return;       // operator already turned it on
+        slot.style.display = 'block';
+        slot.innerHTML = `
+            <div role="status" aria-live="polite"
+                 style="display:flex; align-items:flex-start; gap:12px; padding:14px 16px; margin-bottom:14px; background:linear-gradient(135deg, rgba(59,130,246,0.12), rgba(168,85,247,0.08)); border:1px solid rgba(59,130,246,0.3); border-radius:10px;">
+                <div style="font-size:24px; line-height:1;">📦</div>
+                <div style="flex:1;">
+                    <div style="font-weight:600; margin-bottom:4px;">Set up automatic Docker image updates</div>
+                    <div style="font-size:13px; color:var(--text-secondary);">You have ${dockerCount} Docker container${dockerCount===1?'':'s'} running. WolfStack can watch their upstream registries for newer images and apply them safely on a maintenance schedule, with backup + health-check + auto-rollback. Per-container overrides on the Docker page.</div>
+                </div>
+                <div style="display:flex; gap:8px; flex-shrink:0;">
+                    <button class="btn btn-sm btn-primary" onclick="dockerUpdatesNudgeGo()">Set up</button>
+                    <button class="btn btn-sm" onclick="dockerUpdatesNudgeDismiss()" aria-label="Dismiss nudge">Dismiss</button>
+                </div>
+            </div>`;
+    } catch (_) { /* silent — datacenter view shouldn't error on nudge fetch */ }
+}
+
+function dockerUpdatesNudgeGo() {
+    // Switch to Settings → Docker Updates tab.
+    selectView('settings');
+    setTimeout(() => {
+        if (typeof switchSettingsTab === 'function') {
+            switchSettingsTab('dockerupdates');
+        }
+        if (typeof loadDockerUpdatesSettings === 'function') {
+            loadDockerUpdatesSettings();
+        }
+    }, 50);
+}
+
+function dockerUpdatesNudgeDismiss() {
+    localStorage.setItem(DOCKER_UPDATES_NUDGE_DISMISS_KEY, '1');
+    const slot = document.getElementById('dc-docker-updates-nudge');
+    if (slot) { slot.style.display = 'none'; slot.innerHTML = ''; }
+}
+
+window.maybeShowDockerUpdatesNudge = maybeShowDockerUpdatesNudge;
+window.dockerUpdatesNudgeGo = dockerUpdatesNudgeGo;
+window.dockerUpdatesNudgeDismiss = dockerUpdatesNudgeDismiss;
+
+// ═══════════════════════════════════════════════════════════════════
+// v24.0.0 — Unified Alerts page
+// ═══════════════════════════════════════════════════════════════════
+//
+// Sub-panel controller. Pages paint themselves lazily on first
+// activation so the cost of rendering History (potentially hundreds
+// of entries) only lands when the operator clicks it.
+const _alertsSubRendered = new Set();
+
+function switchAlertsSub(name) {
+    document.querySelectorAll('.alerts-sub-panel').forEach(p => p.style.display = 'none');
+    document.querySelectorAll('.alerts-side-btn').forEach(b => {
+        b.style.background = 'transparent';
+        b.style.color = 'var(--text-primary)';
+        b.removeAttribute('aria-current');
+    });
+    const panel = document.getElementById('alerts-sub-' + name);
+    const btn = document.querySelector(`.alerts-side-btn[data-alerts-sub="${name}"]`);
+    if (panel) panel.style.display = 'block';
+    if (btn) {
+        btn.style.background = 'rgba(59,130,246,0.15)';
+        btn.style.color = 'var(--accent-light)';
+        btn.setAttribute('aria-current', 'page');
+    }
+    // Lazy-paint on first activation; subsequent visits re-fetch fresh.
+    if (name === 'overview') renderAlertsOverview();
+    else if (name === 'history') renderAlertsHistory();
+    else if (name === 'notifications') renderAlertsNotifications();
+    else if (name === 'schedule') renderAlertsSchedule();
+    else if (name === 'dockerupdates') renderAlertsDockerUpdates();
+    _alertsSubRendered.add(name);
+}
+window.switchAlertsSub = switchAlertsSub;
+
+// ─── Overview sub-panel ────────────────────────────────────────────
+// Surfaces the at-a-glance state of the alerting system: channel
+// health, current verbosity + quiet-hours posture, last 10 dispatched
+// alerts. NOT a full history view — the History tab is for that.
+async function renderAlertsOverview() {
+    const host = document.getElementById('alerts-sub-overview');
+    if (!host) return;
+    host.innerHTML = '<div style="color:var(--text-muted);">Loading…</div>';
+    let cfg, recent;
+    try {
+        const [cfgR, recentR] = await Promise.all([
+            fetch(apiUrl('/api/alerts/config')),
+            fetch(apiUrl('/api/alerts?since=0')),
+        ]);
+        cfg = await cfgR.json();
+        recent = await recentR.json();
+    } catch (e) {
+        host.innerHTML = `<div style="color:#ef4444;">Failed to load: ${escapeHtml(e.message || e)}</div>`;
+        return;
+    }
+    const channels = [];
+    if (cfg.has_discord) channels.push('Discord');
+    if (cfg.has_slack) channels.push('Slack');
+    if (cfg.has_telegram) channels.push('Telegram');
+    const channelStr = channels.length ? channels.join(' · ') : 'No channels configured';
+    const verbosity = cfg.alert_verbosity || 'simple';
+    const qh = cfg.quiet_hours;
+    const qhSummary = (qh && qh.enabled)
+        ? `Quiet ${escapeHtml(qh.start_hhmm)} → ${escapeHtml(qh.end_hhmm)} ${escapeHtml(qh.timezone || 'UTC')}`
+        : 'Quiet hours off';
+    const cooldown = `${cfg.cooldown_secs || 900}s cooldown`;
+    const rateLimit = (cfg.max_alerts_per_hour && cfg.max_alerts_per_hour > 0)
+        ? `max ${cfg.max_alerts_per_hour}/hour`
+        : 'no rate limit';
+    const grouping = (cfg.grouping_window_secs && cfg.grouping_window_secs > 0)
+        ? `${cfg.grouping_window_secs}s group by ${cfg.grouping_strategy || 'by_node'}`
+        : 'no grouping';
+
+    const alerts = (recent.alerts || []).slice().reverse().slice(0, 10);
+    const recentRows = alerts.length === 0
+        ? '<tr><td colspan="4" style="padding:14px; color:var(--text-muted); text-align:center;">No alerts dispatched yet.</td></tr>'
+        : alerts.map(a => {
+            const sevColor = a.severity === 'critical' ? '#ef4444'
+                          : a.severity === 'warning' ? '#eab308'
+                          : '#94a3b8';
+            return `<tr>
+                <td style="padding:6px 10px; font-size:12px; color:var(--text-muted); white-space:nowrap;">${escapeHtml(a.timestamp || '')}</td>
+                <td style="padding:6px 10px;"><span style="color:${sevColor}; font-size:11px; font-weight:600; text-transform:uppercase;">${escapeHtml(a.severity || '')}</span></td>
+                <td style="padding:6px 10px; font-weight:500;">${escapeHtml(a.title || '')}</td>
+                <td style="padding:6px 10px; font-size:12px; color:var(--text-muted);">${escapeHtml(a.hostname || '')}${a.cluster ? ' · ' + escapeHtml(a.cluster) : ''}</td>
+            </tr>`;
+        }).join('');
+
+    host.innerHTML = `
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-bottom:18px;">
+            <div class="card"><div class="card-body" style="padding:14px;">
+                <div style="font-size:11px; text-transform:uppercase; color:var(--text-muted); margin-bottom:4px;">Status</div>
+                <div style="font-size:14px; font-weight:600;">${cfg.enabled ? '<span style="color:#22c55e;">Enabled</span>' : '<span style="color:#ef4444;">Disabled</span>'}</div>
+                <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">${escapeHtml(channelStr)}</div>
+            </div></div>
+            <div class="card"><div class="card-body" style="padding:14px;">
+                <div style="font-size:11px; text-transform:uppercase; color:var(--text-muted); margin-bottom:4px;">Verbosity</div>
+                <div style="font-size:14px; font-weight:600; text-transform:capitalize;">${escapeHtml(verbosity)}</div>
+                <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">${verbosity === 'simple' ? 'Only compromise alerts fire' : 'All categories fire'}</div>
+            </div></div>
+            <div class="card"><div class="card-body" style="padding:14px;">
+                <div style="font-size:11px; text-transform:uppercase; color:var(--text-muted); margin-bottom:4px;">Schedule</div>
+                <div style="font-size:13px; font-weight:600;">${escapeHtml(qhSummary)}</div>
+                <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">${escapeHtml(cooldown)} · ${escapeHtml(rateLimit)} · ${escapeHtml(grouping)}</div>
+            </div></div>
+        </div>
+        <div class="card">
+            <div class="card-header"><h3 style="margin:0;">Latest dispatches</h3>
+                <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Most recent 10. See History for full search + filters.</div>
+            </div>
+            <div class="card-body" style="padding:0;">
+                <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                    <thead><tr style="text-align:left; border-bottom:1px solid var(--border); color:var(--text-muted); font-size:11px; text-transform:uppercase;">
+                        <th style="padding:8px 10px;">When</th>
+                        <th style="padding:8px 10px;">Severity</th>
+                        <th style="padding:8px 10px;">Title</th>
+                        <th style="padding:8px 10px;">Host / Cluster</th>
+                    </tr></thead>
+                    <tbody>${recentRows}</tbody>
+                </table>
+            </div>
+        </div>`;
+}
+
+// ─── History sub-panel ─────────────────────────────────────────────
+// Paginated, filterable view over the same alert_log. Calls
+// /api/alerts/history with optional severity / cluster / host / q
+// filters and a configurable limit.
+async function renderAlertsHistory() {
+    const host = document.getElementById('alerts-sub-history');
+    if (!host) return;
+    // First render — paint the filter form scaffold; data populated below.
+    host.innerHTML = `
+        <div class="card" style="margin-bottom:14px;">
+            <div class="card-body" style="padding:14px; display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
+                <div>
+                    <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:4px;">Severity</label>
+                    <select id="alerts-hist-sev" class="form-control" style="min-width:140px;">
+                        <option value="">All</option>
+                        <option value="critical">Critical</option>
+                        <option value="warning">Warning</option>
+                        <option value="info">Info</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:4px;">Cluster</label>
+                    <input type="text" id="alerts-hist-cluster" class="form-control" placeholder="(any)" style="min-width:140px;">
+                </div>
+                <div>
+                    <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:4px;">Host</label>
+                    <input type="text" id="alerts-hist-host" class="form-control" placeholder="(any)" style="min-width:140px;">
+                </div>
+                <div style="flex:1; min-width:200px;">
+                    <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:4px;">Search</label>
+                    <input type="text" id="alerts-hist-q" class="form-control" placeholder="title or detail">
+                </div>
+                <button class="btn btn-primary" onclick="reloadAlertsHistory()">Filter</button>
+            </div>
+        </div>
+        <div id="alerts-hist-results"></div>`;
+    reloadAlertsHistory();
+}
+
+async function reloadAlertsHistory() {
+    const results = document.getElementById('alerts-hist-results');
+    if (!results) return;
+    results.innerHTML = '<div style="color:var(--text-muted); padding:14px;">Loading…</div>';
+    const sev = (document.getElementById('alerts-hist-sev') || {}).value || '';
+    const cluster = (document.getElementById('alerts-hist-cluster') || {}).value || '';
+    const host = (document.getElementById('alerts-hist-host') || {}).value || '';
+    const q = (document.getElementById('alerts-hist-q') || {}).value || '';
+    const qs = new URLSearchParams();
+    qs.set('limit', '200');
+    if (sev) qs.set('severity', sev);
+    if (cluster) qs.set('cluster', cluster);
+    if (host) qs.set('host', host);
+    if (q) qs.set('q', q);
+    let data;
+    try {
+        const r = await fetch(apiUrl('/api/alerts/history?' + qs.toString()));
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        data = await r.json();
+    } catch (e) {
+        results.innerHTML = `<div style="color:#ef4444; padding:14px;">Failed to load: ${escapeHtml(e.message || e)}</div>`;
+        return;
+    }
+    const alerts = data.alerts || [];
+    if (alerts.length === 0) {
+        results.innerHTML = `<div class="card"><div class="card-body" style="padding:18px; text-align:center; color:var(--text-muted);">No alerts match the current filters.</div></div>`;
+        return;
+    }
+    const rows = alerts.map(a => {
+        const sevColor = a.severity === 'critical' ? '#ef4444'
+                      : a.severity === 'warning' ? '#eab308'
+                      : '#94a3b8';
+        return `<tr>
+            <td style="padding:6px 10px; font-size:12px; color:var(--text-muted); white-space:nowrap;">${escapeHtml(a.timestamp || '')}</td>
+            <td style="padding:6px 10px;"><span style="color:${sevColor}; font-size:11px; font-weight:600; text-transform:uppercase;">${escapeHtml(a.severity || '')}</span></td>
+            <td style="padding:6px 10px; font-weight:500;">${escapeHtml(a.title || '')}</td>
+            <td style="padding:6px 10px; font-size:12px; color:var(--text-muted);">${escapeHtml(a.hostname || '')}${a.cluster ? ' · ' + escapeHtml(a.cluster) : ''}</td>
+            <td style="padding:6px 10px; font-size:12px; color:var(--text-muted); max-width:400px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml((a.detail || '').slice(0, 200))}</td>
+        </tr>`;
+    }).join('');
+    const meta = (data.returned < data.total)
+        ? `<div style="font-size:12px; color:var(--text-muted); padding:10px 14px;">Showing ${data.returned} of ${data.total} matching — narrow filters to see older entries.</div>`
+        : `<div style="font-size:12px; color:var(--text-muted); padding:10px 14px;">${data.total} total match.</div>`;
+    results.innerHTML = `<div class="card">
+        ${meta}
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead><tr style="text-align:left; border-bottom:1px solid var(--border); color:var(--text-muted); font-size:11px; text-transform:uppercase;">
+                <th style="padding:8px 10px;">When</th>
+                <th style="padding:8px 10px;">Severity</th>
+                <th style="padding:8px 10px;">Title</th>
+                <th style="padding:8px 10px;">Host / Cluster</th>
+                <th style="padding:8px 10px;">Detail</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+    </div>`;
+}
+window.reloadAlertsHistory = reloadAlertsHistory;
+
+// ─── Schedule sub-panel (Pulse-inspired layout) ────────────────────
+// Quiet hours card + Alert cooldown card + Smart grouping card +
+// Recovery notifications toggle + Configuration summary at the
+// bottom. All operate on AlertConfig (the same /api/alerts/config
+// endpoint Notifications uses).
+async function renderAlertsSchedule() {
+    const host = document.getElementById('alerts-sub-schedule');
+    if (!host) return;
+    host.innerHTML = '<div style="color:var(--text-muted);">Loading…</div>';
+    let cfg;
+    try {
+        const r = await fetch(apiUrl('/api/alerts/config'));
+        cfg = await r.json();
+    } catch (e) {
+        host.innerHTML = `<div style="color:#ef4444;">Failed to load: ${escapeHtml(e.message || e)}</div>`;
+        return;
+    }
+    const qh = cfg.quiet_hours || { enabled:false, start_hhmm:'22:00', end_hhmm:'08:00', timezone:'UTC', days_of_week:0x7F, suppress_categories:[] };
+    const dows = [['M',0],['T',1],['W',2],['T',3],['F',4],['S',5],['S',6]];
+    const dayChips = dows.map(([label, bit]) => {
+        const on = (qh.days_of_week & (1 << bit)) !== 0;
+        return `<button type="button" data-dow-bit="${bit}" onclick="toggleScheduleDow(${bit}, this)" aria-pressed="${on}"
+            style="width:36px;height:36px;border-radius:8px;border:1px solid ${on?'#3b82f6':'var(--border)'};background:${on?'rgba(59,130,246,0.2)':'transparent'};color:${on?'var(--accent-light)':'var(--text-primary)'};cursor:pointer;font-weight:600;font-size:13px;">${label}</button>`;
+    }).join('');
+    const supprChecked = (cat) => qh.suppress_categories.includes(cat) ? 'checked' : '';
+
+    host.innerHTML = `
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:14px;">
+            <!-- Quiet hours card -->
+            <div class="card"><div class="card-body" style="padding:18px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                    <h3 style="margin:0; font-size:15px;">Quiet hours</h3>
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                        <input type="checkbox" id="sched-qh-enabled" ${qh.enabled?'checked':''}>
+                        <span style="font-size:12px;">Enabled</span>
+                    </label>
+                </div>
+                <p style="font-size:12px; color:var(--text-muted); margin:0 0 14px 0;">Pause non-critical alerts during specific times. Compromise alerts always fire regardless.</p>
+                <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-bottom:12px;">
+                    <div>
+                        <label style="display:block; font-size:11px; color:var(--text-muted);">Start</label>
+                        <input type="time" id="sched-qh-start" class="form-control" value="${escapeAttr(qh.start_hhmm)}">
+                    </div>
+                    <div>
+                        <label style="display:block; font-size:11px; color:var(--text-muted);">End</label>
+                        <input type="time" id="sched-qh-end" class="form-control" value="${escapeAttr(qh.end_hhmm)}">
+                    </div>
+                    <div>
+                        <label style="display:block; font-size:11px; color:var(--text-muted);">Timezone (IANA)</label>
+                        <input type="text" id="sched-qh-tz" class="form-control" value="${escapeAttr(qh.timezone)}" placeholder="Europe/Berlin">
+                    </div>
+                </div>
+                <div style="margin-bottom:14px;">
+                    <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:6px;">Quiet days</label>
+                    <div id="sched-qh-days" style="display:flex; gap:6px;">${dayChips}</div>
+                </div>
+                <div>
+                    <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:6px;">Suppress categories</label>
+                    <label style="display:block; font-size:12px; margin-bottom:4px;"><input type="checkbox" id="sched-supp-threshold" ${supprChecked('threshold')}> Threshold (CPU/mem/disk)</label>
+                    <label style="display:block; font-size:12px; margin-bottom:4px;"><input type="checkbox" id="sched-supp-lifecycle" ${supprChecked('lifecycle')}> Lifecycle (offline/restored/reboot)</label>
+                    <label style="display:block; font-size:12px; margin-bottom:4px;"><input type="checkbox" id="sched-supp-posture" ${supprChecked('posture')}> Posture (config findings)</label>
+                    <label style="display:block; font-size:12px;"><input type="checkbox" id="sched-supp-bruteforce" ${supprChecked('brute_force')}> Brute-force (failed-auth chatter)</label>
+                </div>
+            </div></div>
+
+            <!-- Alert cooldown card -->
+            <div class="card"><div class="card-body" style="padding:18px;">
+                <h3 style="margin:0 0 8px 0; font-size:15px;">Alert cooldown</h3>
+                <p style="font-size:12px; color:var(--text-muted); margin:0 0 14px 0;">Limit how often the same (node, alert-type) pair fires, and set a global rate ceiling for incident-storm protection.</p>
+                <div style="margin-bottom:14px;">
+                    <label style="display:block; font-size:11px; color:var(--text-muted);">Cooldown period (seconds)</label>
+                    <input type="number" id="sched-cooldown" class="form-control" min="60" max="86400" value="${cfg.cooldown_secs || 900}" style="max-width:160px;">
+                    <small style="color:var(--text-muted); font-size:11px;">Minimum 60s. The default 900s (15 min) was hard-coded before v24.</small>
+                </div>
+                <div>
+                    <label style="display:block; font-size:11px; color:var(--text-muted);">Max alerts per hour (0 = no cap)</label>
+                    <input type="number" id="sched-max-per-hour" class="form-control" min="0" max="10000" value="${cfg.max_alerts_per_hour || 0}" style="max-width:160px;">
+                    <small style="color:var(--text-muted); font-size:11px;">Compromise alerts bypass the cap so a flood of noise can't silence them.</small>
+                </div>
+            </div></div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:14px;">
+            <!-- Smart grouping card -->
+            <div class="card"><div class="card-body" style="padding:18px;">
+                <h3 style="margin:0 0 8px 0; font-size:15px;">Smart grouping</h3>
+                <p style="font-size:12px; color:var(--text-muted); margin:0 0 14px 0;">Bundle similar alerts within a window into a single notification.</p>
+                <div style="margin-bottom:12px;">
+                    <label style="display:block; font-size:11px; color:var(--text-muted);">Window (seconds; 0 = grouping off)</label>
+                    <input type="number" id="sched-group-secs" class="form-control" min="0" max="1800" value="${cfg.grouping_window_secs || 0}" style="max-width:160px;">
+                </div>
+                <div>
+                    <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:6px;">Strategy</label>
+                    <label style="display:inline-flex; align-items:center; gap:6px; margin-right:14px; font-size:13px;">
+                        <input type="radio" name="sched-group-strategy" value="by_node" ${(cfg.grouping_strategy||'by_node')==='by_node'?'checked':''}> By node
+                    </label>
+                    <label style="display:inline-flex; align-items:center; gap:6px; font-size:13px;">
+                        <input type="radio" name="sched-group-strategy" value="by_guest" ${(cfg.grouping_strategy)==='by_guest'?'checked':''}> By guest
+                    </label>
+                </div>
+            </div></div>
+
+            <!-- Recovery notifications -->
+            <div class="card"><div class="card-body" style="padding:18px;">
+                <h3 style="margin:0 0 8px 0; font-size:15px;">Recovery notifications</h3>
+                <p style="font-size:12px; color:var(--text-muted); margin:0 0 14px 0;">Send a follow-up when an alert returns to normal (node back online, threshold cleared, etc).</p>
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                    <input type="checkbox" id="sched-recovery" ${(cfg.recovery_notifications!==false)?'checked':''} style="width:18px; height:18px;">
+                    <span style="font-size:13px;">Send recovery follow-ups</span>
+                </label>
+                <small style="color:var(--text-muted); font-size:11px; display:block; margin-top:6px;">Uses the same channels as the original alert.</small>
+            </div></div>
+        </div>
+
+        <div style="display:flex; gap:10px;">
+            <button class="btn btn-primary" onclick="saveAlertsSchedule()">Save schedule</button>
+            <button class="btn" onclick="renderAlertsSchedule()">Reload</button>
+        </div>`;
+}
+
+function toggleScheduleDow(bit, btn) {
+    const on = btn.getAttribute('aria-pressed') === 'true';
+    const next = !on;
+    btn.setAttribute('aria-pressed', String(next));
+    btn.style.borderColor = next ? '#3b82f6' : 'var(--border)';
+    btn.style.background = next ? 'rgba(59,130,246,0.2)' : 'transparent';
+    btn.style.color = next ? 'var(--accent-light)' : 'var(--text-primary)';
+}
+window.toggleScheduleDow = toggleScheduleDow;
+
+async function saveAlertsSchedule() {
+    // Collect quiet-hours state
+    const enabled = document.getElementById('sched-qh-enabled').checked;
+    let dowMask = 0;
+    document.querySelectorAll('#sched-qh-days button[data-dow-bit]').forEach(b => {
+        if (b.getAttribute('aria-pressed') === 'true') {
+            dowMask |= 1 << parseInt(b.getAttribute('data-dow-bit'), 10);
+        }
+    });
+    const suppressCats = [];
+    if (document.getElementById('sched-supp-threshold').checked) suppressCats.push('threshold');
+    if (document.getElementById('sched-supp-lifecycle').checked) suppressCats.push('lifecycle');
+    if (document.getElementById('sched-supp-posture').checked) suppressCats.push('posture');
+    if (document.getElementById('sched-supp-bruteforce').checked) suppressCats.push('brute_force');
+
+    const payload = {
+        quiet_hours: {
+            enabled,
+            start_hhmm: document.getElementById('sched-qh-start').value || '22:00',
+            end_hhmm: document.getElementById('sched-qh-end').value || '08:00',
+            timezone: document.getElementById('sched-qh-tz').value.trim() || 'UTC',
+            days_of_week: dowMask || 0x7F,
+            suppress_categories: suppressCats,
+        },
+        cooldown_secs: parseInt(document.getElementById('sched-cooldown').value, 10) || 900,
+        max_alerts_per_hour: parseInt(document.getElementById('sched-max-per-hour').value, 10) || 0,
+        grouping_window_secs: parseInt(document.getElementById('sched-group-secs').value, 10) || 0,
+        grouping_strategy: (document.querySelector('input[name="sched-group-strategy"]:checked') || {}).value || 'by_node',
+        recovery_notifications: document.getElementById('sched-recovery').checked,
+    };
+    try {
+        const r = await fetch(apiUrl('/api/alerts/config'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!r.ok) {
+            const d = await r.json().catch(() => ({}));
+            throw new Error(d.error || `HTTP ${r.status}`);
+        }
+        showToast('Schedule saved', 'success');
+    } catch (e) {
+        showToast('Save failed: ' + (e.message || e), 'error');
+    }
+}
+window.saveAlertsSchedule = saveAlertsSchedule;
+
+// ─── Notifications sub-panel ───────────────────────────────────────
+// piranha's "spread around the system" complaint is fixed by relocating
+// the existing Settings → Alerting tab into Alerts → Notifications.
+// We MOVE the DOM children rather than duplicating them so:
+//   • All IDs stay unique on the page
+//   • The pre-existing `loadAlertingConfig`/`saveAlertingConfig`
+//     functions keep finding their elements
+//   • Settings → Alerting becomes a deprecation stub (replaced inline)
+// This trick is reversible — refreshing the page re-instates the
+// original layout if the operator never visited Alerts.
+const ALERTS_NOTIF_MOVED = '_alerts_notifications_moved';
+function ensureNotificationsRelocated() {
+    if (window[ALERTS_NOTIF_MOVED]) return;
+    const source = document.getElementById('settings-tab-alerting');
+    const dest = document.getElementById('alerts-sub-notifications');
+    if (!source || !dest) return;
+    // Move every child node from settings tab to the alerts panel.
+    while (source.firstChild) dest.appendChild(source.firstChild);
+    // Replace the Settings tab body with a redirect banner so the
+    // operator who hits the old location lands somewhere helpful.
+    source.innerHTML = `
+        <div style="padding:18px; background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.3); border-radius:10px;">
+            <div style="font-size:14px; font-weight:600; margin-bottom:6px;">Alerting settings have moved.</div>
+            <div style="font-size:13px; color:var(--text-secondary); margin-bottom:12px;">Channels, verbosity, and per-rule toggles now live on the unified <strong>Alerts</strong> page so everything that influences notifications is in one place.</div>
+            <button class="btn btn-primary" onclick="selectView('alerts'); setTimeout(() => switchAlertsSub('notifications'), 50);">Open Alerts → Notifications</button>
+        </div>`;
+    window[ALERTS_NOTIF_MOVED] = true;
+}
+
+async function renderAlertsNotifications() {
+    ensureNotificationsRelocated();
+    // Repopulate the form from the live config — operator may have
+    // changed settings on another tab.
+    if (typeof loadAlertingConfig === 'function') {
+        loadAlertingConfig();
+    }
+}
+
+// ─── Docker Updates sub-panel ──────────────────────────────────────
+// Same relocation pattern as Notifications above.
+const ALERTS_DU_MOVED = '_alerts_dockerupdates_moved';
+function ensureDockerUpdatesRelocated() {
+    if (window[ALERTS_DU_MOVED]) return;
+    const source = document.getElementById('settings-tab-dockerupdates');
+    const dest = document.getElementById('alerts-sub-dockerupdates');
+    if (!source || !dest) return;
+    while (source.firstChild) dest.appendChild(source.firstChild);
+    source.innerHTML = `
+        <div style="padding:18px; background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.3); border-radius:10px;">
+            <div style="font-size:14px; font-weight:600; margin-bottom:6px;">Docker Updates settings have moved.</div>
+            <div style="font-size:13px; color:var(--text-secondary); margin-bottom:12px;">All alerting-adjacent settings are now under the unified <strong>Alerts</strong> page.</div>
+            <button class="btn btn-primary" onclick="selectView('alerts'); setTimeout(() => { switchAlertsSub('dockerupdates'); loadDockerUpdatesSettings(); }, 50);">Open Alerts → Docker Updates</button>
+        </div>`;
+    window[ALERTS_DU_MOVED] = true;
+}
+
+async function renderAlertsDockerUpdates() {
+    ensureDockerUpdatesRelocated();
+    if (typeof loadDockerUpdatesSettings === 'function') {
+        loadDockerUpdatesSettings();
+    }
+}
+
+window.renderAlertsOverview = renderAlertsOverview;
+window.renderAlertsHistory = renderAlertsHistory;
+window.renderAlertsNotifications = renderAlertsNotifications;
+window.renderAlertsSchedule = renderAlertsSchedule;
+window.renderAlertsDockerUpdates = renderAlertsDockerUpdates;
+
 async function fetchContainerStatus() {
     try {
         const resp = await fetch(apiUrl('/api/containers/status'));
@@ -15842,13 +16676,34 @@ async function fleetLoadThreatIntel() {
         const stateColor = s.state === 'enforce' ? '#22c55e'
                         : s.state === 'dry-run' ? '#eab308'
                         : '#94a3b8';
+        // When state is Off, the threat-intel system intentionally does
+        // NOT download the feed or install kernel rules — that's the
+        // operator's explicit choice. The fleet table must reflect this:
+        // "n/a" / muted text, NOT red "feed not downloaded" warnings on
+        // every node. The earlier version of this code cascaded through
+        // the issue checks regardless of state and made every cluster
+        // that hadn't enabled threat-intel look broken.
+        if (s.state === 'off') {
+            return `<tr>
+                <td style="padding:6px 10px; font-weight:500;">${escapeHtml(n.hostname || n.node_id)}</td>
+                <td style="padding:6px 10px; color:var(--text-muted); font-size:12px;">${escapeHtml(s.cluster || '—')}</td>
+                <td style="padding:6px 10px;"><span style="background:${stateColor}22; color:${stateColor}; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600;">${stateLabel}</span></td>
+                <td style="padding:6px 10px; color:var(--text-muted); font-size:12px;">— n/a</td>
+                <td style="padding:6px 10px; color:var(--text-muted); font-family:var(--font-mono); font-size:12px;">—</td>
+                <td style="padding:6px 10px; color:var(--text-muted); font-size:12px;">—</td>
+                <td style="padding:6px 10px; color:var(--text-muted); font-size:12px;">not enabled</td>
+            </tr>`;
+        }
+        // State is DryRun or Enforce — evaluate feed/rule health properly.
         const rulesOk = s.state !== 'enforce' || s.iptables_rules_present;
         const rulesIcon = s.state === 'enforce' ? (s.iptables_rules_present ? '✓' : '✗') : '—';
         const rulesColor = rulesOk ? (s.state === 'enforce' ? '#22c55e' : '#94a3b8') : '#ef4444';
         const feedColor = s.feed_entry_count === 0 ? '#ef4444'
                         : (s.feed_age_secs == null || s.feed_age_secs > 6*3600) ? '#eab308'
                         : '#22c55e';
-        // Most common failure causes, ranked. First match wins.
+        // Most common failure causes, ranked. First match wins. Only
+        // reached when state != off, so "feed not downloaded" is a real
+        // issue here (the analyzer SHOULD have downloaded it).
         let issue = '';
         if (!s.ipset_available) issue = 'ipset missing';
         else if (s.feed_entry_count === 0) issue = 'feed not downloaded';
@@ -18414,6 +19269,11 @@ async function loadDockerContainers() {
         } catch(e) { /* images are non-critical */ }
         applyUpdateBadges();
         fetchContainerUpdateSummary();
+        // Docker image-watcher status (separate from inside-container
+        // package update summary above). Fires non-blocking; if the
+        // watcher is disabled, the endpoint returns an empty list and
+        // no badges render.
+        fetchImageUpdateStatus();
     } catch (e) {
         console.error('Failed to load Docker containers:', e);
     }
@@ -18610,6 +19470,7 @@ function dockerCardHtml(c) {
                 ${portWarning}
             </div>
             <span data-update-badge="docker:${c.name}"></span>
+            <span data-image-update-badge="${escapeAttr(c.name)}"></span>
         </div>
     </div>`;
 }
@@ -18811,7 +19672,7 @@ function renderDockerContainers(containers) {
             const sColor = s.status === 'running' ? '#10b981' : '#ef4444';
             return `<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:${sColor}22;color:${sColor};border:1px solid ${sColor}44;">${s.name}</span>`;
         }).join('') : '';
-        const badgeRow = `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:3px;">${svcItems}<span data-update-badge="docker:${c.name}"></span></div>`;
+        const badgeRow = `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:3px;">${svcItems}<span data-update-badge="docker:${c.name}"></span><span data-image-update-badge="${escapeAttr(c.name)}"></span></div>`;
 
         return `<tr data-name="${c.name}">
             <td><strong>${c.name}</strong>${badgeRow}<span style="font-size:11px;color:var(--text-muted)">${c.id.substring(0, 12)}</span></td>

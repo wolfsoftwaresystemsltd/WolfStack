@@ -228,6 +228,16 @@
                     <span class="icon" style="margin:0;font-size:20px;"><span class="ws-icon-clean-wrap" data-icon="inbox"></span></span>
                     <span id="predictive-badge" style="display:none;position:absolute;top:2px;right:2px;background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:1px 5px;border-radius:8px;line-height:1.4;min-width:14px;text-align:center;"></span>
                 </a>
+                <!-- v24.0.0 — unified Alerts top-level page. Consolidates
+                     the Settings → Alerting + Settings → Docker Updates
+                     tabs plus brand-new Schedule (quiet hours + cooldown
+                     + grouping + recovery) and History/Overview views.
+                     piranha's "everything's spread around the system"
+                     complaint landed here. -->
+                <a class="nav-item" data-page="alerts" onclick="selectView('alerts')" title="Alerts"
+                    style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;border-radius:10px;">
+                    <span class="icon" style="margin:0;font-size:20px;"><span class="ws-icon-clean-wrap" data-icon="bell"></span></span>
+                </a>
                 <!-- Apps & Tools launcher — opens a slide-out drawer
                      containing every secondary view that used to clutter
                      this strip. Top-strip stays focused on the few items
@@ -382,6 +392,11 @@
         <div class="page-content">
             <!-- ═══ Datacenter Overview ═══ -->
             <div id="page-datacenter" class="page-view">
+
+                <!-- v23.12.20 — Onboarding nudge slot. JS injects a banner here
+                     if Docker containers exist on this node and image-watcher is
+                     still disabled. Dismissible via localStorage. -->
+                <div id="dc-docker-updates-nudge" style="display:none;"></div>
 
                 <!-- Map + Bookmarks Row -->
                 <div class="dc-top-row" style="display: grid; grid-template-columns: 1fr 2fr; gap: 12px; margin-bottom: 12px;">
@@ -2863,6 +2878,44 @@
              sync with the JS — no duplicated HTML/JS surface. -->
         <div id="page-inbox" class="page-view" style="display:none;"></div>
 
+        <!-- ═══ Alerts Page (v24.0.0) ═══
+             Unified Alerts surface — sidebar selects between Overview,
+             History, Notifications (channels + verbosity), Schedule
+             (quiet hours + cooldown + grouping + recovery), and Docker
+             Updates. JS builds each sub-page on first activation; this
+             shell only carries the static skeleton + sidebar.
+        -->
+        <div id="page-alerts" class="page-view" style="display:none;">
+            <div style="padding:24px 24px 0 24px;">
+                <h2 style="margin:0 0 6px 0; font-size:22px; font-weight:700;">Alerts</h2>
+                <p style="margin:0 0 18px 0; color:var(--text-muted); font-size:13px;">Tune notifications, schedules, and per-resource overrides from one place.</p>
+            </div>
+            <div style="display:grid; grid-template-columns:220px 1fr; gap:20px; padding:0 24px 24px 24px;">
+                <!-- Sidebar -->
+                <nav role="navigation" aria-label="Alerts sub-navigation" style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:10px; padding:14px;">
+                    <div style="text-transform:uppercase; color:var(--text-muted); font-size:11px; letter-spacing:0.05em; margin-bottom:8px;">Status</div>
+                    <button class="alerts-side-btn" data-alerts-sub="overview" onclick="switchAlertsSub('overview')" style="display:block; width:100%; text-align:left; padding:8px 10px; margin-bottom:4px; background:transparent; border:none; color:var(--text-primary); border-radius:6px; cursor:pointer; font-size:13px;">Overview</button>
+                    <button class="alerts-side-btn" data-alerts-sub="history" onclick="switchAlertsSub('history')" style="display:block; width:100%; text-align:left; padding:8px 10px; margin-bottom:14px; background:transparent; border:none; color:var(--text-primary); border-radius:6px; cursor:pointer; font-size:13px;">History</button>
+
+                    <div style="text-transform:uppercase; color:var(--text-muted); font-size:11px; letter-spacing:0.05em; margin-bottom:8px;">Configuration</div>
+                    <button class="alerts-side-btn" data-alerts-sub="notifications" onclick="switchAlertsSub('notifications')" style="display:block; width:100%; text-align:left; padding:8px 10px; margin-bottom:4px; background:transparent; border:none; color:var(--text-primary); border-radius:6px; cursor:pointer; font-size:13px;">Notifications</button>
+                    <button class="alerts-side-btn" data-alerts-sub="schedule" onclick="switchAlertsSub('schedule')" style="display:block; width:100%; text-align:left; padding:8px 10px; margin-bottom:14px; background:transparent; border:none; color:var(--text-primary); border-radius:6px; cursor:pointer; font-size:13px;">Schedule</button>
+
+                    <div style="text-transform:uppercase; color:var(--text-muted); font-size:11px; letter-spacing:0.05em; margin-bottom:8px;">Resource types</div>
+                    <button class="alerts-side-btn" data-alerts-sub="dockerupdates" onclick="switchAlertsSub('dockerupdates'); loadDockerUpdatesSettings();" style="display:block; width:100%; text-align:left; padding:8px 10px; margin-bottom:4px; background:transparent; border:none; color:var(--text-primary); border-radius:6px; cursor:pointer; font-size:13px;">Docker Updates</button>
+                </nav>
+
+                <!-- Content area — sub-panels populated on activation. -->
+                <div>
+                    <div id="alerts-sub-overview" class="alerts-sub-panel" style="display:block;"></div>
+                    <div id="alerts-sub-history" class="alerts-sub-panel" style="display:none;"></div>
+                    <div id="alerts-sub-notifications" class="alerts-sub-panel" style="display:none;"></div>
+                    <div id="alerts-sub-schedule" class="alerts-sub-panel" style="display:none;"></div>
+                    <div id="alerts-sub-dockerupdates" class="alerts-sub-panel" style="display:none;"></div>
+                </div>
+            </div>
+        </div>
+
         <!-- ═══ Global WolfNet Page ═══ -->
         <div id="page-global-wolfnet" class="page-view" style="display:none;">
             <!-- Header -->
@@ -5022,6 +5075,7 @@
                         <button class="settings-tab-btn" onclick="switchSettingsTab('sidebar')"><span class="ws-icon-clean-wrap" data-icon="compass"></span> Sidebar</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('icons')"><span class="ws-icon-clean-wrap" data-icon="image"></span> Icons</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('alerting')"><span class="ws-icon-clean-wrap" data-icon="bell"></span> Alerting</button>
+                        <button class="settings-tab-btn" onclick="switchSettingsTab('dockerupdates'); loadDockerUpdatesSettings()"><span class="ws-icon-clean-wrap" data-icon="package"></span> Docker Updates</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('ai')"><span class="ws-icon-clean-wrap" data-icon="robot"></span> AI Agent</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('backup')"><span class="ws-icon-clean-wrap" data-icon="package"></span> Config Backup</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('users')"><span class="ws-icon-clean-wrap" data-icon="user"></span> Users &amp; Auth</button>
@@ -5703,6 +5757,70 @@
                             <button class="btn btn-primary" onclick="saveAlertingConfig()"><span class="ws-icon-clean-wrap" data-icon="save"></span> Save Settings</button>
                             <button class="btn btn-sm" onclick="testAlerting()"><span class="ws-icon-clean-wrap" data-icon="lab"></span> Send Test Alert</button>
                         </div>
+                    </div>
+
+                    <!-- ─── Docker Updates Tab (v23.12.20) ─── -->
+                    <div id="settings-tab-dockerupdates" class="settings-tab-panel">
+                        <h4 style="margin:0 0 8px 0; font-size:16px; font-weight:600;">Automatic Docker Image Updates</h4>
+                        <p style="font-size:13px; color:var(--text-muted); margin:0 0 20px 0;">Watch upstream registries for newer image digests on your running Docker containers, optionally apply them on a maintenance schedule with backup + health-check + auto-rollback. Per-container overrides on the Docker page.</p>
+
+                        <div class="form-group" style="margin-bottom:16px;">
+                            <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                                <input type="checkbox" id="docker-updates-enabled" style="width:18px; height:18px;">
+                                <strong>Enable Docker image watcher</strong>
+                            </label>
+                            <small style="color:var(--text-muted); display:block; margin-top:4px; padding-left:26px;">Polls upstream registries on the check interval below. When disabled, no checks or applies happen.</small>
+                        </div>
+
+                        <div class="form-group" style="margin-bottom:16px;">
+                            <label>Check interval</label>
+                            <select id="docker-updates-check-interval" class="form-control" style="max-width:240px;">
+                                <option value="1800">Every 30 minutes</option>
+                                <option value="3600" selected>Every 1 hour</option>
+                                <option value="10800">Every 3 hours</option>
+                                <option value="21600">Every 6 hours</option>
+                                <option value="86400">Every 24 hours</option>
+                            </select>
+                            <small style="color:var(--text-muted);">How often the watcher queries upstream registries for new digests. Each query is one HEAD request per running container — fast, but rate-limits exist.</small>
+                        </div>
+
+                        <div class="form-group" style="margin-bottom:16px;">
+                            <label>Default policy for new containers</label>
+                            <select id="docker-updates-default-policy" class="form-control" style="max-width:300px;">
+                                <option value="notify_only" selected>Notify only — show on dashboard, never apply</option>
+                                <option value="auto_update">Auto-update — apply in maintenance window</option>
+                                <option value="ignore">Ignore — skip the check</option>
+                            </select>
+                            <small style="color:var(--text-muted);">Per-container overrides on the Docker page take precedence. Pinned policy is per-container only (you have to choose what to pin to).</small>
+                        </div>
+
+                        <h4 style="margin:24px 0 8px 0; font-size:14px; color:var(--accent-light);">Maintenance window</h4>
+                        <p style="font-size:13px; color:var(--text-muted); margin:0 0 14px 0;">Gates the auto-APPLY path — checks still run on their own interval regardless. Operators typically restrict applies to off-hours so user-facing services don't restart mid-day. Leave blank to apply immediately on detection.</p>
+
+                        <div class="form-group" style="margin-bottom:16px;">
+                            <label>Schedule (cron expression, UTC)</label>
+                            <input type="text" id="docker-updates-schedule-cron" class="form-control" style="max-width:300px;font-family:var(--font-mono);" placeholder="e.g. 0 4 * * 0 — Sundays 04:00 UTC">
+                            <small style="color:var(--text-muted);">5-field cron: <code>m h dom mon dow</code>. Common picks: <code>0 4 * * 0</code> (Sun 04:00), <code>0 3 * * *</code> (daily 03:00). Blank = always open.</small>
+                        </div>
+
+                        <div class="form-group" style="margin-bottom:16px;">
+                            <label>Window duration (minutes)</label>
+                            <input type="number" id="docker-updates-window-minutes" class="form-control" style="max-width:160px;" min="5" max="1440" value="60">
+                            <small style="color:var(--text-muted);">How long after a cron-match the apply window stays open. Default 60 minutes is enough for most update batches.</small>
+                        </div>
+
+                        <div class="form-group" style="margin-bottom:16px;">
+                            <label>Max parallel updates</label>
+                            <input type="number" id="docker-updates-max-parallel" class="form-control" style="max-width:120px;" min="1" max="10" value="1">
+                            <small style="color:var(--text-muted);">How many containers to update concurrently. Default 1 avoids storming a single host. Raise on fast hardware + fast network.</small>
+                        </div>
+
+                        <div style="margin-top:20px;display:flex;gap:12px;">
+                            <button class="btn btn-primary" onclick="saveDockerUpdatesConfig()"><span class="ws-icon-clean-wrap" data-icon="save"></span> Save Settings</button>
+                        </div>
+
+                        <h4 style="margin:30px 0 8px 0; font-size:14px; color:var(--accent-light);">Recent update history</h4>
+                        <div id="docker-updates-history" style="margin-top:8px;"></div>
                     </div>
 
                     <!-- ─── AI Agent Tab ─── -->

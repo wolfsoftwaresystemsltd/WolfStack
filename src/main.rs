@@ -1664,18 +1664,112 @@ async fn main() -> std::io::Result<()> {
             });
         }
 
-        // Background: image watcher — periodic check for container image updates
+        // Background: image watcher — periodic check + auto-apply for
+        // Docker container image updates. The check populates a cache
+        // that the UI reads; the auto-apply step is gated by:
+        //   - Per-container `AutoUpdate` policy
+        //   - Cluster-wide maintenance window (cron + duration); when
+        //     no window is configured, applies fire immediately on
+        //     detection.
+        //   - `max_parallel_updates` (default 1) bound via a Semaphore
+        //     so a host with 20 containers doesn't get crushed by 20
+        //     concurrent docker pulls.
+        // Each applied update is recorded as an `ImageUpdateEvent` in
+        // `config.update_history` (capped at the most-recent 200) so
+        // the operator has a full audit trail.
         {
             let iw_cache = app_state.image_watcher_cache.clone();
             tokio::spawn(async move {
+                use crate::containers::image_watcher as iw;
                 tokio::time::sleep(Duration::from_secs(120)).await;
                 loop {
-                    let config = crate::containers::image_watcher::ImageWatcherConfig::load();
+                    let config = iw::ImageWatcherConfig::load();
                     if config.enabled {
-                        let results = crate::containers::image_watcher::check_all_containers(&config).await;
-                        let mut cache = iw_cache.write().unwrap();
-                        for r in results {
-                            cache.insert(r.container_name.clone(), r);
+                        // ── CHECK pass ──
+                        let results = iw::check_all_containers(&config).await;
+                        {
+                            let mut cache = iw_cache.write().unwrap();
+                            for r in &results {
+                                cache.insert(r.container_name.clone(), r.clone());
+                            }
+                        }
+
+                        // ── APPLY pass ──
+                        // Only fires when a maintenance window is open
+                        // (or no schedule is set). Returns the events
+                        // produced so we can fold them into history.
+                        let now = chrono::Utc::now().naive_utc();
+                        if config.auto_apply_window_open(now) {
+                            let pending: Vec<String> = results.iter()
+                                .filter(|r| r.update_available && r.error.is_none())
+                                .map(|r| r.container_name.clone())
+                                .filter(|name| config.policy_for(name).is_auto_apply())
+                                .collect();
+                            if !pending.is_empty() {
+                                let max_parallel = config.max_parallel_updates.max(1);
+                                tracing::info!(
+                                    "image_watcher: auto-applying {} update(s) (max_parallel={})",
+                                    pending.len(), max_parallel,
+                                );
+                                let sem = std::sync::Arc::new(
+                                    tokio::sync::Semaphore::new(max_parallel),
+                                );
+                                let mut handles = Vec::new();
+                                for name in pending {
+                                    let sem = sem.clone();
+                                    let cfg = config.clone();
+                                    // Keep an outer-scope copy of the
+                                    // container name so a worker-join
+                                    // failure can be attributed in the
+                                    // audit trail. Without this the
+                                    // fallback event records "<unknown>"
+                                    // and the operator can't tell which
+                                    // update misbehaved.
+                                    let fallback_name = name.clone();
+                                    handles.push(tokio::spawn(async move {
+                                        let _permit = sem.acquire_owned().await
+                                            .expect("semaphore closed");
+                                        tokio::task::spawn_blocking(move || {
+                                            iw::perform_update_blocking(&name, &cfg)
+                                        }).await.unwrap_or_else(|join_err| {
+                                            iw::ImageUpdateEvent {
+                                                id: format!("evt-join-{}", chrono::Utc::now().timestamp()),
+                                                container_name: fallback_name,
+                                                image: String::new(),
+                                                old_digest: String::new(),
+                                                new_digest: String::new(),
+                                                backup_id: None,
+                                                status: iw::ImageUpdateStatus::Failed,
+                                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                                error: Some(format!("worker join failed: {}", join_err)),
+                                            }
+                                        })
+                                    }));
+                                }
+                                let mut events: Vec<iw::ImageUpdateEvent> = Vec::with_capacity(handles.len());
+                                for h in handles {
+                                    if let Ok(ev) = h.await {
+                                        events.push(ev);
+                                    }
+                                }
+                                // Persist the audit trail. Reload the
+                                // config fresh because the apply pass
+                                // can take minutes and the operator
+                                // may have edited settings mid-flight.
+                                if !events.is_empty() {
+                                    let mut latest = iw::ImageWatcherConfig::load();
+                                    latest.update_history.extend(events);
+                                    let overflow = latest.update_history.len().saturating_sub(200);
+                                    if overflow > 0 {
+                                        latest.update_history.drain(0..overflow);
+                                    }
+                                    if let Err(e) = latest.save() {
+                                        tracing::warn!(
+                                            "image_watcher: failed to persist update history: {}", e,
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                     let interval = config.check_interval_secs.max(300);
@@ -2437,7 +2531,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                             let triggered: Vec<alerting::ThresholdAlert> = Vec::new();
 
                             for alert in &triggered {
-                                if !alerting::is_in_cooldown(&cooldowns, &node.id, &alert.alert_type) {
+                                if !alerting::is_in_cooldown_secs(&cooldowns, &node.id, &alert.alert_type, config.cooldown_secs) {
                                     let type_label = match alert.alert_type.as_str() {
                                         "cpu" => "CPU",
                                         "memory" => "Memory",
@@ -2644,7 +2738,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
 
                         for alert in &all_container_alerts {
                             let cooldown_key = format!("container:{}:memory", alert.container_name);
-                            if !alerting::is_in_cooldown(&cooldowns, &cooldown_key, "memory") {
+                            if !alerting::is_in_cooldown_secs(&cooldowns, &cooldown_key, "memory", config.cooldown_secs) {
                                 let runtime_label = if alert.runtime == "docker" { "Docker" } else { "LXC" };
 
                                 let ai_suggestion = alert_ai.analyze_issue(

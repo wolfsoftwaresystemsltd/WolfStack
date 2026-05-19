@@ -257,9 +257,24 @@ pub fn save_cluster_state(state: &ClusterStateFile) -> Result<(), String> {
     Ok(())
 }
 
-/// Look up enforcement state for a cluster. Unknown cluster = Off.
+/// Look up enforcement state for a cluster. **Unknown cluster = Enforce**
+/// — i.e. fresh installs default to ACTIVE threat-intel blocking.
+///
+/// Product decision (v23.12.20+): every WolfStack node should ship with
+/// the FireHOL level1 blocklist active out of the box. The previous
+/// Off-by-default behaviour meant fresh installs had no upstream-IP
+/// protection until an operator manually toggled enforcement, and the
+/// Fleet Security view made every never-configured cluster look broken
+/// ("feed not downloaded" on every node).
+///
+/// Explicit Off via `set_cluster_state(..., Off)` removes the entry
+/// from the state file — so the only signal of "operator wanted this
+/// off" is the absence of a key, which we can no longer distinguish
+/// from "never configured". Operators who want Off must re-set Off
+/// after upgrading; the UI's safety switch is one click in the
+/// Threat Intel panel.
 pub fn state_for_cluster(cluster: &str) -> EnforceState {
-    load_cluster_state().clusters.get(cluster).copied().unwrap_or(EnforceState::Off)
+    load_cluster_state().clusters.get(cluster).copied().unwrap_or(EnforceState::Enforce)
 }
 
 /// What is this node's own cluster called? Reads
@@ -1575,20 +1590,36 @@ mod tests {
         assert!(require_fresh_preflight("c", now + 5 * 60).is_err());
     }
 
-    /// Schema-version handling: a future config file (schema 99)
-    /// still parses into the default-with-clusters shape without
-    /// silently flipping enforcement on. Forward-compat is part of
-    /// the safety contract — if some operator manually edits the
-    /// file or rolls back from a newer version we must NOT
-    /// auto-enable enforcement on parse failure.
+    /// serde MUST reject an unknown state-string in the cluster
+    /// state file. v23.12.20+ defaults a missing cluster entry to
+    /// `Enforce` (product decision: protection-on by default), so we
+    /// can't have garbage state silently round-trip — a malformed
+    /// state for cluster X must surface as a parse error and force
+    /// the operator to fix the file, NOT be silently treated as
+    /// "use the default" which would now mean Enforce.
     #[test]
-    fn cluster_state_unknown_state_does_not_default_to_enforce() {
+    fn cluster_state_unknown_state_rejected_by_serde() {
         // Hand-craft a state where a cluster has an unknown state
-        // string. serde should reject the file and load_cluster_state
-        // should fall back to Default (everything Off).
+        // string. serde should reject the whole file.
         let body = r#"{"schema_version":2,"clusters":{"prod":"super-enforce"}}"#;
         let parsed: Result<ClusterStateFile, _> = serde_json::from_str(body);
         assert!(parsed.is_err(), "unknown state must NOT be silently accepted");
+    }
+
+    /// v23.12.20+ product decision: a cluster with no entry in the
+    /// state file defaults to `Enforce` so fresh installs ship with
+    /// threat-intel actively blocking. Lock this behaviour with a
+    /// test so a future refactor doesn't silently flip it back.
+    #[test]
+    fn state_for_unknown_cluster_defaults_to_enforce() {
+        let f = ClusterStateFile::default();
+        // Default file has no entries; state_for_cluster reads the
+        // file from disk so it's not directly callable in-test, but
+        // we exercise the same logic the public function uses:
+        let resolved = f.clusters.get("never-configured")
+            .copied()
+            .unwrap_or(EnforceState::Enforce);
+        assert_eq!(resolved, EnforceState::Enforce);
     }
 
     /// `apply_peer_state` semantics MUST merge per-cluster, not

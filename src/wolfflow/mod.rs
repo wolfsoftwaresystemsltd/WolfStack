@@ -59,6 +59,7 @@ fn default_timeout() -> u64 { 300 }
 fn default_true() -> bool { true }
 fn default_eq() -> String { "eq".to_string() }
 fn default_http_method() -> String { "GET".to_string() }
+fn default_target_all() -> String { "all".to_string() }
 fn default_ai_max_tokens() -> u32 { 1024 }
 
 // ═══════════════════════════════════════════════
@@ -166,6 +167,41 @@ pub enum ActionType {
         /// Create a backup before updating (default: true)
         #[serde(default = "default_true")]
         backup_first: bool,
+    },
+
+    // ─── Docker Multi-container Update Nodes ───
+    //
+    // Bulk variants that drive WolfStack's image-watcher pipeline (full
+    // recreate-from-inspect + optional backup + health-check + optional
+    // rollback) instead of the simpler docker-restart used by
+    // `DockerUpdate`. Honours per-container policy from
+    // `/etc/wolfstack/image-watcher.json` — pinned/ignored containers
+    // are skipped automatically, no foot-guns.
+
+    /// Check ALL running Docker containers on the local node (or a
+    /// selected subset) for available image updates. Same code path as
+    /// the background watcher uses; result is the per-container
+    /// `update_available` boolean + remote/local digests.
+    DockerCheckUpdateMany {
+        /// Targeting mode: `"all"` walks every running container; any
+        /// other value treats `container_names` as the explicit list.
+        #[serde(default = "default_target_all")]
+        target: String,
+        /// Containers to check when `target != "all"`. Ignored
+        /// otherwise.
+        #[serde(default)]
+        container_names: Vec<String>,
+    },
+
+    /// Update ALL running Docker containers (or a selected subset) to
+    /// the latest image version, using the full image-watcher pipeline.
+    /// Honours `max_parallel_updates` from the image-watcher config so
+    /// the host doesn't get crushed by N concurrent pulls.
+    DockerUpdateMany {
+        #[serde(default = "default_target_all")]
+        target: String,
+        #[serde(default)]
+        container_names: Vec<String>,
     },
 
     // ─── Generic HTTP Request ───
@@ -1103,6 +1139,146 @@ pub async fn execute_action_local(action: &ActionType) -> Result<StepOutput, Str
             data.insert("image".to_string(), serde_json::json!(image));
             Ok(structured_output(
                 format!("Updated container '{}' with latest image '{}'", container_name, image),
+                data,
+            ))
+        }
+
+        // ─── Docker Multi-container Update Check ───
+        //
+        // Drives the full image_watcher check pipeline (registry HEAD
+        // + digest compare) for every running container or a selected
+        // subset. Containers with passive policies (Ignore / Pinned)
+        // are skipped inside `check_all_containers`.
+        ActionType::DockerCheckUpdateMany { target, container_names } => {
+            use crate::containers::image_watcher as iw;
+            let config = iw::ImageWatcherConfig::load();
+            let results = if target == "all" {
+                iw::check_all_containers(&config).await
+            } else {
+                let mut out = Vec::new();
+                for name in container_names {
+                    if name.is_empty() { continue; }
+                    if name.contains(';') || name.contains('&') || name.contains('|') || name.contains('`') {
+                        return Err(format!("Invalid container name: {}", name));
+                    }
+                    // Honour passive policies the same way the bulk
+                    // path does — skip with no remote query.
+                    if config.policy_for(name).is_passive() { continue; }
+                    match iw::check_container_update(name).await {
+                        Ok(r) => out.push(r),
+                        Err(e) => out.push(iw::ImageCheckResult {
+                            container_name: name.clone(),
+                            image: String::new(),
+                            local_digest: String::new(),
+                            remote_digest: None,
+                            update_available: false,
+                            last_checked: chrono::Utc::now().to_rfc3339(),
+                            error: Some(e),
+                        }),
+                    }
+                }
+                out
+            };
+            let updates_available = results.iter().filter(|r| r.update_available).count();
+            let mut data = serde_json::Map::new();
+            data.insert("results".to_string(), serde_json::to_value(&results).unwrap_or(serde_json::Value::Null));
+            data.insert("checked".to_string(), serde_json::json!(results.len()));
+            data.insert("updates_available".to_string(), serde_json::json!(updates_available));
+            Ok(structured_output(
+                format!("Checked {} container(s); {} update(s) available", results.len(), updates_available),
+                data,
+            ))
+        }
+
+        // ─── Docker Multi-container Update ───
+        //
+        // Operator-triggered bulk update via the image_watcher pipeline
+        // (full recreate-from-inspect, optional pre-backup, health-check,
+        // optional rollback). Honours `max_parallel_updates` from the
+        // watcher config so a host with many containers doesn't get
+        // crushed by N concurrent docker pulls. Each container's
+        // policy is consulted: passive (Ignore / Pinned) is skipped
+        // with an explicit "skipped" event so the run log shows why.
+        ActionType::DockerUpdateMany { target, container_names } => {
+            use crate::containers::image_watcher as iw;
+            let config = iw::ImageWatcherConfig::load();
+            // Resolve target list.
+            let names: Vec<String> = if target == "all" {
+                let out = run_command("docker", &["ps", "--format", "{{.Names}}"], 30).await
+                    .map_err(|e| format!("docker ps failed: {}", e))?;
+                out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()
+            } else {
+                for name in container_names.iter() {
+                    if name.contains(';') || name.contains('&') || name.contains('|') || name.contains('`') {
+                        return Err(format!("Invalid container name: {}", name));
+                    }
+                }
+                container_names.clone()
+            };
+            let max_parallel = config.max_parallel_updates.max(1);
+            let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_parallel));
+            let mut handles = Vec::new();
+            for name in names {
+                let policy = config.policy_for(&name);
+                if policy.is_passive() {
+                    let name_for_skip = name.clone();
+                    let policy_str = format!("{:?}", policy.policy);
+                    handles.push(tokio::spawn(async move {
+                        iw::ImageUpdateEvent {
+                            id: format!("evt-skip-{}", uuid::Uuid::new_v4().simple()),
+                            container_name: name_for_skip,
+                            image: String::new(),
+                            old_digest: String::new(),
+                            new_digest: String::new(),
+                            backup_id: None,
+                            status: iw::ImageUpdateStatus::Failed,
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            error: Some(format!("policy is {} — skipped", policy_str)),
+                        }
+                    }));
+                    continue;
+                }
+                let sem = sem.clone();
+                let cfg = config.clone();
+                // Preserve the container name in the outer scope so a
+                // join failure can be recorded against the right
+                // container in the audit history.
+                let fallback_name = name.clone();
+                handles.push(tokio::spawn(async move {
+                    let _permit = sem.acquire_owned().await.expect("semaphore closed");
+                    tokio::task::spawn_blocking(move || {
+                        iw::perform_update_blocking(&name, &cfg)
+                    }).await.unwrap_or_else(|join_err| iw::ImageUpdateEvent {
+                        id: format!("evt-join-{}", chrono::Utc::now().timestamp()),
+                        container_name: fallback_name,
+                        image: String::new(),
+                        old_digest: String::new(),
+                        new_digest: String::new(),
+                        backup_id: None,
+                        status: iw::ImageUpdateStatus::Failed,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        error: Some(format!("worker join failed: {}", join_err)),
+                    })
+                }));
+            }
+            let mut events: Vec<iw::ImageUpdateEvent> = Vec::with_capacity(handles.len());
+            for h in handles { if let Ok(ev) = h.await { events.push(ev); } }
+            // Persist to audit history.
+            let mut latest = iw::ImageWatcherConfig::load();
+            latest.update_history.extend(events.clone());
+            let overflow = latest.update_history.len().saturating_sub(200);
+            if overflow > 0 { latest.update_history.drain(0..overflow); }
+            let _ = latest.save();
+            let success_count = events.iter()
+                .filter(|e| matches!(e.status, iw::ImageUpdateStatus::Completed))
+                .count();
+            let mut data = serde_json::Map::new();
+            data.insert("events".to_string(), serde_json::to_value(&events).unwrap_or(serde_json::Value::Null));
+            data.insert("total".to_string(), serde_json::json!(events.len()));
+            data.insert("succeeded".to_string(), serde_json::json!(success_count));
+            data.insert("failed".to_string(), serde_json::json!(events.len() - success_count));
+            Ok(structured_output(
+                format!("Updated {}/{} container(s) successfully", success_count, events.len()),
                 data,
             ))
         }

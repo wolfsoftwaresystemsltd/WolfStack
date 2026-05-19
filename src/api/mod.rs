@@ -21575,6 +21575,96 @@ pub async fn get_alert_log(
     }))
 }
 
+/// GET /api/alerts/history — paginated, filterable view over the
+/// same in-memory alert log used by `get_alert_log`. Drives the
+/// Alerts page → History sub-tab. Optional query params:
+///   - `severity`    — filter exact match ("critical" / "warning" / ...)
+///   - `cluster`     — filter exact match
+///   - `host`        — filter exact match on hostname
+///   - `q`           — case-insensitive substring match on title + detail
+///   - `since`       — return only entries with id > since
+///   - `limit`       — max rows to return; default 200, clamped to 1000
+///
+/// Response shape:
+///   `{ alerts: [...], total: N, returned: N, oldest_id, newest_id }`
+/// Frontend uses `oldest_id` as the next page cursor (set `since=oldest_id - 1`
+/// won't work for forward paging; instead the History page just
+/// re-queries with adjusted filters).
+pub async fn get_alert_history(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let severity = query.get("severity").cloned();
+    let cluster = query.get("cluster").cloned();
+    let host = query.get("host").cloned();
+    let q_lower = query.get("q").map(|s| s.to_lowercase());
+    let since_id: u64 = query.get("since").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let limit: usize = query.get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200)
+        .min(1000);
+
+    // Merge sources: state.alert_log (array health / AI critical /
+    // gateway audit — the legacy v23 writers) AND the new in-memory
+    // alerting::history_snapshot (every send_node_alert dispatch as
+    // of v24). The two sources have disjoint contents in practice;
+    // unified shape is the existing AlertLogEntry. Newest-first.
+    let legacy_log = state.alert_log.read().unwrap();
+    let legacy_rows: Vec<AlertLogEntry> = legacy_log.iter().cloned().collect();
+    drop(legacy_log);
+    let history_rows: Vec<AlertLogEntry> = crate::alerting::history_snapshot()
+        .into_iter()
+        .map(|h| AlertLogEntry {
+            // Offset the history ID range so it doesn't collide with
+            // the legacy log's IDs (which start at 1 from the
+            // process-lifetime start). 1_000_000+ is a safe band —
+            // legacy log capped at 200, so it can never reach it.
+            id: 1_000_000 + h.id,
+            timestamp: h.timestamp,
+            severity: h.severity,
+            title: h.title,
+            detail: h.detail,
+            hostname: h.hostname,
+            cluster: h.cluster,
+        })
+        .collect();
+
+    // Combined newest-first ordering by timestamp string (RFC3339,
+    // lexicographically sortable for the modern entries; legacy uses
+    // a different format but is bounded to 200 rows so the imperfect
+    // ordering near the boundary is acceptable).
+    let mut all: Vec<AlertLogEntry> = legacy_rows.into_iter()
+        .chain(history_rows.into_iter())
+        .collect();
+    all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+    let matched: Vec<AlertLogEntry> = all.into_iter()
+        .filter(|e| e.id > since_id)
+        .filter(|e| severity.as_deref().is_none_or(|s| e.severity == s))
+        .filter(|e| cluster.as_deref().is_none_or(|c| e.cluster == c))
+        .filter(|e| host.as_deref().is_none_or(|h| e.hostname == h))
+        .filter(|e| q_lower.as_deref().is_none_or(|q| {
+            e.title.to_lowercase().contains(q) || e.detail.to_lowercase().contains(q)
+        }))
+        .collect();
+    let total = matched.len();
+    let mut truncated = matched;
+    truncated.truncate(limit);
+    let returned = truncated.len();
+    let newest_id = truncated.first().map(|e| e.id).unwrap_or(0);
+    let oldest_id = truncated.last().map(|e| e.id).unwrap_or(0);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "alerts": truncated,
+        "total": total,
+        "returned": returned,
+        "newest_id": newest_id,
+        "oldest_id": oldest_id,
+    }))
+}
+
 /// GET /api/settings/paths — get file location configuration
 pub async fn get_file_locations(
     req: HttpRequest,
@@ -21756,6 +21846,39 @@ pub async fn alerts_config_save(req: HttpRequest, state: web::Data<AppState>, bo
             "verbose" => crate::alerting::AlertVerbosity::Verbose,
             _ => crate::alerting::AlertVerbosity::Simple,
         };
+    }
+    // ── v24.0.0: Schedule sub-tab fields ───────────────────────────
+    if let Some(qh) = v.get("quiet_hours") {
+        // The frontend posts either an object or `null`/missing.
+        // `null` clears the window; object replaces wholesale.
+        if qh.is_null() {
+            config.quiet_hours = None;
+        } else if let Ok(parsed) = serde_json::from_value::<crate::alerting::QuietHours>(qh.clone()) {
+            config.quiet_hours = Some(parsed);
+        }
+    }
+    if let Some(i) = v.get("cooldown_secs").and_then(|v| v.as_u64()) {
+        // Floor at 60s — cooldown shorter than that defeats the purpose
+        // and risks alert storms. Ceiling at 24h to keep it usable.
+        config.cooldown_secs = i.max(60).min(24 * 3600);
+    }
+    if let Some(i) = v.get("max_alerts_per_hour").and_then(|v| v.as_u64()) {
+        // 0 = no cap. Ceiling at 10_000 to avoid integer surprises.
+        config.max_alerts_per_hour = i.min(10_000) as u32;
+    }
+    if let Some(i) = v.get("grouping_window_secs").and_then(|v| v.as_u64()) {
+        // 0 = grouping off; max 30 min (longer windows make the
+        // group notification stale).
+        config.grouping_window_secs = i.min(30 * 60);
+    }
+    if let Some(s) = v.get("grouping_strategy").and_then(|v| v.as_str()) {
+        config.grouping_strategy = match s {
+            "by_guest" => crate::alerting::GroupingStrategy::ByGuest,
+            _ => crate::alerting::GroupingStrategy::ByNode,
+        };
+    }
+    if let Some(b) = v.get("recovery_notifications").and_then(|v| v.as_bool()) {
+        config.recovery_notifications = b;
     }
     // Discord bot token is write-only from the UI's perspective —
     // masked in to_masked_json so the frontend never sees it back.
@@ -27014,6 +27137,166 @@ pub async fn image_watcher_check(
     }
 }
 
+/// POST /api/image-watcher/apply/{container} — operator-triggered
+/// "Update now" for a single container. Runs the full apply pipeline
+/// (backup → pull → recreate → health-check → optional rollback) using
+/// the current ImageWatcherConfig's per-container policy settings. The
+/// returned `ImageUpdateEvent` carries the status trail; the event is
+/// also appended to `update_history` for the audit log.
+///
+/// Refuses (HTTP 409) when the container's policy is Pinned or
+/// Ignore — operator must explicitly switch policy first to avoid
+/// fighting their own pin/ignore decision via a stray UI click.
+pub async fn image_watcher_apply(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let container = path.into_inner();
+    let config = crate::containers::image_watcher::ImageWatcherConfig::load();
+    let policy = config.policy_for(&container);
+    if policy.is_passive() {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!(
+                "container '{}' policy is {:?} — switch to NotifyOnly or AutoUpdate first",
+                container, policy.policy,
+            ),
+        }));
+    }
+    let cfg_for_apply = config.clone();
+    let container_for_apply = container.clone();
+    let event = match tokio::task::spawn_blocking(move || {
+        crate::containers::image_watcher::perform_update_blocking(
+            &container_for_apply, &cfg_for_apply,
+        )
+    }).await {
+        Ok(ev) => ev,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("worker join failed: {}", e),
+        })),
+    };
+    // Persist the event to the audit history (re-load fresh to avoid
+    // clobbering settings the operator may have changed mid-apply).
+    let mut latest = crate::containers::image_watcher::ImageWatcherConfig::load();
+    latest.update_history.push(event.clone());
+    let overflow = latest.update_history.len().saturating_sub(200);
+    if overflow > 0 { latest.update_history.drain(0..overflow); }
+    if let Err(e) = latest.save() {
+        tracing::warn!("image_watcher: failed to persist apply event: {}", e);
+    }
+    // Refresh the cache entry so the UI re-renders with the new state.
+    if matches!(event.status, crate::containers::image_watcher::ImageUpdateStatus::Completed) {
+        let _ = crate::containers::image_watcher::check_container_update(&container).await
+            .map(|r| {
+                state.image_watcher_cache.write().unwrap()
+                    .insert(r.container_name.clone(), r);
+            });
+    }
+    HttpResponse::Ok().json(event)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImageWatcherApplyManyRequest {
+    /// Container names to update. Each runs through the same path as
+    /// the per-container endpoint; failures don't abort the batch.
+    pub containers: Vec<String>,
+}
+
+/// POST /api/image-watcher/apply-many — bulk-trigger "Update now" for
+/// multiple containers. Honours `max_parallel_updates` from config so
+/// the host doesn't get crushed by N concurrent docker pulls. Returns
+/// the full list of `ImageUpdateEvent`s — operator-facing UI can show
+/// which succeeded and which failed.
+pub async fn image_watcher_apply_many(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<ImageWatcherApplyManyRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let body = body.into_inner();
+    if body.containers.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "containers list is empty",
+        }));
+    }
+    let config = crate::containers::image_watcher::ImageWatcherConfig::load();
+    let max_parallel = config.max_parallel_updates.max(1);
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_parallel));
+    let mut handles = Vec::new();
+    for name in body.containers {
+        // Skip passive policies up-front so the operator sees an
+        // unambiguous status in the response rather than an opaque
+        // Failed event.
+        let policy = config.policy_for(&name);
+        if policy.is_passive() {
+            handles.push(tokio::spawn(async move {
+                crate::containers::image_watcher::ImageUpdateEvent {
+                    id: format!("evt-skip-{}", uuid::Uuid::new_v4().simple()),
+                    container_name: name,
+                    image: String::new(),
+                    old_digest: String::new(),
+                    new_digest: String::new(),
+                    backup_id: None,
+                    status: crate::containers::image_watcher::ImageUpdateStatus::Failed,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    error: Some(format!("policy is {:?} — skipped", policy.policy)),
+                }
+            }));
+            continue;
+        }
+        let sem = sem.clone();
+        let cfg = config.clone();
+        // Keep the container name outside the inner move so the
+        // worker-join fallback can attribute the failure to the right
+        // container in the audit trail.
+        let fallback_name = name.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire_owned().await.expect("semaphore closed");
+            tokio::task::spawn_blocking(move || {
+                crate::containers::image_watcher::perform_update_blocking(&name, &cfg)
+            }).await.unwrap_or_else(|join_err| {
+                crate::containers::image_watcher::ImageUpdateEvent {
+                    id: format!("evt-join-{}", chrono::Utc::now().timestamp()),
+                    container_name: fallback_name,
+                    image: String::new(),
+                    old_digest: String::new(),
+                    new_digest: String::new(),
+                    backup_id: None,
+                    status: crate::containers::image_watcher::ImageUpdateStatus::Failed,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    error: Some(format!("worker join failed: {}", join_err)),
+                }
+            })
+        }));
+    }
+    let mut events: Vec<crate::containers::image_watcher::ImageUpdateEvent> = Vec::with_capacity(handles.len());
+    for h in handles {
+        if let Ok(ev) = h.await { events.push(ev); }
+    }
+    // Persist history.
+    let mut latest = crate::containers::image_watcher::ImageWatcherConfig::load();
+    latest.update_history.extend(events.clone());
+    let overflow = latest.update_history.len().saturating_sub(200);
+    if overflow > 0 { latest.update_history.drain(0..overflow); }
+    let _ = latest.save();
+    // Refresh cache entries for the containers that completed.
+    {
+        let mut cache = state.image_watcher_cache.write().unwrap();
+        for ev in &events {
+            if matches!(ev.status, crate::containers::image_watcher::ImageUpdateStatus::Completed)
+                && !ev.container_name.is_empty()
+            {
+                // Mark cache entry as needing a refresh — actual
+                // re-check happens on next background tick. Removing
+                // the entry hides the stale "update available" flag.
+                cache.remove(&ev.container_name);
+            }
+        }
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "events": events }))
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ─── Integration Framework Endpoints ───
 // ═══════════════════════════════════════════════════════════════════════════
@@ -30170,6 +30453,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/image-watcher/config", web::put().to(image_watcher_config_save))
         .route("/api/image-watcher/status", web::get().to(image_watcher_status))
         .route("/api/image-watcher/check/{container}", web::post().to(image_watcher_check))
+        // Operator-triggered "Update now" — singular and bulk. Bulk
+        // honours `max_parallel_updates` so a host with many
+        // containers doesn't get crushed by N concurrent docker pulls.
+        .route("/api/image-watcher/apply/{container}", web::post().to(image_watcher_apply))
+        .route("/api/image-watcher/apply-many", web::post().to(image_watcher_apply_many))
         // Certificates
         .route("/api/certificates", web::post().to(request_certificate))
         .route("/api/certificates/list", web::get().to(list_certificates))
@@ -30689,6 +30977,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/issues/scan", web::get().to(scan_issues))
         .route("/api/issues/clean", web::post().to(clean_system))
         .route("/api/alerts", web::get().to(get_alert_log))
+        // v24.0.0 — paginated, filterable history view used by the
+        // new Alerts page. Reads the same in-memory alert_log as the
+        // simpler `/api/alerts` endpoint; no schema change.
+        .route("/api/alerts/history", web::get().to(get_alert_history))
         // File locations
         .route("/api/settings/paths", web::get().to(get_file_locations))
         .route("/api/settings/paths", web::post().to(update_file_locations))

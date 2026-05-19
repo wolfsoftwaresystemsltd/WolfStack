@@ -1,6 +1,6 @@
 [package]
 name = "wolfstack"
-version = "23.12.19"
+version = "24.0.0"
 edition = "2024"
 authors = ["Wolf Software Systems Ltd"]
 description = "Server management platform for the Wolf software suite"
@@ -55,6 +55,7 @@ clap = { version = "4", features = ["derive"] }
 # Utilities
 uuid = { version = "1", features = ["v4", "v5"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 hostname = "0.4"
 libc = "0.2"
 sha1 = "0.10"

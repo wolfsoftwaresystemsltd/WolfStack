@@ -42,9 +42,34 @@ pub struct ImageWatcherConfig {
     pub container_policies: HashMap<String, ContainerUpdatePolicy>,
     #[serde(default)]
     pub update_history: Vec<ImageUpdateEvent>,
+    /// Optional 5-field cron expression (`m h dom mon dow`) gating the
+    /// AUTO-APPLY path. The CHECK loop still runs on its own interval
+    /// regardless — operators want the dashboard to show pending
+    /// updates 24/7. When `None`, auto-apply fires as soon as an
+    /// update is detected for an `AutoUpdate` container. Common
+    /// values: `"0 4 * * 0"` (Sundays 04:00 UTC), `"0 3 * * *"`
+    /// (daily 03:00 UTC). Reuses `wolfflow::cron_matches` so the
+    /// semantics match the rest of WolfFlow's cron handling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_cron: Option<String>,
+    /// How long after a cron-match the auto-apply window stays open.
+    /// At default 60 the loop applies for the first hour after each
+    /// cron-fire. Anything outside this window holds back the apply
+    /// until the next fire. Set higher if a single batch can take
+    /// longer than an hour on slow links.
+    #[serde(default = "default_window_minutes")]
+    pub schedule_window_minutes: u64,
+    /// Maximum number of containers to auto-update concurrently. Each
+    /// apply involves a docker pull (network) + stop / start (kernel
+    /// + I/O), so 1 by default avoids storming the host. Operators
+    /// with fast networks and beefy hosts can raise this.
+    #[serde(default = "default_max_parallel_updates")]
+    pub max_parallel_updates: usize,
 }
 
 fn default_check_interval() -> u64 { 3600 }
+fn default_window_minutes() -> u64 { 60 }
+fn default_max_parallel_updates() -> usize { 1 }
 
 impl Default for ImageWatcherConfig {
     fn default() -> Self {
@@ -54,16 +79,78 @@ impl Default for ImageWatcherConfig {
             default_policy: UpdatePolicy::default(),
             container_policies: HashMap::new(),
             update_history: Vec::new(),
+            schedule_cron: None,
+            schedule_window_minutes: default_window_minutes(),
+            max_parallel_updates: default_max_parallel_updates(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+impl ImageWatcherConfig {
+    /// Resolve the effective per-container policy: explicit entry in
+    /// `container_policies` wins; falls back to a fresh policy whose
+    /// `policy` field is `default_policy`. Single source of truth so
+    /// check + apply paths can't disagree.
+    pub fn policy_for(&self, container_name: &str) -> ContainerUpdatePolicy {
+        if let Some(p) = self.container_policies.get(container_name) {
+            return p.clone();
+        }
+        ContainerUpdatePolicy {
+            policy: self.default_policy.clone(),
+            ..ContainerUpdatePolicy::default()
+        }
+    }
+
+    /// True when the auto-apply window is currently open. With no
+    /// schedule configured, the window is always open (apply
+    /// immediately on detection). With a cron set, the window opens
+    /// at each cron-match and stays open for `schedule_window_minutes`
+    /// minutes. Used by the background loop and the bulk-apply API
+    /// to enforce maintenance hours.
+    ///
+    /// `now` is parameterised so tests can pin a clock; production
+    /// callers pass `chrono::Utc::now().naive_utc()`.
+    pub fn auto_apply_window_open(&self, now: chrono::NaiveDateTime) -> bool {
+        let Some(cron) = self.schedule_cron.as_deref() else {
+            return true; // no schedule == always open
+        };
+        let cron = cron.trim();
+        if cron.is_empty() { return true; }
+        let window = self.schedule_window_minutes.max(1);
+        // Walk backwards minute-by-minute over the window. If any
+        // minute in [now - window, now] matched the cron, the window
+        // is open right now. Cheap: ≤ window iterations of a string
+        // compare per call.
+        for offset_min in 0..window {
+            let when = now - chrono::Duration::minutes(offset_min as i64);
+            if crate::wolfflow::cron_matches(cron, &when) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdatePolicy {
+    /// Detect updates and surface them in the UI / Predictive Inbox,
+    /// but never apply automatically. Operator clicks "Update now".
     NotifyOnly,
+    /// Detect updates and apply automatically within the maintenance
+    /// window. Backup + health-check + rollback semantics governed by
+    /// the per-container flags.
     AutoUpdate,
+    /// Don't even check this container. Useful for one-off / locally-
+    /// built images where the registry roundtrip is wasteful.
     Ignore,
+    /// Lock this container to a specific tag or digest. The check
+    /// loop SKIPS the remote query (same as Ignore for the auto-apply
+    /// path) so a pinned container never auto-updates. The pin target
+    /// is stored in `ContainerUpdatePolicy.pinned_to` and surfaced in
+    /// the UI so the operator can see WHAT it's pinned to without
+    /// looking at the deploy config.
+    Pinned,
 }
 
 impl Default for UpdatePolicy {
@@ -74,6 +161,13 @@ impl Default for UpdatePolicy {
 pub struct ContainerUpdatePolicy {
     #[serde(default = "default_notify_only")]
     pub policy: UpdatePolicy,
+    /// Tag (`1.2.3`, `stable`) or fully-qualified digest
+    /// (`sha256:abc…`) the operator has pinned this container to.
+    /// Only meaningful when `policy == UpdatePolicy::Pinned`. Stored
+    /// as a free-form string — validation happens at the API layer
+    /// (refuse Pinned policy without a non-empty target).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_to: Option<String>,
     #[serde(default = "default_true")]
     pub backup_before_update: bool,
     #[serde(default = "default_true")]
@@ -92,11 +186,31 @@ impl Default for ContainerUpdatePolicy {
     fn default() -> Self {
         Self {
             policy: UpdatePolicy::NotifyOnly,
+            pinned_to: None,
             backup_before_update: true,
             health_check: true,
             health_check_timeout_secs: default_health_check_timeout(),
             auto_rollback: true,
         }
+    }
+}
+
+impl ContainerUpdatePolicy {
+    /// True when this policy means "do nothing automatically" — covers
+    /// both `Ignore` (don't even check) and `Pinned` (check is also
+    /// skipped because we'd just be measuring drift the operator
+    /// already accepted). Use this everywhere the auto-apply loop or
+    /// check loop needs to decide whether to touch a container.
+    pub fn is_passive(&self) -> bool {
+        matches!(self.policy, UpdatePolicy::Ignore | UpdatePolicy::Pinned)
+    }
+
+    /// True when this policy means "apply updates automatically when
+    /// detected" — only `AutoUpdate` qualifies. NotifyOnly surfaces
+    /// updates but doesn't apply; Pinned never applies; Ignore never
+    /// even checks.
+    pub fn is_auto_apply(&self) -> bool {
+        matches!(self.policy, UpdatePolicy::AutoUpdate)
     }
 }
 
@@ -453,6 +567,259 @@ pub async fn check_container_update(container_name: &str) -> Result<ImageCheckRe
     }
 }
 
+// ═══════════════════════════════════════════════
+// ─── Auto-apply Path ───
+// ═══════════════════════════════════════════════
+
+/// Perform an image update for one Docker container, honouring the
+/// configured per-container policy (backup / health-check /
+/// auto-rollback). Synchronous + blocking — call from
+/// `tokio::task::spawn_blocking`.
+///
+/// Sequence:
+///   1. Refuse on passive policies (Ignore + Pinned) — the auto-loop
+///      shouldn't reach here for those, but defense-in-depth keeps a
+///      misuse from mutating a frozen container.
+///   2. `docker inspect` captures the current config (image, ports,
+///      volumes, env, restart policy, etc.) and the old image ID for
+///      rollback.
+///   3. Optional pre-update backup via `backup::backup_docker`. Backup
+///      failures ABORT the update — better to leave the container
+///      running on the old image than apply without a rollback path.
+///   4. `docker pull <image>`; we then snapshot the new image ID.
+///   5. If the pull didn't change the local image (no-op), record
+///      Completed without recreating.
+///   6. `docker stop` + `docker rm` + recreate-from-inspect — the
+///      tag's now pointing at the new image so recreate naturally
+///      picks it up.
+///   7. Health check (if enabled): poll docker inspect for HEALTHCHECK
+///      status, OR fall back to "Running for ≥10 seconds" when no
+///      HEALTHCHECK is declared (very common for community images).
+///   8. On health failure: if `auto_rollback`, recreate with the OLD
+///      image ID; otherwise mark Failed and leave the container in
+///      its degraded state for the operator to inspect.
+///
+/// Always returns an `ImageUpdateEvent` — the caller appends it to
+/// `config.update_history` regardless of outcome so the operator has
+/// a full audit trail.
+pub fn perform_update_blocking(container_name: &str, config: &ImageWatcherConfig) -> ImageUpdateEvent {
+    let event_id = format!("evt-{}", uuid::Uuid::new_v4().simple());
+    let started_at_rfc = chrono::Utc::now().to_rfc3339();
+    let policy = config.policy_for(container_name);
+    let mut event = ImageUpdateEvent {
+        id: event_id,
+        container_name: container_name.into(),
+        image: String::new(),
+        old_digest: String::new(),
+        new_digest: String::new(),
+        backup_id: None,
+        status: ImageUpdateStatus::UpdateAvailable,
+        timestamp: started_at_rfc,
+        error: None,
+    };
+
+    if policy.is_passive() {
+        event.status = ImageUpdateStatus::Failed;
+        event.error = Some(format!(
+            "policy is {:?} — auto-apply refused",
+            policy.policy,
+        ));
+        return event;
+    }
+
+    // Step 2: inspect.
+    let inspect = match crate::containers::docker_inspect(container_name) {
+        Ok(v) => v,
+        Err(e) => {
+            event.status = ImageUpdateStatus::Failed;
+            event.error = Some(format!("docker inspect failed: {}", e));
+            return event;
+        }
+    };
+    let image = inspect.pointer("/Config/Image")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let old_image_id = inspect.pointer("/Image")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    event.image = image.clone();
+    event.old_digest = old_image_id.clone();
+    if image.is_empty() {
+        event.status = ImageUpdateStatus::Failed;
+        event.error = Some("could not determine image from docker inspect".into());
+        return event;
+    }
+
+    // Step 3: optional backup.
+    if policy.backup_before_update {
+        event.status = ImageUpdateStatus::BackingUp;
+        match crate::backup::backup_docker(container_name) {
+            Ok((path, _size, _sha, _mounts)) => {
+                event.backup_id = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string());
+            }
+            Err(e) => {
+                event.status = ImageUpdateStatus::Failed;
+                event.error = Some(format!("pre-update backup failed: {}", e));
+                return event;
+            }
+        }
+    }
+
+    // Step 4: pull.
+    event.status = ImageUpdateStatus::Pulling;
+    if let Err(e) = crate::containers::docker_pull(&image) {
+        event.status = ImageUpdateStatus::Failed;
+        event.error = Some(format!("docker pull failed: {}", e));
+        return event;
+    }
+    let new_image_id = Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}}", &image])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    event.new_digest = new_image_id.clone();
+
+    // Step 5: no-op short circuit.
+    if !new_image_id.is_empty() && new_image_id == old_image_id {
+        event.status = ImageUpdateStatus::Completed;
+        event.error = Some("already at latest digest — no recreate needed".into());
+        return event;
+    }
+
+    // Step 6: stop + remove + recreate.
+    event.status = ImageUpdateStatus::Recreating;
+    if let Err(e) = crate::containers::docker_stop(container_name) {
+        // Stop failures aren't fatal — the container may already be
+        // stopped, or docker may have raced us. Log and continue.
+        warn!("docker stop {} during update: {}", container_name, e);
+    }
+    if let Err(e) = crate::containers::docker_remove(container_name) {
+        event.status = ImageUpdateStatus::Failed;
+        event.error = Some(format!("docker rm failed: {}", e));
+        return event;
+    }
+    if let Err(e) = crate::containers::docker_recreate_from_inspect(container_name, &inspect) {
+        event.status = ImageUpdateStatus::Failed;
+        event.error = Some(format!("docker recreate failed: {}", e));
+        // Try to bring the OLD container back as a safety net.
+        let _ = recreate_with_image(&inspect, container_name, &old_image_id);
+        return event;
+    }
+
+    // Step 7+8: health check + optional rollback.
+    if policy.health_check {
+        event.status = ImageUpdateStatus::HealthChecking;
+        let healthy = wait_for_healthy(container_name, policy.health_check_timeout_secs);
+        if !healthy {
+            if policy.auto_rollback {
+                warn!(
+                    "auto-update {} unhealthy after restart — rolling back to image {}",
+                    container_name, old_image_id,
+                );
+                let _ = crate::containers::docker_stop(container_name);
+                let _ = crate::containers::docker_remove(container_name);
+                match recreate_with_image(&inspect, container_name, &old_image_id) {
+                    Ok(_) => {
+                        event.status = ImageUpdateStatus::RolledBack;
+                        event.error = Some("health check failed — rolled back to previous image".into());
+                    }
+                    Err(e) => {
+                        event.status = ImageUpdateStatus::Failed;
+                        event.error = Some(format!(
+                            "health check failed AND rollback recreate failed: {}", e,
+                        ));
+                    }
+                }
+                return event;
+            }
+            event.status = ImageUpdateStatus::Failed;
+            event.error = Some(format!(
+                "health check failed after {}s — auto_rollback disabled, container left in degraded state",
+                policy.health_check_timeout_secs,
+            ));
+            return event;
+        }
+    }
+
+    event.status = ImageUpdateStatus::Completed;
+    event
+}
+
+/// Clone `inspect`, override `Config.Image` to a specific image-ID
+/// (typically the sha256 of the previous image for rollback) and
+/// recreate. Keeps the recreate site in `perform_update_blocking`
+/// readable without duplicating the inspect-mutation logic.
+fn recreate_with_image(
+    inspect: &serde_json::Value,
+    container_name: &str,
+    image_id: &str,
+) -> Result<String, String> {
+    let mut rollback_inspect = inspect.clone();
+    if let Some(cfg) = rollback_inspect.pointer_mut("/Config") {
+        cfg["Image"] = serde_json::Value::String(image_id.to_string());
+    }
+    crate::containers::docker_recreate_from_inspect(container_name, &rollback_inspect)
+}
+
+/// Poll `docker inspect` until the container reports healthy or the
+/// deadline lapses. Two modes, selected automatically:
+///
+/// 1. **Image declares HEALTHCHECK** — wait for `.State.Health.Status`
+///    to be `healthy`. Returns false on `unhealthy`, keeps polling on
+///    `starting`.
+/// 2. **No HEALTHCHECK declared** — wait for `.State.Status == "running"`
+///    to hold for ≥10 contiguous seconds. The 10s gate filters out
+///    images that crash-loop right after start (very common with
+///    misconfigured env vars).
+///
+/// Returns true on success, false on timeout / explicit unhealthy.
+fn wait_for_healthy(container_name: &str, timeout_secs: u64) -> bool {
+    let timeout = std::time::Duration::from_secs(timeout_secs.max(5));
+    let deadline = std::time::Instant::now() + timeout;
+    let mut running_since: Option<std::time::Instant> = None;
+    loop {
+        if std::time::Instant::now() > deadline { return false; }
+        let out = Command::new("docker")
+            .args([
+                "inspect", "--format",
+                "{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",
+                container_name,
+            ])
+            .output();
+        if let Ok(o) = out {
+            if o.status.success() {
+                let raw = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                let (status, health) = raw.split_once('|').unwrap_or((raw.as_str(), "none"));
+                match health {
+                    "healthy" => return true,
+                    "unhealthy" => return false,
+                    _ => {
+                        // No HEALTHCHECK OR still "starting" — fall back
+                        // to "running for 10s contiguous" as a stability
+                        // signal. Reset if status drops off "running".
+                        if status == "running" {
+                            let now = std::time::Instant::now();
+                            let r = *running_since.get_or_insert(now);
+                            if now.duration_since(r) >= std::time::Duration::from_secs(10) {
+                                return true;
+                            }
+                        } else {
+                            running_since = None;
+                        }
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
 /// Check all running Docker containers for available image updates.
 /// Containers with an `Ignore` policy are skipped.
 pub async fn check_all_containers(config: &ImageWatcherConfig) -> Vec<ImageCheckResult> {
@@ -484,14 +851,14 @@ pub async fn check_all_containers(config: &ImageWatcherConfig) -> Vec<ImageCheck
     let mut results = Vec::new();
 
     for name in &names {
-        // Determine effective policy for this container
-        let policy = config
-            .container_policies
-            .get(name)
-            .map(|cp| &cp.policy)
-            .unwrap_or(&config.default_policy);
-
-        if *policy == UpdatePolicy::Ignore {
+        // Skip passive policies (Ignore + Pinned). Passive == the
+        // operator has already decided not to follow remote-latest,
+        // so the registry HEAD is wasted work AND surfaces noise as
+        // "update available" on the dashboard for containers the
+        // operator deliberately froze. `policy_for` is the single
+        // source of truth for the per-container effective policy.
+        let policy = config.policy_for(name);
+        if policy.is_passive() {
             continue;
         }
 
@@ -589,6 +956,7 @@ mod tests {
             "my-app".into(),
             ContainerUpdatePolicy {
                 policy: UpdatePolicy::AutoUpdate,
+                pinned_to: None,
                 backup_before_update: true,
                 health_check: true,
                 health_check_timeout_secs: 120,
@@ -640,9 +1008,123 @@ mod tests {
         let json = serde_json::to_string(&UpdatePolicy::Ignore).unwrap();
         assert_eq!(json, "\"ignore\"");
 
+        let json = serde_json::to_string(&UpdatePolicy::Pinned).unwrap();
+        assert_eq!(json, "\"pinned\"");
+
         // Round-trip
         let parsed: UpdatePolicy = serde_json::from_str("\"auto_update\"").unwrap();
         assert_eq!(parsed, UpdatePolicy::AutoUpdate);
+        let parsed: UpdatePolicy = serde_json::from_str("\"pinned\"").unwrap();
+        assert_eq!(parsed, UpdatePolicy::Pinned);
+    }
+
+    /// Locks the passive/auto-apply classification. If either of these
+    /// helpers ever flips for a variant, the auto-apply loop will
+    /// either skip a container it should touch or touch one it
+    /// shouldn't — both are P0 regressions.
+    #[test]
+    fn policy_passive_and_auto_apply_helpers() {
+        let notify = ContainerUpdatePolicy { policy: UpdatePolicy::NotifyOnly, ..Default::default() };
+        let auto   = ContainerUpdatePolicy { policy: UpdatePolicy::AutoUpdate, ..Default::default() };
+        let ignore = ContainerUpdatePolicy { policy: UpdatePolicy::Ignore, ..Default::default() };
+        let pinned = ContainerUpdatePolicy { policy: UpdatePolicy::Pinned, pinned_to: Some("1.2.3".into()), ..Default::default() };
+
+        // is_passive — Ignore + Pinned only.
+        assert!(!notify.is_passive());
+        assert!(!auto.is_passive());
+        assert!(ignore.is_passive());
+        assert!(pinned.is_passive());
+
+        // is_auto_apply — AutoUpdate only.
+        assert!(!notify.is_auto_apply());
+        assert!(auto.is_auto_apply());
+        assert!(!ignore.is_auto_apply());
+        assert!(!pinned.is_auto_apply());
+    }
+
+    /// `pinned_to` is serialised only when Some — keeps existing
+    /// configs un-touched when the operator hasn't pinned anything,
+    /// AND keeps the on-disk file diff-friendly.
+    #[test]
+    fn pinned_to_is_skipped_when_none() {
+        let p = ContainerUpdatePolicy { policy: UpdatePolicy::NotifyOnly, ..Default::default() };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("pinned_to"), "expected no pinned_to field when None, got: {}", json);
+    }
+
+    #[test]
+    fn pinned_to_serialises_when_some() {
+        let p = ContainerUpdatePolicy {
+            policy: UpdatePolicy::Pinned,
+            pinned_to: Some("v1.4.3".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"pinned_to\":\"v1.4.3\""), "got: {}", json);
+    }
+
+    /// `policy_for` is the single source of truth for the effective
+    /// per-container policy. Test the fallback to default_policy and
+    /// the explicit-entry-wins behaviour.
+    #[test]
+    fn policy_for_uses_explicit_entry_then_default() {
+        let mut cfg = ImageWatcherConfig::default();
+        cfg.default_policy = UpdatePolicy::AutoUpdate;
+        cfg.container_policies.insert("ngx".into(), ContainerUpdatePolicy {
+            policy: UpdatePolicy::Ignore,
+            ..Default::default()
+        });
+
+        // Explicit entry wins.
+        assert_eq!(cfg.policy_for("ngx").policy, UpdatePolicy::Ignore);
+        // No entry → default.
+        assert_eq!(cfg.policy_for("untouched").policy, UpdatePolicy::AutoUpdate);
+    }
+
+    /// No schedule_cron → window is always open. Default install
+    /// state — operators who haven't picked a maintenance window
+    /// shouldn't have the apply loop silently held back.
+    #[test]
+    fn auto_apply_window_open_with_no_schedule() {
+        let cfg = ImageWatcherConfig::default();
+        assert!(cfg.schedule_cron.is_none());
+        let now = chrono::NaiveDateTime::parse_from_str("2026-05-19 14:23:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        assert!(cfg.auto_apply_window_open(now));
+    }
+
+    /// Schedule "0 4 * * 0" = Sundays 04:00 UTC, with a 60-minute
+    /// window. Sunday 04:00 = open; Sunday 04:30 = still open; Sunday
+    /// 05:30 = CLOSED; Wednesday any time = CLOSED.
+    #[test]
+    fn auto_apply_window_respects_cron_and_duration() {
+        let cfg = ImageWatcherConfig {
+            schedule_cron: Some("0 4 * * 0".into()),
+            schedule_window_minutes: 60,
+            ..Default::default()
+        };
+        // 2026-05-17 is a Sunday.
+        let sun_04_00 = chrono::NaiveDateTime::parse_from_str("2026-05-17 04:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let sun_04_30 = chrono::NaiveDateTime::parse_from_str("2026-05-17 04:30:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let sun_05_30 = chrono::NaiveDateTime::parse_from_str("2026-05-17 05:30:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let wed_04_00 = chrono::NaiveDateTime::parse_from_str("2026-05-20 04:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+
+        assert!(cfg.auto_apply_window_open(sun_04_00), "Sunday 04:00 should open");
+        assert!(cfg.auto_apply_window_open(sun_04_30), "Sunday 04:30 within 60min window");
+        assert!(!cfg.auto_apply_window_open(sun_05_30), "Sunday 05:30 past 60min window");
+        assert!(!cfg.auto_apply_window_open(wed_04_00), "Wednesday is not a Sunday cron-match");
+    }
+
+    /// Empty / whitespace-only cron string falls back to "always open"
+    /// rather than silently blocking every apply forever. Defensive
+    /// against an operator typo or a half-saved settings form.
+    #[test]
+    fn auto_apply_window_open_with_blank_cron() {
+        let cfg = ImageWatcherConfig {
+            schedule_cron: Some("   ".into()),
+            ..Default::default()
+        };
+        let now = chrono::NaiveDateTime::parse_from_str("2026-05-19 14:23:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        assert!(cfg.auto_apply_window_open(now));
     }
 
     #[test]
