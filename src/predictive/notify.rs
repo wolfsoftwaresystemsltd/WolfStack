@@ -32,8 +32,6 @@
 //! want to block the tick body. Each dispatch is `tokio::spawn`'d
 //! so the orchestrator returns to its 5-min sleep promptly.
 
-use std::sync::Arc;
-
 use crate::predictive::Proposal;
 use crate::predictive::proposal::{ProposalScope, Severity};
 
@@ -60,21 +58,37 @@ pub fn find_first_appearance_alerts<'a>(
 
 /// Fire the existing alerting channels for a list of newly-appeared
 /// proposals. Spawns one task per proposal so a slow Discord webhook
-/// doesn't sequence-stall the others. Configuration is loaded once
-/// up-front (cheap — JSON file read).
+/// doesn't sequence-stall the others. `send_local_alert` resolves the
+/// cluster name + hostname inside the dispatch, so operators see
+/// `[<cluster> / <host>] <title>` in Discord/Slack/Telegram and the
+/// email body opens with a Cluster/Host/When header — fixes the
+/// previous "Scope: ws-784bcbe6" UX where notifications carried only
+/// the internal node-id slug.
 pub fn dispatch_alerts(proposals: Vec<Proposal>) {
     if proposals.is_empty() { return; }
-    let config = Arc::new(crate::alerting::AlertConfig::load());
-    if !config.enabled || !config.has_channels() {
+    let cfg = crate::alerting::AlertConfig::load();
+    if !cfg.enabled || !cfg.has_channels() {
         // Operator hasn't configured notifications — inbox only.
         // This is the common case and shouldn't log noise.
         return;
     }
     for p in proposals {
-        let cfg = config.clone();
         tokio::spawn(async move {
             let (title, message) = format_for_channel(&p);
-            crate::alerting::send_alert(&cfg, &title, &message).await;
+            // Map predictive finding_type → AlertCategory. The
+            // `compromise_indicator:*` family (root-shell hijack, locker
+            // binary, C2 connection, proxmox-services-masked, bash-history
+            // signature, immutable PVE UI — see predictive/compromise_indicators.rs)
+            // are real host-compromise signals and must fire under Simple
+            // mode. Everything else (disk-fill ETA, container restart-loops,
+            // memory creep) is early-warning Threshold material visible in
+            // the Predictive Inbox; Simple mode suppresses the push for those.
+            let category = if p.finding_type.starts_with("compromise_indicator:") {
+                crate::alerting::AlertCategory::Compromise
+            } else {
+                crate::alerting::AlertCategory::Threshold
+            };
+            crate::alerting::send_local_alert(category, &title, &message).await;
         });
     }
 }
@@ -85,10 +99,6 @@ fn format_for_channel(p: &Proposal) -> (String, String) {
         Severity::High     => "🟠 HIGH",
         Severity::Warn     => "🟡 WARN",
         Severity::Info     => "ℹ INFO",
-    };
-    let scope_label = match &p.scope.resource_id {
-        Some(r) => format!("{} · {}", p.scope.node_id, r),
-        None    => p.scope.node_id.clone(),
     };
     let title = format!("{} — {}", sev_marker, p.title);
 
@@ -103,7 +113,15 @@ fn format_for_channel(p: &Proposal) -> (String, String) {
         .map(|e| format!("• {}: {}", e.label, e.value))
         .collect();
 
-    let mut message = format!("Scope: {}\n\n{}", scope_label, why_short);
+    // Body intentionally omits `p.scope.node_id` — the dispatch wraps
+    // this with a Cluster:/Host:/When: header via `send_local_alert`,
+    // so duplicating the raw slug here would just be noise. The
+    // resource_id (container, disk, etc.) is still useful when present
+    // because it disambiguates which *thing on this host* fired.
+    let mut message = match &p.scope.resource_id {
+        Some(r) => format!("Resource: {}\n\n{}", r, why_short),
+        None    => why_short,
+    };
     if !evidence_lines.is_empty() {
         message.push_str("\n\nEvidence:\n");
         message.push_str(&evidence_lines.join("\n"));

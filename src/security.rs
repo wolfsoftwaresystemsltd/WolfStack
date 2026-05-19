@@ -574,8 +574,14 @@ fn scan_tmp_binaries(out: &mut Vec<DependencyCheck>) {
         }
     }
     if suspicious.is_empty() { return; }
-    out.push(warn(
-        &format!("Recent executable file(s) in /tmp or /dev/shm ({} found)", suspicious.len()),
+    // Severity: critical. A freshly-dropped executable in /tmp or /dev/shm
+    // is a classic compromise staging area — bumping from warn → critical
+    // so this finding actually reaches the operator via the security-scan
+    // alert path (which is `Missing`/critical-only by design). The user's
+    // Simple-mode notification list explicitly includes "suspicious /tmp
+    // binary" as one of the three always-fire categories.
+    out.push(critical(
+        &format!("Suspicious binary in /tmp or /dev/shm ({} found)", suspicious.len()),
         &format!(
             "Files that are world-writable AND executable AND freshly-dropped are classic malware-staging indicators. If you didn't put these there, investigate.\n\n{}",
             suspicious.join("\n")),

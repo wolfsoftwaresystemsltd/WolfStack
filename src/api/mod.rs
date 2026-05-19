@@ -21748,6 +21748,15 @@ pub async fn alerts_config_save(req: HttpRequest, state: web::Data<AppState>, bo
         // a user picks the highest setting offered.
         config.security_scan_interval_secs = i.max(3600).min(24 * 3600);
     }
+    // Notification verbosity. Anything other than the exact string
+    // "verbose" falls back to Simple — defensive against typos and
+    // forward-compatible with future verbosity tiers if we ever add one.
+    if let Some(s) = v.get("alert_verbosity").and_then(|v| v.as_str()) {
+        config.alert_verbosity = match s {
+            "verbose" => crate::alerting::AlertVerbosity::Verbose,
+            _ => crate::alerting::AlertVerbosity::Simple,
+        };
+    }
     // Discord bot token is write-only from the UI's perspective —
     // masked in to_masked_json so the frontend never sees it back.
     // Only overwrite when a non-empty value arrives, so a save with

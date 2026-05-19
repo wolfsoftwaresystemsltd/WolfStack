@@ -15898,11 +15898,21 @@ async function fleetLoadBlockedIps() {
         }
         totalAttempts += (n.data.audit || []).length;
     }
-    const ips = Object.values(byIp).sort((a, b) => b.max_remaining - a.max_remaining);
+    // Sorted newest-first: max_remaining is the seconds left in the
+    // fixed-duration lockout, so a higher value === more recently blocked.
+    const ipsAll = Object.values(byIp).sort((a, b) => b.max_remaining - a.max_remaining);
+    // Display cap. On hosts under heavy scanner pressure there can be
+    // 500+ concurrent blocks in a 24h window — WolfStack handles them
+    // server-side; this panel is informational, so render only the
+    // most-recent N and call out the truncation in the summary.
+    const FLEET_BLOCKED_IPS_DISPLAY_CAP = 50;
+    const ips = ipsAll.slice(0, FLEET_BLOCKED_IPS_DISPLAY_CAP);
+    const ipsTruncated = ipsAll.length - ips.length;
     const okNodesList = nodes.filter(n => n.status === 'ok');
     const failedNodesList = nodes.filter(n => n.status === 'failed');
     const skippedNodesList = nodes.filter(n => n.status === 'skipped');
-    const summary = `${ips.length} unique IP${ips.length === 1 ? '' : 's'} blocked across ${okNodesList.length} node${nodes.length === 1 ? '' : 's'}` +
+    const summary = `${ipsAll.length} unique IP${ipsAll.length === 1 ? '' : 's'} blocked across ${okNodesList.length} node${nodes.length === 1 ? '' : 's'}` +
+                    (ipsTruncated > 0 ? ` <span style="color:var(--text-muted);">(showing newest ${ips.length})</span>` : '') +
                     (failedNodesList.length > 0 ? ` (<span style="color:#fbbf24;">${failedNodesList.length} node${failedNodesList.length === 1 ? '' : 's'} unreachable</span>)` : '') +
                     (skippedNodesList.length > 0 ? ` (<span style="color:var(--text-muted);">${skippedNodesList.length} skipped</span>)` : '') +
                     ` · ${totalAttempts} recent auth events`;
@@ -36525,6 +36535,14 @@ async function loadAlertingConfig() {
             const secEl = document.getElementById('alerting-security-scan-interval');
             if (secEl) secEl.value = String(c.security_scan_interval_secs);
         }
+        // Notification verbosity (Simple = compromise only, Verbose = everything).
+        // Server defaults missing/unknown values to "simple" via #[serde(default)]
+        // + Default derive on AlertVerbosity, so an absent field reads as Simple.
+        const verb = (c.alert_verbosity === 'verbose') ? 'verbose' : 'simple';
+        const verbSimple = document.getElementById('alerting-verbosity-simple');
+        const verbVerbose = document.getElementById('alerting-verbosity-verbose');
+        if (verbSimple) verbSimple.checked = (verb === 'simple');
+        if (verbVerbose) verbVerbose.checked = (verb === 'verbose');
         // Telegram receiver toggle (inbound messages → agents).
         const tgRx = document.getElementById('alerting-telegram-receiver');
         if (tgRx) tgRx.checked = !!c.telegram_receiver_enabled;
@@ -36579,6 +36597,7 @@ async function saveAlertingConfig() {
         container_memory_threshold: parseInt(document.getElementById('alerting-container-mem').value),
         check_interval_secs: parseInt(document.getElementById('alerting-check-interval').value) || 60,
         security_scan_interval_secs: parseInt((document.getElementById('alerting-security-scan-interval') || {}).value) || 14400,
+        alert_verbosity: (document.getElementById('alerting-verbosity-verbose') || {}).checked ? 'verbose' : 'simple',
     };
     const discord = document.getElementById('alerting-discord').value.trim();
     const slack = document.getElementById('alerting-slack').value.trim();

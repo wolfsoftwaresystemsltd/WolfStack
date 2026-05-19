@@ -1294,10 +1294,17 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
 
                     let display_name = if hostname.is_empty() { &node.address } else { &hostname };
 
+                    // Node offline / restored are Lifecycle events: visible
+                    // on the dashboard, so Simple mode suppresses the push.
+                    // Operators who want every flap by email switch to Verbose.
+                    let lifecycle_allowed = crate::alerting::should_send(
+                        &alert_config,
+                        crate::alerting::AlertCategory::Lifecycle,
+                    );
                     if was_online && !node.online {
                         // Node went OFFLINE
-                        let subject = format!("[WolfStack ALERT] {} has gone offline", display_name);
-                        let body = format!(
+                        let raw_subject = format!("[WolfStack ALERT] {} has gone offline", display_name);
+                        let raw_body = format!(
                             "⚠️ Node Offline Alert\n\n\
                              Hostname: {}\n\
                              Address: {}:{}\n\
@@ -1308,10 +1315,17 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             display_name, node.address, node.port,
                             chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
                         );
-                        if let Err(e) = crate::ai::send_alert_email(&config, &subject, &body) {
-                            warn!("Failed to send node-offline email for {}: {}", display_name, e);
-                        } else {
-
+                        // Decorate with the observer node's cluster + host so
+                        // multi-cluster operators see WHICH primary detected
+                        // the failure. The failing peer is named in the
+                        // (un-prefixed) title text and the body's Hostname:
+                        // line — between the two, recipients have both
+                        // observer and subject context.
+                        let (subject, body) = crate::alerting::decorate_local(&raw_subject, &raw_body);
+                        if lifecycle_allowed {
+                            if let Err(e) = crate::ai::send_alert_email(&config, &subject, &body) {
+                                warn!("Failed to send node-offline email for {}: {}", display_name, e);
+                            }
                         }
                         // Send to webhook channels
                         if alert_config.enabled && alert_config.alert_node_offline {
@@ -1319,13 +1333,17 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             let subj = subject.clone();
                             let b = body.clone();
                             tokio::spawn(async move {
-                                crate::alerting::send_alert(&ac, &subj, &b).await;
+                                crate::alerting::send_alert(
+                                    &ac,
+                                    crate::alerting::AlertCategory::Lifecycle,
+                                    &subj, &b,
+                                ).await;
                             });
                         }
                     } else if !was_online && node.online {
                         // Node came back ONLINE
-                        let subject = format!("[WolfStack OK] {} has been restored", display_name);
-                        let body = format!(
+                        let raw_subject = format!("[WolfStack OK] {} has been restored", display_name);
+                        let raw_body = format!(
                             "✅ Node Restored\n\n\
                              Hostname: {}\n\
                              Address: {}:{}\n\
@@ -1335,10 +1353,13 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             display_name, node.address, node.port,
                             chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
                         );
-                        if let Err(e) = crate::ai::send_alert_email(&config, &subject, &body) {
-                            warn!("Failed to send node-restored email for {}: {}", display_name, e);
-                        } else {
-
+                        // Decorate with observer cluster + host — same shape as
+                        // every other WolfStack alert.
+                        let (subject, body) = crate::alerting::decorate_local(&raw_subject, &raw_body);
+                        if lifecycle_allowed {
+                            if let Err(e) = crate::ai::send_alert_email(&config, &subject, &body) {
+                                warn!("Failed to send node-restored email for {}: {}", display_name, e);
+                            }
                         }
                         // Send to webhook channels
                         if alert_config.enabled && alert_config.alert_node_restored {
@@ -1346,7 +1367,11 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             let subj = subject.clone();
                             let b = body.clone();
                             tokio::spawn(async move {
-                                crate::alerting::send_alert(&ac, &subj, &b).await;
+                                crate::alerting::send_alert(
+                                    &ac,
+                                    crate::alerting::AlertCategory::Lifecycle,
+                                    &subj, &b,
+                                ).await;
                             });
                         }
                     }

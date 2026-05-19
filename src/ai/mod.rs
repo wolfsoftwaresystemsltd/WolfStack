@@ -1500,9 +1500,18 @@ impl AiAgent {
                         }
                     };
 
+                    // AI health alerts are general posture/config findings;
+                    // gate email AND webhook on the Posture category so Simple
+                    // mode quiets both paths uniformly.
+                    let alert_config = crate::alerting::AlertConfig::load();
+                    let posture_allowed = crate::alerting::should_send(
+                        &alert_config,
+                        crate::alerting::AlertCategory::Posture,
+                    );
+
                     // Send email if configured — include proposed actions
-                    if config.email_enabled && !config.email_to.is_empty() {
-                        let subject = format!("[WolfStack {}] {} Alert on {}", severity.to_uppercase(), severity.to_uppercase(), hostname);
+                    if posture_allowed && config.email_enabled && !config.email_to.is_empty() {
+                        let raw_subject = format!("[WolfStack {}] {} Alert on {}", severity.to_uppercase(), severity.to_uppercase(), hostname);
                         let mut email_body = clean_response.clone();
                         if !actions.is_empty() {
                             email_body.push_str("\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
@@ -1522,21 +1531,29 @@ impl AiAgent {
                             }
                         }
                         email_body.push_str(&suppress_block);
-                        if let Err(e) = send_alert_email(&config, &subject, &email_body) {
+                        // Decorate with cluster + host header so multi-cluster
+                        // operators see which node fired this AI health alert.
+                        let (subject, decorated_body) =
+                            crate::alerting::decorate_local(&raw_subject, &email_body);
+                        if let Err(e) = send_alert_email(&config, &subject, &decorated_body) {
                             warn!("Failed to send alert email: {}", e);
                         }
                     }
 
                     // Also send to Discord/Telegram/Slack via the alerting system
-                    let alert_config = crate::alerting::AlertConfig::load();
                     if alert_config.enabled && alert_config.has_channels() {
-                        let title = format!(
+                        let raw_title = format!(
                             "[WolfStack AI {}] Health alert on {}",
                             severity.to_uppercase(), hostname
                         );
-                        let body = clean_response.clone();
+                        let (title, body) =
+                            crate::alerting::decorate_local(&raw_title, &clean_response);
                         tokio::spawn(async move {
-                            crate::alerting::send_alert(&alert_config, &title, &body).await;
+                            crate::alerting::send_alert(
+                                &alert_config,
+                                crate::alerting::AlertCategory::Posture,
+                                &title, &body,
+                            ).await;
                         });
                     }
 
@@ -1567,24 +1584,41 @@ impl AiAgent {
         let config = self.config.lock().unwrap().clone();
         if !config.is_configured() { return; }
 
-        let subject = format!("[WolfStack OK] Health alert cleared on {}", hostname);
-        let body = format!(
+        let raw_subject = format!("[WolfStack OK] Health alert cleared on {}", hostname);
+        let raw_body = format!(
             "The AI health check for {} returned ALL_OK — the previous alert has been resolved.\n\
              Any auto-created status-page incidents for this host have been marked resolved.",
             hostname
         );
 
-        if config.email_enabled && !config.email_to.is_empty() {
+        // AI "resolved" pairs with the Posture-category alert above.
+        let alert_config = crate::alerting::AlertConfig::load();
+        let posture_allowed = crate::alerting::should_send(
+            &alert_config,
+            crate::alerting::AlertCategory::Posture,
+        );
+
+        // Decorate subject + body with cluster + host. The same pair
+        // is reused by both the email path and the webhook path so the
+        // recipient context is identical no matter which channel
+        // delivered the resolved notification.
+        let (subject, body) = crate::alerting::decorate_local(&raw_subject, &raw_body);
+
+        if posture_allowed && config.email_enabled && !config.email_to.is_empty() {
             if let Err(e) = send_alert_email(&config, &subject, &body) {
                 warn!("Failed to send resolved email: {}", e);
             }
         }
 
-        let alert_config = crate::alerting::AlertConfig::load();
         if alert_config.enabled && alert_config.has_channels() {
-            let title = format!("[WolfStack AI OK] Health alert cleared on {}", hostname);
+            // Webhook reuses the same decorated subject/body — single
+            // decoration, two channels, identical context for operators.
             tokio::spawn(async move {
-                crate::alerting::send_alert(&alert_config, &title, &body).await;
+                crate::alerting::send_alert(
+                    &alert_config,
+                    crate::alerting::AlertCategory::Posture,
+                    &subject, &body,
+                ).await;
             });
         }
     }

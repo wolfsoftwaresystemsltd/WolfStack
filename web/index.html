@@ -5628,6 +5628,28 @@
                                         from System Check still run instantly.</small>
                                 </div>
 
+                                <h4 style="margin:0 0 12px 0;font-size:14px;color:var(--accent-light);">Notification verbosity</h4>
+                                <div role="radiogroup" aria-labelledby="alerting-verbosity-label"
+                                    style="background:var(--bg-input);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:16px;display:grid;gap:10px;">
+                                    <span id="alerting-verbosity-label" style="display:none;">Notification verbosity</span>
+                                    <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:13px;">
+                                        <input type="radio" name="alerting-verbosity" id="alerting-verbosity-simple"
+                                            value="simple" checked style="margin-top:3px;width:16px;height:16px;cursor:pointer;">
+                                        <span>
+                                            <strong style="display:block;">Simple <span style="color:var(--text-muted);font-weight:400;">(recommended)</span></strong>
+                                            <span style="color:var(--text-muted);">Only push when something looks like a real compromise: crypto miner running, suspicious binary in /tmp or /dev/shm, outbound scan from this host. Internet-background noise (failed SSH logins, "we blocked another IP", threshold breaches, config recommendations) is suppressed — visible on the dashboard, no email/Discord/Slack/Telegram push.</span>
+                                        </span>
+                                    </label>
+                                    <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:13px;">
+                                        <input type="radio" name="alerting-verbosity" id="alerting-verbosity-verbose"
+                                            value="verbose" style="margin-top:3px;width:16px;height:16px;cursor:pointer;">
+                                        <span>
+                                            <strong style="display:block;">Verbose</strong>
+                                            <span style="color:var(--text-muted);">Send everything: brute-force activity, IP-block events, threshold breaches, node offline/restored, posture findings, etc. Useful for forensics but expect a busy inbox on public-facing hosts.</span>
+                                        </span>
+                                    </label>
+                                </div>
+
                                 <h4 style="margin:0 0 12px 0;font-size:14px;color:var(--accent-light);">Events</h4>
                                 <div style="display:grid;gap:10px;">
                                     <label

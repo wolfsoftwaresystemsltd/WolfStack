@@ -752,7 +752,13 @@ async fn main() -> std::io::Result<()> {
                     .map(|h| h.to_string_lossy().to_string())
                     .unwrap_or_else(|_| "unknown".into());
                 rt_alert_lim.spawn(async move {
-                    crate::alerting::send_node_alert(&cluster_name, &hostname, &title, &body).await;
+                    // Failed-login / IP-blocked events — BruteForce category.
+                    // Public boxes get these constantly; Simple mode suppresses.
+                    crate::alerting::send_node_alert(
+                        &cluster_name, &hostname,
+                        crate::alerting::AlertCategory::BruteForce,
+                        &title, &body,
+                    ).await;
                 });
             }));
             let cluster_for_alert_scan = app_state.cluster.clone();
@@ -763,7 +769,13 @@ async fn main() -> std::io::Result<()> {
                     .map(|h| h.to_string_lossy().to_string())
                     .unwrap_or_else(|_| "unknown".into());
                 rt_alert_scan.spawn(async move {
-                    crate::alerting::send_node_alert(&cluster_name, &hostname, &title, &body).await;
+                    // Outbound scan from THIS host — compromise indicator.
+                    // Always fires (Simple AND Verbose).
+                    crate::alerting::send_node_alert(
+                        &cluster_name, &hostname,
+                        crate::alerting::AlertCategory::Compromise,
+                        &title, &body,
+                    ).await;
                 });
             }));
         }
@@ -883,13 +895,26 @@ async fn main() -> std::io::Result<()> {
                         //    blocks the watcher.
                         let alert_cfg = crate::alerting::AlertConfig::load();
                         let ai_cfg = crate::ai::AiConfig::load();
+                        // Storage / SMART failures — Lifecycle category. The
+                        // event itself is rare (state-change-gated, not per-tick)
+                        // but operators told us Simple mode should stay minimal:
+                        // dashboard surfaces these, switch to Verbose to push.
+                        let cat = crate::alerting::AlertCategory::Lifecycle;
+                        let category_allowed = crate::alerting::should_send(&alert_cfg, cat);
                         for (_sev, title, detail) in new_alerts {
-                            let body = format!(
-                                "Host: {}\nCluster: {}\n\n{}",
-                                hostname, cluster_name, detail
-                            );
-                            crate::alerting::send_alert(&alert_cfg, &title, &body).await;
-                            if ai_cfg.email_enabled && !ai_cfg.email_to.is_empty() {
+                            // decorate_local prepends `[<cluster> / <host>]`
+                            // and a Cluster:/Host:/When: header — same shape
+                            // every other WolfStack alert uses. We pass the
+                            // bare detail as the body since decorate_local
+                            // already owns the host/cluster labelling; a
+                            // manual prefix here would just duplicate it.
+                            let (title, body) = crate::alerting::decorate_local(&title, &detail);
+                            // Webhook (Discord/Slack/Telegram). send_alert
+                            // re-checks `enabled + allows(category)`, so the
+                            // category_allowed guard for the email path
+                            // doesn't need to be repeated here.
+                            crate::alerting::send_alert(&alert_cfg, cat, &title, &body).await;
+                            if category_allowed && ai_cfg.email_enabled && !ai_cfg.email_to.is_empty() {
                                 let cfg = ai_cfg.clone();
                                 let subj = title.clone();
                                 let b = body.clone();
@@ -1165,7 +1190,7 @@ async fn main() -> std::io::Result<()> {
                         if let Some(prev) = recent_alerts.get(&key) {
                             if now.duration_since(*prev) < cooldown { continue; }
                         }
-                        recent_alerts.insert(key, now);
+                        recent_alerts.insert(key.clone(), now);
 
                         let title = format!("🚨 WolfStack Security — {}", f.name);
                         let mut msg = f.detail.clone();
@@ -1173,7 +1198,33 @@ async fn main() -> std::io::Result<()> {
                             msg.push_str("\n\nSuggested fix:\n");
                             msg.push_str(fix);
                         }
-                        crate::alerting::send_alert(&cfg, &title, &msg).await;
+                        // Map each finding to an AlertCategory by stable
+                        // name prefix. Only Compromise fires under Simple
+                        // mode; the rest are Verbose-only "you have a
+                        // recommendation" or "we blocked a scanner" noise
+                        // that floods operator inboxes on any public box.
+                        let category = match key.as_str() {
+                            // ── Compromise indicators — fire in Simple AND Verbose ──
+                            // Crypto miner running on this host.
+                            n if n.starts_with("Crypto-miner") => crate::alerting::AlertCategory::Compromise,
+                            // Freshly-dropped executable in /tmp or /dev/shm.
+                            // `scan_tmp_binaries` was promoted from warn → critical
+                            // so this path is reachable.
+                            n if n.starts_with("Suspicious binary")
+                                || n.starts_with("Recent executable file") =>
+                                crate::alerting::AlertCategory::Compromise,
+                            // ── Brute-force noise — Verbose only ──
+                            n if n.starts_with("SSH brute-force") =>
+                                crate::alerting::AlertCategory::BruteForce,
+                            // ── Everything else from the security scanner is
+                            // posture/config (PermitRootLogin, world-readable
+                            // secrets, duplicate IPs, fail2ban missing, etc.)
+                            _ => crate::alerting::AlertCategory::Posture,
+                        };
+                        // send_local_alert prepends `[<cluster> / <host>]` and
+                        // a Cluster/Host/When body header so operators on
+                        // multi-cluster setups know which node fired the alert.
+                        crate::alerting::send_local_alert(category, &title, &msg).await;
                     }
                 }
 
@@ -1834,17 +1885,35 @@ async fn main() -> std::io::Result<()> {
                             }
 
                             body.push_str(&format!("\nWolfStack v{}", env!("CARGO_PKG_VERSION")));
-                            if let Err(e) = ai::send_alert_email(&config, &subject, &body) {
-                                tracing::warn!("Failed to send critical issues email: {}", e);
+                            // Aggregated daily-issues mail — Posture category
+                            // (mixed bag of config/posture findings). Verbose
+                            // only; Simple operators see the inbox.
+                            let alert_config = crate::alerting::AlertConfig::load();
+                            let posture_allowed = crate::alerting::should_send(
+                                &alert_config,
+                                crate::alerting::AlertCategory::Posture,
+                            );
+                            // Stamp the subject + body with `[<cluster> / <host>]`
+                            // and the Cluster/Host/When header so the email AND
+                            // the webhook recipients see the same originator
+                            // metadata.
+                            let (subject, body) = crate::alerting::decorate_local(&subject, &body);
+                            if posture_allowed {
+                                if let Err(e) = ai::send_alert_email(&config, &subject, &body) {
+                                    tracing::warn!("Failed to send critical issues email: {}", e);
+                                }
                             }
 
                             // Also send to webhook channels
-                            let alert_config = crate::alerting::AlertConfig::load();
                             if alert_config.enabled && alert_config.has_channels() {
                                 let s = subject.clone();
                                 let b = body.clone();
                                 tokio::spawn(async move {
-                                    crate::alerting::send_alert(&alert_config, &s, &b).await;
+                                    crate::alerting::send_alert(
+                                        &alert_config,
+                                        crate::alerting::AlertCategory::Posture,
+                                        &s, &b,
+                                    ).await;
                                 });
                             }
                             let wn_title = subject.clone();
@@ -2407,11 +2476,18 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                         ));
                                     }
 
-                                    let cfg = config.clone();
                                     let t = title.clone();
                                     let b = body.clone();
                                     tokio::spawn(async move {
-                                        alerting::send_alert(&cfg, &t, &b).await;
+                                        // CPU/mem/disk threshold — visible on
+                                        // dashboard, Simple suppresses push.
+                                        // send_local_alert adds the cluster + host
+                                        // labels so multi-cluster operators see
+                                        // which node fired this in Discord/email.
+                                        alerting::send_local_alert(
+                                            alerting::AlertCategory::Threshold,
+                                            &t, &b,
+                                        ).await;
                                     });
                                     let wn_title = title.clone();
                                     let wn_body = body.clone();
@@ -2457,11 +2533,15 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                         type_label,
                                     );
 
-                                    let cfg = config.clone();
                                     let t = title.clone();
                                     let b = body.clone();
                                     tokio::spawn(async move {
-                                        alerting::send_alert(&cfg, &t, &b).await;
+                                        // Threshold recovery — pair with the
+                                        // matching breach, same category.
+                                        alerting::send_local_alert(
+                                            alerting::AlertCategory::Threshold,
+                                            &t, &b,
+                                        ).await;
                                     });
                                     let wn_title = title.clone();
                                     let wn_body = body.clone();
@@ -2512,11 +2592,14 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                         ));
                                     }
 
-                                    let cfg = config.clone();
                                     let t = title.clone();
                                     let b = body.clone();
                                     tokio::spawn(async move {
-                                        alerting::send_alert(&cfg, &t, &b).await;
+                                        // Reboot detected — Lifecycle.
+                                        alerting::send_local_alert(
+                                            alerting::AlertCategory::Lifecycle,
+                                            &t, &b,
+                                        ).await;
                                     });
                                     let wn_title = title.clone();
                                     let wn_body = body.clone();
@@ -2596,11 +2679,14 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                     ));
                                 }
 
-                                let cfg = config.clone();
                                 let t = title.clone();
                                 let b = body.clone();
                                 tokio::spawn(async move {
-                                    alerting::send_alert(&cfg, &t, &b).await;
+                                    // Container memory threshold — Threshold.
+                                    alerting::send_local_alert(
+                                        alerting::AlertCategory::Threshold,
+                                        &t, &b,
+                                    ).await;
                                 });
                                 let wn_title = title.clone();
                                 let wn_body = body.clone();
@@ -2645,11 +2731,14 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                             chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
                                         );
 
-                                        let cfg = config.clone();
                                         let t = title.clone();
                                         let b = body.clone();
                                         tokio::spawn(async move {
-                                            alerting::send_alert(&cfg, &t, &b).await;
+                                            // Container memory recovery — Threshold.
+                                            alerting::send_local_alert(
+                                                alerting::AlertCategory::Threshold,
+                                                &t, &b,
+                                            ).await;
                                         });
                                         let wn_title = title.clone();
                                         let wn_body = body.clone();
@@ -2757,7 +2846,11 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                             chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
                                         );
                                         tokio::spawn(async move {
-                                            alerting::send_alert(&config, &title, &body).await;
+                                            // WolfNet auto-recovered — Lifecycle.
+                                            alerting::send_local_alert(
+                                                alerting::AlertCategory::Lifecycle,
+                                                &title, &body,
+                                            ).await;
                                         });
                                     }
                                 } else {
@@ -2786,7 +2879,11 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                                 ));
                                             }
                                             tokio::spawn(async move {
-                                                alerting::send_alert(&config, &title, &body).await;
+                                                // WolfNet restart failed — Lifecycle.
+                                                alerting::send_local_alert(
+                                                    alerting::AlertCategory::Lifecycle,
+                                                    &title, &body,
+                                                ).await;
                                             });
                                         }
                                     }
@@ -2821,7 +2918,11 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                             ));
                                         }
                                         tokio::spawn(async move {
-                                            alerting::send_alert(&config, &title, &body).await;
+                                            // WolfNet restart-command error — Lifecycle.
+                                            alerting::send_local_alert(
+                                                alerting::AlertCategory::Lifecycle,
+                                                &title, &body,
+                                            ).await;
                                         });
                                     }
                                 }
