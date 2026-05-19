@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.0.0: unified Alerts page, Docker auto-updates, threat-intel on-by-default** _(2026-05-19 — [`f32ea7f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f32ea7fa298b92c49bf2f7e8db44d56e5be724a6))_
 - **v23.12.19: hotfix — unescaped backticks in app.js threat-intel banner** _(2026-05-19 — [`59537b5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/59537b55c249417a45321457f2bb186ce1397270))_
 - **v23.12.18: threat-intel diagnostics — per-node card + fleet table + feed test** _(2026-05-19 — [`ddaa370`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ddaa370c08d0ed8974f33faeb0b6002e16e13417))_
 - **v23.12.17: Simple/Verbose alerting + cluster+host labels on every alert** _(2026-05-19 — [`5161b89`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5161b89b7cfbfab81e976aeca3748bac7da1979a))_
