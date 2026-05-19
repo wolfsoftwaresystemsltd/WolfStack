@@ -31724,7 +31724,7 @@ async function loadNodeThreatIntel(node) {
         </div>`;
     } else if (s.state === 'enforce' && s.ipset_entry_count === 0) {
         diagnosis = `<div style="background:rgba(234,179,8,0.1); border:1px solid rgba(234,179,8,0.3); border-radius:6px; padding:10px 12px; margin-bottom:12px; font-size:12px;">
-            <strong style="color:#eab308;">⚠ Feed parsed but ipset is empty.</strong> The kernel set didn't get populated this tick — check journalctl for `wolfstack` errors around ipset, and retry on the next tick.
+            <strong style="color:#eab308;">⚠ Feed parsed but ipset is empty.</strong> The kernel set didn't get populated this tick — check journalctl for wolfstack errors around ipset, and retry on the next tick.
         </div>`;
     } else if (feedStale) {
         diagnosis = `<div style="background:rgba(234,179,8,0.1); border:1px solid rgba(234,179,8,0.3); border-radius:6px; padding:10px 12px; margin-bottom:12px; font-size:12px;">
