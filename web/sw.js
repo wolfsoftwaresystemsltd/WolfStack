@@ -50,6 +50,16 @@ self.addEventListener('fetch', (event) => {
                 }
                 return response;
             })
-            .catch(() => caches.match(event.request))
+            // Network failed — fall back to cache. caches.match resolves
+            // to `undefined` when the request isn't cached; respondWith()
+            // then throws "Failed to convert value to 'Response'". Always
+            // hand back a real Response so the FetchEvent resolves cleanly.
+            .catch(() => caches.match(event.request).then((cached) =>
+                cached || new Response('Offline — resource not cached.', {
+                    status: 503,
+                    statusText: 'Service Unavailable',
+                    headers: { 'Content-Type': 'text/plain' },
+                })
+            ))
     );
 });

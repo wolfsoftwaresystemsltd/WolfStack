@@ -3344,6 +3344,7 @@ pub fn send_alert_email(config: &AiConfig, subject: &str, body: &str) -> Result<
                 .map_err(|e| format!("SMTP relay: {}", e))?
                 .port(config.smtp_port)
                 .credentials(creds)
+                .timeout(Some(std::time::Duration::from_secs(20)))
                 .build()
         }
         "none" => {
@@ -3351,6 +3352,7 @@ pub fn send_alert_email(config: &AiConfig, subject: &str, body: &str) -> Result<
             SmtpTransport::builder_dangerous(&config.smtp_host)
                 .port(config.smtp_port)
                 .credentials(creds)
+                .timeout(Some(std::time::Duration::from_secs(20)))
                 .build()
         }
         _ => {
@@ -3359,6 +3361,7 @@ pub fn send_alert_email(config: &AiConfig, subject: &str, body: &str) -> Result<
                 .map_err(|e| format!("SMTP STARTTLS: {}", e))?
                 .port(config.smtp_port)
                 .credentials(creds)
+                .timeout(Some(std::time::Duration::from_secs(20)))
                 .build()
         }
     };
@@ -3391,12 +3394,14 @@ pub fn send_html_email(config: &AiConfig, subject: &str, html_body: &str) -> Res
                 .map_err(|e| format!("SMTP relay: {}", e))?
                 .port(config.smtp_port)
                 .credentials(creds)
+                .timeout(Some(std::time::Duration::from_secs(20)))
                 .build()
         }
         "none" => {
             SmtpTransport::builder_dangerous(&config.smtp_host)
                 .port(config.smtp_port)
                 .credentials(creds)
+                .timeout(Some(std::time::Duration::from_secs(20)))
                 .build()
         }
         _ => {
@@ -3404,6 +3409,7 @@ pub fn send_html_email(config: &AiConfig, subject: &str, html_body: &str) -> Res
                 .map_err(|e| format!("SMTP STARTTLS: {}", e))?
                 .port(config.smtp_port)
                 .credentials(creds)
+                .timeout(Some(std::time::Duration::from_secs(20)))
                 .build()
         }
     };

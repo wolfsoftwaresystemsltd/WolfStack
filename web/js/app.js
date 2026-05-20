@@ -16978,6 +16978,13 @@ async function abuseReportOpen(ip) {
     document.getElementById('abuse-report-cooldown-warning').style.display = 'none';
     document.getElementById('abuse-report-override-cooldown').checked = false;
     document.getElementById('abuse-report-status').textContent = '';
+    // Re-enable Send on every open. The button element is static and
+    // persists across open/close, so a prior send that never reached
+    // its `finally` (a stalled request) would otherwise leave it
+    // `disabled` permanently — and a disabled button fires no onclick,
+    // so the operator gets a dead Send button with no request, no error.
+    const sendBtn = document.getElementById('abuse-report-send-btn');
+    if (sendBtn) { sendBtn.disabled = false; sendBtn.style.opacity = '1'; }
 
     let data;
     try {
@@ -17049,7 +17056,10 @@ function abuseReportClose() {
 
 async function abuseReportSend() {
     const ip = _abuseReportCurrentIp;
-    if (!ip) return;
+    if (!ip) {
+        showToast('No IP selected — close this dialog and reopen the report from the blocked-IP row.', 'error');
+        return;
+    }
     const to = document.getElementById('abuse-report-to').value.trim();
     const subject = document.getElementById('abuse-report-subject').value.trim();
     const body = document.getElementById('abuse-report-body').value;
@@ -17072,6 +17082,13 @@ async function abuseReportSend() {
     if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
     if (status) status.textContent = 'Sending…';
 
+    // Hard 30s timeout. The backend send path runs a synchronous SMTP
+    // transaction inside web::block; a slow or unreachable mail relay
+    // stalls the HTTP response. Without this abort the `await fetch`
+    // never settles, the `finally` never runs, and the Send button is
+    // left `disabled` forever — bricking the modal until a page reload.
+    const sendController = new AbortController();
+    const sendTimeout = setTimeout(() => sendController.abort(), 30000);
     try {
         const r = await fetch(apiUrl('/api/security/abuse-report/send'), {
             method: 'POST', headers: {'Content-Type':'application/json'},
@@ -17080,6 +17097,7 @@ async function abuseReportSend() {
                 override_cooldown: override,
                 evidence_count: evidenceCount,
             }),
+            signal: sendController.signal,
         });
         const d = await r.json().catch(() => ({}));
         if (r.status === 409) {
@@ -17099,8 +17117,14 @@ async function abuseReportSend() {
         // Re-render the lockouts table so the "last reported" timestamps refresh.
         if (typeof fleetLoadBlockedIps === 'function') fleetLoadBlockedIps();
     } catch (e) {
-        showToast(`Send failed: ${e.message || e}`, 'error');
+        if (status) status.textContent = '';
+        if (e && e.name === 'AbortError') {
+            showToast('Send timed out after 30s — the server or SMTP relay is not responding. The report was not sent; try again.', 'error');
+        } else {
+            showToast(`Send failed: ${e.message || e}`, 'error');
+        }
     } finally {
+        clearTimeout(sendTimeout);
         if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
     }
 }
