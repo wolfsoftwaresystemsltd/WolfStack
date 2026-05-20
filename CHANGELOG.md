@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.1.0: VM IP configuration on vSwitches via cloud-init** _(2026-05-20 — [`197ad2a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/197ad2a137d93bd4acb9fe5e7af570be0403b41a))_
 - **v24.0.2: fix abuse-report Send button bricking + SMTP/SW hardening** _(2026-05-20 — [`f581586`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f581586c9bba9e106cdfebec91778b7c5a563176))_
 - **v24.0.1: move Alerts UI from main menu into Settings tab** _(2026-05-19 — [`7730dd9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7730dd9711ba49e370bcee6ccd15cfc71f0ff151))_
 - **v24.0.0: unified Alerts page, Docker auto-updates, threat-intel on-by-default** _(2026-05-19 — [`f32ea7f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f32ea7fa298b92c49bf2f7e8db44d56e5be724a6))_
