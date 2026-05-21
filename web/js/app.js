@@ -20903,6 +20903,7 @@ async function toggleContainerCronJob(index, currentlyEnabled, schedule, command
 var _lxcSettingsTab = 1;
 var _lxcParsedCfg = null;
 var _lxcPhysicalNics = [];  // physical NICs for the vSwitch-uplink picker; loaded by openLxcSettings
+var _lxcSaving = false;     // re-entrancy guard for saveLxcSettings — blocks double-click double-saves
 
 function switchLxcTab(tab) {
     _lxcSettingsTab = tab;
@@ -21002,6 +21003,23 @@ function lxcUplinkOptions() {
     return opts;
 }
 
+// When a vSwitch uplink NIC is chosen, the bridge is created and
+// assigned automatically, so the Bridge / Link field is not used —
+// grey it out (and clear it) to make that obvious.
+function vswUplinkChanged(idx) {
+    var sel = document.querySelector('.lxc-nic-field[data-nic="' + idx + '"][data-field="vsw_uplink"]');
+    var link = document.querySelector('.lxc-nic-field[data-nic="' + idx + '"][data-field="link"]');
+    if (!sel || !link) return;
+    if (sel.value) {
+        link.value = '';
+        link.disabled = true;
+        link.placeholder = 'set automatically by the vSwitch';
+    } else {
+        link.disabled = false;
+        link.placeholder = 'e.g. lxcbr0, vmbr0';
+    }
+}
+
 // Remove a network interface from the LXC settings editor. It's gone
 // once the operator clicks Save — saveLxcSettings rebuilds the
 // container's network config from whatever .lxc-nic-item rows remain.
@@ -21089,7 +21107,7 @@ function addLxcNic(name) {
                     </div>
                     <div class="form-group" style="margin:0;">
                         <label style="font-size:11px;">vSwitch uplink NIC</label>
-                        <select class="form-control lxc-nic-field" data-nic="${newIdx}" data-field="vsw_uplink">${lxcUplinkOptions()}</select>
+                        <select class="form-control lxc-nic-field" data-nic="${newIdx}" data-field="vsw_uplink" onchange="vswUplinkChanged(${newIdx})">${lxcUplinkOptions()}</select>
                     </div>
                 </div>
                 <div style="font-size:11px;color:var(--text-muted);margin-top:8px;line-height:1.5;">
@@ -21354,7 +21372,7 @@ async function openLxcSettings(name) {
                                 </div>
                                 <div class="form-group" style="margin:0;">
                                     <label style="font-size:11px;">vSwitch uplink NIC</label>
-                                    <select class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="vsw_uplink">${lxcUplinkOptions()}</select>
+                                    <select class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="vsw_uplink" onchange="vswUplinkChanged(${nic.index})">${lxcUplinkOptions()}</select>
                                 </div>
                             </div>
                             <div style="font-size:11px;color:var(--text-muted);margin-top:8px;line-height:1.5;">
@@ -21554,6 +21572,23 @@ async function ensureVswitchBridge(uplink, vlanId, mtuStr) {
 }
 
 async function saveLxcSettings(name) {
+    // Re-entrancy guard: the vSwitch auto-wire makes a save several
+    // round-trips long, and an un-disabled button invites a second
+    // click that would POST the container settings twice. Block
+    // re-entry and disable the Save buttons while a save is in flight.
+    if (_lxcSaving) return;
+    _lxcSaving = true;
+    var _saveBtns = document.querySelectorAll('button[onclick*="saveLxcSettings"]');
+    _saveBtns.forEach(function (b) { b.disabled = true; });
+    try {
+        await _saveLxcSettingsImpl(name);
+    } finally {
+        _lxcSaving = false;
+        _saveBtns.forEach(function (b) { b.disabled = false; });
+    }
+}
+
+async function _saveLxcSettingsImpl(name) {
     // A NIC editor open as a popup has its fields detached into the
     // backdrop overlay, not inside its .lxc-nic-item — so collecting
     // NICs below would read that interface as empty and silently drop
@@ -21617,7 +21652,13 @@ async function saveLxcSettings(name) {
     for (const nic of networkInterfaces) {
         const uplink = (nic.vsw_uplink || '').trim();
         delete nic.vsw_uplink;
-        if (!uplink || !nic.vlan) continue;
+        if (!uplink) continue;  // not a vSwitch NIC — plain bridge / plain VLAN tag
+        // A vSwitch uplink with no VLAN Tag can't be wired up — tell the
+        // operator instead of silently saving a half-configured NIC.
+        if (!nic.vlan) {
+            showToast(`Interface ${nic.name}: a vSwitch uplink NIC is selected but the VLAN Tag is empty — enter the VLAN ID too, or set the uplink back to "— none —".`, 'error', 8000);
+            return;
+        }
         const vlanId = parseInt(nic.vlan, 10);
         if (!Number.isInteger(vlanId) || vlanId < 1 || vlanId > 4094) {
             showToast(`vSwitch: VLAN tag "${nic.vlan}" is invalid (must be 1-4094)`, 'error');
