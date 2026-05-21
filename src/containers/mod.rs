@@ -1812,6 +1812,44 @@ pub fn reapply_wolfnet_routes() {
     let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.proxy_arp=1"]).output();
 }
 
+/// True when the container has a NIC — other than the lxcbr0/WolfNet
+/// `eth0` — that carries its own IPv4 gateway (a vSwitch or routed-
+/// public NIC). Such a container must keep THAT NIC's gateway as its
+/// default route: WolfNet's lxcbr0 path is a NAT fallback and must not
+/// hijack a container that already has its own way out.
+fn lxc_has_external_gateway(container: &str) -> bool {
+    let path = format!("{}/{}/config", lxc_base_dir(container), container);
+    let cfg = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    // Pair each NIC index with its bridge link and whether it carries a
+    // non-empty ipv4.gateway, then flag any gateway NIC not on lxcbr0.
+    let mut links: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    let mut gw_idxs: Vec<&str> = Vec::new();
+    for line in cfg.lines() {
+        let rest = match line.trim().strip_prefix("lxc.net.") {
+            Some(r) => r,
+            None => continue,
+        };
+        // rest is e.g. "1.link = vmbr4000" or "1.ipv4.gateway = 1.2.3.4"
+        let (idx, key_val) = match rest.split_once('.') {
+            Some(p) => p,
+            None => continue,
+        };
+        let (key, value) = match key_val.split_once('=') {
+            Some((k, v)) => (k.trim(), v.trim()),
+            None => continue,
+        };
+        if key == "link" {
+            links.insert(idx, value);
+        } else if key == "ipv4.gateway" && !value.is_empty() {
+            gw_idxs.push(idx);
+        }
+    }
+    gw_idxs.iter().any(|idx| links.get(idx).copied() != Some("lxcbr0"))
+}
+
 /// Apply WolfNet IP inside a running container (called after lxc-start)
 fn lxc_apply_wolfnet(container: &str) {
     let base = lxc_base_dir(container);
@@ -1992,9 +2030,17 @@ fn lxc_apply_wolfnet(container: &str) {
             args.extend(["ip", "addr", "add", &wolfnet_cidr, "dev", "eth0"].iter().map(|s| s.to_string()));
             let _ = Command::new("lxc-attach").args(&args).output();
 
-            let mut args: Vec<String> = attach_prefix.clone();
-            args.extend(["ip", "route", "replace", "default", "via", "10.0.3.1"].iter().map(|s| s.to_string()));
-            let _ = Command::new("lxc-attach").args(&args).output();
+            // Default route via lxcbr0 — but ONLY when the container has
+            // no other way out. A container with a vSwitch / routed-public
+            // NIC has its own gateway (set by LXC from lxc.net.N.ipv4.
+            // gateway); replacing the default here would hijack it and
+            // black-hole the public IP. WolfNet still gets its subnet
+            // route below — it just stops owning the default.
+            if !lxc_has_external_gateway(container) {
+                let mut args: Vec<String> = attach_prefix.clone();
+                args.extend(["ip", "route", "replace", "default", "via", "10.0.3.1"].iter().map(|s| s.to_string()));
+                let _ = Command::new("lxc-attach").args(&args).output();
+            }
 
             // Route WolfNet subnet with correct source IP — ensures the container
             // uses its WolfNet IP (not the bridge IP) as source when talking to
@@ -2243,6 +2289,11 @@ fn wolfnet_subnet_from_ip(ip: &str) -> Option<String> {
 fn write_container_network_config(container: &str, bridge_ip: &str, wolfnet_ip: Option<&str>) {
     let rootfs = format!("{}/{}/rootfs", lxc_base_dir(container), container);
     let wn_subnet = wolfnet_ip.and_then(wolfnet_subnet_from_ip);
+    // When the container has its own vSwitch / public NIC, eth0 is the
+    // WolfNet-only NIC here: it must NOT carry a default route, or it
+    // would compete with (and on a route flush, replace) the public
+    // NIC's gateway. See lxc_has_external_gateway.
+    let wolfnet_only = lxc_has_external_gateway(container);
 
     // Method 1: systemd-networkd (Debian Trixie, Arch, etc.)
     let networkd_dir = format!("{}/etc/systemd/network", rootfs);
@@ -2254,7 +2305,13 @@ fn write_container_network_config(container: &str, bridge_ip: &str, wolfnet_ip: 
         if let Some(wip) = wolfnet_ip {
             conf.push_str(&format!("Address={}/32\n", wip));
         }
-        conf.push_str("Gateway=10.0.3.1\nDNS=10.0.3.1\nDNS=8.8.8.8\n");
+        if wolfnet_only {
+            // eth0 is WolfNet-only — no default gateway; the container's
+            // vSwitch / public NIC owns the default route.
+            conf.push_str("DNS=8.8.8.8\nDNS=1.1.1.1\n");
+        } else {
+            conf.push_str("Gateway=10.0.3.1\nDNS=10.0.3.1\nDNS=8.8.8.8\n");
+        }
         if let (Some(wip), Some(subnet)) = (wolfnet_ip, &wn_subnet) {
             // Source-pinned route so reply traffic uses the WolfNet IP, not the bridge IP.
             conf.push_str(&format!(
@@ -2272,18 +2329,32 @@ fn write_container_network_config(container: &str, bridge_ip: &str, wolfnet_ip: 
         if let Some(wip) = wolfnet_ip {
             addresses.push_str(&format!("        - {}/32\n", wip));
         }
-        let mut routes = String::from(
-            "      routes:\n        - to: default\n          via: 10.0.3.1\n",
-        );
+        // eth0 carries a default route only when the container has no
+        // vSwitch / public NIC of its own; the WolfNet subnet route is
+        // always present.
+        let mut route_lines = String::new();
+        if !wolfnet_only {
+            route_lines.push_str("        - to: default\n          via: 10.0.3.1\n");
+        }
         if let (Some(wip), Some(subnet)) = (wolfnet_ip, &wn_subnet) {
-            routes.push_str(&format!(
+            route_lines.push_str(&format!(
                 "        - to: {}\n          via: 10.0.3.1\n          from: {}\n",
                 subnet, wip
             ));
         }
+        let routes = if route_lines.is_empty() {
+            String::new()
+        } else {
+            format!("      routes:\n{}", route_lines)
+        };
+        let nameservers = if wolfnet_only {
+            "        addresses: [8.8.8.8, 1.1.1.1]\n"
+        } else {
+            "        addresses: [10.0.3.1, 8.8.8.8]\n"
+        };
         let conf = format!(
-            "network:\n  version: 2\n  ethernets:\n    eth0:\n      addresses:\n{}{}      nameservers:\n        addresses: [10.0.3.1, 8.8.8.8]\n",
-            addresses, routes
+            "network:\n  version: 2\n  ethernets:\n    eth0:\n      addresses:\n{}{}      nameservers:\n{}",
+            addresses, routes, nameservers
         );
         // Remove conflicting configs
         if let Ok(entries) = std::fs::read_dir(&netplan_dir) {
@@ -2298,9 +2369,14 @@ fn write_container_network_config(container: &str, bridge_ip: &str, wolfnet_ip: 
     let ifaces_path = format!("{}/etc/network/interfaces", rootfs);
     if std::path::Path::new(&ifaces_path).exists() {
         let mut conf = format!(
-            "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet static\n    address {}\n    netmask 255.255.255.0\n    gateway 10.0.3.1\n    dns-nameservers 10.0.3.1 8.8.8.8\n",
+            "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet static\n    address {}\n    netmask 255.255.255.0\n",
             bridge_ip
         );
+        if wolfnet_only {
+            conf.push_str("    dns-nameservers 8.8.8.8 1.1.1.1\n");
+        } else {
+            conf.push_str("    gateway 10.0.3.1\n    dns-nameservers 10.0.3.1 8.8.8.8\n");
+        }
         if let (Some(wip), Some(subnet)) = (wolfnet_ip, &wn_subnet) {
             // post-up adds the WolfNet IP as a secondary + the source-pinned subnet route
             conf.push_str(&format!(
@@ -2319,7 +2395,15 @@ fn write_container_network_config(container: &str, bridge_ip: &str, wolfnet_ip: 
     if std::path::Path::new(&nm_dir).exists() || std::path::Path::new(&format!("{}/etc/NetworkManager", rootfs)).exists() {
         let _ = std::fs::create_dir_all(&nm_dir);
         let mut ipv4 = String::from("[ipv4]\nmethod=manual\n");
-        ipv4.push_str(&format!("address1={}/24,10.0.3.1\n", bridge_ip));
+        if wolfnet_only {
+            // No gateway on eth0, and never-default so NetworkManager
+            // won't route the world through lxcbr0 — the public NIC
+            // owns the default route.
+            ipv4.push_str(&format!("address1={}/24\n", bridge_ip));
+            ipv4.push_str("never-default=true\n");
+        } else {
+            ipv4.push_str(&format!("address1={}/24,10.0.3.1\n", bridge_ip));
+        }
         if let Some(wip) = wolfnet_ip {
             ipv4.push_str(&format!("address2={}/32\n", wip));
         }
@@ -2327,7 +2411,11 @@ fn write_container_network_config(container: &str, bridge_ip: &str, wolfnet_ip: 
             ipv4.push_str(&format!("route1={},10.0.3.1\n", subnet));
             ipv4.push_str(&format!("route1_options=src={}\n", wip));
         }
-        ipv4.push_str("dns=10.0.3.1;8.8.8.8;\n");
+        if wolfnet_only {
+            ipv4.push_str("dns=8.8.8.8;1.1.1.1;\n");
+        } else {
+            ipv4.push_str("dns=10.0.3.1;8.8.8.8;\n");
+        }
 
         let conf = format!(
             "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n\
@@ -4792,9 +4880,14 @@ fn lxc_post_start_setup(container: &str) {
         args.extend_from_slice(&["ip", "addr", "add", &cidr, "dev", "eth0"]);
         let _ = Command::new("lxc-attach").args(&args).output();
 
-        let mut args = attach_prefix.clone();
-        args.extend_from_slice(&["ip", "route", "replace", "default", "via", "10.0.3.1"]);
-        let _ = Command::new("lxc-attach").args(&args).output();
+        // Default route via lxcbr0 only when the container has no
+        // vSwitch / public NIC with its own gateway (see
+        // lxc_has_external_gateway).
+        if !lxc_has_external_gateway(container) {
+            let mut args = attach_prefix.clone();
+            args.extend_from_slice(&["ip", "route", "replace", "default", "via", "10.0.3.1"]);
+            let _ = Command::new("lxc-attach").args(&args).output();
+        }
 
         // Restart networking (multi-distro)
         let mut args = attach_prefix.clone();
