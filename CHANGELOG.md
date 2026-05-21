@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.3.0: container-driven vSwitch VLAN auto-wire** _(2026-05-21 — [`e5fe79b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e5fe79b7139f4891806e99db695eb7d3670908e3))_
 - **v24.2.0: per-host WolfRouter view + VLAN dialog NIC detection fix** _(2026-05-21 — [`8a4802a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8a4802a52193e9c4111b74d839ccdc061a30c001))_
 - **v24.1.1: fix LXC network-interface save + VLAN config key** _(2026-05-21 — [`b8ad438`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b8ad438d96f405e228f7b15b12278557e8252c5d))_
 - **v24.1.0: VM IP configuration on vSwitches via cloud-init** _(2026-05-20 — [`197ad2a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/197ad2a137d93bd4acb9fe5e7af570be0403b41a))_
