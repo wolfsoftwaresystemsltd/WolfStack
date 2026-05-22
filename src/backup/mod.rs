@@ -2332,10 +2332,37 @@ pub fn restore_docker(entry: &BackupEntry, overwrite: bool) -> Result<String, St
 }
 
 /// Restore an LXC container from backup
-pub fn restore_lxc(entry: &BackupEntry, storage: &str, overwrite: bool) -> Result<String, String> {
+pub fn restore_lxc(entry: &BackupEntry, storage: &str, overwrite: bool, new_name: &str) -> Result<String, String> {
+
+    // `new_name` lets the operator restore under a different container
+    // name / VMID. Validate it BEFORE downloading anything — it ends up
+    // in a filesystem path (`/var/lib/lxc/<name>`), so an unsafe value
+    // must never get that far.
+    let new_name = new_name.trim();
+    if !new_name.is_empty() && !crate::auth::is_safe_name(new_name) {
+        return Err(format!(
+            "'{}' is not a valid container name — use letters, digits, '-', '_' and '.' only, with no '..'.",
+            new_name));
+    }
+    // A Proxmox vzdump restore targets a numeric VMID — catch a typo'd
+    // name here, before the (possibly remote, large) archive download,
+    // rather than only in restore_lxc_proxmox after it.
+    if !new_name.is_empty()
+        && entry.filename.contains("vzdump")
+        && crate::containers::is_proxmox()
+        && new_name.parse::<u32>().map(|n| n < 100).unwrap_or(true)
+    {
+        return Err(format!(
+            "'{}' is not a valid Proxmox container ID — it must be a whole number, 100 or higher.",
+            new_name));
+    }
 
     let local_path = retrieve_backup(entry)?;
-    let container_name = &entry.target.name;
+    let container_name: &str = if new_name.is_empty() {
+        entry.target.name.as_str()
+    } else {
+        new_name
+    };
 
     // Detect if this is a vzdump archive (Proxmox backup)
     let filename = local_path.file_name()
@@ -2344,7 +2371,7 @@ pub fn restore_lxc(entry: &BackupEntry, storage: &str, overwrite: bool) -> Resul
     let is_vzdump = filename.contains("vzdump");
 
     if is_vzdump && crate::containers::is_proxmox() {
-        return restore_lxc_proxmox(entry, &local_path, storage, overwrite);
+        return restore_lxc_proxmox(&local_path, storage, overwrite, container_name);
     }
 
     // Native LXC restore. `backup_lxc` archives the container directory with
@@ -2456,8 +2483,15 @@ pub fn restore_lxc(entry: &BackupEntry, storage: &str, overwrite: bool) -> Resul
 }
 
 /// Restore a Proxmox LXC container from a vzdump archive using pct restore
-fn restore_lxc_proxmox(entry: &BackupEntry, archive_path: &Path, storage: &str, overwrite: bool) -> Result<String, String> {
-    let vmid = &entry.target.name;
+fn restore_lxc_proxmox(archive_path: &Path, storage: &str, overwrite: bool, vmid: &str) -> Result<String, String> {
+    // Proxmox VMIDs are whole numbers, 100 or higher. A restore-as name
+    // typed in the dialog reaches here — reject anything that isn't a
+    // usable VMID rather than letting `pct` fail cryptically.
+    if vmid.parse::<u32>().map(|n| n < 100).unwrap_or(true) {
+        let _ = fs::remove_file(archive_path);
+        return Err(format!(
+            "'{}' is not a valid Proxmox container ID — it must be a whole number, 100 or higher.", vmid));
+    }
 
     // Check if the VMID already exists — pct restore will fail if it does
     let exists = Command::new("pct").args(["status", vmid]).output()
@@ -2590,7 +2624,7 @@ pub fn restore_config_backup(entry: &BackupEntry) -> Result<String, String> {
 pub fn restore_backup(entry: &BackupEntry, overwrite: bool) -> Result<String, String> {
     match entry.target.target_type {
         BackupTargetType::Docker => restore_docker(entry, overwrite),
-        BackupTargetType::Lxc => restore_lxc(entry, "", overwrite),
+        BackupTargetType::Lxc => restore_lxc(entry, "", overwrite, ""),
         BackupTargetType::Vm => restore_vm(entry),
         BackupTargetType::Config => restore_config_backup(entry),
     }
@@ -2906,7 +2940,7 @@ pub fn restore_by_id(id: &str, overwrite: bool) -> Result<String, String> {
 }
 
 /// Restore from a backup by ID with streaming log output
-pub fn restore_by_id_with_log(id: &str, overwrite: bool, storage: &str, log: std::sync::mpsc::Sender<String>) -> Result<String, String> {
+pub fn restore_by_id_with_log(id: &str, overwrite: bool, storage: &str, new_name: &str, log: std::sync::mpsc::Sender<String>) -> Result<String, String> {
     let config = load_config();
     let entry = config.entries.iter().find(|e| e.id == id)
         .ok_or_else(|| format!("Backup not found: {}", id))?;
@@ -3005,7 +3039,7 @@ pub fn restore_by_id_with_log(id: &str, overwrite: bool, storage: &str, log: std
         }
         BackupTargetType::Lxc => {
             let _ = log.send("Restoring LXC container...".to_string());
-            let result = restore_lxc(entry, storage, overwrite);
+            let result = restore_lxc(entry, storage, overwrite, new_name);
             match &result {
                 Ok(msg) => { let _ = log.send(format!("✅ {}", msg)); }
                 Err(e) => { let _ = log.send(format!("❌ {}", e)); }

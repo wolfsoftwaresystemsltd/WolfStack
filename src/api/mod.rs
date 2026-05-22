@@ -13658,6 +13658,7 @@ pub async fn backup_restore_stream(
     let id = path.into_inner();
     let overwrite = query.get("overwrite").map(|v| v == "true").unwrap_or(false);
     let storage = query.get("storage").cloned().unwrap_or_default();
+    let new_name = query.get("name").cloned().unwrap_or_default();
 
     // Check for container existence before streaming (to return 409 synchronously)
     {
@@ -13682,7 +13683,7 @@ pub async fn backup_restore_stream(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
 
     std::thread::spawn(move || {
-        let result = backup::restore_by_id_with_log(&id, overwrite, &storage, std_tx.clone());
+        let result = backup::restore_by_id_with_log(&id, overwrite, &storage, &new_name, std_tx.clone());
         match result {
             Ok(msg) => { let _ = std_tx.send(format!("RESULT:OK:{}", msg)); }
             Err(e) => { let _ = std_tx.send(format!("RESULT:ERR:{}", e)); }

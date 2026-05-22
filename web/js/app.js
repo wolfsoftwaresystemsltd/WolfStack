@@ -26299,6 +26299,17 @@ async function openRestoreDialog(id, type, name) {
             <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Where the restored container's root filesystem is placed — passed to <code>pct restore</code>.</div>
         </div>` : '';
 
+    // For an LXC restore the operator can restore under a different name
+    // / VMID — when restoring a backup it usually IS different from the
+    // backed-up one. Pre-filled with the original; editable.
+    const wantsName = type === 'lxc';
+    const nameRow = wantsName ? `
+        <div style="margin-bottom:14px;">
+            <label for="restore-name" style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;">${proxmox ? 'Restore as container ID (VMID)' : 'Restore as container name'}</label>
+            <input type="text" id="restore-name" class="form-control" value="${escapeHtml(String(name || ''))}" placeholder="${proxmox ? 'e.g. 105' : 'e.g. web-01'}">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Defaults to the backup's original ${proxmox ? 'ID' : 'name'}. Change it to restore as a separate copy.</div>
+        </div>` : '';
+
     const stale = document.getElementById('restore-dialog-backdrop');
     if (stale) {
         if (_restoreKeyHandler) document.removeEventListener('keydown', _restoreKeyHandler);
@@ -26313,6 +26324,7 @@ async function openRestoreDialog(id, type, name) {
              style="background:var(--bg-primary);border:1px solid var(--border);border-radius:12px;padding:20px;width:480px;max-width:92vw;max-height:85vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.4);">
             <h3 id="restore-dialog-title" style="margin:0 0 4px;font-size:16px;">Restore backup</h3>
             <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px;">${escapeHtml(String(name || id))} — ${escapeHtml(String(type || 'backup').toUpperCase())}</div>
+            ${nameRow}
             ${storageRow}
             <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;margin-bottom:14px;cursor:pointer;">
                 <input type="checkbox" id="restore-overwrite" style="margin-top:2px;">
@@ -26358,7 +26370,9 @@ async function openRestoreDialog(id, type, name) {
         resultEl.style.display = 'none';
         const overwrite = backdrop.querySelector('#restore-overwrite').checked;
         const storageSel = backdrop.querySelector('#restore-storage');
-        const ok = await _runRestoreStream(id, overwrite, storageSel ? storageSel.value : '', progressEl, resultEl);
+        const nameEl = backdrop.querySelector('#restore-name');
+        const ok = await _runRestoreStream(id, overwrite, storageSel ? storageSel.value : '',
+                                           nameEl ? nameEl.value.trim() : '', progressEl, resultEl);
         running = false;
         _restoreInFlight = false;
         cancelBtn.disabled = false;
@@ -26374,15 +26388,16 @@ async function openRestoreDialog(id, type, name) {
     };
 
     // Focus the most useful control for keyboard users.
-    (backdrop.querySelector('#restore-storage') || goBtn).focus();
+    (backdrop.querySelector('#restore-name') || backdrop.querySelector('#restore-storage') || goBtn).focus();
 }
 
 // Stream a restore over SSE, appending progress lines into `progressEl`
 // and the final outcome into `resultEl`. Resolves true on success.
-async function _runRestoreStream(id, overwrite, storage, progressEl, resultEl) {
+async function _runRestoreStream(id, overwrite, storage, name, progressEl, resultEl) {
     const params = new URLSearchParams();
     if (overwrite) params.set('overwrite', 'true');
     if (storage) params.set('storage', storage);
+    if (name) params.set('name', name);
     const qs = params.toString();
     const append = (line) => {
         progressEl.style.display = 'block';
