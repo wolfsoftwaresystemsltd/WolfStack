@@ -769,12 +769,23 @@ pub fn get_wolfnet_local_info() -> Option<serde_json::Value> {
     let status_path = "/var/run/wolfnet/status.json";
     let content = std::fs::read_to_string(status_path).ok()?;
     let status: serde_json::Value = serde_json::from_str(&content).ok()?;
+    // Current configured peers (name + allowed_ip). Lets the cluster sync
+    // prune entries that don't belong to this node's cluster, and lets
+    // diagnostics report a node's real peer count instead of guessing from
+    // the bastion's own peer list.
+    let peers: Vec<serde_json::Value> = get_wolfnet_peers_list().into_iter()
+        .map(|p| {
+            let ip = p.ip.split('/').next().unwrap_or(&p.ip).to_string();
+            serde_json::json!({ "name": p.name, "ip": ip })
+        })
+        .collect();
     Some(serde_json::json!({
         "hostname": status["hostname"],
         "address": status["address"],
         "public_key": status["public_key"],
         "listen_port": status["listen_port"],
         "interface": status["interface"],
+        "peers": peers,
     }))
 }
 
