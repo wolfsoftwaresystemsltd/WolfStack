@@ -1082,6 +1082,11 @@ pub fn add_wolfnet_peer(name: &str, endpoint: PeerEndpoint, ip: &str, public_key
 
 
         result_msg = format!("Peer '{}' added and WolfNet restarted", name);
+
+        // An explicit add overrides a stale tombstone — e.g. a node moved
+        // out of another cluster and into this one. Without this the peer
+        // stays tombstoned and the endpoint reconciler would skip it.
+        let _ = wolfnet_tombstone_remove(name);
     }
 
     // Write back

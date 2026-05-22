@@ -3540,7 +3540,11 @@ pub async fn agent_set_wolfnet_routes(req: HttpRequest, state: web::Data<AppStat
     }
 }
 
-/// POST /api/cluster/wolfnet-sync — ensure all WolfStack nodes in a cluster know about each other's WolfNet peers
+/// POST /api/cluster/wolfnet-sync — reconcile every WolfStack node's WolfNet
+/// peer list to its own cluster. Nodes are paired only with same-`cluster_name`
+/// peers; a peer in a different cluster is removed, healing any past
+/// cross-cluster merge. WolfNet itself is cluster-agnostic — this handler is
+/// the single point where cluster identity is enforced onto the overlay.
 #[derive(Deserialize)]
 pub struct WolfNetSyncRequest {
     pub node_ids: Vec<String>,
@@ -3549,8 +3553,7 @@ pub struct WolfNetSyncRequest {
 pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfNetSyncRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
 
-    let node_ids = &body.node_ids;
-    if node_ids.len() < 2 {
+    if body.node_ids.len() < 2 {
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "Need at least 2 nodes to sync"}));
     }
 
@@ -3579,6 +3582,9 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
         /// WolfStack API port — used to call back into this node when
         /// pushing peer entries to it.
         port: u16,
+        /// Normalised `cluster_name`. WolfNet is per-cluster, so peering
+        /// and pruning decisions key off this — see the sync loop below.
+        cluster_name: String,
     }
 
     /// Pick the WolfNet endpoint string to write into `target`'s config
@@ -3634,13 +3640,13 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
     let mut infos: Vec<NodeWnInfo> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
-    for nid in node_ids {
-        let node = match state.cluster.get_node(nid) {
-            Some(n) => n,
-            None => { errors.push(format!("Node {} not found", nid)); continue; }
-        };
+    // Reconcile EVERY WolfStack node the bastion knows, not only the ones in
+    // `node_ids` — the sync is authoritative per cluster, so it must see all
+    // clusters at once to peer same-cluster nodes AND prune cross-cluster ones.
+    // WolfNet is cluster-agnostic; this loop is where cluster identity
+    // (`cluster_name`) gets enforced onto the overlay.
+    for node in state.cluster.get_all_nodes() {
         if node.node_type != "wolfstack" {
-            errors.push(format!("{} is not a WolfStack node", node.hostname));
             continue;
         }
 
@@ -3675,6 +3681,7 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                         lan_address: effective_addr,
                         public_ip: node.public_ip.clone(),
                         port: node.port,
+                        cluster_name: ti_normalize_cluster(node.cluster_name.as_deref().unwrap_or("")),
                     });
                 }
                 None => {
@@ -3716,6 +3723,7 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                                 lan_address: node.address.clone(),
                                 public_ip: node.public_ip.clone(),
                                 port: node.port,
+                                cluster_name: ti_normalize_cluster(node.cluster_name.as_deref().unwrap_or("")),
                             });
                             fetched = true;
                             break;
@@ -3741,12 +3749,62 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
     // Now tell each node about every other node
     let mut synced = 0u32;
     let mut skipped = 0u32;
+    let mut pruned = 0u32;
 
     for i in 0..infos.len() {
         let target = &infos[i];
         for j in 0..infos.len() {
             if i == j { continue; }
             let peer = &infos[j];
+
+            // WolfNet is per-cluster. Pair a node only with peers that share
+            // its `cluster_name`; for a peer in a DIFFERENT cluster, actively
+            // remove it from this target's config so a past cross-cluster
+            // merge is healed, not merely halted.
+            if target.cluster_name != peer.cluster_name {
+                if target.is_self {
+                    match networking::remove_wolfnet_peer(&peer.hostname) {
+                        Ok(_) => { pruned += 1; }
+                        Err(e) => {
+                            if !e.contains("not found") {
+                                errors.push(format!("local prune {}: {}", peer.hostname, e));
+                            }
+                        }
+                    }
+                } else {
+                    let urls = build_node_urls(&target.lan_address, target.port, "/api/networking/wolfnet/peers");
+                    let payload = serde_json::json!({ "name": peer.hostname });
+                    let mut acted = false;
+                    for url in &urls {
+                        match client.delete(url)
+                            .timeout(std::time::Duration::from_secs(10))
+                            .header("X-WolfStack-Secret", &state.cluster_secret)
+                            .header("Content-Type", "application/json")
+                            .body(payload.to_string())
+                            .send().await
+                        {
+                            Ok(resp) => {
+                                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                                    match data.get("error").and_then(|v| v.as_str()) {
+                                        None => { pruned += 1; }
+                                        Some(err) if err.contains("not found") => { /* already absent */ }
+                                        Some(err) => {
+                                            errors.push(format!("{} prune {}: {}", target.hostname, peer.hostname, err));
+                                        }
+                                    }
+                                }
+                                acted = true;
+                                break;
+                            }
+                            Err(_) => continue, // Try next URL
+                        }
+                    }
+                    if !acted {
+                        errors.push(format!("{} prune {}: unreachable on all ports/protocols", target.hostname, peer.hostname));
+                    }
+                }
+                continue;
+            }
 
             // Per-target endpoint selection — see `pick_wolfnet_endpoint`
             // above. `None` means "roaming-only on this target for this
@@ -3831,6 +3889,7 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
         "status": "ok",
         "synced": synced,
         "skipped": skipped,
+        "pruned": pruned,
         "nodes_reached": infos.len(),
         "errors": errors,
     }))
