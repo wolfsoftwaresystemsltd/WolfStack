@@ -8126,6 +8126,24 @@ pub async fn lxc_config(req: HttpRequest, state: web::Data<AppState>, path: web:
     }
 }
 
+/// GET /api/containers/lxc/{name}/exists — does an LXC container, or a
+/// leftover directory from an earlier failed restore, already occupy
+/// this name on this node? The restore dialog calls this so it can warn
+/// the operator BEFORE a restore that would collide — e.g. an accidental
+/// second restore of a container that already restored fine.
+pub async fn lxc_exists(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    // The name is interpolated into a filesystem path — reject anything
+    // unsafe rather than stat a traversal path.
+    if !crate::auth::is_safe_name(&name) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "invalid container name" }));
+    }
+    let exists = std::path::Path::new(&format!("/var/lib/lxc/{}", name)).exists()
+        || std::path::Path::new(&format!("/etc/pve/lxc/{}.conf", name)).exists();
+    HttpResponse::Ok().json(serde_json::json!({ "exists": exists }))
+}
+
 /// PUT /api/containers/lxc/{name}/config — save LXC container config
 pub async fn lxc_save_config(
     req: HttpRequest,
@@ -30599,6 +30617,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/lxc/{name}/logs", web::get().to(lxc_logs))
         .route("/api/containers/lxc/{name}/config", web::get().to(lxc_config))
         .route("/api/containers/lxc/{name}/config", web::put().to(lxc_save_config))
+        .route("/api/containers/lxc/{name}/exists", web::get().to(lxc_exists))
         .route("/api/containers/lxc/{name}/action", web::post().to(lxc_action))
         .route("/api/containers/lxc/{name}/clone", web::post().to(lxc_clone))
         .route("/api/containers/lxc/{name}/mounts", web::get().to(lxc_mounts))

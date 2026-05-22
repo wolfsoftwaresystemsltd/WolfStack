@@ -26254,6 +26254,41 @@ async function deleteBackup(id) {
     loadBackups();
 }
 
+// Does an LXC container — or a leftover directory from an earlier
+// failed restore — already occupy this name on the node?
+async function lxcNameExists(name) {
+    if (!name) return false;
+    try {
+        const r = await fetch(apiUrl(`/api/containers/lxc/${encodeURIComponent(name)}/exists`));
+        if (!r.ok) return false;
+        const d = await r.json();
+        return !!d.exists;
+    } catch (_) { return false; }
+}
+
+// Wire a restore dialog's name field so it proactively warns when the
+// typed name already exists on this node — so an accidental repeat
+// restore (or a leftover from a failed one) is flagged in the dialog,
+// before Restore is clicked, instead of as a post-hoc error.
+function wireRestoreNameCheck(nameEl, warnEl) {
+    if (!nameEl || !warnEl) return;
+    let timer = null;
+    const check = async () => {
+        const name = nameEl.value.trim();
+        if (!name) { warnEl.style.display = 'none'; return; }
+        const exists = await lxcNameExists(name);
+        if (!warnEl.isConnected) return;  // dialog closed while the check was in flight
+        if (exists) {
+            warnEl.textContent = `⚠ "${name}" already exists on this node — tick the "Replace" option below to overwrite it, or restore under a different name.`;
+            warnEl.style.display = 'block';
+        } else {
+            warnEl.style.display = 'none';
+        }
+    };
+    nameEl.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(check, 400); });
+    check();  // initial check against the pre-filled name
+}
+
 // Tracks the live restore dialog: its Escape-key handler (so a re-open
 // can detach the previous one instead of leaking listeners) and whether
 // a restore is mid-flight (so a second dialog can't open over a
@@ -26308,6 +26343,7 @@ async function openRestoreDialog(id, type, name) {
             <label for="restore-name" style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;">${proxmox ? 'Restore as container ID (VMID)' : 'Restore as container name'}</label>
             <input type="text" id="restore-name" class="form-control" value="${escapeHtml(String(name || ''))}" placeholder="${proxmox ? 'e.g. 105' : 'e.g. web-01'}">
             <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Defaults to the backup's original ${proxmox ? 'ID' : 'name'}. Change it to restore as a separate copy.</div>
+            <div id="restore-name-warn" role="status" aria-live="polite" style="display:none;font-size:11px;color:var(--warning,#f59e0b);margin-top:4px;"></div>
         </div>` : '';
 
     const stale = document.getElementById('restore-dialog-backdrop');
@@ -26386,6 +26422,9 @@ async function openRestoreDialog(id, type, name) {
             goBtn.textContent = 'Restore';
         }
     };
+
+    // Proactively warn if the typed name already exists on this node.
+    wireRestoreNameCheck(backdrop.querySelector('#restore-name'), backdrop.querySelector('#restore-name-warn'));
 
     // Focus the most useful control for keyboard users.
     (backdrop.querySelector('#restore-name') || backdrop.querySelector('#restore-storage') || goBtn).focus();
@@ -26939,6 +26978,7 @@ async function restorePbsSnapshot(snapshot, backupType) {
             <label for="pbs-restore-name" style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;">Restore as container name</label>
             <input type="text" id="pbs-restore-name" class="form-control" value="${escapeHtml(String(snapId))}" placeholder="e.g. web-01">
             <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Defaults to the snapshot's original name. Change it to restore as a separate copy.</div>
+            <div id="pbs-restore-name-warn" role="status" aria-live="polite" style="display:none;font-size:11px;color:var(--warning,#f59e0b);margin-top:4px;"></div>
         </div>` : '';
 
     const backdrop = document.createElement('div');
@@ -27007,6 +27047,8 @@ async function restorePbsSnapshot(snapshot, backupType) {
         }
     };
 
+    // Proactively warn if the typed name already exists on this node.
+    wireRestoreNameCheck(backdrop.querySelector('#pbs-restore-name'), backdrop.querySelector('#pbs-restore-name-warn'));
     (backdrop.querySelector('#pbs-restore-name') || goBtn).focus();
 }
 
