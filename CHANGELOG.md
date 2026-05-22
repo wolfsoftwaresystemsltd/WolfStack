@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.3.9: restore dialog with Proxmox storage selection** _(2026-05-22 — [`37aded6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/37aded6c492f7496e42841b50c27ef69aad5986c))_
 - **v24.3.8: recover vSwitch uplink + VLAN tag in LXC NIC editor** _(2026-05-22 — [`4657e17`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4657e1727a87ec06fe8ed94f6f45e43d77313574))_
 - **v24.3.7: make LXC restore extract, verify, and not corrupt ownership** _(2026-05-22 — [`bb221ee`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bb221eecde7bf040f9dcf16a4db8d4459e20248a))_
 - **v24.3.6: keep WolfNet sync scoped to one cluster** _(2026-05-22 — [`c0a6e19`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c0a6e191b7ac7603250ab331ffcfd8498c09d596))_
