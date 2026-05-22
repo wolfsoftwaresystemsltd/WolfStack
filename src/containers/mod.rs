@@ -5676,11 +5676,22 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
         }
     }
 
-    // Cores / CPUs
+    // Cores / CPUs — Proxmox `cores` is a whole-number count. Reject a
+    // cpuset spec ("0-3") with a clear message instead of letting
+    // `pct set --cores 0-3` fail with a cryptic Proxmox error.
     let cpus = settings.cpus.as_deref().unwrap_or(&current.cpus);
     if !cpus.is_empty() {
-        args.push("--cores".to_string());
-        args.push(cpus.to_string());
+        match cpus.trim().parse::<u32>() {
+            Ok(n) if n >= 1 => {
+                args.push("--cores".to_string());
+                args.push(n.to_string());
+            }
+            _ => {
+                return Err(format!(
+                    "CPU Cores must be a whole number for a Proxmox container (got '{}'). \
+                     A cpuset range like 0-3 applies only to native LXC.", cpus.trim()));
+            }
+        }
     }
 
     // Autostart
@@ -8252,8 +8263,20 @@ fn lxc_cpuset_spec(cpu: &str) -> Option<String> {
         Ok(0) => None,
         Ok(1) => Some("0".to_string()),
         Ok(n) => Some(format!("0-{}", n - 1)),
-        Err(_) => Some(cpu.to_string()),
+        // Not a bare count — accept an explicit cpuset spec, but only a
+        // well-formed one. Junk ("-1", "abc", "4.5", "0-") must never
+        // reach the kernel as cpuset.cpus and break the container.
+        Err(_) => is_valid_cpuset(cpu).then(|| cpu.to_string()),
     }
+}
+
+/// True when `s` is a well-formed cgroup cpuset list — comma-separated
+/// CPU numbers and/or `lo-hi` ranges, e.g. "0-3", "0,2,4", "8-15".
+fn is_valid_cpuset(s: &str) -> bool {
+    !s.is_empty() && s.split(',').all(|part| match part.split_once('-') {
+        Some((lo, hi)) => lo.parse::<u32>().is_ok() && hi.parse::<u32>().is_ok(),
+        None => part.parse::<u32>().is_ok(),
+    })
 }
 
 #[cfg(test)]
@@ -8279,6 +8302,15 @@ mod cpuset_spec_tests {
         assert_eq!(lxc_cpuset_spec("0-3").as_deref(), Some("0-3"));
         assert_eq!(lxc_cpuset_spec("0,2,4").as_deref(), Some("0,2,4"));
         assert_eq!(lxc_cpuset_spec("8-15").as_deref(), Some("8-15"));
+    }
+
+    #[test]
+    fn malformed_specs_are_rejected() {
+        assert_eq!(lxc_cpuset_spec("-1"), None);
+        assert_eq!(lxc_cpuset_spec("abc"), None);
+        assert_eq!(lxc_cpuset_spec("4.5"), None);
+        assert_eq!(lxc_cpuset_spec("0-"), None);
+        assert_eq!(lxc_cpuset_spec("0--3"), None);
     }
 }
 
