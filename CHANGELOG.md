@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.3.16: clearing Proxmox CPU Cores actually drops the limit** _(2026-05-23 — [`c711a8b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c711a8bef99ac5aa231b2c4ccfd08ca8e478c18a))_
 - **v24.3.15: restore dialog warns when the target name is already taken** _(2026-05-22 — [`3ffbbd3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3ffbbd3929c4f61a15fe7a9c6d3c86b66787853f))_
 - **v24.3.14: rebuild to confirm the v24.3.13 PBS restore fix is deployed** _(2026-05-22 — [`77d34f9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/77d34f9a80f68866d1fabc02b33d3b47006b3825))_
 - **v24.3.13: fix PBS snapshot restore — actually un-archive the guest** _(2026-05-22 — [`0da0b1e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0da0b1e8091e1ead77495eeae87cac9b36227a31))_
