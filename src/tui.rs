@@ -11,13 +11,12 @@ use crate::api::AppState;
 // ─── Helpers ───
 
 fn require_tui_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<String, HttpResponse> {
-    // Check cluster secret header first (for inter-node or CLI access)
+    // Check cluster secret header first (for inter-node or CLI access).
+    // Centralised three-way check (in-memory, on-disk, optional default)
+    // lives in `auth::validate_inter_node_secret` — see Stage 5 docs.
     if let Some(val) = req.headers().get("X-WolfStack-Secret") {
         let provided = val.to_str().unwrap_or("");
-        if crate::auth::validate_cluster_secret(provided, &state.cluster_secret)
-            || crate::auth::validate_cluster_secret(provided, crate::auth::default_cluster_secret())
-            || crate::auth::validate_cluster_secret(provided, &crate::auth::load_cluster_secret())
-        {
+        if crate::auth::validate_inter_node_secret(provided, &state.cluster_secret) {
             return Ok("cluster-node".to_string());
         }
     }

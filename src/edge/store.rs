@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
 const STORE_PATH: &str = "/etc/wolfstack/cloud-providers.json";
+/// Legacy XOR key — kept ONLY for reading pre-v24.4 stored values.
+/// New writes use AES-256-GCM via `crate::at_rest_crypto`.
 const XOR_KEY: &[u8] = b"wolfstack-cloud-v1";
+const AT_REST_PURPOSE: &[u8] = b"cloud-providers";
 
 /// Cloud provider kind. New providers land as additive whitelist
 /// entries. Pre-v23.2 the only one that ships is Cloudflare; v23.3
@@ -211,7 +214,23 @@ impl CloudProviderStore {
     }
 }
 
+/// Write path — v2 AES-256-GCM via at_rest_crypto. Falls back to v1
+/// XOR only if at_rest_crypto isn't initialised (defensive — shouldn't
+/// happen in a normally-started process).
 fn obfuscate(plain: &str) -> String {
+    match crate::at_rest_crypto::encrypt(plain.as_bytes(), AT_REST_PURPOSE) {
+        Ok(v2) => v2,
+        Err(_) => obfuscate_v1_xor(plain),
+    }
+}
+
+/// Read path — accept v2 or v1. v2 decrypts via AES-GCM; v1 falls
+/// through to the legacy XOR decoder. Backward compat is permanent.
+fn deobfuscate(encoded: &str) -> String {
+    crate::at_rest_crypto::decrypt_or_legacy(encoded, AT_REST_PURPOSE, deobfuscate_v1_xor)
+}
+
+fn obfuscate_v1_xor(plain: &str) -> String {
     use base64::Engine;
     let bytes: Vec<u8> = plain.bytes().enumerate()
         .map(|(i, b)| b ^ XOR_KEY[i % XOR_KEY.len()])
@@ -219,7 +238,7 @@ fn obfuscate(plain: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-fn deobfuscate(encoded: &str) -> String {
+fn deobfuscate_v1_xor(encoded: &str) -> String {
     use base64::Engine;
     let raw = match base64::engine::general_purpose::STANDARD.decode(encoded) {
         Ok(b) => b,
@@ -229,6 +248,45 @@ fn deobfuscate(encoded: &str) -> String {
         .map(|(i, b)| b ^ XOR_KEY[i % XOR_KEY.len()])
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+impl CloudProviderStore {
+    /// Re-encrypt every v1 entry as v2 AES-256-GCM. Backs up the
+    /// existing file to `<path>.bak.<ts>` BEFORE the save. Returns
+    /// (migrated, already_v2, errored).
+    pub fn migrate_to_v2(&mut self) -> Result<(usize, usize, usize), String> {
+        // W5 fix: skip backup when no v1 entries remain.
+        let any_v1 = self.providers.iter().any(|e|
+            !crate::at_rest_crypto::is_v2_format(&e.credentials_enc));
+        if any_v1 && std::path::Path::new(STORE_PATH).exists() {
+            let backup = format!("{}.bak.{}", STORE_PATH,
+                chrono::Utc::now().format("%Y%m%d%H%M%S"));
+            std::fs::copy(STORE_PATH, &backup)
+                .map_err(|e| format!("backup before migrate: {}", e))?;
+        }
+        let mut migrated = 0;
+        let mut already = 0;
+        let mut errored = 0;
+        for entry in &mut self.providers {
+            if crate::at_rest_crypto::is_v2_format(&entry.credentials_enc) {
+                already += 1;
+                continue;
+            }
+            let plaintext = deobfuscate_v1_xor(&entry.credentials_enc);
+            if plaintext.is_empty() {
+                errored += 1;
+                continue;
+            }
+            match crate::at_rest_crypto::encrypt(plaintext.as_bytes(), AT_REST_PURPOSE) {
+                Ok(v2) => { entry.credentials_enc = v2; migrated += 1; }
+                Err(_) => errored += 1,
+            }
+        }
+        if migrated > 0 {
+            self.save()?;
+        }
+        Ok((migrated, already, errored))
+    }
 }
 
 #[cfg(test)]

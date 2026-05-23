@@ -58,6 +58,9 @@ mod github_backup;
 mod deps;
 mod systemcheck;
 mod security;
+mod secret_audit;
+mod secret_rotation;
+mod at_rest_crypto;
 mod services_discovery;
 mod cluster_browser;
 mod compat;
@@ -472,8 +475,35 @@ async fn main() -> std::io::Result<()> {
         containers::reapply_wolfnet_routes();
     });
 
+    // Stage 2 of the cluster-secret migration: if this is a fresh
+    // install (no on-disk custom secret + no peers in nodes.json),
+    // generate a per-install secret right now so we never start up
+    // using the built-in default that every WolfStack installation
+    // shares. The helper refuses to act on anything that looks like
+    // an existing install — see auth::auto_generate_for_fresh_install.
+    let _ = auth::auto_generate_for_fresh_install();
+
     // Load per-installation cluster secret for inter-node authentication
     let cluster_secret = auth::load_cluster_secret();
+
+    // Initialise the shared at-rest crypto module with the active
+    // cluster secret. After this point, dns_providers / edge::store /
+    // xo can use AES-256-GCM v2 encryption for new credential values;
+    // legacy v1 XOR values still decrypt transparently via the
+    // fallback path. Must run BEFORE any module that might encrypt.
+    at_rest_crypto::init(&cluster_secret);
+
+    // Stage 5 of the cluster-secret migration: log whether the
+    // built-in default is currently accepted, so operators can see
+    // their WOLFSTACK_REJECT_DEFAULT_SECRET env flag is being honoured.
+    if !auth::default_secret_accepted() {
+        info!("Cluster secret: built-in default REJECTED (WOLFSTACK_REJECT_DEFAULT_SECRET set). \
+               Only the per-install secret will authenticate inter-node calls.");
+    }
+    if secret_audit::is_using_default_cluster_secret() {
+        info!("Cluster secret: still using the built-in default — see \
+               Settings → Security to rotate to a per-install value.");
+    }
 
     // Fetch public IP (best effort — try multiple services)
     let public_ip = {

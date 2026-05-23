@@ -26,7 +26,14 @@ use std::sync::Mutex;
 
 const STORE_PATH: &str = "/etc/wolfstack/dns-providers.json";
 const TMP_CREDS_DIR: &str = "/run/wolfstack/dns-creds";
+/// Legacy XOR key — kept ONLY for reading pre-v24.4 stored values.
+/// New writes go through `at_rest_crypto::encrypt` (AES-256-GCM keyed
+/// off the per-install cluster secret). The audit module surfaces a
+/// finding while any v1 entries remain on disk.
 const XOR_KEY: &[u8] = b"wolfstack-dns-v1";
+/// Purpose label for HKDF key derivation — NEVER renamed (would
+/// invalidate every stored v2 credential on this install).
+const AT_REST_PURPOSE: &[u8] = b"dns-providers";
 
 /// Plugin names accepted by certbot's stock `certbot-dns-*` set. New
 /// providers must be added here explicitly — the plugin name is
@@ -293,7 +300,29 @@ fn validate_ini(ini: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Write path — prefer v2 AES-256-GCM; fall back to v1 XOR only if the
+/// at-rest crypto module hasn't been initialised (shouldn't happen
+/// after startup, but means a missing init() doesn't break credential
+/// writes on a partially-initialised process).
 fn obfuscate(plain: &str) -> String {
+    match crate::at_rest_crypto::encrypt(plain.as_bytes(), AT_REST_PURPOSE) {
+        Ok(v2) => v2,
+        Err(_) => obfuscate_v1_xor(plain),
+    }
+}
+
+/// Read path — accept either format. v2 values decrypt via AES-GCM;
+/// anything without the v2 prefix is treated as a legacy v1 (XOR)
+/// value and routed through the legacy decoder. Backward compat is
+/// permanent: even years from now, an install that hasn't migrated
+/// still reads correctly.
+fn deobfuscate(encoded: &str) -> String {
+    crate::at_rest_crypto::decrypt_or_legacy(encoded, AT_REST_PURPOSE, deobfuscate_v1_xor)
+}
+
+/// Legacy v1 XOR encoder — retained ONLY for the at_rest_crypto-not-
+/// initialised fallback path. New code should never reach this.
+fn obfuscate_v1_xor(plain: &str) -> String {
     use base64::Engine;
     let bytes: Vec<u8> = plain
         .bytes()
@@ -303,24 +332,63 @@ fn obfuscate(plain: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-fn deobfuscate(encoded: &str) -> String {
+/// Legacy v1 XOR decoder — used as the fallback for any stored value
+/// that doesn't start with `v2:`. Kept correct for UTF-8 (pre-fix
+/// version cast each byte to char, mangling multi-byte sequences).
+fn deobfuscate_v1_xor(encoded: &str) -> String {
     use base64::Engine;
     let raw = match base64::engine::general_purpose::STANDARD.decode(encoded) {
         Ok(b) => b,
         Err(_) => return String::new(),
     };
-    // First XOR back to the original bytes, THEN reassemble UTF-8.
-    // The pre-fix version did `(byte ^ key) as char`, which silently
-    // corrupted any multi-byte UTF-8 sequence (each byte became its own
-    // U+0080..U+00FF code point). DNS credentials are almost always
-    // ASCII tokens, but operator comments and friendly names can carry
-    // any unicode — better correct than fast.
     let bytes: Vec<u8> = raw
         .into_iter()
         .enumerate()
         .map(|(i, b)| b ^ XOR_KEY[i % XOR_KEY.len()])
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+impl DnsProviderStore {
+    /// Re-encrypt every v1 entry as v2 AES-256-GCM. Takes a backup of
+    /// the existing file to `<path>.bak.<ts>` BEFORE the save so the
+    /// operator can recover by hand if anything goes wrong. Returns
+    /// (migrated, already_v2, errored).
+    pub fn migrate_to_v2(&mut self) -> Result<(usize, usize, usize), String> {
+        // W5 fix: only back up if there's actually any v1 entry to
+        // migrate. Re-clicking the migrate button on an already-
+        // migrated store shouldn't churn the backup retention slots.
+        let any_v1 = self.providers.iter().any(|e|
+            !crate::at_rest_crypto::is_v2_format(&e.credentials_enc));
+        if any_v1 && std::path::Path::new(STORE_PATH).exists() {
+            let backup = format!("{}.bak.{}", STORE_PATH,
+                chrono::Utc::now().format("%Y%m%d%H%M%S"));
+            std::fs::copy(STORE_PATH, &backup)
+                .map_err(|e| format!("backup before migrate: {}", e))?;
+        }
+        let mut migrated = 0;
+        let mut already = 0;
+        let mut errored = 0;
+        for entry in &mut self.providers {
+            if crate::at_rest_crypto::is_v2_format(&entry.credentials_enc) {
+                already += 1;
+                continue;
+            }
+            let plaintext = deobfuscate_v1_xor(&entry.credentials_enc);
+            if plaintext.is_empty() {
+                errored += 1;
+                continue;
+            }
+            match crate::at_rest_crypto::encrypt(plaintext.as_bytes(), AT_REST_PURPOSE) {
+                Ok(v2) => { entry.credentials_enc = v2; migrated += 1; }
+                Err(_) => errored += 1,
+            }
+        }
+        if migrated > 0 {
+            self.save()?;
+        }
+        Ok((migrated, already, errored))
+    }
 }
 
 #[cfg(test)]

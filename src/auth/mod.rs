@@ -80,6 +80,231 @@ pub fn save_cluster_secret(secret: &str) -> Result<(), String> {
         .map_err(|e| format!("Cannot write custom-cluster-secret: {}", e))
 }
 
+/// Stage 2 of the cluster-secret migration: on a FRESH install (no
+/// custom-secret file AND no peers configured), generate a fresh
+/// per-install secret instead of inheriting the built-in default
+/// shared by every WolfStack on Earth.
+///
+/// SAFETY — this MUST be called only when both conditions hold:
+///   1. `custom_secret_path()` does not exist
+///   2. No peers are recorded in nodes.json (single-node install)
+///
+/// Either condition false → existing install → do nothing, never
+/// rotate behind the operator's back. Stage 3 (operator-triggered
+/// coordinated rotation) is the supported path for existing clusters.
+///
+/// Returns `Some(new_secret)` on a fresh-install generation,
+/// `None` if conditions aren't met or generation/save failed.
+/// On generation, emits a loud INFO log so the operator can copy
+/// the value to a password manager.
+pub fn auto_generate_for_fresh_install() -> Option<String> {
+    let path = custom_secret_path();
+    if std::path::Path::new(&path).exists() { return None; }
+
+    // Check for peers in nodes.json — if any exist, this is NOT a
+    // fresh install (someone is rejoining, restoring from backup, or
+    // running on a host whose old custom-secret was deleted but the
+    // peer list survived). Refuse to auto-generate.
+    //
+    // W1 fix: if nodes.json exists but is unreadable, corrupted, or
+    // contains anything we can't recognise as "empty", treat it as
+    // "existing install" and refuse — the safe direction. Log a
+    // warning so operators with a corrupted file see why the auto-gen
+    // didn't fire (otherwise they'd silently keep running on the
+    // default secret).
+    let nodes_path = crate::paths::get().nodes_config;
+    if std::path::Path::new(&nodes_path).exists() {
+        match std::fs::read_to_string(&nodes_path) {
+            Ok(raw) => {
+                let trimmed = raw.trim();
+                if !trimmed.is_empty() && trimmed != "[]" && trimmed != "{}" {
+                    return None;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(target: "cluster_secret",
+                    "fresh-install auto-gen skipped: cannot read {} ({}). \
+                     If this is a fresh install, fix file perms and restart.",
+                    nodes_path, e);
+                return None;
+            }
+        }
+    }
+
+    let new_secret = generate_cluster_secret();
+    if save_cluster_secret(&new_secret).is_err() {
+        // Non-fatal: caller can still proceed with the built-in default.
+        // We don't want a fresh-install failure here to break startup.
+        return None;
+    }
+    // Keep /etc/wolfusb/wolfusb.env aligned. The install script writes
+    // it with the hardcoded default BEFORE the daemon ever starts (so
+    // it can't see our soon-to-be-generated per-install secret). If we
+    // don't update it here, the external wolfusb daemon will run with
+    // the default and our in-process wolfusb module will run with the
+    // new per-install — they'll reject each other's auth headers.
+    // Best-effort; failure here doesn't block startup.
+    let _ = realign_wolfusb_env(&new_secret);
+    // H1 fix: only log a fingerprint, never the secret bytes themselves.
+    // journald is readable by anyone in the systemd-journal group on
+    // most distros — a full secret in the log is an immediate exfil
+    // path. Operators retrieve the full value from the 0600 file at
+    // `path` or via Settings → Security in the UI.
+    let masked = mask_secret_for_log(&new_secret);
+    tracing::warn!(target: "cluster_secret",
+        "Fresh-install cluster secret generated and saved to {} \
+         (mode 0600). Fingerprint: {}. Retrieve the full value from \
+         that file (sudo cat) before adding peer nodes — peers must \
+         present the same secret to authenticate inter-node calls.",
+        path, masked);
+    Some(new_secret)
+}
+
+/// Print a short, log-safe fingerprint of a cluster secret: prefix +
+/// first 6 chars after the `wsk_` + `…` + last 4. Enough for an
+/// operator to confirm "is this the value I'm holding" without
+/// committing the secret to journald.
+fn mask_secret_for_log(s: &str) -> String {
+    if s.len() < 14 { return "(too short to mask)".into(); }
+    let head: String = s.chars().take(10).collect();   // "wsk_xxxxxx"
+    let tail: String = s.chars().rev().take(4).collect::<Vec<_>>()
+        .into_iter().rev().collect();
+    format!("{}…{}", head, tail)
+}
+
+/// H5 — public wrapper used by Stage 3 coordinated rotation. After
+/// any rotation that changes the on-disk cluster secret, the external
+/// wolfusb daemon's WOLFUSB_KEY must be updated too — otherwise our
+/// in-process wolfusb module (using the new cluster_secret) and the
+/// external daemon (using the old env value) reject each other.
+/// Best-effort; logs but does not fail on errors.
+///
+/// Also signals systemd to restart wolfusb.service so the daemon picks
+/// up the new key without waiting for the next manual restart. Silent
+/// no-op if systemctl / the service unit isn't present (e.g. fresh
+/// install where setup.sh hasn't installed wolfusb yet).
+pub fn realign_wolfusb_env_after_rotation(new_secret: &str) {
+    if new_secret.is_empty() { return; }
+    match realign_wolfusb_env(new_secret) {
+        Ok(()) => {
+            // C2 fix: dispatch the systemctl restart on a blocking
+            // pool thread instead of synchronously on the caller —
+            // this is called from actix request handlers and a
+            // systemctl fork/exec under dbus pressure can block for
+            // seconds. `--no-block` only stops systemd waiting on the
+            // unit's startup; the spawn/exec itself is still
+            // synchronous. tokio::spawn keeps the call off the actix
+            // worker thread; the result is discarded (best-effort).
+            // We also try to detect tokio runtime presence so the
+            // helper stays callable from non-async contexts (init
+            // paths, future CLI tools).
+            let restart = || {
+                let _ = std::process::Command::new("systemctl")
+                    .args(["restart", "--no-block", "wolfusb.service"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            };
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => { handle.spawn_blocking(restart); }
+                Err(_) => { std::thread::spawn(restart); }
+            }
+        }
+        Err(e) => tracing::warn!(target: "cluster_secret",
+            "failed to realign /etc/wolfusb/wolfusb.env after rotation ({}); \
+             you may need to update WOLFUSB_KEY by hand and restart wolfusb.service",
+            e),
+    }
+}
+
+/// Update `/etc/wolfusb/wolfusb.env`'s `WOLFUSB_KEY=` line in place
+/// without touching the rest of the file (preserves any operator
+/// edits to bind / port). No-ops silently if the file isn't there.
+fn realign_wolfusb_env(new_secret: &str) -> Result<(), std::io::Error> {
+    let path = "/etc/wolfusb/wolfusb.env";
+    if !std::path::Path::new(path).exists() { return Ok(()); }
+    let body = std::fs::read_to_string(path)?;
+    let mut out = String::with_capacity(body.len());
+    let mut replaced = false;
+    for line in body.lines() {
+        if line.starts_with("WOLFUSB_KEY=") {
+            out.push_str("WOLFUSB_KEY=");
+            out.push_str(new_secret);
+            out.push('\n');
+            replaced = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !replaced {
+        out.push_str("WOLFUSB_KEY=");
+        out.push_str(new_secret);
+        out.push('\n');
+    }
+    // Reuse the project's atomic 0600 writer so a partial write
+    // can't leave the file truncated.
+    crate::paths::write_secure(path, out)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+}
+
+/// Stage 5 of the cluster-secret migration: is the built-in default
+/// secret currently accepted as a valid inter-node auth value?
+///
+/// Default (in this release): **YES, accept**. Shipping the binary
+/// must not break any existing install. Operators opt INTO rejection
+/// by setting `WOLFSTACK_REJECT_DEFAULT_SECRET=1` in the environment.
+///
+/// A future release flips the default to "reject" with an opt-OUT
+/// flag (`WOLFSTACK_ACCEPT_DEFAULT_SECRET=1`) for any install that
+/// hasn't migrated by then. The escape hatch is permanent so ops
+/// support can recover a broken upgrade by setting the variable
+/// without an emergency hotfix release.
+pub fn default_secret_accepted() -> bool {
+    // Explicit reject takes priority — operators who set this WANT
+    // the default rejected even if a future release flips the
+    // overall default to "reject".
+    if std::env::var("WOLFSTACK_REJECT_DEFAULT_SECRET")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    // For now: accept by default. The opt-out env flag is here so
+    // operators who've migrated their cluster can lock the door
+    // behind them without waiting for a future release.
+    true
+}
+
+/// Authenticate a presented `X-WolfStack-Secret` header value against
+/// every acceptance path used by inter-node auth:
+///   1. The in-memory secret from process start (`state.cluster_secret`)
+///   2. The current on-disk secret (re-read every call so a Stage 3
+///      .pending → active commit is picked up without restart)
+///   3. The hardcoded built-in default — ONLY if Stage 5 still allows it
+///      (operators can opt out via `WOLFSTACK_REJECT_DEFAULT_SECRET=1`)
+///
+/// Use this from every endpoint that authenticates by cluster secret —
+/// the alternative is bespoke three-line checks at every call site, which
+/// is how the Stage 5 review found 13+ endpoints accepting the default
+/// unconditionally even when the operator had opted out.
+///
+/// Constant-time per-comparison via `validate_cluster_secret`. The
+/// overall function short-circuits on success (`||` chain), which is
+/// fine: an attacker learns nothing useful from "which of the three
+/// values matched" because the three valid values are equally
+/// authoritative.
+pub fn validate_inter_node_secret(provided: &str, in_memory: &str) -> bool {
+    if validate_cluster_secret(provided, in_memory) { return true; }
+    if validate_cluster_secret(provided, &load_cluster_secret()) { return true; }
+    if default_secret_accepted()
+        && validate_cluster_secret(provided, default_cluster_secret())
+    {
+        return true;
+    }
+    false
+}
+
 /// Validate a cluster secret from a request header.
 ///
 /// True constant-time comparison: the pre-v18.7.30 implementation had
@@ -1086,6 +1311,40 @@ mod secret_tests {
     fn equal_content_equal_length_is_true() {
         assert!(validate_cluster_secret("wsk_abc123", "wsk_abc123"));
         assert!(validate_cluster_secret("x", "x"));
+    }
+
+    /// Stage 5 regression test: validate_inter_node_secret MUST accept
+    /// the in-memory secret regardless of env-flag state. Pre-fix, the
+    /// chain in `require_auth` was inlined at 7+ call sites; any future
+    /// change must keep the in-memory path always-on. This test does
+    /// NOT touch env vars (set_var is racy with parallel tests in
+    /// edition 2024 — marked unsafe) — just exercises the trivial
+    /// in-memory match.
+    #[test]
+    fn inter_node_accepts_in_memory_unconditionally() {
+        assert!(validate_inter_node_secret("wsk_in_mem_value_for_test", "wsk_in_mem_value_for_test"));
+    }
+
+    /// Stage 5 regression test: the OR-chain in
+    /// validate_inter_node_secret must reject an obviously-wrong value
+    /// regardless of any env state. Sanity check that the helper isn't
+    /// degenerate to "always true".
+    #[test]
+    fn inter_node_rejects_obviously_wrong_value() {
+        assert!(!validate_inter_node_secret("not_a_real_secret_at_all_xyz",
+                                            "wsk_in_mem_value_for_test"));
+    }
+
+    /// Stage 5 regression test: default_secret_accepted() must default
+    /// to TRUE so shipping the binary doesn't break any existing install.
+    /// If the env var is set in the test runner this assertion is
+    /// skipped — we trust CI to not set WolfStack vars accidentally.
+    #[test]
+    fn default_secret_acceptance_defaults_to_true() {
+        if std::env::var("WOLFSTACK_REJECT_DEFAULT_SECRET").is_ok() { return; }
+        assert!(default_secret_accepted(),
+                "default-secret acceptance must default to true — \
+                 Stage 5 must not change behaviour for any install on upgrade");
     }
 
     #[test]

@@ -69,12 +69,30 @@ pub struct XoPool {
     pub vm_count: u32,
 }
 
-/// Trivial XOR-with-prefix obfuscation. Same scheme as the rest
-/// of WolfStack's at-rest secrets — keeps the file from being
-/// trivially `cat`-able while not pretending to be encryption.
-/// The actual access control is filesystem permissions on
-/// `/etc/wolfstack/`.
+/// Purpose label for HKDF key derivation — NEVER renamed (would
+/// invalidate every stored v2 token on this install).
+const AT_REST_PURPOSE: &[u8] = b"xo-tokens";
+
+/// Encrypt a Xen Orchestra bearer token for at-rest storage.
+///
+/// v2 → AES-256-GCM keyed off the per-install cluster secret via
+/// `crate::at_rest_crypto`. Falls back to v1 (XOR) only if
+/// at_rest_crypto isn't initialised, which shouldn't happen in a
+/// normally-started process.
 pub fn obfuscate_token(plain: &str) -> String {
+    match crate::at_rest_crypto::encrypt(plain.as_bytes(), AT_REST_PURPOSE) {
+        Ok(v2) => v2,
+        Err(_) => obfuscate_token_v1_xor(plain),
+    }
+}
+
+/// Decrypt an XO token. Accepts v2 (AES) or v1 (XOR); permanent
+/// backward compatibility for installs that haven't run the migration.
+pub fn deobfuscate_token(encoded: &str) -> String {
+    crate::at_rest_crypto::decrypt_or_legacy(encoded, AT_REST_PURPOSE, deobfuscate_token_v1_xor)
+}
+
+fn obfuscate_token_v1_xor(plain: &str) -> String {
     use base64::Engine;
     let key = b"wolfstack-xo-v1";
     let bytes: Vec<u8> = plain.bytes().enumerate()
@@ -83,16 +101,44 @@ pub fn obfuscate_token(plain: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-pub fn deobfuscate_token(encoded: &str) -> String {
+/// Pre-v24.4 this used `(b ^ key[i]) as char` which corrupted any
+/// non-ASCII byte (each became a separate U+0080..U+00FF code point).
+/// XO bearer tokens are ASCII so the bug never fired in practice, but
+/// the corrected decoder is safer for arbitrary future token shapes.
+fn deobfuscate_token_v1_xor(encoded: &str) -> String {
     use base64::Engine;
     let key = b"wolfstack-xo-v1";
     let raw = match base64::engine::general_purpose::STANDARD.decode(encoded) {
         Ok(b) => b,
         Err(_) => return String::new(),
     };
-    raw.into_iter().enumerate()
-        .map(|(i, b)| (b ^ key[i % key.len()]) as char)
-        .collect()
+    let bytes: Vec<u8> = raw.into_iter().enumerate()
+        .map(|(i, b)| b ^ key[i % key.len()])
+        .collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Helper used by `XoStore::migrate_to_v2` — not called directly.
+fn migrate_v1_to_v2_pools(pools: &mut [XoPool]) -> (usize, usize, usize) {
+    let mut migrated = 0;
+    let mut already = 0;
+    let mut errored = 0;
+    for pool in pools.iter_mut() {
+        if crate::at_rest_crypto::is_v2_format(&pool.token_enc) {
+            already += 1;
+            continue;
+        }
+        let plaintext = deobfuscate_token_v1_xor(&pool.token_enc);
+        if plaintext.is_empty() {
+            errored += 1;
+            continue;
+        }
+        match crate::at_rest_crypto::encrypt(plaintext.as_bytes(), AT_REST_PURPOSE) {
+            Ok(v2) => { pool.token_enc = v2; migrated += 1; }
+            Err(_) => errored += 1,
+        }
+    }
+    (migrated, already, errored)
 }
 
 // ─── Live data types ──────────────────────────────────────────────
@@ -555,6 +601,28 @@ impl XoStore {
 
     pub fn get(&self, id: &str) -> Option<XoPool> {
         self.pools.iter().find(|p| p.id == id).cloned()
+    }
+
+    /// Re-encrypt every v1-format token to v2. Backs up the existing
+    /// file to `<path>.bak.<ts>` BEFORE the save — if anything goes
+    /// wrong, the operator can restore by hand. Returns
+    /// (migrated, already_v2, errored).
+    pub fn migrate_to_v2(&mut self) -> Result<(usize, usize, usize), String> {
+        // W5 fix: backup only if there's a v1 entry to convert.
+        let any_v1 = self.pools.iter().any(|p|
+            !crate::at_rest_crypto::is_v2_format(&p.token_enc));
+        if any_v1 && std::path::Path::new(&self.path).exists() {
+            let backup = format!("{}.bak.{}", self.path,
+                chrono::Utc::now().format("%Y%m%d%H%M%S"));
+            std::fs::copy(&self.path, &backup)
+                .map_err(|e| format!("backup before migrate: {}", e))?;
+        }
+        let (migrated, already, errored) = migrate_v1_to_v2_pools(&mut self.pools);
+        // Only save if anything actually changed.
+        if migrated > 0 {
+            self.save()?;
+        }
+        Ok((migrated, already, errored))
     }
 
     pub fn add(&mut self, mut pool: XoPool) -> Result<(), String> {

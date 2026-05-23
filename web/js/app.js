@@ -17295,6 +17295,217 @@ async function fleetRotateClusterSecret() {
     }
 }
 
+// ─── Cluster-secret migration (Stages 1-5) ─────────────────────────
+// Stage 1: secretAuditRender() — fetches /api/security/secret-audit
+//   and renders both the dashboard banner and the Settings → Security
+//   credential-audit panel. Called on dashboard load and after every
+//   rotation attempt so the banner reflects current state.
+// Stage 3: secretAuditPreflight() / secretAuditCoordinatedRotate() —
+//   thin wrappers around the orchestrator endpoint.
+
+async function secretAuditRender() {
+    const banner = document.getElementById('secret-audit-banner');
+    const panel = document.getElementById('secret-audit-findings');
+    if (!banner && !panel) return;
+    let data;
+    try {
+        const r = await fetch(apiUrl('/api/security/secret-audit'));
+        if (!r.ok) {
+            if (panel) panel.innerHTML = `<div style="color:var(--text-muted); font-size:13px;">Audit endpoint returned HTTP ${r.status}.</div>`;
+            return;
+        }
+        data = await r.json();
+    } catch (e) {
+        if (panel) panel.innerHTML = `<div style="color:var(--text-muted); font-size:13px;">Could not load audit: ${vlanEsc(e.message || e)}</div>`;
+        return;
+    }
+    const findings = Array.isArray(data.findings) ? data.findings : [];
+    const compromise = findings.filter(f => f.severity === 'compromise');
+    const high = findings.filter(f => f.severity === 'high');
+
+    // Dashboard banner — red if any compromise, yellow if any high,
+    // hidden if clean. Per-session dismissal stored in sessionStorage
+    // so a fresh login surfaces it again.
+    if (banner) {
+        const dismissedKey = 'secret-audit-banner-dismissed-' + (data.finding_count || 0);
+        const dismissed = sessionStorage.getItem(dismissedKey) === '1';
+        if (findings.length === 0 || dismissed) {
+            banner.style.display = 'none';
+        } else {
+            const isCompromise = compromise.length > 0;
+            const bg = isCompromise ? 'rgba(220,38,38,0.12)' : 'rgba(234,179,8,0.12)';
+            const border = isCompromise ? 'rgba(220,38,38,0.45)' : 'rgba(234,179,8,0.4)';
+            const colour = isCompromise ? '#fca5a5' : '#fbbf24';
+            const title = isCompromise
+                ? `Cluster secret is the built-in default — ${findings.length} finding${findings.length > 1 ? 's' : ''}`
+                : `${findings.length} credential audit finding${findings.length > 1 ? 's' : ''}`;
+            banner.style.background = bg;
+            banner.style.border = `1px solid ${border}`;
+            banner.style.color = 'var(--text-primary)';
+            banner.innerHTML = `
+                <div style="display:flex; align-items:flex-start; gap:12px;">
+                    <div style="font-size:20px; line-height:1;"><span class="ws-icon-clean-wrap" data-icon="warning"></span></div>
+                    <div style="flex:1; font-size:13px; line-height:1.5;">
+                        <div style="font-weight:600; margin-bottom:4px; color:${colour};">${vlanEsc(title)}</div>
+                        <div style="color:var(--text-secondary);">Open <a href="#" onclick="selectView('settings'); switchSettingsTab('security'); document.getElementById('secret-audit-card')?.scrollIntoView({behavior:'smooth'}); return false;" style="color:${colour}; text-decoration:underline;">Settings → Security → Credential audit</a> to review and rotate.</div>
+                    </div>
+                    <button onclick="sessionStorage.setItem('${vlanEsc(dismissedKey)}','1'); document.getElementById('secret-audit-banner').style.display='none';" class="btn btn-sm" style="background:transparent; color:var(--text-secondary); border:1px solid var(--border); padding:6px 12px; border-radius:6px; cursor:pointer; white-space:nowrap;">Dismiss</button>
+                </div>`;
+            banner.style.display = 'block';
+        }
+    }
+
+    // Settings → Security findings panel — always rendered, regardless
+    // of banner dismissal state.
+    if (panel) {
+        if (findings.length === 0) {
+            panel.innerHTML = `<div style="color:#22c55e; font-size:13px;">No findings — this install is not exposed to any committed-default secret issue.</div>`;
+        } else {
+            panel.innerHTML = findings.map(f => {
+                const sevColour = f.severity === 'compromise' ? '#fca5a5'
+                    : f.severity === 'high' ? '#fbbf24' : '#94a3b8';
+                const sevBg = f.severity === 'compromise' ? 'rgba(220,38,38,0.10)'
+                    : f.severity === 'high' ? 'rgba(234,179,8,0.10)' : 'rgba(148,163,184,0.10)';
+                return `<div style="padding:12px 14px; background:${sevBg}; border-left:3px solid ${sevColour}; border-radius:4px; margin-bottom:8px;">
+                    <div style="font-weight:600; color:${sevColour}; margin-bottom:4px;">${vlanEsc(f.title)}</div>
+                    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px; line-height:1.5;">${vlanEsc(f.detail)}</div>
+                    <div style="font-size:12px; color:var(--text-muted); line-height:1.5;"><strong>Remediation:</strong> ${vlanEsc(f.remediation)}</div>
+                </div>`;
+            }).join('');
+        }
+    }
+}
+
+async function secretAuditPreflight() {
+    // Confirms THIS node's /rotate-preflight endpoint is live and at the
+    // expected protocol version. NOT a per-peer check — per-peer preflight
+    // is the first step inside the coordinated-rotate orchestrator and
+    // aborts the whole flow if any peer fails. Button label intentionally
+    // reflects this scope.
+    const status = document.getElementById('secret-audit-status');
+    if (!status) return;
+    status.innerHTML = `<span style="color:#fbbf24;">Checking local rotation endpoint…</span>`;
+    try {
+        const r = await fetch(apiUrl('/api/cluster/secret/rotate-preflight'), { method: 'POST' });
+        if (!r.ok) {
+            status.innerHTML = `<span style="color:#ef4444;">Local endpoint HTTP ${r.status} — the Stage 3 rotation protocol may not be live on this node yet.</span>`;
+            return;
+        }
+        const d = await r.json();
+        status.innerHTML = `<span style="color:#22c55e;">Local endpoint OK — node ${vlanEsc(d.node_id || 'unknown')} (${vlanEsc(d.hostname || '')}), protocol v${d.protocol_version || '?'}.</span> <span style="color:var(--text-muted);">Per-peer preflight will run automatically when you click "Coordinated rotation".</span>`;
+    } catch (e) {
+        status.innerHTML = `<span style="color:#ef4444;">${vlanEsc(e.message || e)}</span>`;
+    }
+}
+
+async function secretAuditCoordinatedRotate() {
+    if (!await wolfConfirm(
+        `Generate a NEW per-install cluster secret and distribute it to every WolfStack peer with preflight, ACK, and automatic rollback?\n\n` +
+        `If any peer fails preflight or fails to receive the new secret, the entire rotation is aborted with no changes. ` +
+        `If commit fails on any peer after others succeeded, the protocol attempts a best-effort rollback on those that committed.\n\n` +
+        `Until every node is restarted, both the OLD and NEW secret remain accepted — the cluster keeps working during the rolling restart.`,
+        'Coordinated rotation', { okText: 'Run coordinated rotation', danger: true }
+    )) return;
+    const status = document.getElementById('secret-audit-status');
+    if (!status) return;
+    status.innerHTML = `<span style="color:#fbbf24;">Running preflight → propose → receive → commit on every peer…</span>`;
+    try {
+        const r = await fetch(apiUrl('/api/cluster/secret/coordinated-rotate'), { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok) {
+            // Render the per-peer failure detail so operators can see
+            // which peer blocked the rotation. Stage reported in d.stage
+            // tells you which step bailed out.
+            const stageLabel = d.stage ? ` (stage: ${vlanEsc(d.stage)})` : '';
+            let extras = '';
+            if (Array.isArray(d.preflight)) {
+                extras = '<ul style="margin:6px 0 0 18px;">' + d.preflight.map(p =>
+                    `<li style="color:${p.ok ? '#22c55e' : '#ef4444'};">${vlanEsc(p.hostname || p.address)} — ${p.ok ? 'OK' : vlanEsc(p.detail)}</li>`
+                ).join('') + '</ul>';
+            } else if (Array.isArray(d.failures)) {
+                extras = '<ul style="margin:6px 0 0 18px;">' + d.failures.map(p =>
+                    `<li style="color:#ef4444;">${vlanEsc(p.hostname || p.address)} — ${vlanEsc(p.detail)}</li>`
+                ).join('') + '</ul>';
+            }
+            status.innerHTML = `<div style="color:#ef4444;">${vlanEsc(d.error || ('HTTP ' + r.status))}${stageLabel}</div>${extras}`;
+            return;
+        }
+        const newSecret = d.new_secret || '';
+        status.innerHTML = `
+            <div style="padding:12px 14px; background:rgba(34,197,94,0.10); border-left:3px solid #22c55e; border-radius:4px;">
+                <div style="color:#22c55e; font-weight:600; margin-bottom:6px;">Rotation complete on self + ${d.peer_count || 0} peer(s).</div>
+                <div style="font-size:11px; color:var(--text-muted); margin-bottom:6px;">New secret — copy to a password manager NOW. Will not be shown again.</div>
+                <code style="font-family:var(--font-mono); font-size:11px; word-break:break-all; user-select:all; background:var(--bg-secondary); padding:6px 8px; border-radius:3px; display:block; margin-bottom:6px;">${vlanEsc(newSecret)}</code>
+                <div style="font-size:11px; color:#fbbf24;">${vlanEsc(d.important || '')}</div>
+                <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Backup of prior active secret on this node: <code>${vlanEsc(d.self_backup || '(none)')}</code></div>
+            </div>`;
+        // Re-render the audit panel so the dashboard banner clears.
+        await secretAuditRender();
+    } catch (e) {
+        status.innerHTML = `<span style="color:#ef4444;">${vlanEsc(e.message || e)}</span>`;
+    }
+}
+
+async function secretAuditMigrateAtRest() {
+    // Operator-triggered re-encryption of every legacy v1 (XOR) at-rest
+    // credential to v2 (AES-256-GCM keyed off the per-install cluster
+    // secret). Backs up every file BEFORE writing; safe to re-run if
+    // any single store errors. Read paths support both formats
+    // forever so a partial success leaves the system fully functional.
+    if (!await wolfConfirm(
+        `Re-encrypt every stored DNS / cloud / XO credential from the legacy XOR obfuscation to AES-256-GCM?\n\n` +
+        `Each file is backed up to <path>.bak.<timestamp> BEFORE saving. ` +
+        `Read paths permanently support both old and new formats, so a ` +
+        `partial failure leaves all credentials still readable. ` +
+        `You can re-run this migration any time.`,
+        'Migrate at-rest credentials', { okText: 'Migrate', danger: false }
+    )) return;
+    const status = document.getElementById('secret-audit-status');
+    if (!status) return;
+    status.innerHTML = `<span style="color:#fbbf24;">Migrating credentials in each store…</span>`;
+    try {
+        const r = await fetch(apiUrl('/api/security/migrate-at-rest-credentials'), { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok) {
+            status.innerHTML = `<div style="color:#ef4444;">${vlanEsc(d.error || ('HTTP ' + r.status))}</div>`;
+            return;
+        }
+        const stores = Array.isArray(d.stores) ? d.stores : [];
+        const rows = stores.map(s => {
+            const ok = s.ok;
+            const bg = ok ? 'rgba(34,197,94,0.10)' : 'rgba(220,38,38,0.10)';
+            const colour = ok ? '#22c55e' : '#ef4444';
+            const detail = s.error
+                ? `<span style="color:#ef4444;">${vlanEsc(s.error)}</span>`
+                : `migrated: <strong>${s.migrated || 0}</strong> · already v2: ${s.already_v2 || 0} · errored: ${s.errored || 0}`;
+            return `<div style="padding:8px 12px; background:${bg}; border-left:3px solid ${colour}; border-radius:4px; margin-bottom:6px;">
+                <div style="font-weight:600; color:${colour};">${vlanEsc(s.store)}</div>
+                <div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">${detail}</div>
+            </div>`;
+        }).join('');
+        status.innerHTML = `
+            <div style="padding:6px 0; font-weight:600; color:#86efac;">Migration complete. Total entries migrated: ${d.total_migrated || 0}</div>
+            ${rows}
+            <div style="font-size:11px; color:var(--text-muted); margin-top:6px;">${vlanEsc(d.note || '')}</div>`;
+        // Re-render the audit so the XOR-credential findings clear.
+        await secretAuditRender();
+    } catch (e) {
+        status.innerHTML = `<span style="color:#ef4444;">${vlanEsc(e.message || e)}</span>`;
+    }
+}
+
+window.secretAuditRender = secretAuditRender;
+window.secretAuditPreflight = secretAuditPreflight;
+window.secretAuditCoordinatedRotate = secretAuditCoordinatedRotate;
+window.secretAuditMigrateAtRest = secretAuditMigrateAtRest;
+
+// Fire on initial dashboard load — banner is on the main shell so it
+// should be visible regardless of which page the operator is on.
+document.addEventListener('DOMContentLoaded', () => {
+    // Defer so it doesn't race with the login redirect.
+    setTimeout(() => { secretAuditRender().catch(() => {}); }, 1500);
+});
+
 // ─── SSH hardening push ────────────────────────────────────────────
 
 async function fleetPushSshHardening() {

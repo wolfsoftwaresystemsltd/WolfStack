@@ -379,15 +379,16 @@ fn get_session_token(req: &HttpRequest) -> Option<String> {
 
 /// Check if request is authenticated; returns username or error response
 pub fn require_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<String, HttpResponse> {
-    // Accept internal requests from other WolfStack nodes if they provide the cluster secret
+    // Accept internal requests from other WolfStack nodes if they provide the cluster secret.
+    // Centralised three-way check (in-memory, on-disk, optional default) lives in
+    // `auth::validate_inter_node_secret` — see Stage 5 docs there. Using the helper
+    // (rather than open-coding the three checks here) keeps every endpoint's
+    // behaviour identical and prevents drift like the pre-fix gap where
+    // `require_cluster_auth` and 5 inline checks accepted the default
+    // unconditionally even when Stage 5 was tightened.
     if let Some(val) = req.headers().get("X-WolfStack-Secret") {
         let provided = val.to_str().unwrap_or("");
-        // Accept: the in-memory secret, the hardcoded default, OR the on-disk secret
-        // (covers the window between secret propagation and node restart)
-        if crate::auth::validate_cluster_secret(provided, &state.cluster_secret)
-            || crate::auth::validate_cluster_secret(provided, crate::auth::default_cluster_secret())
-            || crate::auth::validate_cluster_secret(provided, &crate::auth::load_cluster_secret())
-        {
+        if crate::auth::validate_inter_node_secret(provided, &state.cluster_secret) {
             return Ok("cluster-node".to_string());
         }
         // Invalid secret — do NOT fall through to session auth
@@ -459,10 +460,12 @@ pub fn require_cluster_auth(req: &HttpRequest, state: &web::Data<AppState>) -> R
     match req.headers().get("X-WolfStack-Secret") {
         Some(val) => {
             let provided = val.to_str().unwrap_or("");
-            if crate::auth::validate_cluster_secret(provided, &state.cluster_secret)
-                || crate::auth::validate_cluster_secret(provided, crate::auth::default_cluster_secret())
-                || crate::auth::validate_cluster_secret(provided, &crate::auth::load_cluster_secret())
-            {
+            // Centralised three-way check (in-memory, on-disk, optional default)
+            // — see auth::validate_inter_node_secret. The pre-Stage-5 version
+            // of this helper accepted the hardcoded default unconditionally,
+            // bypassing the Stage 5 env-flag gate that was applied to require_auth.
+            // 13+ endpoints use this helper and inherited that gap; fixed here.
+            if crate::auth::validate_inter_node_secret(provided, &state.cluster_secret) {
                 Ok(())
             } else {
                 Err(HttpResponse::Forbidden().json(serde_json::json!({
@@ -2868,9 +2871,14 @@ pub async fn cluster_secret_generate(req: HttpRequest, state: web::Data<AppState
         let mut pushed = false;
         let mut err = String::new();
         for url in &urls {
+            // Stage 5 fix: pre-fix this used `default_cluster_secret()` which
+            // only worked on never-rotated installs. Use the current in-memory
+            // secret — peers accept any of {in-memory, on-disk, default} via
+            // validate_inter_node_secret, so this works regardless of whether
+            // the cluster has rotated before.
             match client.post(url)
                 .timeout(std::time::Duration::from_secs(10))
-                .header("X-WolfStack-Secret", crate::auth::default_cluster_secret())
+                .header("X-WolfStack-Secret", state.cluster_secret.clone())
                 .json(&serde_json::json!({ "secret": new_secret }))
                 .send()
                 .await
@@ -2917,9 +2925,10 @@ pub async fn cluster_secret_repush(req: HttpRequest, state: web::Data<AppState>)
         let mut pushed = false;
         let mut err = String::new();
         for url in &urls {
+            // Stage 5 fix: same as cluster_secret_generate above.
             match client.post(url)
                 .timeout(std::time::Duration::from_secs(10))
-                .header("X-WolfStack-Secret", crate::auth::default_cluster_secret())
+                .header("X-WolfStack-Secret", state.cluster_secret.clone())
                 .json(&serde_json::json!({ "secret": active }))
                 .send()
                 .await
@@ -3081,17 +3090,119 @@ pub async fn cluster_leave(
     }))
 }
 
-/// POST /api/cluster/secret/receive — receive a new cluster secret from admin node
+/// Has this process already scheduled an auto-restart in response to
+/// a fresh-bootstrap secret push? Idempotency guard so multiple rapid
+/// pushes don't queue redundant restarts.
+static BOOTSTRAP_RESTART_SCHEDULED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// True if this node has no peers OTHER THAN ITSELF — the "I'm a
+/// fresh install that's just being bootstrapped into a cluster"
+/// signal as observed by the receiving endpoint. Defence-in-depth
+/// for the auto-restart logic: even if a buggy caller sends the
+/// bootstrap flag against an active cluster member, this check
+/// blocks the restart.
+///
+/// Note: we look at AppState.cluster.nodes (in-memory, post-startup)
+/// rather than nodes.json on disk — by the time a push arrives,
+/// ClusterState::new has already written the self entry to disk, so
+/// the on-disk file always has at least one entry. The in-memory
+/// map's self-exclusion is the right "do I have any OTHER peers"
+/// signal.
+fn has_no_other_peers(state: &AppState) -> bool {
+    match state.cluster.nodes.read() {
+        Ok(nodes) => {
+            let self_id = state.cluster.self_id.as_str();
+            !nodes.values().any(|n| n.id != self_id)
+        }
+        Err(_) => false,  // Lock poisoned → safer to assume NOT fresh.
+    }
+}
+
+/// POST /api/cluster/secret/receive — receive a new cluster secret
+/// from the cluster's admin node. Two trigger paths:
+///   1. add_node bootstrap push — receiving node is a fresh install
+///      being joined to an existing cluster. Auto-restart after save
+///      so the operator doesn't have to manually align state.
+///   2. legacy fleet-rotate push — receiving node is an active
+///      cluster member. NEVER auto-restart; rotation docs explicitly
+///      say "restart when convenient" so existing work isn't
+///      interrupted.
+/// We distinguish by checking whether this node has any peers
+/// configured: a peerless node is fresh (case 1); a node with peers
+/// is active (case 2).
 pub async fn cluster_secret_receive(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
     if let Err(resp) = require_cluster_auth(&req, &state) { return resp; }
     let secret = match body.get("secret").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s,
         _ => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing secret" })),
     };
+    // Idempotency: if the pushed value matches what we already have
+    // in memory, the save is a no-op AND we don't need a restart.
+    let secret_actually_changed = secret != state.cluster_secret.as_str();
+    // Explicit bootstrap signal from the caller. `add_node` sets this
+    // when pushing to a freshly-joined node so the receiver knows
+    // it's safe to self-restart. Old-code masters won't include this
+    // field; serde_json::Value parsing ignores its absence and the
+    // restart path stays inactive — receiver falls back to "manual
+    // restart required" semantics, preserving the legacy behaviour.
+    let bootstrap_intent = body.get("bootstrap").and_then(|v| v.as_bool()).unwrap_or(false);
     if let Err(e) = crate::auth::save_cluster_secret(secret) {
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
     }
-    HttpResponse::Ok().json(serde_json::json!({ "saved": true }))
+    // Auto-restart only when ALL four guards pass:
+    //   • caller explicitly tagged this as a bootstrap (`bootstrap: true`)
+    //   • the secret actually changed (avoid pointless restarts on
+    //     idempotent pushes)
+    //   • we have no peers OTHER than ourselves (defence-in-depth: even
+    //     if a buggy caller sends bootstrap=true against an active
+    //     cluster member, this catches it)
+    //   • we haven't already scheduled a restart in this process (the
+    //     AtomicBool deduplicates rapid successive pushes)
+    let mut restart_scheduled = false;
+    if bootstrap_intent
+        && secret_actually_changed
+        && has_no_other_peers(&state)
+        && BOOTSTRAP_RESTART_SCHEDULED
+            .compare_exchange(false, true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst).is_ok()
+    {
+        restart_scheduled = true;
+        // 3-second delay so the HTTP response flushes and the
+        // calling node sees the success ACK before our service
+        // begins shutdown. systemctl --no-block returns immediately
+        // (queues the restart with systemd); the actual SIGTERM
+        // arrives milliseconds later but we've already returned.
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            tracing::info!(target: "cluster_secret",
+                "bootstrap secret-push received on fresh install — \
+                 self-restarting to load new secret into memory");
+            let _ = tokio::task::spawn_blocking(|| {
+                std::process::Command::new("systemctl")
+                    .args(["restart", "--no-block", "wolfstack.service"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+            }).await;
+        });
+    }
+    HttpResponse::Ok().json(serde_json::json!({
+        "saved": true,
+        "auto_restart_scheduled": restart_scheduled,
+        "note": if restart_scheduled {
+            "Bootstrap secret saved. Self-restart scheduled in 3 seconds to \
+             load the new secret into memory. The cluster will be fully \
+             aligned with this node once it comes back up (typically 3-8s)."
+        } else if !secret_actually_changed {
+            "Secret unchanged — no restart needed."
+        } else {
+            "Secret saved. Restart wolfstack to load it into memory; until \
+             restart, both old and new secret are accepted (auth checks \
+             read disk as a fallback)."
+        }
+    }))
 }
 
 /// POST /api/nodes — add a server to the cluster
@@ -3288,26 +3399,71 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
 
     let id = state.cluster.add_server(body.address.clone(), port, cluster_name.clone());
 
-    // If we have a custom cluster secret (on disk), push it to the new node
+    // Push our cluster secret to the new node — UNCONDITIONALLY, even
+    // when we're still on the built-in default. The "always push"
+    // semantic closes the Stage-2 new-cluster-formation corner case:
+    //
+    // Without it, joining a freshly-installed new-code node (which fired
+    // Stage 2 and has its own per-install secret Y) to an existing
+    // default-using cluster left the new node's secret unchanged. The
+    // cluster could poll the new node (Y-node accepted our default via
+    // Stage 5 default-acceptance), but the new node's outbound polls
+    // signed with Y were rejected by the cluster — Y matched neither
+    // our in-memory secret, the default, nor our on-disk secret.
+    //
+    // With "always push": the new node receives our secret, writes it to
+    // /etc/wolfstack/custom-cluster-secret. On the new node's next
+    // restart, its in-memory state aligns to our value and both
+    // directions of polling authenticate cleanly. Operator action
+    // required: restart wolfstack on the newly-joined node after
+    // add_node returns. The push works regardless of whether our active
+    // is default or a rotated value.
+    //
+    // The new node is freshly installed: its require_auth accepts any
+    // of {its own per-install Stage-2 secret, our default, its on-disk}.
+    // We don't know its per-install value, so we try TWO bootstrap
+    // credentials in order:
+    //   1. our `state.cluster_secret` — works if the new node was
+    //      pre-aligned out-of-band (operator scp'd the secret before
+    //      joining), OR if our active secret is the default (since the
+    //      new node accepts default by default).
+    //   2. the hardcoded default — the original bootstrap path. Always
+    //      works on a new node that hasn't set
+    //      WOLFSTACK_REJECT_DEFAULT_SECRET=1.
+    // If both fail (operator set the reject env flag on the new node
+    // before joining) the operator must align secrets manually.
     let active_secret = crate::auth::load_cluster_secret();
-    if active_secret != crate::auth::default_cluster_secret() {
+    {
         let addr = body.address.clone();
         let secret = active_secret;
+        let our_secret = state.cluster_secret.clone();
         tokio::spawn(async move {
             let client = &*API_HTTP_CLIENT;
             let urls = build_node_urls(&addr, port, "/api/cluster/secret/receive");
-            for url in &urls {
-                if let Ok(resp) = client.post(url)
-                    .timeout(std::time::Duration::from_secs(10))
-                    .header("X-WolfStack-Secret", crate::auth::default_cluster_secret())
-                    .json(&serde_json::json!({ "secret": secret }))
-                    .send()
-                    .await
-                {
-                    let success = resp.status().is_success();
-                    let _ = resp.bytes().await;
-                    if success { break; }
+            for auth_value in [our_secret.as_str(), crate::auth::default_cluster_secret()] {
+                let mut pushed = false;
+                for url in &urls {
+                    // `bootstrap: true` tells the receiving node "this is a
+                    // first-time join; safe to self-restart so the new
+                    // secret takes effect in-memory immediately". Old-code
+                    // receivers ignore the field (serde_json::Value
+                    // parsing) and revert to "manual restart required".
+                    if let Ok(resp) = client.post(url)
+                        .timeout(std::time::Duration::from_secs(10))
+                        .header("X-WolfStack-Secret", auth_value)
+                        .json(&serde_json::json!({
+                            "secret": secret,
+                            "bootstrap": true,
+                        }))
+                        .send()
+                        .await
+                    {
+                        let success = resp.status().is_success();
+                        let _ = resp.bytes().await;
+                        if success { pushed = true; break; }
+                    }
                 }
+                if pushed { break; }
             }
         });
     }
@@ -10241,13 +10397,15 @@ pub async fn ai_action_exec(
     req: HttpRequest, state: web::Data<AppState>,
     body: web::Json<AiExecRequest>,
 ) -> HttpResponse {
-    // Only allow inter-node auth (X-WolfStack-Secret) — not browser sessions
+    // Only allow inter-node auth (X-WolfStack-Secret) — not browser sessions.
+    // Centralised three-way check (in-memory, on-disk, optional default).
+    // Pre-fix this endpoint accepted in-memory + default only, missing the
+    // on-disk path that covers the rotation transition window AND missing
+    // the Stage 5 env-flag gate on default acceptance.
     let secret_header = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !crate::auth::validate_cluster_secret(secret_header, &state.cluster_secret)
-        && !crate::auth::validate_cluster_secret(secret_header, crate::auth::default_cluster_secret())
-    {
+    if !crate::auth::validate_inter_node_secret(secret_header, &state.cluster_secret) {
         return HttpResponse::Forbidden().json(serde_json::json!({"error": "Cluster auth required"}));
     }
 
@@ -10330,6 +10488,30 @@ pub async fn system_check_run(
         "checks": checks,
         "ai_enabled": ai_enabled,
         "hostname": hostname::get().ok().and_then(|h| h.into_string().ok()),
+    }))
+}
+
+/// GET /api/security/secret-audit — lightweight read-only audit of
+/// committed-default secrets on this node. Used by:
+///   • the dashboard banner (asks once per page load, decides colour)
+///   • Settings → Security (renders the full finding list + remediation)
+///   • Stage 4 telemetry — the count is folded into the heartbeat
+///
+/// Returns the same `secret_audit::Finding` shape the scanner uses;
+/// the structured JSON lets the frontend present per-finding migration
+/// buttons without re-parsing scanner text.
+pub async fn secret_audit_get(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let findings = crate::secret_audit::audit();
+    let high_or_above = findings.iter()
+        .filter(|f| !matches!(f.severity, crate::secret_audit::Severity::Info))
+        .count();
+    HttpResponse::Ok().json(serde_json::json!({
+        "findings": findings,
+        "finding_count": high_or_above,
+        "using_default_cluster_secret": crate::secret_audit::is_using_default_cluster_secret(),
     }))
 }
 
@@ -12004,15 +12186,23 @@ pub struct RotateClusterSecretReceiveRequest {
 /// the new secret to /etc/wolfstack/cluster-secret. Authenticated via
 /// X-WolfStack-Secret using the CURRENT (old) secret — that's the
 /// last legitimate use of the old secret before it's superseded.
+///
+/// Stage 5 fix: pre-Stage-5 this endpoint accepted ONLY the hardcoded
+/// default secret, which meant the matching coordinator
+/// (`fleet_security_rotate_cluster_secret`) only worked on installs
+/// that had never rotated. Now uses the shared three-way validator so
+/// the legacy rotation flow works on already-rotated installs too. The
+/// helper honours the Stage 5 env flag — operators who set
+/// WOLFSTACK_REJECT_DEFAULT_SECRET=1 still get the tighter check here.
 pub async fn security_cluster_secret_receive(
     req: HttpRequest,
-    _state: web::Data<AppState>,
+    state: web::Data<AppState>,
     body: web::Json<RotateClusterSecretReceiveRequest>,
 ) -> HttpResponse {
     let presented = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !crate::auth::validate_cluster_secret(presented, crate::auth::default_cluster_secret()) {
+    if !crate::auth::validate_inter_node_secret(presented, &state.cluster_secret) {
         return HttpResponse::Unauthorized().json(serde_json::json!({
             "error": "invalid cluster secret",
         }));
@@ -12029,10 +12219,14 @@ pub async fn security_cluster_secret_receive(
             "error": e,
         }));
     }
+    // W2 fix: use the actual configured path in the response — pre-fix
+    // hardcoded "/etc/wolfstack/cluster-secret" misled operators on
+    // installs with paths.json overrides.
+    let active_path = crate::paths::get().cluster_secret;
     HttpResponse::Ok().json(serde_json::json!({
         "ok": true,
         "applied_at_restart": true,
-        "note": "Secret written to /etc/wolfstack/cluster-secret. Restart WolfStack to activate.",
+        "note": format!("Secret written to {}. Restart WolfStack to activate.", active_path),
     }))
 }
 
@@ -12068,7 +12262,14 @@ pub async fn fleet_security_rotate_cluster_secret(
         (self_id, peers)
     };
     let _ = self_id;
-    let old_secret = crate::auth::default_cluster_secret().to_string();
+    // Auth the fanout with the IN-MEMORY current secret (the value
+    // peers were started with). Pre-fix this used
+    // `default_cluster_secret()` which only worked on the first
+    // rotation of a never-rotated install — every subsequent rotation
+    // failed all peer pushes because they no longer accepted the
+    // hardcoded default. `state.cluster_secret` is the value loaded
+    // at startup, which IS what each peer currently accepts.
+    let old_secret = state.cluster_secret.clone();
     let client = match reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(std::time::Duration::from_secs(8))
@@ -24779,10 +24980,8 @@ pub async fn wolfrun_sync(req: HttpRequest, state: web::Data<AppState>, body: we
     let secret = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !crate::auth::validate_cluster_secret(secret, &state.cluster_secret)
-        && !crate::auth::validate_cluster_secret(secret, crate::auth::default_cluster_secret())
-        && !crate::auth::validate_cluster_secret(secret, &crate::auth::load_cluster_secret())
-    {
+    // Stage 5 — gate default-secret acceptance via the shared helper.
+    if !crate::auth::validate_inter_node_secret(secret, &state.cluster_secret) {
         // Also try cookie auth (in case admin calls it manually)
         if let Err(resp) = require_auth(&req, &state) { return resp; }
     }
@@ -24817,10 +25016,8 @@ pub async fn statuspage_config_get(req: HttpRequest, state: web::Data<AppState>)
     let secret = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !crate::auth::validate_cluster_secret(secret, &state.cluster_secret)
-        && !crate::auth::validate_cluster_secret(secret, crate::auth::default_cluster_secret())
-        && !crate::auth::validate_cluster_secret(secret, &crate::auth::load_cluster_secret())
-    {
+    // Stage 5 — gate default-secret acceptance via the shared helper.
+    if !crate::auth::validate_inter_node_secret(secret, &state.cluster_secret) {
         if let Err(resp) = require_auth(&req, &state) { return resp; }
     }
     let config = state.statuspage.config.read().unwrap().clone();
@@ -25081,10 +25278,8 @@ pub async fn statuspage_sync(req: HttpRequest, state: web::Data<AppState>, body:
     let secret = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !crate::auth::validate_cluster_secret(secret, &state.cluster_secret)
-        && !crate::auth::validate_cluster_secret(secret, crate::auth::default_cluster_secret())
-        && !crate::auth::validate_cluster_secret(secret, &crate::auth::load_cluster_secret())
-    {
+    // Stage 5 — gate default-secret acceptance via the shared helper.
+    if !crate::auth::validate_inter_node_secret(secret, &state.cluster_secret) {
         if let Err(resp) = require_auth(&req, &state) { return resp; }
     }
 
@@ -28815,9 +29010,8 @@ pub async fn gateways_sync(req: HttpRequest, state: web::Data<AppState>, body: w
     let provided = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !crate::auth::validate_cluster_secret(provided, &state.cluster_secret)
-        && !crate::auth::validate_cluster_secret(provided, crate::auth::default_cluster_secret())
-        && !crate::auth::validate_cluster_secret(provided, &crate::auth::load_cluster_secret())
+    // Stage 5 — gate default-secret acceptance via the shared helper.
+    if !crate::auth::validate_inter_node_secret(provided, &state.cluster_secret)
     {
         return HttpResponse::Unauthorized().finish();
     }
@@ -30691,6 +30885,34 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // System dependency audit
         .route("/api/system-check", web::get().to(system_check_run))
         .route("/api/system-check/ask-ai", web::post().to(system_check_ask_ai))
+        // Stage 1 of the cluster-secret migration: read-only audit
+        // of committed-default secrets. Powers the dashboard banner
+        // and the Settings → Security findings panel.
+        .route("/api/security/secret-audit", web::get().to(secret_audit_get))
+        // Stage 3 of the cluster-secret migration: coordinated rotation.
+        // See src/secret_rotation.rs for the protocol. Endpoints are
+        // operator-triggered; nothing here fires automatically.
+        .route("/api/cluster/secret/rotate-preflight",
+               web::post().to(crate::secret_rotation::api_rotate_preflight))
+        .route("/api/cluster/secret/rotate-propose",
+               web::post().to(crate::secret_rotation::api_rotate_propose))
+        .route("/api/cluster/secret/rotate-receive",
+               web::post().to(crate::secret_rotation::api_rotate_receive))
+        .route("/api/cluster/secret/rotate-commit",
+               web::post().to(crate::secret_rotation::api_rotate_commit))
+        .route("/api/cluster/secret/rotate-rollback",
+               web::post().to(crate::secret_rotation::api_rotate_rollback))
+        // The single endpoint the dashboard UI hits. Runs the full
+        // preflight → propose → receive → commit flow with automatic
+        // rollback on partial failure. Requires an operator session.
+        .route("/api/cluster/secret/coordinated-rotate",
+               web::post().to(crate::secret_rotation::api_coordinated_rotate))
+        // At-rest credential migration: re-encrypts every v1 XOR-format
+        // stored credential to v2 AES-256-GCM. Operator-triggered;
+        // backs up every file BEFORE saving. Read paths support both
+        // formats forever so partial failure is harmless.
+        .route("/api/security/migrate-at-rest-credentials",
+               web::post().to(crate::secret_rotation::api_migrate_at_rest_credentials))
         // Ceph Cluster
         .route("/api/ceph/status", web::get().to(ceph_status))
         .route("/api/ceph/install-status", web::get().to(ceph_install_status))

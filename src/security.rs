@@ -153,6 +153,7 @@ pub fn run_security_checks() -> Vec<DependencyCheck> {
     scan_listening_services(&mut out);
     scan_config_permissions(&mut out);
     scan_cluster_secret(&mut out);
+    scan_committed_default_secrets(&mut out);
     scan_sshd_config(&mut out);
     scan_fail2ban(&mut out);
     scan_ssh_bruteforce(&mut out);
@@ -310,8 +311,14 @@ fn scan_config_permissions(out: &mut Vec<DependencyCheck>) {
 // ─── Cluster secret ─────────────────────────────────────────────
 
 fn scan_cluster_secret(out: &mut Vec<DependencyCheck>) {
-    let path = "/etc/wolfstack/cluster_secret.txt";
-    let s = match std::fs::read_to_string(path) {
+    // Read the SAME file the auth loader uses
+    // (`crate::auth::custom_secret_path()` resolves to
+    // `/etc/wolfstack/custom-cluster-secret`). The pre-secret-audit
+    // version of this scanner checked `cluster_secret.txt` — a path
+    // that has never matched the loader, so this finding silently
+    // never fired on any install.
+    let path = crate::paths::get().cluster_secret;
+    let s = match std::fs::read_to_string(&path) {
         Ok(t) => t.trim().to_string(), Err(_) => return,
     };
     if s.is_empty() { return; }
@@ -319,7 +326,7 @@ fn scan_cluster_secret(out: &mut Vec<DependencyCheck>) {
     if s.len() < 24 {
         out.push(warn(
             "Cluster secret is too short",
-            &format!("cluster_secret.txt is {} chars; inter-node messages are trivially spoofable at that length. Aim for ≥32 random bytes.", s.len()),
+            &format!("{} is {} chars; inter-node messages are trivially spoofable at that length. Aim for ≥32 random bytes.", path, s.len()),
             Some(format!("head -c 32 /dev/urandom | base64 > {} && chmod 600 {}  (then propagate to every cluster node)", path, path)),
         ));
     } else if s.len() >= 8 && unique < 4 {
@@ -328,6 +335,25 @@ fn scan_cluster_secret(out: &mut Vec<DependencyCheck>) {
             &format!("Only {} unique characters across {} — looks like a placeholder or keyboard-walked value.", unique, s.len()),
             Some(format!("head -c 32 /dev/urandom | base64 > {} && chmod 600 {}", path, path)),
         ));
+    }
+}
+
+/// Surface every finding from the central secret-audit module into
+/// the System Check scanner UI. Reuses the existing severity colours
+/// (Missing = red, Warning = yellow) to match the rest of Security.
+/// The audit module is the single source of truth — the same Vec
+/// also powers `/api/security/secret-audit` and the heartbeat counter.
+fn scan_committed_default_secrets(out: &mut Vec<DependencyCheck>) {
+    for f in crate::secret_audit::audit() {
+        let check = match f.severity {
+            crate::secret_audit::Severity::Compromise =>
+                critical(&f.title, &f.detail, Some(f.remediation.clone())),
+            crate::secret_audit::Severity::High =>
+                warn(&f.title, &f.detail, Some(f.remediation.clone())),
+            crate::secret_audit::Severity::Info =>
+                ok(&f.title, &f.detail, None),
+        };
+        out.push(check);
     }
 }
 

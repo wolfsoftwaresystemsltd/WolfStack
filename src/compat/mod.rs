@@ -292,6 +292,34 @@ pub async fn report_license_heartbeat(cluster: &crate::agent::ClusterState) {
         })
         .unwrap_or_else(|| "Linux".to_string());
 
+    // Stage 4 of the cluster-secret migration: report fleet-wide
+    // exposure to the committed-default-secret bug so server-side
+    // adoption telemetry can gate the Stage 5 default-rejection
+    // ship date.
+    //
+    // Fields are non-identifying counts only:
+    //   • `credential_audit_findings` — count of audit() findings at
+    //     High or above on this install. 0 means "this install is
+    //     not exposed to any of the known committed-default issues".
+    //   • `using_default_cluster_secret` — true iff this node still
+    //     accepts the built-in default as its active cluster secret.
+    //     The single most important number for deciding when it's
+    //     safe to flip the Stage 5 default to "reject".
+    // No file paths, no secret bytes, no finding details — server
+    // gets only the boolean + count.
+    //
+    // W6 — audit() does several blocking std::fs reads. The heartbeat
+    // is a tokio task, so we offload to spawn_blocking to avoid
+    // parking the async executor on disk I/O (matters on slow /
+    // network-mounted /etc/wolfstack/). Daily cadence — overhead is
+    // negligible.
+    let (findings_count, using_default) = tokio::task::spawn_blocking(|| {
+        (
+            crate::secret_audit::finding_count(),
+            crate::secret_audit::is_using_default_cluster_secret(),
+        )
+    }).await.unwrap_or((0, false));
+
     let payload = serde_json::json!({
         "license_key": license_key,
         "node_id": node_id,
@@ -300,6 +328,8 @@ pub async fn report_license_heartbeat(cluster: &crate::agent::ClusterState) {
         "wolfstack_version": env!("CARGO_PKG_VERSION"),
         "os": os,
         "arch": std::env::consts::ARCH,
+        "credential_audit_findings": findings_count,
+        "using_default_cluster_secret": using_default,
     });
 
     // Shared pool — see HEARTBEAT_CLIENT below. Daily heartbeat; low
