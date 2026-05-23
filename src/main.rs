@@ -1496,6 +1496,32 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
+        // Background: retroactive cluster-name sweep.
+        // Heals existing fleets that were joined before C1-Fix-2: pushes
+        // each peer's cluster_name (stored on this node's nodes.json
+        // from the original add_node call) to the peer's
+        // /api/agent/cluster-name. Receiver writes self_cluster.json,
+        // per-node WolfRouter preflight goes green.
+        //
+        // Fundamentally one-shot: once a peer's self_cluster.json is
+        // written, every subsequent sweep is a no-op (idempotent write).
+        // 30-minute cadence is enough to catch the only case that needs
+        // re-firing — a peer that was offline during the previous
+        // sweep — without spam. First sweep at T+30s handles the
+        // post-upgrade case immediately.
+        //
+        // Reads the cluster secret fresh from disk each iteration so a
+        // Stage-3 rotation doesn't strand the sweep with a stale value.
+        let cluster_sweep = cluster.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            loop {
+                let secret = auth::load_cluster_secret();
+                agent::sweep_push_cluster_names(cluster_sweep.clone(), secret).await;
+                tokio::time::sleep(Duration::from_secs(1800)).await;
+            }
+        });
+
         // Background: clean up stale WolfNet kernel routes (every 60s)
         // Only runs if WolfNet is configured (cleanup fn returns early if not)
         tokio::spawn(async move {

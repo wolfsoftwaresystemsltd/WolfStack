@@ -864,6 +864,67 @@ pub enum AgentMessage {
     Response { success: bool, message: String },
 }
 
+/// Retroactive cluster-name sweep.
+///
+/// Background task that iterates every WolfStack peer in this node's
+/// `nodes.json`. For each peer where THIS node knows the peer's
+/// cluster_name (because we recorded it when add_node was called),
+/// push that name to the peer's `/api/agent/cluster-name` endpoint.
+///
+/// **Why this exists.** The cluster-name push at join time (C1-Fix-2)
+/// only helps NEW joins after that fix shipped. Every node joined
+/// before the fix has no `/etc/wolfstack/self_cluster.json`, so its
+/// per-node WolfRouter preflight reports "(not yet configured)". The
+/// fixed gossip path can heal these, but only if specific conditions
+/// align (the peer must be polling someone who has it with cluster_name
+/// set, AND that someone's record must carry the peer's self_id). For
+/// installs joined long ago, those conditions often don't.
+///
+/// Pushing periodically (every 5 minutes) makes the heal automatic:
+/// admin node has the cluster_name on disk, peer receives the push,
+/// peer writes self_cluster.json, peer's preflight goes green.
+///
+/// Idempotent — receiver writes whatever we send. Safe to call
+/// repeatedly. No-ops for peers we don't have a cluster_name for, or
+/// where the peer is offline (we don't want to retry-spam an
+/// unreachable node). Cluster secret used for auth.
+pub async fn sweep_push_cluster_names(cluster: Arc<ClusterState>, cluster_secret: String) {
+    // Snapshot peers under read lock; release before any HTTP work.
+    let peers: Vec<(String, u16, String)> = {
+        let nodes = cluster.nodes.read().unwrap();
+        nodes.values()
+            .filter(|n| !n.is_self)
+            .filter(|n| n.node_type == "wolfstack")
+            .filter(|n| n.online)
+            .filter_map(|n| {
+                n.cluster_name.clone().map(|name| (n.address.clone(), n.port, name))
+            })
+            .collect()
+    };
+    if peers.is_empty() { return; }
+    let client = crate::api::API_HTTP_CLIENT.clone();
+    for (address, port, cluster_name) in peers {
+        let urls = crate::api::build_node_urls(&address, port, "/api/agent/cluster-name");
+        let payload = serde_json::json!({ "cluster_name": cluster_name });
+        for url in &urls {
+            let r = client.post(url)
+                .timeout(std::time::Duration::from_secs(5))
+                .header("X-WolfStack-Secret", &cluster_secret)
+                .json(&payload)
+                .send()
+                .await;
+            match r {
+                Ok(resp) => {
+                    let success = resp.status().is_success();
+                    let _ = resp.bytes().await;
+                    if success { break; }
+                }
+                Err(_) => { /* try next URL */ }
+            }
+        }
+    }
+}
+
 /// Poll remote nodes for their status
 pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: String, ai_agent: Option<Arc<crate::ai::AiAgent>>) {
     // Snapshot previous online state BEFORE polling
