@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.7.2: normalise primary-NIC topology on VM export (cross-host restore)** _(2026-05-24 — [`064d6d8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/064d6d8c7cd61e155f5f4785d3187d4001a717af))_
+- **v24.7.1: surface existing extra NICs in the VM editor (Proxmox + libvirt)** _(2026-05-24 — [`4940bae`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4940baefdcaae0422b6c0d86ba1750fd6ac437a1))_
 - **v24.7.0: LXC-style network presets for VMs — WolfNet/Bridge/vSwitch/NAT** _(2026-05-24 — [`cd3fb5e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cd3fb5e84b352a596dcdab83b6e744142d21229e))_
 - **v24.6.1: Proxmox/libvirt VMs visible in backup picker; running-VM actions stay visible** _(2026-05-24 — [`827c7e1`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/827c7e11936d077bfd3ebc1c6df829ab0e2a1101))_
 - **v24.6.0: cross-platform VM backup, clone, and migration preflight** _(2026-05-24 — [`12cf996`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/12cf996887ddf72e3286865f9357cdcfc1ccca60))_
