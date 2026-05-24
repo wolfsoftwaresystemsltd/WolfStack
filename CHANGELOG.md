@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.6.0: cross-platform VM backup, clone, and migration preflight** _(2026-05-24 — [`12cf996`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/12cf996887ddf72e3286865f9357cdcfc1ccca60))_
+- **service worker: stop NetworkError on Cache.put for redirected responses** _(2026-05-23 — [`dee1ef3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/dee1ef346c8c561cfeb5451aca9ddf26fad7f2df))_
 - **v24.5.0: cluster-secret migration + WolfRouter fixes + beta-channel reform + at-rest AES** _(2026-05-23 — [`4dfc04c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4dfc04cacf660374b49697f2ad48baaf586264d8))_
 - **v24.3.16: clearing Proxmox CPU Cores actually drops the limit** _(2026-05-23 — [`c711a8b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c711a8bef99ac5aa231b2c4ccfd08ca8e478c18a))_
 - **v24.3.15: restore dialog warns when the target name is already taken** _(2026-05-22 — [`3ffbbd3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3ffbbd3929c4f61a15fe7a9c6d3c86b66787853f))_
