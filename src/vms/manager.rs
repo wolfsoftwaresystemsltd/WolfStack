@@ -4767,6 +4767,17 @@ pub fn export_proxmox_vm_with_staging(name: &str, staging_dir: Option<&str>) -> 
     portable.usb_devices.clear();
     portable.pci_devices.clear();
     portable.extra_disks = extra_disks;
+    // Cross-host normalisation: a source-host WolfNet IP / bridge name is
+    // meaningless on the restore target (different subnet, different
+    // bridge naming). Reset the primary-NIC topology to NAT — the operator
+    // re-picks the right mode + bridge on restore via the editor. Extra
+    // NICs keep their bridge names as hints but the operator may need to
+    // re-map them too.
+    portable.network_mode = Some("nat".to_string());
+    portable.bridge = None;
+    portable.bridge_ip_mode = None;
+    portable.bridge_ip = None;
+    portable.bridge_gateway = None;
     let config_json = serde_json::to_string_pretty(&portable)
         .map_err(|e| format!("serialize VM config: {}", e))?;
     fs::write(staging.join(format!("{}.json", name)), &config_json)
@@ -4919,6 +4930,13 @@ pub fn export_libvirt_vm_with_staging(name: &str, staging_dir: Option<&str>) -> 
     portable.usb_devices.clear();
     portable.pci_devices.clear();
     portable.extra_disks = extra_disks;
+    // Same cross-host normalisation as the Proxmox export — see comment
+    // on portable.network_mode in export_proxmox_vm_with_staging.
+    portable.network_mode = Some("nat".to_string());
+    portable.bridge = None;
+    portable.bridge_ip_mode = None;
+    portable.bridge_ip = None;
+    portable.bridge_gateway = None;
     let config_json = serde_json::to_string_pretty(&portable)
         .map_err(|e| format!("serialize VM config: {}", e))?;
     fs::write(staging.join(format!("{}.json", name)), &config_json)
@@ -5004,6 +5022,13 @@ pub fn export_vm_with_staging(name: &str, staging_dir: Option<&str>) -> Result<P
     // Passthrough devices are host-specific — they never survive a migration
     portable.usb_devices.clear();
     portable.pci_devices.clear();
+    // Same cross-host normalisation as the Proxmox + libvirt exports —
+    // bridge names and WolfNet IPs don't transfer across clusters.
+    portable.network_mode = Some("nat".to_string());
+    portable.bridge = None;
+    portable.bridge_ip_mode = None;
+    portable.bridge_ip = None;
+    portable.bridge_gateway = None;
     // Reset extra disk storage paths to default
     for disk in &mut portable.extra_disks {
         disk.storage_path = VM_BASE.to_string();
