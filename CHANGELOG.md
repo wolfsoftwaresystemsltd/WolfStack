@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.6.1: Proxmox/libvirt VMs visible in backup picker; running-VM actions stay visible** _(2026-05-24 — [`827c7e1`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/827c7e11936d077bfd3ebc1c6df829ab0e2a1101))_
 - **v24.6.0: cross-platform VM backup, clone, and migration preflight** _(2026-05-24 — [`12cf996`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/12cf996887ddf72e3286865f9357cdcfc1ccca60))_
 - **service worker: stop NetworkError on Cache.put for redirected responses** _(2026-05-23 — [`dee1ef3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/dee1ef346c8c561cfeb5451aca9ddf26fad7f2df))_
 - **v24.5.0: cluster-secret migration + WolfRouter fixes + beta-channel reform + at-rest AES** _(2026-05-23 — [`4dfc04c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4dfc04cacf660374b49697f2ad48baaf586264d8))_
