@@ -636,6 +636,8 @@ impl VmManager {
                 let mut iso_path: Option<String> = None;
                 let mut storage_path: Option<String> = None;
                 let mut net0_bridge: Option<String> = None;
+                let mut wolfnet_active = false;
+                let mut extra_nic_pairs: Vec<(usize, NicConfig)> = Vec::new();
 
                 // Capture the raw qm config text so we can parse passthrough lines too
                 let qm_config_text = Command::new("qm").args(["config", &vmid.to_string()]).output()
@@ -662,6 +664,17 @@ impl VmManager {
                                         let br = br.trim();
                                         if !br.is_empty() { net0_bridge = Some(br.to_string()); }
                                     }
+                                }
+                            }
+                        } else if cline.starts_with("net") && !cline.starts_with("net0:") {
+                            // net1, net2, … — surface as editable extra NICs
+                            // (skip the WolfNet bridge — that lives behind
+                            // the network_mode preset instead).
+                            if let Some((k, v)) = cline.split_once(':') {
+                                let v = v.trim();
+                                if v.contains("bridge=wnbr-") { wolfnet_active = true; }
+                                if let Some(pair) = parse_pve_extra_nic(k.trim(), v) {
+                                    extra_nic_pairs.push(pair);
                                 }
                             }
                         } else if (cline.starts_with("ide2:") || cline.starts_with("cdrom:")) && cline.contains("media=cdrom") {
@@ -697,15 +710,22 @@ impl VmManager {
                 // Parse usbN= and hostpciN= lines so device state round-trips through edits
                 let (usb_devices, pci_devices) = parse_proxmox_passthrough(&qm_config_text);
 
-                // Derive network_mode from the parsed bridge so the editor
-                // shows the right preset. vmbr0 (PVE's default management
-                // bridge) is the "nat" preset on Proxmox; anything else is
-                // a bridge / vSwitch attachment. Mode is recomputed at
-                // display time — `effective_network_mode` keeps the fallback
-                // for configs that pre-date this field.
-                let (derived_mode, derived_bridge) = match net0_bridge.as_deref() {
-                    Some("vmbr0") | None => (Some("nat".to_string()), None),
-                    Some(other) => (Some("bridge".to_string()), Some(other.to_string())),
+                // Sort extras by net-index so the editor shows them in
+                // the same net1/net2/… order PVE has.
+                extra_nic_pairs.sort_by_key(|(n, _)| *n);
+                let extra_nics: Vec<NicConfig> = extra_nic_pairs.into_iter().map(|(_, n)| n).collect();
+
+                // Derive network_mode from net0's bridge — but a WolfNet
+                // attachment on net1 always wins. Mode is recomputed at
+                // display time; `effective_network_mode` keeps the fallback
+                // for older configs missing this field entirely.
+                let (derived_mode, derived_bridge) = if wolfnet_active {
+                    (Some("wolfnet".to_string()), None)
+                } else {
+                    match net0_bridge.as_deref() {
+                        Some("vmbr0") | None => (Some("nat".to_string()), None),
+                        Some(other) => (Some("bridge".to_string()), Some(other.to_string())),
+                    }
                 };
 
                 Some(VmConfig {
@@ -726,7 +746,7 @@ impl VmManager {
                     drivers_iso: None,
                     import_image: None,
                     extra_disks: Vec::new(),
-                    extra_nics: Vec::new(),
+                    extra_nics,
                     usb_devices,
                     pci_devices,
                     vmid: Some(vmid),
@@ -3875,6 +3895,19 @@ impl VmManager {
         };
 
         let (usb_devices, pci_devices) = parse_libvirt_hostdevs(&dumpxml);
+        let (extra_nics, wolfnet_active) = parse_libvirt_extra_nics(&dumpxml);
+        // Derive primary-NIC mode + bridge from the first <interface>
+        // block. A WolfNet attachment anywhere flips mode to "wolfnet".
+        let primary_bridge = iter_xml_blocks(&dumpxml, "interface").next()
+            .and_then(|b| libvirt_xml_attr_in_block(b, "source", "bridge"));
+        let (derived_mode, derived_bridge) = if wolfnet_active {
+            (Some("wolfnet".to_string()), None)
+        } else {
+            match primary_bridge.as_deref() {
+                None | Some("virbr0") => (Some("nat".to_string()), None),
+                Some(other) => (Some("bridge".to_string()), Some(other.to_string())),
+            }
+        };
 
         let mut config = VmConfig {
             name: name.to_string(),
@@ -3894,15 +3927,15 @@ impl VmManager {
             drivers_iso: None,
             import_image: None,
             extra_disks: Vec::new(),
-            extra_nics: Vec::new(),
+            extra_nics,
             usb_devices,
             pci_devices,
             vmid: None,
             bios_type,
             host_id: Some(crate::agent::self_node_id()),
             skip_default_nic: false,
-            network_mode: None,
-            bridge: None,
+            network_mode: derived_mode,
+            bridge: derived_bridge,
             bridge_ip_mode: None,
             bridge_ip: None,
             bridge_gateway: None,
@@ -4036,6 +4069,18 @@ impl VmManager {
 
         // Reuse the existing libvirt hostdev parser for USB/PCI passthrough.
         let (usb_devices, pci_devices) = parse_libvirt_hostdevs(&persistent);
+        // Surface extra NICs + the primary NIC's bridge for the editor.
+        let (extra_nics, wolfnet_active) = parse_libvirt_extra_nics(&persistent);
+        let primary_bridge = iter_xml_blocks(&persistent, "interface").next()
+            .and_then(|b| libvirt_xml_attr_in_block(b, "source", "bridge"));
+        let (derived_mode, derived_bridge) = if wolfnet_active {
+            (Some("wolfnet".to_string()), None)
+        } else {
+            match primary_bridge.as_deref() {
+                None | Some("virbr0") => (Some("nat".to_string()), None),
+                Some(other) => (Some("bridge".to_string()), Some(other.to_string())),
+            }
+        };
 
         let mut config = VmConfig {
             name: name.to_string(),
@@ -4055,15 +4100,15 @@ impl VmManager {
             drivers_iso: None,
             import_image: None,
             extra_disks: Vec::new(),
-            extra_nics: Vec::new(),
+            extra_nics,
             usb_devices,
             pci_devices,
             vmid: None,
             bios_type,
             host_id: Some(crate::agent::self_node_id()),
             skip_default_nic: false,
-            network_mode: None,
-            bridge: None,
+            network_mode: derived_mode,
+            bridge: derived_bridge,
             bridge_ip_mode: None,
             bridge_ip: None,
             bridge_gateway: None,
@@ -6234,6 +6279,8 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
     let mut bios_type = "seabios".to_string();
     let mut net0_bridge: Option<String> = None;
     let mut net_model = "virtio".to_string();
+    let mut wolfnet_active = false;
+    let mut extra_nic_pairs: Vec<(usize, NicConfig)> = Vec::new();
 
     for line in main_section.lines() {
         let line = line.trim();
@@ -6259,6 +6306,16 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
                         let br = br.trim();
                         if !br.is_empty() { net0_bridge = Some(br.to_string()); }
                     }
+                }
+            }
+            k if k.starts_with("net") && k != "net0" => {
+                // net1, net2, … — surface as editable extra NICs so the
+                // operator can change model/bridge/MAC without having to
+                // delete + re-add. The WolfNet bridge (wnbr-*) is filtered
+                // inside parse_pve_extra_nic and instead flips network_mode.
+                if val.contains("bridge=wnbr-") { wolfnet_active = true; }
+                if let Some(pair) = parse_pve_extra_nic(k, val) {
+                    extra_nic_pairs.push(pair);
                 }
             }
             "ide2" | "cdrom" => {
@@ -6300,13 +6357,23 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
 
     let running = is_pve_vmid_running(vmid);
 
-    // Derive network_mode from net0's bridge so the editor shows the right
-    // preset. vmbr0 (PVE's default management bridge) maps to "nat"; any
-    // other bridge means the operator (or WolfStack's vSwitch sugar) wired
-    // net0 to something explicit, so the editor shows the "bridge" preset.
-    let (derived_mode, derived_bridge) = match net0_bridge.as_deref() {
-        Some("vmbr0") | None => (Some("nat".to_string()), None),
-        Some(other) => (Some("bridge".to_string()), Some(other.to_string())),
+    // Sort extra NICs by their net-index so the editor's net1/net2/…
+    // order matches PVE's, then strip the index — NicConfig is positional
+    // by Vec order from the operator's POV.
+    extra_nic_pairs.sort_by_key(|(n, _)| *n);
+    let extra_nics: Vec<NicConfig> = extra_nic_pairs.into_iter().map(|(_, n)| n).collect();
+
+    // Derive network_mode from net0's bridge (and net1's WolfNet bridge if
+    // present). Priority: a WolfNet attachment ALWAYS wins regardless of
+    // net0's bridge, otherwise non-vmbr0 net0 means "bridge", and vmbr0
+    // (or no net0 at all) means "nat".
+    let (derived_mode, derived_bridge) = if wolfnet_active {
+        (Some("wolfnet".to_string()), None)
+    } else {
+        match net0_bridge.as_deref() {
+            Some("vmbr0") | None => (Some("nat".to_string()), None),
+            Some(other) => (Some("bridge".to_string()), Some(other.to_string())),
+        }
     };
 
     Some(VmConfig {
@@ -6327,7 +6394,7 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
         drivers_iso: None,
         import_image: None,
         extra_disks: Vec::new(),
-        extra_nics: Vec::new(),
+        extra_nics,
         usb_devices,
         pci_devices,
         vmid: Some(vmid),
@@ -6340,6 +6407,85 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
         bridge_ip: None,
         bridge_gateway: None,
     })
+}
+
+/// Walk every `<interface>` block in a libvirt domain XML and produce
+/// a NicConfig per interface (skipping the first — that's the editor's
+/// "primary NIC" surfaced through the preset cards, and the WolfNet
+/// bridge, which is owned by WolfStack). Returns `(nics, wolfnet_active)`
+/// so the caller can flip `network_mode` to "wolfnet" when WolfStack's
+/// per-VM bridge is attached.
+fn parse_libvirt_extra_nics(xml: &str) -> (Vec<NicConfig>, bool) {
+    let mut nics: Vec<NicConfig> = Vec::new();
+    let mut wolfnet_active = false;
+    let mut index = 0usize;
+    for block in iter_xml_blocks(xml, "interface") {
+        let mac = libvirt_xml_attr_in_block(block, "mac", "address");
+        // Source bridge: `<source bridge='...'/>` for type='bridge'.
+        // Network-type interfaces (<source network='default'/>) don't have
+        // a host bridge name we can edit, so we surface them as user-mode-
+        // style with bridge=None.
+        let bridge = libvirt_xml_attr_in_block(block, "source", "bridge");
+        if bridge.as_deref().map(|b| b.starts_with("wnbr-")).unwrap_or(false) {
+            wolfnet_active = true;
+            index += 1;
+            continue;
+        }
+        // First interface is the editor's primary NIC — handled via
+        // network_mode + bridge fields, not as an extra NIC.
+        if index == 0 {
+            index += 1;
+            continue;
+        }
+        let model = libvirt_xml_attr_in_block(block, "model", "type")
+            .unwrap_or_else(|| "virtio".to_string());
+        nics.push(NicConfig {
+            model,
+            mac,
+            bridge,
+            passthrough_interface: None,
+        });
+        index += 1;
+    }
+    (nics, wolfnet_active)
+}
+
+/// Parse a single `netN: <value>` line value into a NicConfig. Returns
+/// (n, NicConfig) so the caller can sort by N and skip net0. Skips the
+/// per-VM WolfNet bridge (`wnbr-*`) — that's the WolfNet attachment,
+/// surfaced via `network_mode == "wolfnet"` not as a user-facing extra
+/// NIC. Returns None when the value isn't parseable.
+fn parse_pve_extra_nic(key: &str, val: &str) -> Option<(usize, NicConfig)> {
+    if !key.starts_with("net") { return None; }
+    let n: usize = key[3..].parse().ok()?;
+    let mut model = "virtio".to_string();
+    let mut mac: Option<String> = None;
+    let mut bridge: Option<String> = None;
+    for part in val.split(',') {
+        let part = part.trim();
+        if let Some((k, v)) = part.split_once('=') {
+            if matches!(k, "virtio" | "e1000" | "e1000e" | "rtl8139" | "vmxnet3") {
+                model = k.to_string();
+                mac = Some(v.to_string());
+            } else if k == "bridge" {
+                let v = v.trim();
+                if !v.is_empty() { bridge = Some(v.to_string()); }
+            }
+        }
+    }
+    // The per-VM WolfNet bridge is owned by WolfStack and surfaced via
+    // network_mode — never list it as an editable extra NIC, or the
+    // editor would treat it as a manual bridge attachment and the next
+    // save would freeze the auto-name.
+    if bridge.as_deref().map(|b| b.starts_with("wnbr-")).unwrap_or(false) {
+        return None;
+    }
+    Some((n, NicConfig {
+        model,
+        mac,
+        bridge,
+        passthrough_interface: None,
+    }))
 }
 
 /// True if /var/run/qemu-server/<vmid>.pid points at a live process.
