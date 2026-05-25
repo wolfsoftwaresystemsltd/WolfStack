@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.7.3: AV install on Ubuntu — wait for unattended-upgrades' dpkg lock** _(2026-05-25 — [`8f836c0`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8f836c077ea60189914a222e076e1ca400f4dd5b))_
 - **v24.7.2: normalise primary-NIC topology on VM export (cross-host restore)** _(2026-05-24 — [`064d6d8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/064d6d8c7cd61e155f5f4785d3187d4001a717af))_
 - **v24.7.1: surface existing extra NICs in the VM editor (Proxmox + libvirt)** _(2026-05-24 — [`4940bae`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4940baefdcaae0422b6c0d86ba1750fd6ac437a1))_
 - **v24.7.0: LXC-style network presets for VMs — WolfNet/Bridge/vSwitch/NAT** _(2026-05-24 — [`cd3fb5e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cd3fb5e84b352a596dcdab83b6e744142d21229e))_
