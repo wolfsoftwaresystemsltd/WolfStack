@@ -17533,8 +17533,15 @@ pub async fn system_upgrade(
     let channel = query.get("channel").map(|s| s.as_str()).unwrap_or("master");
     let (branch, flag) = if channel == "beta" { ("beta", " --beta") } else { ("master", "") };
 
+    // WolfStack itself runs as root (needs /etc/shadow for auth — see
+    // CLAUDE.md), so the `sudo` that used to live here was redundant
+    // AND broke on minimal Proxmox installs which don't ship sudo by
+    // default (customer report 2026-05-25: NyvenZA's Proxmox box logs
+    // in as root and has no sudo binary, so `curl | sudo bash` errored
+    // with "sudo: command not found"). Pipe straight to bash — we're
+    // already root.
     let cmd = format!(
-        "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/{}/setup.sh | sudo bash -s --{}",
+        "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/{}/setup.sh | bash -s --{}",
         branch, flag
     );
 

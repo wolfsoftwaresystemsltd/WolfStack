@@ -153,13 +153,16 @@ pub fn build(b: &Bootstrap) -> String {
         format!("{}/api/install/setup.sh", b.sp_url.trim_end_matches('/'))
     } else { String::new() };
 
+    // cloud-init `runcmd` already executes as root, and not every base
+    // image ships sudo (e.g. some Proxmox-derived templates strip it).
+    // Drop sudo to keep this working across all minimal images.
     let install_cmd = if !sp_setup.is_empty() {
         format!(
             "rm -f /tmp/wolfstack-setup.sh && \
              (curl -fsSL --max-time 30 '{}' -o /tmp/wolfstack-setup.sh \
               || curl -fsSL --max-time 60 '{}' -o /tmp/wolfstack-setup.sh) && \
              [ -s /tmp/wolfstack-setup.sh ] && \
-             sudo bash /tmp/wolfstack-setup.sh --yes",
+             bash /tmp/wolfstack-setup.sh --yes",
             shell_quote(&sp_setup), shell_quote(github_url),
         )
     } else {
@@ -167,7 +170,7 @@ pub fn build(b: &Bootstrap) -> String {
             "rm -f /tmp/wolfstack-setup.sh && \
              curl -fsSL --max-time 60 '{}' -o /tmp/wolfstack-setup.sh && \
              [ -s /tmp/wolfstack-setup.sh ] && \
-             sudo bash /tmp/wolfstack-setup.sh --yes",
+             bash /tmp/wolfstack-setup.sh --yes",
             shell_quote(github_url),
         )
     };

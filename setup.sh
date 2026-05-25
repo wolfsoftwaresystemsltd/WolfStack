@@ -8,9 +8,13 @@
 # Installs WolfStack server management dashboard
 # Supported: Ubuntu/Debian, Fedora/RHEL/CentOS, SLES/openSUSE, Arch Linux, IBM Power (ppc64le)
 #
-# Usage: curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash
-#        curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/beta/setup.sh | sudo bash -s -- --beta
-#        sudo bash setup.sh --install-dir /mnt/usb      # build & install from external drive
+# Usage (as root — Proxmox root login):
+#        curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | bash
+#        curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/beta/setup.sh | bash -s -- --beta
+#        bash setup.sh --install-dir /mnt/usb           # build & install from external drive
+# Usage (sudoer — Ubuntu/Debian):
+#        curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash
+#        sudo bash setup.sh
 #
 
 set -e
@@ -139,8 +143,16 @@ echo ""
 # ─── Must run as root ────────────────────────────────────────────────────────
 if [ "$(id -u)" -ne 0 ]; then
     echo "✗ This script must be run as root."
-    echo "  Usage: sudo bash setup.sh"
-    echo "     or: curl -sSL <url> | sudo bash"
+    if command -v sudo >/dev/null 2>&1; then
+        echo "  Usage: sudo bash setup.sh"
+        echo "     or: curl -sSL <url> | sudo bash"
+    else
+        # Proxmox / minimal installs without sudo — operator is expected
+        # to log in as root and run the script directly.
+        echo "  sudo is not installed on this system. Log in as root and run:"
+        echo "    bash setup.sh"
+        echo "    curl -sSL <url> | bash"
+    fi
     exit 1
 fi
 
@@ -1576,7 +1588,11 @@ set -e
 PURGE=false
 [ "${1:-}" = "--purge" ] && PURGE=true
 if [ "$EUID" -ne 0 ]; then
-    echo "wolfstack-uninstall must be run as root (use sudo)." >&2
+    if command -v sudo >/dev/null 2>&1; then
+        echo "wolfstack-uninstall must be run as root (use: sudo wolfstack-uninstall)." >&2
+    else
+        echo "wolfstack-uninstall must be run as root (log in as root, then re-run)." >&2
+    fi
     exit 1
 fi
 echo "Stopping wolfstack…"

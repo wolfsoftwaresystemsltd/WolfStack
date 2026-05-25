@@ -220,9 +220,12 @@ async fn console_session(
             ));
         }
         "upgrade" => {
-            // WolfStack upgrade — use custom update script if configured, otherwise default
+            // WolfStack upgrade — use custom update script if configured,
+            // otherwise default. PTY is spawned by WolfStack which is
+            // root, so no sudo needed (and proxmox minimal installs
+            // don't ship sudo — see system_upgrade in api/mod.rs).
             let script = update_script.as_deref().unwrap_or(
-                "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash"
+                "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | bash"
             );
             cmd.arg(script);
         }
