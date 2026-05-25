@@ -18234,14 +18234,18 @@ async function fleetLoadHostAudit() {
 // API for self node" guard.
 let _fleetAvSelfId = null;
 
+// Build a URL for a fleet AV operation (restore/delete quarantined files,
+// etc.) on `nodeId`. Same direct-path reasoning as _avNodeUrl: do NOT
+// route the already-proxied URL through apiUrl, or the per-server view
+// would double-prefix and 404 (customer report 2026-05-25).
 function _fleetAvOpUrl(nodeId, subpath) {
     if (_fleetAvSelfId && nodeId === _fleetAvSelfId) {
-        return apiUrl(subpath);
+        return subpath;
     }
     // node_proxy re-prepends "/api/" to the captured {path:.*}, so we
     // must strip the leading /api/ from subpath to avoid /api/api/…
     const cleanPath = subpath.replace(/^\/api\//, '');
-    return apiUrl(`/api/nodes/${encodeURIComponent(nodeId)}/proxy/${cleanPath}`);
+    return `/api/nodes/${encodeURIComponent(nodeId)}/proxy/${cleanPath}`;
 }
 
 async function fleetLoadAntivirus() {
@@ -18840,11 +18844,13 @@ async function nodeAntivirusDismiss(id) {
 }
 
 async function fleetAntivirusDismiss(nodeId, id) {
-    // Routes via node_proxy for remote nodes (selfId-aware).
+    // Routes via node_proxy for remote nodes (selfId-aware). DO NOT wrap
+    // the proxy URL through apiUrl — same double-prefix-404 bug as
+    // _avNodeUrl / _fleetAvOpUrl. Direct path is correct here.
     const selfId = _fleetAvSelfId;
     const url = (selfId && nodeId === selfId)
-        ? apiUrl('/api/antivirus/findings/dismiss')
-        : apiUrl(`/api/nodes/${encodeURIComponent(nodeId)}/proxy/antivirus/findings/dismiss`);
+        ? '/api/antivirus/findings/dismiss'
+        : `/api/nodes/${encodeURIComponent(nodeId)}/proxy/antivirus/findings/dismiss`;
     try {
         const r = await fetch(url, {
             method: 'POST', headers: {'Content-Type':'application/json'},
@@ -19106,10 +19112,18 @@ function _avTermAppend(text) {
 // leading /api/ from subpath here, otherwise the remote receives
 // /api/api/… which falls through to the static-files handler and
 // returns 405 on POST.
+// Build a URL for the AV install/status endpoints on `nodeId`, called
+// from the per-node fleet dispatcher. Returns a DIRECT path (no apiUrl
+// wrapping) — passing the already-proxy-prefixed URL through apiUrl
+// would double-prefix when the operator is viewing a non-self node
+// (apiUrl auto-prepends /api/nodes/{currentNodeId}/proxy/ in that view),
+// producing /api/nodes/A/proxy/nodes/B/proxy/… and a 404. The dispatcher
+// always runs on the WolfStack the browser is talking to and proxies
+// outward in one hop.
 function _avNodeUrl(nodeId, selfId, subpath) {
-    if (selfId && nodeId === selfId) return apiUrl(subpath);
+    if (selfId && nodeId === selfId) return subpath;
     const cleanPath = subpath.replace(/^\/api\//, '');
-    return apiUrl(`/api/nodes/${encodeURIComponent(nodeId)}/proxy/${cleanPath}`);
+    return `/api/nodes/${encodeURIComponent(nodeId)}/proxy/${cleanPath}`;
 }
 
 async function _avDriveOneNode(nodeId, hostname, selfId) {

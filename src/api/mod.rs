@@ -17513,6 +17513,15 @@ fn import_nodes(nodes_val: &serde_json::Value, state: &web::Data<AppState>) -> R
     Ok(added)
 }
 
+/// Path the web-triggered upgrade streams its stdout+stderr to. The
+/// previous run is overwritten (the most recent failure is what an
+/// operator wants to inspect; older runs aren't useful). Permissions are
+/// 0644 so an operator can `cat` it without sudo. NEVER under /var/lib —
+/// `/var/lib/wolfstack` is on the OnAccessExcludePath list and we want
+/// this log scannable by clamav.
+const UPGRADE_LOG_PATH: &str = "/var/log/wolfstack-upgrade.log";
+const UPGRADE_LOG_MAX_RETURN_BYTES: usize = 256 * 1024;
+
 /// POST /api/upgrade — run the WolfStack upgrade script in the background
 /// Optional query param: ?channel=beta (defaults to master)
 pub async fn system_upgrade(
@@ -17524,30 +17533,157 @@ pub async fn system_upgrade(
     let channel = query.get("channel").map(|s| s.as_str()).unwrap_or("master");
     let (branch, flag) = if channel == "beta" { ("beta", " --beta") } else { ("master", "") };
 
-
     let cmd = format!(
         "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/{}/setup.sh | sudo bash -s --{}",
         branch, flag
     );
 
-    // Spawn the upgrade script as a detached background process
+    // Truncate + write a header line so the operator sees what kicked
+    // off this upgrade run even before setup.sh starts producing output.
+    // Then re-open in append mode and hand the file to the child as
+    // stdout+stderr. Previous-run output is discarded on every new
+    // upgrade — the most recent failure is what matters; older runs are
+    // noise.
+    use std::io::Write;
+    {
+        let mut hdr = match std::fs::OpenOptions::new()
+            .create(true).write(true).truncate(true)
+            .open(UPGRADE_LOG_PATH)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                error!("Failed to create upgrade log {}: {}", UPGRADE_LOG_PATH, e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to create {}: {}", UPGRADE_LOG_PATH, e)
+                }));
+            }
+        };
+        let _ = writeln!(
+            hdr,
+            "=== WolfStack upgrade started {} (channel={}, branch={}) ===\n$ {}\n",
+            chrono::Utc::now().to_rfc3339(), channel, branch, cmd,
+        );
+        // 0644 so the operator can `cat` without sudo; the log doesn't
+        // contain secrets — only setup.sh output and apt progress.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = hdr.set_permissions(std::fs::Permissions::from_mode(0o644));
+        }
+    }
+    let log_for_stdout = match std::fs::OpenOptions::new()
+        .append(true).open(UPGRADE_LOG_PATH)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to reopen upgrade log {} for append: {}", UPGRADE_LOG_PATH, e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to open {} for streaming: {}", UPGRADE_LOG_PATH, e)
+            }));
+        }
+    };
+    let log_for_stderr = match log_for_stdout.try_clone() {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to dup upgrade log fd: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to dup log fd: {}", e)
+            }));
+        }
+    };
+
+    // Spawn the upgrade script as a detached background process with
+    // stdout+stderr captured to UPGRADE_LOG_PATH. The child inherits the
+    // file descriptors, so output continues to land even after this
+    // handler returns and the WolfStack binary restarts mid-upgrade
+    // (setup.sh runs as a child of init, file descriptors survive).
     match std::process::Command::new("bash")
         .args(["-c", &cmd])
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log_for_stdout))
+        .stderr(std::process::Stdio::from(log_for_stderr))
         .spawn()
     {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({
-            "message": format!("Upgrade started ({} channel) — WolfStack will restart automatically when complete.", branch)
+            "message": format!("Upgrade started ({} channel) — WolfStack will restart automatically when complete.", branch),
+            "log_path": UPGRADE_LOG_PATH,
+            "log_url": "/api/upgrade/log",
         })),
         Err(e) => {
             error!("Failed to start upgrade: {}", e);
+            // Surface the spawn failure to the log file too so even
+            // a /api/upgrade/log poll sees it.
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(UPGRADE_LOG_PATH) {
+                let _ = writeln!(f, "=== ERROR: failed to spawn upgrade: {} ===", e);
+            }
             HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to start upgrade: {}", e)
+                "error": format!("Failed to start upgrade: {}", e),
+                "log_path": UPGRADE_LOG_PATH,
             }))
         }
     }
+}
+
+/// GET /api/upgrade/log — return the tail of the upgrade log so the
+/// operator can see what setup.sh / apt produced without ssh'ing in.
+/// Returns the LAST `UPGRADE_LOG_MAX_RETURN_BYTES` bytes — big enough
+/// for a full setup.sh run, small enough that the UI doesn't choke.
+/// Optional query param `?tail=N` (bytes) overrides, capped at 4 MB.
+pub async fn system_upgrade_log(
+    req: HttpRequest, state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+
+    let tail_bytes: usize = query.get("tail")
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|n| n.min(4 * 1024 * 1024))
+        .unwrap_or(UPGRADE_LOG_MAX_RETURN_BYTES);
+
+    let path = std::path::Path::new(UPGRADE_LOG_PATH);
+    if !path.exists() {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "exists": false,
+            "path": UPGRADE_LOG_PATH,
+            "message": "No upgrade has been run via the web interface on this node yet.",
+            "content": "",
+            "size_bytes": 0,
+            "truncated": false,
+        }));
+    }
+
+    let size_bytes = std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
+    let content = match std::fs::read(path) {
+        Ok(bytes) => {
+            let start = bytes.len().saturating_sub(tail_bytes);
+            // UTF-8 boundary safety: if we landed mid-codepoint, walk
+            // forward to the next start byte (top bits 0x.. or 0b10..
+            // are continuation bytes — skip them).
+            let mut safe_start = start;
+            while safe_start < bytes.len() && (bytes[safe_start] & 0xC0) == 0x80 {
+                safe_start += 1;
+            }
+            String::from_utf8_lossy(&bytes[safe_start..]).to_string()
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to read {}: {}", UPGRADE_LOG_PATH, e)
+            }));
+        }
+    };
+
+    let mtime_rfc3339 = std::fs::metadata(path).ok()
+        .and_then(|m| m.modified().ok())
+        .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "exists": true,
+        "path": UPGRADE_LOG_PATH,
+        "content": content,
+        "size_bytes": size_bytes,
+        "truncated": size_bytes > content.len(),
+        "modified_at": mtime_rfc3339,
+    }))
 }
 
 // ─── WolfFlow Workflow Automation API ───
@@ -31468,6 +31604,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/config/export", web::get().to(config_export))
         .route("/api/config/import", web::post().to(config_import))
         .route("/api/upgrade", web::post().to(system_upgrade))
+        .route("/api/upgrade/log", web::get().to(system_upgrade_log))
         // Issues Scanner
         .route("/api/issues/scan", web::get().to(scan_issues))
         .route("/api/issues/clean", web::post().to(clean_system))
