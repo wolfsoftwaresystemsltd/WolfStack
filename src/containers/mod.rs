@@ -1587,45 +1587,162 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
     Ok(format!("Container '{}' routed to WolfNet at {} via {}", container, ip, bridge_dev))
 }
 
-/// Ensure lxcbr0 bridge exists for default LXC container networking (with DHCP/NAT)
+/// Ensure lxcbr0 bridge exists for default LXC container networking
+/// (with DHCP/NAT). Idempotent — safe to call every minute. Logs every
+/// error rather than swallowing them: silent failures here are how a
+/// host ends up with running containers and no working bridge, with
+/// the operator hunting through unrelated layers.
 pub fn ensure_lxc_bridge() {
-    // 1. Try standard systemd service first — wait for it to fully start
-    let lxc_net_ok = Command::new("systemctl").args(["enable", "--now", "lxc-net"]).output()
-        .map(|o| o.status.success()).unwrap_or(false);
+    if let Err(e) = ensure_lxc_bridge_checked() {
+        error!("ensure_lxc_bridge: {}", e);
+    }
+}
 
-    if lxc_net_ok {
-        // Wait for lxc-net to fully bring up the bridge and dnsmasq
-        for _ in 0..10 {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            let bridge_up = Command::new("ip").args(["addr", "show", "lxcbr0"]).output()
-                .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("10.0.3.1"))
-                .unwrap_or(false);
-            if bridge_up { break; }
+/// Like `ensure_lxc_bridge` but surfaces the first hard failure. Used
+/// internally so the public function can keep its `()` return — most
+/// callers can't do anything useful with the error, they just need it
+/// logged. The periodic self-heal tick uses the same wrapper.
+fn ensure_lxc_bridge_checked() -> Result<(), String> {
+    // Load the kernel bridge module first. `ip link add … type bridge`
+    // fails with "Operation not supported" on kernels where the module
+    // isn't built in and hasn't been auto-loaded yet (minimal cloud
+    // images, custom kernels). Idempotent if already loaded; we don't
+    // treat modprobe failure as fatal because some hosts ship bridge
+    // built-in (no /lib/modules entry) and modprobe returns non-zero.
+    let _ = Command::new("modprobe").arg("bridge").output();
+
+    // Try the standard systemd service. If lxc-net brings up lxcbr0
+    // with 10.0.3.1 we don't need to do anything else for the bridge.
+    let mut used_lxc_net = false;
+    if let Ok(o) = Command::new("systemctl")
+        .args(["enable", "--now", "lxc-net"])
+        .output()
+    {
+        if o.status.success() {
+            used_lxc_net = true;
+            for _ in 0..10 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if bridge_has_ip("lxcbr0", "10.0.3.1") { break; }
+            }
         }
     }
 
-    // Check if lxcbr0 exists with an IP
-    let bridge_exists = Command::new("ip").args(["addr", "show", "lxcbr0"]).output()
-        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("10.0.3.1"))
-        .unwrap_or(false);
+    let needs_create = !bridge_exists("lxcbr0");
+    let needs_ip = !bridge_has_ip("lxcbr0", "10.0.3.1");
 
-    if !bridge_exists {
-        // Create bridge manually (lxc-net not available or failed)
-        let _ = Command::new("ip").args(["link", "add", "lxcbr0", "type", "bridge"]).output();
-        let _ = Command::new("ip").args(["addr", "add", "10.0.3.1/24", "dev", "lxcbr0"]).output();
-        let _ = Command::new("ip").args(["link", "set", "lxcbr0", "up"]).output();
+    if needs_create {
+        let o = Command::new("ip")
+            .args(["link", "add", "lxcbr0", "type", "bridge"])
+            .output()
+            .map_err(|e| format!("spawn `ip link add lxcbr0`: {}", e))?;
+        if !o.status.success() {
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            // "File exists" = a parallel ensure_lxc_bridge already
+            // created it — race is harmless. Anything else is real.
+            if !err.contains("File exists") {
+                return Err(format!(
+                    "`ip link add lxcbr0 type bridge` failed: {}", err
+                ));
+            }
+        } else {
+            info!("ensure_lxc_bridge: created lxcbr0");
+        }
     }
 
-    // Only start dnsmasq if nothing is already listening on 10.0.3.1
-    // Check both port 53 (DNS) and for any dnsmasq process on lxcbr0
-    let dns_in_use = Command::new("ss").args(["-lnup", "sport", "=", "53"])
-        .output().ok()
+    if needs_ip {
+        let o = Command::new("ip")
+            .args(["addr", "add", "10.0.3.1/24", "dev", "lxcbr0"])
+            .output()
+            .map_err(|e| format!("spawn `ip addr add`: {}", e))?;
+        if !o.status.success() {
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            if !err.contains("File exists") {
+                return Err(format!(
+                    "`ip addr add 10.0.3.1/24 dev lxcbr0` failed: {}", err
+                ));
+            }
+        }
+    }
+
+    let o = Command::new("ip")
+        .args(["link", "set", "lxcbr0", "up"])
+        .output()
+        .map_err(|e| format!("spawn `ip link set lxcbr0 up`: {}", e))?;
+    if !o.status.success() {
+        return Err(format!(
+            "`ip link set lxcbr0 up` failed: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ));
+    }
+
+    // Final verification. If we got here without an error but the
+    // bridge still isn't present + addressed, something *outside*
+    // wolfstack is actively tearing it down (lxc-net stop hooks,
+    // NetworkManager, an admin script, a malicious cleanup). Surface
+    // that loudly — operators have lost hours chasing this when our
+    // code silently returned success.
+    if !bridge_has_ip("lxcbr0", "10.0.3.1") {
+        return Err(
+            "lxcbr0 still missing or unaddressed after create — \
+             something external is tearing it down. Check \
+             `journalctl -u lxc-net`, `journalctl --since '1 hour ago' \
+             | grep -iE 'bridge|lxcbr'`, and any custom firewall / \
+             network scripts on this host."
+                .to_string(),
+        );
+    }
+
+    // We just (re)brought lxcbr0 up. Existing containers' host-side
+    // veth endpoints survived the deletion but are now orphans — they
+    // have no master and won't carry traffic until re-attached. Walk
+    // every running LXC container and re-master its veth to lxcbr0.
+    if needs_create {
+        lxc_remaster_orphan_veths();
+    }
+
+    ensure_lxcbr0_services(used_lxc_net);
+    Ok(())
+}
+
+/// True if `name` exists as a link of any kind on the host.
+fn bridge_exists(name: &str) -> bool {
+    Command::new("ip")
+        .args(["link", "show", name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// True if `name` exists AND has the given IPv4 address.
+fn bridge_has_ip(name: &str, ip: &str) -> bool {
+    Command::new("ip")
+        .args(["addr", "show", name])
+        .output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains(ip))
+        .unwrap_or(false)
+}
+
+/// dnsmasq + NAT MASQUERADE + FORWARD rules. Each rule is checked
+/// with `-C` first; we only insert what's missing. Stderr is logged on
+/// failure so a wedged iptables doesn't disappear silently.
+fn ensure_lxcbr0_services(_used_lxc_net: bool) {
+    // dnsmasq — only start if nothing is already listening.
+    let dns_in_use = Command::new("ss")
+        .args(["-lnup", "sport", "=", "53"])
+        .output()
+        .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).contains("10.0.3.1"))
         .unwrap_or(false);
-    let dnsmasq_running = Command::new("pgrep").args(["-f", "dnsmasq.*lxcbr0"])
-        .output().map(|o| o.status.success()).unwrap_or(false)
-        || Command::new("pgrep").args(["-f", "dnsmasq.*10.0.3.1"])
-        .output().map(|o| o.status.success()).unwrap_or(false);
+    let dnsmasq_running = Command::new("pgrep")
+        .args(["-f", "dnsmasq.*lxcbr0"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+        || Command::new("pgrep")
+            .args(["-f", "dnsmasq.*10.0.3.1"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
 
     if !dns_in_use && !dnsmasq_running {
         let _ = std::fs::create_dir_all("/run/lxc");
@@ -1634,37 +1751,222 @@ pub fn ensure_lxc_bridge() {
                 "--strict-order",
                 "--bind-interfaces",
                 "--pid-file=/run/lxc/dnsmasq.pid",
-                "--listen-address", "10.0.3.1",
-                "--dhcp-range", "10.0.3.2,10.0.3.254",
+                "--listen-address",
+                "10.0.3.1",
+                "--dhcp-range",
+                "10.0.3.2,10.0.3.254",
                 "--dhcp-lease-max=253",
                 "--dhcp-no-override",
                 "--except-interface=lo",
                 "--interface=lxcbr0",
-                "--conf-file=" // avoid reading /etc/dnsmasq.conf
+                "--conf-file=", // avoid reading /etc/dnsmasq.conf
             ])
             .spawn();
-    } else {
-        tracing::info!("dnsmasq: already running on lxcbr0/10.0.3.1 — skipping");
     }
 
-    // ALWAYS force the bridge UP (it can exist but be DOWN if no interfaces are attached yet)
-    let _ = Command::new("ip").args(["link", "set", "lxcbr0", "up"]).output();
-
-    // ALWAYS ensure NAT + forwarding for internet access (even if lxc-net is running)
-    let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.lxcbr0.forwarding=1"]).output();
-    let nat_check = Command::new("iptables")
-        .args(["-t", "nat", "-C", "POSTROUTING", "-s", "10.0.3.0/24", "!", "-d", "10.0.3.0/24", "-j", "MASQUERADE"])
+    // Forwarding sysctl on the bridge — separate from global ip_forward
+    // because some hardened hosts disable per-interface forwarding.
+    let _ = Command::new("sysctl")
+        .args(["-w", "net.ipv4.conf.lxcbr0.forwarding=1"])
         .output();
-    if nat_check.map(|o| !o.status.success()).unwrap_or(true) {
 
-        let _ = Command::new("iptables").args(["-t", "nat", "-A", "POSTROUTING", "-s", "10.0.3.0/24", "!", "-d", "10.0.3.0/24", "-j", "MASQUERADE"]).output();
+    // NAT MASQUERADE — required for containers to reach the outside.
+    let nat_present = Command::new("iptables")
+        .args([
+            "-t", "nat", "-C", "POSTROUTING",
+            "-s", "10.0.3.0/24", "!", "-d", "10.0.3.0/24",
+            "-j", "MASQUERADE",
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !nat_present {
+        let o = Command::new("iptables")
+            .args([
+                "-t", "nat", "-A", "POSTROUTING",
+                "-s", "10.0.3.0/24", "!", "-d", "10.0.3.0/24",
+                "-j", "MASQUERADE",
+            ])
+            .output();
+        match o {
+            Ok(o) if o.status.success() => info!(
+                "ensure_lxc_bridge: re-added MASQUERADE for 10.0.3.0/24"
+            ),
+            Ok(o) => warn!(
+                "ensure_lxc_bridge: iptables MASQUERADE insert failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => warn!("ensure_lxc_bridge: spawn iptables: {}", e),
+        }
     }
-    let fwd_check = Command::new("iptables")
+
+    // FORWARD ACCEPT — both directions. Without these, containers
+    // can't reach beyond lxcbr0 even with NAT and ip_forward on.
+    let fwd_in_present = Command::new("iptables")
         .args(["-C", "FORWARD", "-i", "lxcbr0", "-j", "ACCEPT"])
-        .output();
-    if fwd_check.map(|o| !o.status.success()).unwrap_or(true) {
-        let _ = Command::new("iptables").args(["-I", "FORWARD", "-i", "lxcbr0", "-j", "ACCEPT"]).output();
-        let _ = Command::new("iptables").args(["-I", "FORWARD", "-o", "lxcbr0", "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"]).output();
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !fwd_in_present {
+        let o = Command::new("iptables")
+            .args(["-I", "FORWARD", "-i", "lxcbr0", "-j", "ACCEPT"])
+            .output();
+        match o {
+            Ok(o) if o.status.success() => info!(
+                "ensure_lxc_bridge: re-added FORWARD -i lxcbr0 ACCEPT"
+            ),
+            Ok(o) => warn!(
+                "ensure_lxc_bridge: FORWARD -i insert failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => warn!("ensure_lxc_bridge: spawn iptables: {}", e),
+        }
+        let _ = Command::new("iptables")
+            .args([
+                "-I", "FORWARD", "-o", "lxcbr0",
+                "-m", "state", "--state", "RELATED,ESTABLISHED",
+                "-j", "ACCEPT",
+            ])
+            .output();
+    }
+}
+
+/// Find the host-side veth name for a running LXC container, by
+/// reading the container's `eth0`'s `iflink` from inside its netns and
+/// mapping that ifindex back to a host interface. Returns None if the
+/// container isn't running, has no eth0, or nsenter isn't available.
+fn lxc_container_host_veth(container: &str) -> Option<String> {
+    let base = lxc_base_dir(container);
+    let mut args: Vec<String> = vec!["lxc-info".to_string()];
+    if base != LXC_DEFAULT_PATH {
+        args.push("-P".to_string());
+        args.push(base.clone());
+    }
+    args.extend([
+        "-n".to_string(),
+        container.to_string(),
+        "-p".to_string(),
+        "-H".to_string(),
+    ]);
+    let pid: u32 = Command::new(&args[0])
+        .args(&args[1..])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse().ok())?;
+    if pid == 0 {
+        return None;
+    }
+
+    let iflink: u32 = Command::new("nsenter")
+        .args([
+            "-t",
+            &pid.to_string(),
+            "-n",
+            "cat",
+            "/sys/class/net/eth0/iflink",
+        ])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse().ok())?;
+    if iflink == 0 {
+        return None;
+    }
+
+    let link_out = Command::new("ip").args(["-o", "link", "show"]).output().ok()?;
+    let s = String::from_utf8_lossy(&link_out.stdout);
+    for line in s.lines() {
+        // "56: vethABCDEF@if2: <BROADCAST,...> ..."
+        let mut parts = line.splitn(2, ':');
+        let idx_str = parts.next()?.trim();
+        let name_part = parts.next()?.trim();
+        if idx_str.parse::<u32>().ok() == Some(iflink) {
+            let name = name_part.split('@').next()?.trim();
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// For every running LXC container that's configured to live on
+/// lxcbr0, find its host-side veth and re-master it if it's currently
+/// orphaned (i.e. has no master). Called after we re-create lxcbr0 so
+/// containers that survived the bridge being deleted come back online
+/// without an operator restart.
+fn lxc_remaster_orphan_veths() {
+    for container in lxc_list_all() {
+        if !container.state.eq_ignore_ascii_case("RUNNING") {
+            continue;
+        }
+        // Only re-master containers whose config actually says lxcbr0.
+        // A container with a vSwitch / public-NIC config doesn't belong
+        // on lxcbr0 and we'd cause an outage by attaching its veth.
+        let cfg_path = format!(
+            "{}/{}/config",
+            lxc_base_dir(&container.name),
+            container.name
+        );
+        let uses_lxcbr0 = std::fs::read_to_string(&cfg_path)
+            .map(|c| {
+                c.lines().any(|l| {
+                    let t = l.trim();
+                    t.starts_with("lxc.net.")
+                        && t.contains(".link")
+                        && t.contains("lxcbr0")
+                })
+            })
+            .unwrap_or(false);
+        if !uses_lxcbr0 {
+            continue;
+        }
+
+        let veth = match lxc_container_host_veth(&container.name) {
+            Some(v) => v,
+            None => {
+                warn!(
+                    "ensure_lxc_bridge: could not locate host-side veth \
+                     for running container '{}' — operator may need to \
+                     restart it manually",
+                    container.name
+                );
+                continue;
+            }
+        };
+
+        // If the veth already has a master, leave it alone — that
+        // master might be a non-default bridge the operator chose.
+        let master_path = format!("/sys/class/net/{}/master", veth);
+        if std::fs::read_link(&master_path).is_ok() {
+            continue;
+        }
+
+        match Command::new("ip")
+            .args(["link", "set", &veth, "master", "lxcbr0"])
+            .output()
+        {
+            Ok(o) if o.status.success() => {
+                let _ = Command::new("ip")
+                    .args(["link", "set", &veth, "up"])
+                    .output();
+                info!(
+                    "ensure_lxc_bridge: re-attached orphan veth '{}' \
+                     for container '{}' to lxcbr0",
+                    veth, container.name
+                );
+            }
+            Ok(o) => warn!(
+                "ensure_lxc_bridge: ip link set {} master lxcbr0 \
+                 failed: {}",
+                veth,
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => warn!(
+                "ensure_lxc_bridge: spawn `ip link set {} master \
+                 lxcbr0`: {}",
+                veth, e
+            ),
+        }
     }
 }
 

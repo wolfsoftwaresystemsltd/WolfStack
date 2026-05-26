@@ -1145,6 +1145,26 @@ async fn main() -> std::io::Result<()> {
         // changes if the user doesn't confirm within the safe-mode window.
         crate::networking::router::spawn_rollback_watcher(app_state.router.clone());
 
+        // LXC bridge self-heal — re-affirm lxcbr0 + its iptables rules
+        // every 60s. External events (Docker daemon restart, NetworkManager
+        // reload, package upgrade, admin `iptables -F`, unattended-upgrades
+        // restarting lxc-net) routinely wipe the bridge and our FORWARD /
+        // MASQUERADE rules. Without this tick the next recovery is the
+        // next `lxc-start` going through wolfstack — which may be hours
+        // away while every container is unreachable. The function is
+        // idempotent (early `ip addr show` skip when the bridge is
+        // healthy) and shells out to `ip` / `iptables`, so it runs on
+        // the blocking pool. Mirrors the router's subnet-route
+        // reconciler at `networking::router::mod.rs:2281`.
+        tokio::spawn(async {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            tick.tick().await; // skip the immediate fire — startup just did it
+            loop {
+                tick.tick().await;
+                let _ = tokio::task::spawn_blocking(containers::ensure_lxc_bridge).await;
+            }
+        });
+
         // Antivirus scheduler — every 5 minutes, check whether the
         // configured schedule_hours interval has elapsed since the
         // last completed scan; if so, fire a background scan thread.
