@@ -48926,6 +48926,16 @@ function renderActionFields(actionKey, container, actionData) {
                 <textarea class="form-control wf-action-field" data-field="${f.name}" placeholder="${escapeHtml(f.placeholder || '')}" rows="3"
                     style="font-size:12px;font-family:'JetBrains Mono',monospace;resize:vertical;">${escapeHtml(String(val))}</textarea>
             </div>`;
+        } else if (f.type === 'string_list') {
+            // Backend Vec<String>. UI is a textarea — operator types names
+            // one per line or comma-separated; saveStep splits on both.
+            const listVal = Array.isArray(val) ? val.join('\n') : String(val || '');
+            return `<div style="margin-bottom:8px;">
+                <label style="font-size:11px;font-weight:600;display:block;margin-bottom:3px;color:var(--text-secondary);">${escapeHtml(f.label)}${f.required ? ' *' : ''}</label>
+                <textarea class="form-control wf-action-field" data-field="${f.name}" data-type="string_list"
+                    placeholder="${escapeHtml(f.placeholder || '')}" rows="4"
+                    style="font-size:12px;font-family:'JetBrains Mono',monospace;resize:vertical;">${escapeHtml(listVal)}</textarea>
+            </div>`;
         } else if (f.type === 'checkbox') {
             const checked = val === true || val === 'true' || val === 1;
             return `<div style="margin-bottom:8px;">
@@ -49147,14 +49157,20 @@ function updateWolfFlowStepFromPanel() {
         const newAction = { action: actionSel.value };
         document.querySelectorAll('.wf-action-field').forEach(el => {
             const fieldName = el.dataset.field;
-            if (fieldName) {
-                if (el.type === 'checkbox' || el.dataset.type === 'checkbox') {
-                    newAction[fieldName] = el.checked;
-                } else {
-                    let val = el.value;
-                    if (el.type === 'number' && val !== '') val = Number(val);
-                    newAction[fieldName] = val;
-                }
+            if (!fieldName) return;
+            if (el.type === 'checkbox' || el.dataset.type === 'checkbox') {
+                newAction[fieldName] = el.checked;
+            } else if (el.dataset.type === 'string_list') {
+                // Backend expects Vec<String>. Operator can separate by
+                // newlines, commas, or both — we trim and drop empties.
+                newAction[fieldName] = (el.value || '')
+                    .split(/[\n,]+/)
+                    .map(s => s.trim())
+                    .filter(s => s.length > 0);
+            } else {
+                let val = el.value;
+                if (el.type === 'number' && val !== '') val = Number(val);
+                newAction[fieldName] = val;
             }
         });
         step.action = newAction;

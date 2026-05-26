@@ -2655,6 +2655,21 @@ pub fn toolbox_actions() -> serde_json::Value {
             "outputs": ["success", "container", "image"]
         },
         {
+            "action": "docker_update_many",
+            "label": "Docker Update (Bulk)",
+            "description": "Update all running Docker containers — or a chosen subset — in one step. Uses the full image-watcher pipeline (recreate-from-inspect + backup + health-check). Honours per-container Pinned/Ignored policy and max_parallel_updates from image-watcher.json.",
+            "icon": "fa-arrows-rotate",
+            "category": "docker",
+            "fields": [
+                { "name": "target", "label": "Target", "type": "select",
+                  "options": ["all", "specific"], "default": "all" },
+                { "name": "container_names", "label": "Container Names (when Target = specific)",
+                  "type": "string_list",
+                  "placeholder": "one per line, or comma-separated — e.g.\nplex\nnextcloud, mariadb" }
+            ],
+            "outputs": ["total", "succeeded", "failed", "events"]
+        },
+        {
             "action": "docker_prune",
             "label": "Docker Prune",
             "description": "Remove all unused Docker images, containers, volumes, and networks",
@@ -2672,6 +2687,21 @@ pub fn toolbox_actions() -> serde_json::Value {
                 { "name": "container_or_image", "label": "Container / Image", "type": "text", "required": true, "placeholder": "nginx or myapp:latest" }
             ],
             "outputs": ["image", "local_digest", "update_available", "container"]
+        },
+        {
+            "action": "docker_check_update_many",
+            "label": "Docker Update Check (Bulk)",
+            "description": "Check all running Docker containers — or a chosen subset — for available image updates in one step. Same code path as the background watcher. Pinned/Ignored containers are skipped automatically.",
+            "icon": "fa-magnifying-glass-plus",
+            "category": "docker",
+            "fields": [
+                { "name": "target", "label": "Target", "type": "select",
+                  "options": ["all", "specific"], "default": "all" },
+                { "name": "container_names", "label": "Container Names (when Target = specific)",
+                  "type": "string_list",
+                  "placeholder": "one per line, or comma-separated — e.g.\nplex\nnextcloud, mariadb" }
+            ],
+            "outputs": ["checked", "updates_available", "results"]
         },
         {
             "action": "http_request",
@@ -3058,11 +3088,14 @@ mod tests {
     fn toolbox_returns_all_actions() {
         let actions = toolbox_actions();
         let arr = actions.as_array().unwrap();
-        // 16 base actions + AiInvoke + AgentChat added in v18.1.
+        // 16 base actions + AiInvoke + AgentChat added in v18.1
+        // + docker_update_many + docker_check_update_many added in
+        // v24.7.16 (sponsor request — bulk Docker container update so
+        // operators don't have to chain one step per image).
         // Bump this when you add a new toolbox entry — the frontend's
         // editor relies on one card per action, so `len` IS the right
         // assertion even if it reads like a fragile hardcode.
-        assert_eq!(arr.len(), 18);
+        assert_eq!(arr.len(), 20);
         // Check that each action has required fields
         for a in arr {
             assert!(a.get("action").is_some());
@@ -3077,5 +3110,12 @@ mod tests {
             .collect();
         assert!(names.contains(&"ai_invoke"), "toolbox missing ai_invoke");
         assert!(names.contains(&"agent_chat"), "toolbox missing agent_chat");
+        // The bulk Docker actions exposed in v24.7.16 — the backend
+        // already supported them; without these catalog entries the UI
+        // palette never offered them, forcing one-step-per-image flows.
+        assert!(names.contains(&"docker_update_many"),
+            "toolbox missing docker_update_many");
+        assert!(names.contains(&"docker_check_update_many"),
+            "toolbox missing docker_check_update_many");
     }
 }
