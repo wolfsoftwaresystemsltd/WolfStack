@@ -2746,7 +2746,124 @@ pub fn restore_lxc_local(
     let _ = Command::new("chown").args(["root:root", &config_path]).output();
     let _ = Command::new("chmod").args(["755", &container_dir]).output();
 
-    Ok(format!("LXC container '{}' restored and verified — start it from the Containers page", container_name))
+    // Restore copies the source's lxc.net.N.hwaddr verbatim — there is
+    // no clone-style MAC rewrite. The operator may have intentionally
+    // pinned a specific MAC for upstream router/firewall whitelisting
+    // (Hetzner vSwitch, MAC-based DHCP reservations, license dongles
+    // keyed off MAC), so silently re-randomising would break those
+    // setups. Instead, surface a loud warning — and if another local
+    // container is already using one of these MACs, name it. The
+    // operator can then edit the NIC in Settings → Resources to mint
+    // a fresh MAC if they need one.
+    //
+    // Cross-node duplicates (e.g. restoring the same backup on two
+    // nodes for HA) are not detectable here without trusting the
+    // cluster cache; the generic warning covers that case.
+    let mac_warning = build_mac_duplication_warning(&config_path, container_name);
+
+    Ok(format!(
+        "LXC container '{}' restored and verified — start it from the Containers page.{}",
+        container_name, mac_warning
+    ))
+}
+
+/// Build a human-readable warning about MAC-address duplication risk
+/// for a freshly restored container. Always warns generically (since
+/// we can't reliably scan cluster-wide MACs from this call site); also
+/// names local conflicts when the restored container shares a MAC with
+/// another container already on this node.
+fn build_mac_duplication_warning(restored_config_path: &str, restored_name: &str) -> String {
+    // Pull the restored container's MACs from its newly-installed config.
+    let restored_macs = read_hwaddrs(restored_config_path);
+    if restored_macs.is_empty() {
+        // No MACs to worry about (very unusual — most LXC configs pin
+        // hwaddr) — just the generic warning.
+        return "\n\nNOTE: restore copies the source's network settings verbatim. \
+                Check that this container's MAC addresses, hostname, and any pinned \
+                IPs don't clash with other containers — especially important on \
+                vSwitches and shared L2 networks, where duplicate MACs cause silent \
+                connectivity failures."
+            .to_string();
+    }
+
+    // Walk every other LXC container's config for matching MACs.
+    let mut local_conflicts: Vec<(String, String)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/var/lib/lxc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip the container we just restored, hidden dirs, and the
+            // restore staging directory pattern.
+            if name == restored_name || name.starts_with('.') {
+                continue;
+            }
+            let other_config = format!("/var/lib/lxc/{}/config", name);
+            if !std::path::Path::new(&other_config).exists() {
+                continue;
+            }
+            for mac in read_hwaddrs(&other_config) {
+                if restored_macs.iter().any(|m| m.eq_ignore_ascii_case(&mac)) {
+                    local_conflicts.push((name.clone(), mac));
+                }
+            }
+        }
+    }
+
+    let mut warning = String::from(
+        "\n\nNOTE: restore copies the source's network settings verbatim, including \
+         MAC addresses. Check for duplicates — especially on vSwitches and shared \
+         L2 networks, where two containers with the same MAC cause silent \
+         connectivity failures (flapping switch FDB, traffic to the wrong host).",
+    );
+    if !local_conflicts.is_empty() {
+        warning.push_str("\n\nDUPLICATE MAC DETECTED on this node:");
+        for (other, mac) in &local_conflicts {
+            warning.push_str(&format!(
+                "\n  - '{}' also uses MAC {} — edit one of them in Settings → Resources.",
+                other, mac
+            ));
+        }
+    } else {
+        warning.push_str(
+            "\n\nNo duplicates on this node; verify across the cluster too if you \
+             restored this from a backup of a container that's still running elsewhere.",
+        );
+    }
+    warning
+}
+
+/// Extract every `lxc.net.N.hwaddr` value from an LXC config file.
+/// Tolerates `key = value` and `key=value`. Returns lowercase MACs.
+fn read_hwaddrs(config_path: &str) -> Vec<String> {
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut macs = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        // Match lxc.net.<N>.hwaddr — N is any digit run.
+        let stripped = trimmed.strip_prefix("lxc.net.").unwrap_or("");
+        if stripped.is_empty() {
+            continue;
+        }
+        // Skip past the digits to find ".hwaddr".
+        let rest = stripped.trim_start_matches(|c: char| c.is_ascii_digit());
+        let rest = match rest.strip_prefix(".hwaddr") {
+            Some(r) => r.trim_start(),
+            None => continue,
+        };
+        let rest = match rest.strip_prefix('=') {
+            Some(r) => r.trim(),
+            None => continue,
+        };
+        if !rest.is_empty() {
+            macs.push(rest.to_ascii_lowercase());
+        }
+    }
+    macs
 }
 
 /// Restore a Proxmox LXC container from a vzdump archive using pct restore
@@ -5011,4 +5128,63 @@ pub fn proxmox_lxc_conf_to_config(conf: &str) -> serde_json::Value {
         "ostype": ostype,
         "source": "proxmox"
     })
+}
+
+#[cfg(test)]
+mod restore_warning_tests {
+    use super::read_hwaddrs;
+    use std::io::Write;
+
+    fn write_tmp(content: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "wolfstack-hwaddr-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        path
+    }
+
+    #[test]
+    fn extracts_every_lxc_net_hwaddr_line() {
+        let p = write_tmp(
+            "lxc.uts.name = foo\n\
+             lxc.net.0.type = veth\n\
+             lxc.net.0.hwaddr = 00:16:3e:aa:bb:cc\n\
+             lxc.net.1.hwaddr=00:16:3e:DD:EE:FF\n\
+             # commented = 11:22:33:44:55:66\n\
+             lxc.net.2.type = veth\n",
+        );
+        let mut macs = read_hwaddrs(p.to_str().unwrap());
+        macs.sort();
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(
+            macs,
+            vec!["00:16:3e:aa:bb:cc".to_string(), "00:16:3e:dd:ee:ff".to_string()]
+        );
+    }
+
+    #[test]
+    fn returns_empty_for_missing_or_macless_config() {
+        // Nonexistent path → empty.
+        assert!(read_hwaddrs("/nonexistent/wolfstack/test/config").is_empty());
+        // Config without any hwaddr lines → empty.
+        let p = write_tmp("lxc.uts.name = bar\nlxc.net.0.type = veth\n");
+        let macs = read_hwaddrs(p.to_str().unwrap());
+        let _ = std::fs::remove_file(&p);
+        assert!(macs.is_empty());
+    }
+
+    #[test]
+    fn does_not_confuse_other_keys_containing_hwaddr_substring() {
+        // Hypothetical comment line + look-alike key. Neither should match.
+        let p = write_tmp(
+            "# lxc.net.0.hwaddr = ff:ff:ff:ff:ff:ff\n\
+             lxc.net.x.hwaddr = aa:bb:cc:dd:ee:ff\n",
+        );
+        let macs = read_hwaddrs(p.to_str().unwrap());
+        let _ = std::fs::remove_file(&p);
+        assert!(macs.is_empty(), "matched a non-numeric net index: {:?}", macs);
+    }
 }
