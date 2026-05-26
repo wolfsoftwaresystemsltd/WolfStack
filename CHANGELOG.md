@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.7.11: per-node Upgrade button now fans out across the cluster via the same engine as 'Upgrade All'** _(2026-05-26 — [`c76d467`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c76d467224e327a6f23160c891edfd0806446bb4))_
 - **v24.7.10: upgrader — survive the console tab closing before the post-install restart fires** _(2026-05-25 — [`bb6d47a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bb6d47ac199ca8433d092cd4f79792985f608e73))_
 - **v24.7.9: WolfRouter — startup self-heal from rolling backup when config.json is corrupt** _(2026-05-25 — [`3a9891f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3a9891fe52a2df1b0a64e3f999c79c13eb8fa986))_
 - **v24.7.8: WolfRouter — fix torn-write that corrupted config.json on all nodes** _(2026-05-25 — [`fd9dbde`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/fd9dbde75465f0930ecd0258e00d664c850c9414))_
