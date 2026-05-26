@@ -8117,6 +8117,179 @@ pub async fn wolfnet_used_ips_endpoint(req: HttpRequest, state: web::Data<AppSta
     HttpResponse::Ok().json(ips)
 }
 
+/// POST /api/wolfnet/routes/announce — accept a route push from a peer.
+///
+/// Body shape: `{ "host_ip": "10.10.10.171", "routes": { "10.10.10.100":
+/// "10.10.10.171", ... } }`. Every value MUST equal `host_ip` (a peer
+/// can only announce routes that point at itself — it can't claim to
+/// own a container that lives on someone else's node).
+///
+/// This is the PUSH side of route propagation, redundant with the
+/// pull-based poll loop in `agent::poll_remote_nodes`. The pull path
+/// can silently fail (TLS mismatch, cluster-state staleness, peer's
+/// /api/agent/status not returning a parseable StatusReport) and leave
+/// receivers without container routes for hours. The push side adds
+/// an independent path: even if mouse can't successfully poll dreamer,
+/// dreamer announcing its routes TO mouse still keeps the routing
+/// table converged. dreamer was reporting `10.10.10.100→10.10.10.171`
+/// locally but mouse's `routes.json` had no dreamer entries — exactly
+/// the failure mode this endpoint defends against.
+#[derive(Deserialize)]
+pub struct WolfnetRouteAnnounce {
+    pub host_ip: String,
+    pub routes: std::collections::HashMap<String, String>,
+}
+
+pub async fn wolfnet_routes_announce(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<WolfnetRouteAnnounce>,
+) -> HttpResponse {
+    // Cluster-secret only — this is an inter-node call and must never
+    // be reachable via session/UI auth.
+    if let Err(resp) = require_cluster_auth(&req, &state) { return resp; }
+
+    let announce = body.into_inner();
+    // Anti-spoof: the host_ip and every route value must be IPv4, and
+    // every route value MUST equal host_ip. A peer that tried to
+    // announce `10.10.10.55: 10.10.10.171` would be claiming to own a
+    // container that lives on dreamer — refuse it.
+    if announce.host_ip.parse::<std::net::Ipv4Addr>().is_err() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "host_ip is not a valid IPv4 address"
+        }));
+    }
+    let mut accepted = std::collections::HashMap::new();
+    for (container_ip, claimed_host) in announce.routes.iter() {
+        if container_ip.parse::<std::net::Ipv4Addr>().is_err() {
+            continue;
+        }
+        if claimed_host != &announce.host_ip {
+            tracing::warn!(
+                "wolfnet_routes_announce: refusing route {} → {} (host_ip is {}); peer cannot announce routes pointing elsewhere",
+                container_ip, claimed_host, announce.host_ip
+            );
+            continue;
+        }
+        if container_ip == &announce.host_ip {
+            // Host's own IP — not a container route. Skip silently.
+            continue;
+        }
+        accepted.insert(container_ip.clone(), claimed_host.clone());
+    }
+
+    // First sweep stale entries pointing at this host from this peer
+    // (so a container that moved off the peer doesn't linger). Then
+    // merge the fresh set. Atomic w.r.t. the WOLFNET_ROUTES lock so
+    // wolfnet daemon sees a consistent state on the SIGHUP.
+    let host_ip = announce.host_ip.clone();
+    let cache_changed = tokio::task::spawn_blocking(move || {
+        use std::collections::HashMap;
+        let mut cache = containers::WOLFNET_ROUTES.lock().unwrap();
+        let before = cache.clone();
+        // Drop entries pointing at this host that aren't in the fresh
+        // announce — they've been deleted on the source.
+        cache.retain(|k, v| {
+            if v == &host_ip { accepted.contains_key(k) } else { true }
+        });
+        for (k, v) in &accepted {
+            cache.insert(k.clone(), v.clone());
+        }
+        let changed = *cache != before;
+        if changed {
+            // Drop the lock before flush_routes_to_disk reacquires it.
+            let snapshot: HashMap<String, String> = cache.clone();
+            drop(cache);
+            containers::flush_routes_to_disk(&snapshot);
+        }
+        changed
+    }).await.unwrap_or(false);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "accepted": true,
+        "host_ip": announce.host_ip,
+        "changed": cache_changed
+    }))
+}
+
+/// Push the local WOLFNET_ROUTES (entries that point at THIS host) to
+/// every online wolfstack peer in the cluster. Fire-and-forget; each
+/// peer can fail independently without holding up the others.
+///
+/// Runs on a 30s tick from `main.rs`. Symmetric to `poll_remote_nodes`
+/// — they pull, this pushes. The combination is robust against either
+/// path failing on its own.
+pub async fn announce_wolfnet_routes_to_peers(
+    cluster: std::sync::Arc<crate::agent::ClusterState>,
+    cluster_secret: String,
+) {
+    // Snapshot peers + local routes under their respective locks, then
+    // release both before any HTTP work.
+    let peers: Vec<(String, u16)> = {
+        let nodes = cluster.nodes.read().unwrap();
+        nodes
+            .values()
+            .filter(|n| !n.is_self)
+            .filter(|n| n.node_type == "wolfstack")
+            .filter(|n| n.online)
+            .map(|n| (n.address.clone(), n.port))
+            .collect()
+    };
+    if peers.is_empty() {
+        return;
+    }
+
+    // Build the announce payload: host_ip = our wolfnet0 IP, routes =
+    // every entry in WOLFNET_ROUTES that points at us (our local
+    // containers/VMs). Don't include routes pointing at OTHER hosts —
+    // each host announces its own routes.
+    let local_ips = containers::wolfnet_used_ips_cached();
+    let host_ip = match local_ips.first() {
+        Some(ip) if !ip.is_empty() => ip.clone(),
+        _ => {
+            // No wolfnet0 IP yet — nothing to announce. Skip silently;
+            // the next tick will retry once wolfnet is up.
+            return;
+        }
+    };
+    let local_routes: std::collections::HashMap<String, String> = {
+        let cache = containers::WOLFNET_ROUTES.lock().unwrap();
+        cache
+            .iter()
+            .filter(|(_, v)| *v == &host_ip)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    };
+
+    let payload = serde_json::json!({
+        "host_ip": host_ip,
+        "routes": local_routes,
+    });
+    let client = API_HTTP_CLIENT.clone();
+    for (address, port) in peers {
+        let urls = build_node_urls(&address, port, "/api/wolfnet/routes/announce");
+        for url in &urls {
+            let r = client
+                .post(url)
+                .timeout(std::time::Duration::from_secs(5))
+                .header("X-WolfStack-Secret", &cluster_secret)
+                .json(&payload)
+                .send()
+                .await;
+            match r {
+                Ok(resp) => {
+                    let success = resp.status().is_success();
+                    let _ = resp.bytes().await;
+                    if success {
+                        break;
+                    }
+                }
+                Err(_) => { /* try next URL in the fallback chain */ }
+            }
+        }
+    }
+}
+
 /// GET /api/wolfnet/routes — returns the full WOLFNET_ROUTES cache + local used IPs for debugging
 pub async fn wolfnet_routes_debug(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
@@ -31547,6 +31720,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/agent/wolfnet-routes", web::post().to(agent_set_wolfnet_routes))
         .route("/api/wolfnet/used-ips", web::get().to(wolfnet_used_ips_endpoint))
         .route("/api/wolfnet/routes", web::get().to(wolfnet_routes_debug))
+        .route("/api/wolfnet/routes/announce", web::post().to(wolfnet_routes_announce))
         // Geolocation proxy (ip-api.com is HTTP-only, browsers block mixed content on HTTPS pages)
         .route("/api/geolocate", web::get().to(geolocate))
         .route("/api/traceroute", web::get().to(traceroute_handler))

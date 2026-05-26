@@ -151,6 +151,15 @@ pub fn ensure_firewalld_trusted(ifaces: &[&str]) {
 
 // ─── WolfNet Route Cache ───
 // Keep container→host route map in memory; only flush to disk when it changes.
+//
+// Signalled whenever `flush_routes_to_disk` writes the map to disk —
+// i.e. only on real change. The push task in main.rs awaits this so
+// peers learn about our local routes the moment they change, with no
+// polling cost during steady-state. Coalesced: multiple notify_one
+// calls before the consumer wakes collapse to a single notification.
+pub static WOLFNET_ROUTES_CHANGED: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
+
 pub static WOLFNET_ROUTES: std::sync::LazyLock<Mutex<std::collections::HashMap<String, String>>> =
     std::sync::LazyLock::new(|| {
         // Seed from existing routes file on startup
@@ -236,7 +245,9 @@ pub fn flush_routes_to_disk(routes: &std::collections::HashMap<String, String>) 
         Ok(json) => {
             match std::fs::write(routes_path, &json) {
                 Ok(_) => {
-
+                    // Wake the push task — peers should learn about
+                    // this route change immediately, not on a poll.
+                    WOLFNET_ROUTES_CHANGED.notify_one();
                     // Signal WolfNet to reload (SIGHUP)
                     if let Ok(output) = Command::new("pidof").arg("wolfnet").output() {
                         let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();

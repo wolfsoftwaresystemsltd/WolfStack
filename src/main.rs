@@ -1145,6 +1145,55 @@ async fn main() -> std::io::Result<()> {
         // changes if the user doesn't confirm within the safe-mode window.
         crate::networking::router::spawn_rollback_watcher(app_state.router.clone());
 
+        // WolfNet route push — event-driven announcement of our local
+        // container routes to every cluster peer. Wakes on the
+        // `WOLFNET_ROUTES_CHANGED` Notify (signalled by
+        // `flush_routes_to_disk` when the route map really changes),
+        // plus a 5-minute heartbeat as a safety net for peers that
+        // came online during a quiet period or missed an earlier push
+        // due to transient network. No polling cost during steady-
+        // state — if nothing changes and all peers heard the last
+        // heartbeat, the next push is 5 minutes away.
+        //
+        // Symmetric to the pull-based `poll_remote_nodes` path: both
+        // populate the same WOLFNET_ROUTES table on the receiver, and
+        // either path failing on its own doesn't take down cross-node
+        // container reachability.
+        //
+        // Why both: the pull path can silently fail in ways the
+        // receiver can't recover from on its own (TLS-trust mismatch
+        // on the peer's API, cluster state missing the peer entirely,
+        // a peer's /api/agent/status returning non-StatusReport JSON).
+        // dreamer 2026-05-26: routes.json on dreamer correctly
+        // contained `10.10.10.100→10.10.10.171` but mouse's
+        // routes.json had ZERO dreamer entries, so mouse couldn't
+        // reply to container traffic from regions9 — the host-to-host
+        // wolfnet tunnel was fine but mouse had no `find_route` hit
+        // for the container's IP. Push closes the gap from the SOURCE
+        // side, so the sender doesn't need the receiver's poll path
+        // to be healthy.
+        let cluster_for_push = app_state.cluster.clone();
+        let secret_for_push = cluster_secret.clone();
+        tokio::spawn(async move {
+            // Initial push so peers learn our routes on boot without
+            // waiting for the heartbeat or for a route change.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            crate::api::announce_wolfnet_routes_to_peers(
+                cluster_for_push.clone(),
+                secret_for_push.clone(),
+            ).await;
+            loop {
+                tokio::select! {
+                    _ = crate::containers::WOLFNET_ROUTES_CHANGED.notified() => {}
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {}
+                }
+                crate::api::announce_wolfnet_routes_to_peers(
+                    cluster_for_push.clone(),
+                    secret_for_push.clone(),
+                ).await;
+            }
+        });
+
         // LXC bridge self-heal — re-affirm lxcbr0 + its iptables rules
         // every 60s. External events (Docker daemon restart, NetworkManager
         // reload, package upgrade, admin `iptables -F`, unattended-upgrades
