@@ -1226,8 +1226,9 @@ pub fn wolfnet_used_ips() -> Vec<String> {
 /// Sync container routes from all WolfNet peers.
 /// Reads /etc/wolfnet/config.toml to discover peers, calls each peer's
 /// WolfStack API for their container IPs, builds routes.json, and
-/// signals WolfNet to reload. Works without WolfStack cluster membership.
-#[allow(dead_code)]
+/// signals WolfNet to reload. This is the ground-truth mechanism —
+/// config.toml defines exactly which nodes share this WolfNet mesh,
+/// bypassing the cluster_name matching that can get out of sync.
 pub async fn sync_wolfnet_peer_routes() {
     // Load cluster secret for authenticating API requests
     let cluster_secret = crate::auth::load_cluster_secret();

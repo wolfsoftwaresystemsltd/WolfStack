@@ -8226,35 +8226,12 @@ pub async fn announce_wolfnet_routes_to_peers(
     cluster: std::sync::Arc<crate::agent::ClusterState>,
     cluster_secret: String,
 ) {
-    // Push to every online wolfstack peer in OUR cluster. Cluster-scoped
-    // by design — wolfnet routes don't propagate cross-cluster even
-    // when a wolfnet mesh happens to span clusters.
-    let self_cluster = cluster.get_self_cluster_name();
-    let peers: Vec<(String, u16)> = {
-        let nodes = cluster.nodes.read().unwrap();
-        nodes
-            .values()
-            .filter(|n| !n.is_self)
-            .filter(|n| n.node_type == "wolfstack")
-            .filter(|n| n.online)
-            .filter(|n| n.cluster_name.as_deref().unwrap_or("WolfStack") == self_cluster)
-            .map(|n| (n.address.clone(), n.port))
-            .collect()
-    };
-    if peers.is_empty() {
-        return;
-    }
-
-    // Build the announce payload: host_ip = our wolfnet0 IP, routes =
-    // every entry in WOLFNET_ROUTES that points at us (our local
-    // containers/VMs). Don't include routes pointing at OTHER hosts —
-    // each host announces its own routes.
+    // Build the announce payload first — shared by both discovery paths.
     let local_ips = containers::wolfnet_used_ips_cached();
     let host_ip = match local_ips.first() {
         Some(ip) if !ip.is_empty() => ip.clone(),
         _ => {
-            // No wolfnet0 IP yet — nothing to announce. Skip silently;
-            // the next tick will retry once wolfnet is up.
+            // No wolfnet0 IP yet — nothing to announce.
             return;
         }
     };
@@ -8271,9 +8248,27 @@ pub async fn announce_wolfnet_routes_to_peers(
         "host_ip": host_ip,
         "routes": local_routes,
     });
+
+    // ── Path 1: Cluster node list (existing mechanism) ──
+    // Push to every online wolfstack peer in OUR cluster.
+    let self_cluster = cluster.get_self_cluster_name();
+    let cluster_peers: Vec<(String, u16)> = {
+        let nodes = cluster.nodes.read().unwrap();
+        nodes
+            .values()
+            .filter(|n| !n.is_self)
+            .filter(|n| n.node_type == "wolfstack")
+            .filter(|n| n.online)
+            .filter(|n| n.cluster_name.as_deref().unwrap_or("WolfStack") == self_cluster)
+            .map(|n| (n.address.clone(), n.port))
+            .collect()
+    };
+
     let client = API_HTTP_CLIENT.clone();
-    for (address, port) in peers {
-        let urls = build_node_urls(&address, port, "/api/wolfnet/routes/announce");
+    let mut pushed_hosts: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (address, port) in &cluster_peers {
+        pushed_hosts.insert(address.clone());
+        let urls = build_node_urls(address, *port, "/api/wolfnet/routes/announce");
         for url in &urls {
             let r = client
                 .post(url)
@@ -8291,6 +8286,61 @@ pub async fn announce_wolfnet_routes_to_peers(
                     }
                 }
                 Err(_) => { /* try next URL in the fallback chain */ }
+            }
+        }
+    }
+
+    // ── Path 2: WolfNet config.toml peers (ground-truth) ──
+    // The config.toml defines exactly which nodes share this WolfNet
+    // mesh. Push to any peers not already covered by the cluster list.
+    // This is the primary mechanism — it works even when the cluster
+    // node list has stale cluster_names or the peer is temporarily
+    // marked offline.
+    if let Ok(config_str) = std::fs::read_to_string("/etc/wolfnet/config.toml") {
+        if let Ok(config) = config_str.parse::<toml::Value>() {
+            if let Some(peers) = config.get("peers").and_then(|p| p.as_array()) {
+                for peer in peers {
+                    let endpoint = match peer.get("endpoint").and_then(|v| v.as_str()) {
+                        Some(e) => e,
+                        None => continue,
+                    };
+                    // endpoint is "hostname:port" — extract hostname
+                    let hostname = endpoint.split(':').next().unwrap_or(endpoint);
+                    if hostname.is_empty() { continue; }
+                    // Skip if we already pushed to this host via Path 1
+                    if pushed_hosts.contains(hostname) { continue; }
+                    // Also check against wolfnet IP — Path 1 might have
+                    // used a numeric address while config has a hostname
+                    let allowed_ip = peer.get("allowed_ip").and_then(|v| v.as_str()).unwrap_or("");
+                    if pushed_hosts.contains(allowed_ip) { continue; }
+                    pushed_hosts.insert(hostname.to_string());
+
+                    // Try HTTPS on default port, then HTTP, then via wolfnet IP
+                    let urls = vec![
+                        format!("https://{}:8553/api/wolfnet/routes/announce", hostname),
+                        format!("http://{}:8554/api/wolfnet/routes/announce", hostname),
+                        format!("http://{}:8554/api/wolfnet/routes/announce", allowed_ip),
+                    ];
+                    for url in &urls {
+                        let r = client
+                            .post(url)
+                            .timeout(std::time::Duration::from_secs(5))
+                            .header("X-WolfStack-Secret", &cluster_secret)
+                            .json(&payload)
+                            .send()
+                            .await;
+                        match r {
+                            Ok(resp) => {
+                                let success = resp.status().is_success();
+                                let _ = resp.bytes().await;
+                                if success {
+                                    break;
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
             }
         }
     }

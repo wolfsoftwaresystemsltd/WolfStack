@@ -1228,6 +1228,23 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
+        // WolfNet config.toml peer route sync — pull container routes
+        // from peers listed in /etc/wolfnet/config.toml. This is the
+        // ground-truth pull mechanism: config.toml defines exactly which
+        // nodes share this WolfNet mesh, so it doesn't depend on the
+        // cluster_name matching in poll_remote_nodes.
+        tokio::spawn(async {
+            // Wait for wolfnet to be up and initial push to fire
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            containers::sync_wolfnet_peer_routes().await;
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            tick.tick().await; // skip immediate
+            loop {
+                tick.tick().await;
+                containers::sync_wolfnet_peer_routes().await;
+            }
+        });
+
         // LXC bridge self-heal — re-affirm lxcbr0 + its iptables rules
         // every 60s. External events (Docker daemon restart, NetworkManager
         // reload, package upgrade, admin `iptables -F`, unattended-upgrades
