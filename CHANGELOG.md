@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.7.20: poll + route-push senders re-read cluster_secret from disk every iteration** _(2026-05-26 — [`4ec95bd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4ec95bd8f9c1e3fbcea6a64a790d6a94ffc29804))_
 - **v24.7.19: ensure_lxc_bridge — also self-heal missing per-container /32 host routes** _(2026-05-26 — [`3300bfc`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3300bfc7de538e325d6d9aeff5abb86a1f5a2a13))_
 - **v24.7.18: LXC restore — warn loudly about MAC duplication, naming local conflicts when detected** _(2026-05-26 — [`f5e2737`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f5e2737869c6181816256e5876045e536f7e9374))_
 - **v24.7.17: WolfNet routes — event-driven push so peers learn container routes when the pull silently fails** _(2026-05-26 — [`3367caf`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3367cafded63a24b94da819c4b0fa3edecd5abbd))_
