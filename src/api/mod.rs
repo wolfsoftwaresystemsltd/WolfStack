@@ -13274,6 +13274,39 @@ pub async fn antivirus_on_access(
     }))
 }
 
+/// POST /api/antivirus/clamav/repair — run the ClamAV signature-DB
+/// repair flow (ensure clamav user, run freshclam, verify DB).
+/// Synchronous because the work is short (seconds, not minutes) and
+/// the operator wants to see the result immediately. piranhaSponsor's
+/// case (2026-05-27): scheduled-scan auto-recovery silently failed and
+/// the operator had no in-UI way to invoke the heal manually or see
+/// WHY it kept failing.
+pub async fn antivirus_clamav_repair(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    // Repair shells out to systemctl + freshclam; offload off the
+    // tokio executor so we don't block the runtime on the (typically
+    // 5-30 second) freshclam network fetch.
+    let result = web::block(crate::antivirus::repair_clamav_signatures)
+        .await
+        .map_err(|e| format!("repair thread join failed: {}", e));
+    match result {
+        Ok(r) => HttpResponse::Ok().json(serde_json::json!({
+            "ok": r.signatures_present_after,
+            "signatures_present_after": r.signatures_present_after,
+            "freshclam_ok": r.freshclam_ok,
+            "healed_user": r.healed_user,
+            "lines": r.lines,
+            "error": r.error,
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "ok": false,
+            "error": e,
+        })),
+    }
+}
+
 /// POST /api/antivirus/scan — fire a full scan in a background thread.
 /// Returns immediately with 202 + the scan state so the UI can poll
 /// /api/antivirus/status for progress.
@@ -31649,6 +31682,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/antivirus/install-log", web::get().to(antivirus_install_log))
         .route("/api/antivirus/on-access", web::post().to(antivirus_on_access))
         .route("/api/antivirus/scan", web::post().to(antivirus_scan_start))
+        .route("/api/antivirus/clamav/repair", web::post().to(antivirus_clamav_repair))
         .route("/api/antivirus/config", web::get().to(antivirus_config_get))
         .route("/api/antivirus/config", web::put().to(antivirus_config_set))
         .route("/api/antivirus/findings", web::get().to(antivirus_findings))

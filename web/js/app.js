@@ -18748,6 +18748,51 @@ async function nodeAntivirusScan() {
     }
 }
 
+// Run the ClamAV signature-DB repair flow on this node. Surfaces the
+// step-by-step log + final outcome in a modal so the operator can see
+// exactly what happened — fixes piranhaSponsor's "no way to fix it"
+// case where the auto-recovery on scheduled scans was silently failing
+// with no visible reason.
+async function nodeAntivirusRepairClamAV() {
+    if (!await wolfConfirm(
+        'Re-seed the ClamAV signature database on this node?\n\n' +
+        'Runs `freshclam` to download the main / daily / bytecode signature files. ' +
+        'Typically takes 5-30 seconds depending on your network. Needs outbound HTTPS to ' +
+        'database.clamav.net — if you have block-outbound.sh active, allow updates first.',
+        'Repair ClamAV'
+    )) return;
+    const btn = document.getElementById('node-av-repair-btn');
+    const status = document.getElementById('node-av-action-status');
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+    if (status) status.innerHTML = '<span style="color:#fbbf24;">Running freshclam…</span>';
+    try {
+        const r = await fetch(apiUrl('/api/antivirus/clamav/repair'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const d = await r.json();
+        const lines = Array.isArray(d.lines) ? d.lines : [];
+        const log = lines.map(l => vlanEsc(l)).join('\n');
+        const okBanner = d.ok
+            ? '<div style="color:#22c55e;font-weight:600;margin-bottom:8px;">✓ ClamAV signature DB repaired</div>'
+            : `<div style="color:#ef4444;font-weight:600;margin-bottom:8px;">✗ Repair failed: ${vlanEsc(d.error || 'unknown error')}</div>`;
+        const body = `${okBanner}<pre style="background:var(--bg-input);padding:10px;border-radius:6px;font-size:12px;line-height:1.5;white-space:pre-wrap;max-height:50vh;overflow:auto;">${log || '(no log lines returned)'}</pre>`;
+        showModal(body, d.ok ? 'ClamAV Repair Complete' : 'ClamAV Repair Failed');
+        if (status) {
+            status.innerHTML = d.ok
+                ? '<span style="color:#22c55e;">✓ Signatures seeded — try the scan again</span>'
+                : `<span style="color:#ef4444;">${vlanEsc(d.error || 'repair failed')}</span>`;
+        }
+        if (d.ok) showToast('ClamAV signatures refreshed', 'success');
+        else showToast(`Repair failed: ${d.error || 'see log'}`, 'error');
+        await loadNodeAntivirus();
+    } catch (e) {
+        if (status) status.innerHTML = `<span style="color:#ef4444;">${vlanEsc(e.message || e)}</span>`;
+        showToast(`Repair failed: ${e.message || e}`, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+    }
+}
+
 async function nodeAntivirusSaveConfig() {
     const cfg = {
         enabled:          document.getElementById('node-av-enabled').value === 'true',

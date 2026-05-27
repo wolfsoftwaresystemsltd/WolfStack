@@ -1133,6 +1133,31 @@ pub fn apply_on_access(state: std::sync::Arc<AntivirusState>, target: bool) {
             state.push_install_line("==> clamd + clamonacc already installed — skipping package install.".into());
         }
 
+        // 1b. Pre-seed the signature DB if /var/lib/clamav is empty.
+        //     piranhaSponsor 2026-05-27: enabling on-access used to
+        //     fail with the vague "clamonacc failed to stay running"
+        //     error because step 3 below restarts clamd, clamd
+        //     refuses to start without signatures, then clamonacc
+        //     dies because clamd is dead. Seed first so the daemons
+        //     actually come up.
+        if !clamav_signatures_present() {
+            state.push_install_line(
+                "==> /var/lib/clamav is empty — running ClamAV repair (freshclam) before starting clamd".into());
+            let rr = repair_clamav_signatures();
+            for ln in &rr.lines {
+                state.push_install_line(format!("    {}", ln));
+            }
+            if !rr.signatures_present_after {
+                let err = format!(
+                    "cannot start clamd without signatures: {}",
+                    rr.error.unwrap_or_else(|| "freshclam did not produce a usable DB".into()),
+                );
+                state.push_install_line(format!("==> ERROR: {}", err));
+                finalize_install(&state, false, Some(err));
+                return;
+            }
+        }
+
         // 2. Write managed clamd.conf block.
         state.push_install_line(format!("==> Injecting managed block into {}", prof.clamd_conf));
         if let Err(e) = install_clamd_conf_block(prof.clamd_conf) {
@@ -2544,64 +2569,201 @@ pub struct ScanRunSummary {
     pub errors: Vec<String>,
 }
 
-/// Detect the "ClamAV signature DB is missing" failure mode from a
-/// `run_clamav_scan` error string and attempt to recover by running
-/// `freshclam` once. Returns `true` if freshclam succeeded and the
-/// caller should retry the scan.
-///
-/// The error we recognise is clamscan exit code 2 with stderr
-/// containing `LibClamAV Error: cli_loaddbdir: No supported database
-/// files found in /var/lib/clamav` — which happens when the clamav
-/// package is installed but `freshclam` has never run (or its service
-/// is disabled), so /var/lib/clamav has no .cvd / .cld signatures.
-///
-/// On Debian/Ubuntu the `clamav-freshclam` daemon holds an exclusive
-/// lock on the signature DB, so we stop it before the one-shot run
-/// and start it again afterwards. If it wasn't running at all we
-/// enable it so future scans don't hit the same problem.
-fn try_recover_clamav_signatures(state: &AntivirusState, err: &str) -> bool {
-    let lower = err.to_lowercase();
-    let missing_db = lower.contains("no supported database files")
-        || lower.contains("cli_loaddbdir");
-    if !missing_db { return false; }
-    if which("freshclam").is_none() { return false; }
+/// Outcome of `repair_clamav_signatures()` — a step-by-step record of
+/// what was attempted, plus the final state so the caller can decide
+/// whether to retry / surface to the UI / abort.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ClamavRepairResult {
+    /// True if /var/lib/clamav contains a usable signature DB after
+    /// the repair (main.cvd / main.cld / equivalent).
+    pub signatures_present_after: bool,
+    /// True if freshclam exited 0.
+    pub freshclam_ok: bool,
+    /// Did we have to create the clamav user during this run?
+    pub healed_user: bool,
+    /// Was the clamav-freshclam.service running before we started
+    /// (we stop it for the one-shot freshclam to release the DB lock).
+    pub freshclam_service_was_active: bool,
+    /// Per-step log lines suitable for surfacing into the UI.
+    pub lines: Vec<String>,
+    /// Final human-readable failure reason. `None` on success.
+    pub error: Option<String>,
+}
 
+/// Heal a "missing ClamAV signature DB" on this host: ensure the
+/// `clamav` user exists, run `freshclam` once to seed signatures,
+/// and re-enable the freshclam daemon for future updates.
+///
+/// piranhaSponsor reported (2026-05-27) that this used to be invisible:
+/// the old `try_recover_clamav_signatures` returned a bare `bool` and
+/// swallowed every failure reason, so when freshclam exited non-zero
+/// the operator saw only the original "No supported database files"
+/// error from the scan retry with zero clue WHY recovery didn't fire.
+///
+/// This now returns a structured `ClamavRepairResult` so callers can
+/// surface the actual failure (freshclam missing / network blocked /
+/// /var/lib/clamav permissions wrong / clamav user creation failed)
+/// into the scan error AND the Repair-button UI.
+pub fn repair_clamav_signatures() -> ClamavRepairResult {
+    let mut r = ClamavRepairResult::default();
+
+    if which("freshclam").is_none() {
+        r.error = Some(
+            "freshclam not installed — install the `clamav-freshclam` (Debian) or \
+             `clamav-update` (RHEL) package, or re-run the WolfStack ClamAV installer".into(),
+        );
+        r.lines.push(format!("✗ {}", r.error.as_deref().unwrap_or("")));
+        return r;
+    }
+    r.lines.push("→ freshclam binary present".into());
+
+    // freshclam drops privileges to the `clamav` user on Debian. If a
+    // partial package install left the user missing, freshclam exits
+    // before writing any signature. Heal first.
+    let (distro, id_like) = parse_os_release();
+    if distro_family_with_idlike(&distro, &id_like) == "debian" {
+        if clamav_user_present() {
+            r.lines.push("→ `clamav` user present".into());
+        } else {
+            r.lines.push("→ `clamav` user missing — creating…".into());
+            let healed = ensure_clamav_user_silent();
+            r.healed_user = healed;
+            if !healed {
+                r.error = Some(
+                    "could not create the `clamav` system user (adduser + useradd both failed). \
+                     Hand-fix with: `adduser --system --group clamav` then click Repair again".into(),
+                );
+                r.lines.push(format!("✗ {}", r.error.as_deref().unwrap_or("")));
+                return r;
+            }
+            r.lines.push("→ `clamav` user/group created".into());
+        }
+    }
+
+    // freshclam needs an exclusive lock on /var/lib/clamav. If the
+    // freshclam daemon is currently running it holds that lock, so we
+    // stop it, run the one-shot, and start it again. If it wasn't
+    // running we leave it that way until we confirm freshclam works,
+    // then enable it so future updates run automatically.
+    r.freshclam_service_was_active = systemd_is_active("clamav-freshclam.service")
+        || systemd_is_active("clamav-freshclam-daemon.service");
+    if r.freshclam_service_was_active {
+        r.lines.push("→ stopping clamav-freshclam.service to release DB lock".into());
+        let _ = Command::new("systemctl")
+            .args(["stop", "clamav-freshclam.service"]).status();
+    }
+
+    r.lines.push("→ running `freshclam`…".into());
+    let fc_out = Command::new("freshclam")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output();
+    match fc_out {
+        Ok(o) => {
+            r.freshclam_ok = o.status.success();
+            // Tail the combined output (cap to 800 chars) so failures
+            // like network errors / mirror unreachable surface in the
+            // UI without overwhelming the operator with the full log.
+            let mut combined = String::new();
+            combined.push_str(&String::from_utf8_lossy(&o.stdout));
+            combined.push_str(&String::from_utf8_lossy(&o.stderr));
+            let tail = combined.lines()
+                .rev()
+                .take(8)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !tail.is_empty() {
+                r.lines.push(format!("  freshclam output (last 8 lines):\n{}", tail));
+            }
+            if !r.freshclam_ok {
+                let code = o.status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into());
+                r.error = Some(format!(
+                    "freshclam exited with code {} — common causes: outbound HTTP/HTTPS blocked \
+                     to db.local.clamav.net / database.clamav.net (check your firewall / \
+                     block-outbound rules), DNS failing, or /var/lib/clamav permissions wrong",
+                    code,
+                ));
+            }
+        }
+        Err(e) => {
+            r.error = Some(format!("could not exec freshclam: {}", e));
+        }
+    }
+
+    // Restore service state.
+    if r.freshclam_service_was_active {
+        r.lines.push("→ restarting clamav-freshclam.service".into());
+        let _ = Command::new("systemctl")
+            .args(["start", "clamav-freshclam.service"]).status();
+    } else if r.freshclam_ok {
+        r.lines.push("→ enabling clamav-freshclam.service for future auto-updates".into());
+        let _ = Command::new("systemctl")
+            .args(["enable", "--now", "clamav-freshclam.service"]).status();
+    }
+
+    r.signatures_present_after = clamav_signatures_present();
+    if r.signatures_present_after {
+        r.lines.push("✓ /var/lib/clamav now contains signature files".into());
+        // Success — clear any earlier error left by a non-fatal step.
+        if r.freshclam_ok {
+            r.error = None;
+        }
+    } else if r.error.is_none() {
+        r.error = Some(
+            "freshclam reported success but /var/lib/clamav still has no signature files — \
+             check `journalctl -u clamav-freshclam` and /etc/clamav/freshclam.conf".into(),
+        );
+    }
+    if let Some(ref e) = r.error {
+        r.lines.push(format!("✗ {}", e));
+    }
+    r
+}
+
+/// True when /var/lib/clamav contains at least one usable signature DB
+/// (main.cvd / main.cld / main.cud). ClamAV needs `main` to start at
+/// all — daily / bytecode are optional updates.
+fn clamav_signatures_present() -> bool {
+    let dir = std::path::Path::new("/var/lib/clamav");
+    let rd = match std::fs::read_dir(dir) { Ok(r) => r, Err(_) => return false };
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        let s = name.to_string_lossy();
+        if s.starts_with("main.")
+            && (s.ends_with(".cvd") || s.ends_with(".cld") || s.ends_with(".cud"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when the scan error string we got from `run_clamav_scan`
+/// matches the "missing signature DB" signature. Used both at scan-
+/// retry time and by the Repair button to decide whether the repair
+/// is the right tool for the surfaced error.
+pub fn is_clamav_missing_db_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("no supported database files")
+        || lower.contains("cli_loaddbdir")
+}
+
+/// Old `try_recover_clamav_signatures` wrapper, preserved for the scan
+/// retry path but now returning the structured result so callers can
+/// surface the failure reason. Returns `Some(result)` if the error
+/// matched the missing-DB signature and we attempted recovery;
+/// `None` otherwise (caller doesn't need to retry).
+fn try_recover_clamav_signatures(state: &AntivirusState, err: &str) -> Option<ClamavRepairResult> {
+    if !is_clamav_missing_db_error(err) { return None; }
     {
         let mut s = state.scan_state.write().unwrap();
         s.progress_message =
             "ClamAV signature DB missing — running freshclam to recover…".into();
     }
-
-    // freshclam drops privileges to the `clamav` user (set via
-    // `DatabaseOwner clamav` in /etc/clamav/freshclam.conf on Debian).
-    // If a partial package install left the user missing, freshclam
-    // exits before writing any signature, and the next clamscan hits
-    // exactly the "No supported database files" error we just saw.
-    // Self-heal: recreate the user before retrying freshclam.
-    let (distro, id_like) = parse_os_release();
-    if distro_family_with_idlike(&distro, &id_like) == "debian" {
-        ensure_clamav_user_silent();
-    }
-
-    let svc_was_active = systemd_is_active("clamav-freshclam.service")
-        || systemd_is_active("clamav-freshclam-daemon.service");
-    if svc_was_active {
-        let _ = Command::new("systemctl")
-            .args(["stop", "clamav-freshclam.service"]).status();
-    }
-
-    let fc_ok = Command::new("freshclam").status()
-        .map(|s| s.success()).unwrap_or(false);
-
-    if svc_was_active {
-        let _ = Command::new("systemctl")
-            .args(["start", "clamav-freshclam.service"]).status();
-    } else if fc_ok {
-        let _ = Command::new("systemctl")
-            .args(["enable", "--now", "clamav-freshclam.service"]).status();
-    }
-
-    fc_ok
+    Some(repair_clamav_signatures())
 }
 
 /// Run every configured scanner sequentially. ClamAV first (longest
@@ -2645,15 +2807,23 @@ pub fn run_full_scan(state: &AntivirusState) -> ScanRunSummary {
         let mut scan_result = run_clamav_scan(state, &cfg);
         // Auto-recover from the "signature DB never seeded" failure
         // mode: freshclam has never run, /var/lib/clamav is empty, and
-        // every clamscan exits 2. Run freshclam once and retry.
+        // every clamscan exits 2. Run freshclam once and retry — and
+        // if the recovery itself fails, surface WHY into the scan
+        // error so the operator can see whether freshclam is missing,
+        // network-blocked, etc. (piranhaSponsor 2026-05-27).
+        let mut repair_note: Option<String> = None;
         if let Err(ref e) = scan_result {
-            if try_recover_clamav_signatures(state, e) {
-                {
-                    let mut s = state.scan_state.write().unwrap();
-                    s.progress_message =
-                        "Retrying ClamAV scan with refreshed signatures…".into();
+            if let Some(rr) = try_recover_clamav_signatures(state, e) {
+                if rr.signatures_present_after {
+                    {
+                        let mut s = state.scan_state.write().unwrap();
+                        s.progress_message =
+                            "Retrying ClamAV scan with refreshed signatures…".into();
+                    }
+                    scan_result = run_clamav_scan(state, &cfg);
+                } else if let Some(reason) = rr.error.clone() {
+                    repair_note = Some(format!("auto-repair failed: {}", reason));
                 }
-                scan_result = run_clamav_scan(state, &cfg);
             }
         }
         match scan_result {
@@ -2664,9 +2834,13 @@ pub fn run_full_scan(state: &AntivirusState) -> ScanRunSummary {
                 s.last_clamav_run = Some(now_rfc3339());
             }
             Err(e) => {
-                summary.errors.push(format!("clamav: {}", e));
+                let full = match repair_note {
+                    Some(note) => format!("clamav: {} | {}", e, note),
+                    None => format!("clamav: {}", e),
+                };
+                summary.errors.push(full.clone());
                 let mut s = state.scan_state.write().unwrap();
-                s.last_error = Some(format!("clamav: {}", e));
+                s.last_error = Some(full);
             }
         }
     }

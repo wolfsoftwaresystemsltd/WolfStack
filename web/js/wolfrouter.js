@@ -8359,6 +8359,68 @@
         // any node, not just the one the browser is connected to.
         const topoNodes = (wrState.topology?.nodes || [])
             .filter(n => n && n.node_id);
+
+        // Cross-cluster nodes used as subnet-route targets.
+        //
+        // Sponsor report 2026-05-27: a VPS that lives in a different
+        // cluster (after the WolfNet cluster merge) hosted a working
+        // subnet route — confirmed by manual test — but never appeared
+        // in the diagnostics rack because `wrState.topology.nodes` is
+        // scoped to the cluster being viewed. The route showed up
+        // (every local responder has it in its config) but with no
+        // row for the VPS, so the operator couldn't tell whether the
+        // VPS had installed it or not.
+        //
+        // Pull /api/nodes (admins see EVERY cluster) and add any node
+        // referenced as a route target whose id we don't already have
+        // in topology. Each extra node gets queried via the standard
+        // wrNodeUrl proxy path — the backend accepts proxy requests
+        // for any registered node regardless of cluster scope.
+        const knownIds = new Set(topoNodes.map(n => n.node_id));
+        const referencedIds = new Set(
+            (wrState.subnet_routes || [])
+                .filter(r => r && r.enabled && r.node_id)
+                .map(r => r.node_id)
+        );
+        const missingIds = [...referencedIds].filter(id => !knownIds.has(id));
+        if (missingIds.length) {
+            try {
+                const r = await fetch('/api/nodes');
+                if (r.ok) {
+                    const j = await r.json();
+                    const allNodes = (j.nodes || []);
+                    for (const id of missingIds) {
+                        const n = allNodes.find(x => x.id === id);
+                        const label = n
+                            ? (n.hostname || n.address || id.slice(0, 8))
+                            : id.slice(0, 8);
+                        topoNodes.push({
+                            node_id: id,
+                            node_name: label + ' (other cluster)',
+                        });
+                    }
+                } else {
+                    // /api/nodes failed — best-effort: still query the
+                    // missing IDs by id alone. wrNodeUrl works on id
+                    // and we'll surface "(other cluster)" without a
+                    // friendly hostname.
+                    for (const id of missingIds) {
+                        topoNodes.push({
+                            node_id: id,
+                            node_name: id.slice(0, 8) + ' (other cluster)',
+                        });
+                    }
+                }
+            } catch (e) {
+                for (const id of missingIds) {
+                    topoNodes.push({
+                        node_id: id,
+                        node_name: id.slice(0, 8) + ' (other cluster)',
+                    });
+                }
+            }
+        }
+
         if (topoNodes.length === 0) {
             // Fall back to a single self-call when topology hasn't loaded
             // (can happen if preflight failed). Better than no answer.

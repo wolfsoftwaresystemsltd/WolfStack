@@ -1394,6 +1394,7 @@
                     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:14px;">
                         <button class="btn btn-primary" onclick="nodeAntivirusInstall()" id="node-av-install-btn">📥 Install on this node</button>
                         <button class="btn btn-primary" onclick="nodeAntivirusScan()" id="node-av-scan-btn">▶ Run scan on this node</button>
+                        <button class="btn btn-secondary" onclick="nodeAntivirusRepairClamAV()" id="node-av-repair-btn" title="Re-seed the ClamAV signature DB if scans are failing with 'No supported database files'">🛠 Repair ClamAV</button>
                         <button class="btn btn-secondary" onclick="loadNodeAntivirus()">↻ Refresh</button>
                         <span id="node-av-action-status" style="font-size:12px; color:var(--text-muted); margin-left:4px;"></span>
                     </div>
