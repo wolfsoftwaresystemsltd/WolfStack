@@ -946,6 +946,67 @@ impl LoginRateLimiter {
         just_locked
     }
 
+    /// Immediately lock out an IP without the threshold accumulation.
+    /// Used for cases where a single hit is unambiguous evidence and
+    /// the standard sliding-window count would just delay the same
+    /// outcome. Returns `true` if newly locked (caller should
+    /// propagate to the rest of the cluster); `false` if the IP was
+    /// trusted, the limiter is disabled, or the IP was already locked.
+    ///
+    /// `source` and `detail` are caller-side context only — the
+    /// operator-visible audit log uses a generic reason regardless.
+    pub fn force_lockout(&self, ip: &str, source: &str, detail: &str) -> bool {
+        let cfg = self.config.read().unwrap().clone();
+        if cfg.is_trusted(ip) {
+            tracing::info!("auth: force-lockout skipped for trusted IP {} ({})", ip, source);
+            return false;
+        }
+        if !cfg.enabled {
+            return false;
+        }
+        let lockout = Duration::from_secs(cfg.lockout_seconds);
+        let mut attempts = self.attempts.write().unwrap();
+        let entry = attempts.entry(ip.to_string()).or_default();
+        let now = Instant::now();
+        if let Some(until) = entry.locked_until {
+            if until > now {
+                return false; // already locked, don't re-fire
+            }
+        }
+        entry.locked_until = Some(now + lockout);
+        entry.last_username = source.to_string();
+        drop(attempts);
+        tracing::warn!("auth: auto-block {}", ip);
+        kernel_block_ip(ip);
+        self.persist_lockouts();
+        self.fire_block_hook(ip, cfg.lockout_seconds);
+        let hook = self.alert_hook.read().unwrap().clone();
+        if let Some(h) = hook {
+            let title = format!("🚨 IP {} auto-blocked", ip);
+            let body = format!(
+                "Source IP {} was blocked.\n\n\
+                 Lockout: {} seconds ({} hours)\n\n\
+                 The block is enforced via iptables DROP and is propagating to every other WolfStack-managed node in the cluster.",
+                ip, cfg.lockout_seconds, cfg.lockout_seconds / 3600,
+            );
+            h(title, body);
+        }
+        // Audit reason is intentionally generic — callers pass their
+        // own `detail` for context only at the limiter level; we don't
+        // surface it in the operator-visible audit log.
+        let _ = detail;
+        let _ = source;
+        self.audit_push(AuthLogEntry {
+            timestamp: now_secs(),
+            ip: ip.to_string(),
+            username: String::new(),
+            success: false,
+            reason: "auto-block".to_string(),
+            was_locked: true,
+        });
+        true
+    }
+
     /// Currently locked out?
     pub fn is_locked_out(&self, ip: &str) -> bool {
         let cfg = self.config.read().unwrap();
@@ -1525,5 +1586,43 @@ mod lockout_tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "hook fires exactly once at threshold");
         l.record_failure_with("7.7.7.7", "u");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "hook does not re-fire on subsequent failures");
+    }
+
+    #[test]
+    fn force_lockout_blocks_on_first_hit() {
+        // No threshold accumulation — one hit is enough.
+        let cfg = LoginLockoutConfig {
+            max_failures: 3, window_seconds: 60, lockout_seconds: 60,
+            trusted_ips: vec![], enabled: true,
+        };
+        let l = make_limiter(cfg);
+        let locked = l.force_lockout("6.6.6.6", "auto", "ctx");
+        assert!(locked, "force_lockout must return true on first hit");
+        assert!(l.is_locked_out("6.6.6.6"));
+    }
+
+    #[test]
+    fn force_lockout_respects_trusted_ips() {
+        let cfg = LoginLockoutConfig {
+            max_failures: 3, window_seconds: 60, lockout_seconds: 60,
+            trusted_ips: vec!["10.0.0.0/8".into()],
+            enabled: true,
+        };
+        let l = make_limiter(cfg);
+        let locked = l.force_lockout("10.5.5.5", "auto", "ctx");
+        assert!(!locked, "trusted IPs must not be force-locked");
+        assert!(!l.is_locked_out("10.5.5.5"));
+    }
+
+    #[test]
+    fn force_lockout_idempotent_when_already_locked() {
+        let cfg = LoginLockoutConfig {
+            max_failures: 3, window_seconds: 60, lockout_seconds: 60,
+            trusted_ips: vec![], enabled: true,
+        };
+        let l = make_limiter(cfg);
+        assert!(l.force_lockout("5.5.5.5", "auto", "first"));
+        assert!(!l.force_lockout("5.5.5.5", "auto", "second"),
+            "second force_lockout while still locked must return false");
     }
 }

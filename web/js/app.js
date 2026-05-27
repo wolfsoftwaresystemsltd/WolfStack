@@ -16831,6 +16831,8 @@ window.emergencyRotateResults = emergencyRotateResults;
 // lockouts + audit in one shot.
 
 async function securityRefreshLockouts() {
+    // Refresh the toggle state alongside the rest of the security page.
+    if (typeof gandalfRefresh === 'function') gandalfRefresh();
     let data;
     try {
         const resp = await fetch(apiUrl('/api/security/auth-lockouts'));
@@ -16860,30 +16862,82 @@ async function securityRefreshLockouts() {
         : `<span style="color:#22c55e;">Lockout active.</span> ${cfg.max_failures} failures in ${cfg.window_seconds}s triggers a ${Math.round(cfg.lockout_seconds / 3600)}h kernel block. ${cfg.trusted_ips?.length || 0} trusted IP${cfg.trusted_ips?.length === 1 ? '' : 's'} configured.`;
     document.getElementById('security-lockout-status').innerHTML = status;
 
-    // Currently locked IPs.
+    // 24-hour block-activity chart (one bar per hour). Source: audit
+    // entries with was_locked=true, bucketed by the hour they fired.
+    // Uses absolute hour-of-day labels so an attack burst is visible
+    // against the operator's local clock.
+    const chartEl = document.getElementById('security-block-chart');
+    if (chartEl) {
+        const now = new Date();
+        const buckets = new Array(24).fill(0);
+        const labels = new Array(24);
+        // Bucket 23 = current hour, bucket 0 = 23 hours ago.
+        for (let i = 0; i < 24; i++) {
+            const d = new Date(now.getTime() - (23 - i) * 3600 * 1000);
+            labels[i] = d.getHours();
+        }
+        const startMs = now.getTime() - 24 * 3600 * 1000;
+        for (const e of audit) {
+            if (!e.was_locked) continue;
+            const tsMs = (e.timestamp || 0) * 1000;
+            if (tsMs < startMs) continue;
+            const idx = 23 - Math.floor((now.getTime() - tsMs) / (3600 * 1000));
+            if (idx >= 0 && idx < 24) buckets[idx]++;
+        }
+        const total = buckets.reduce((a, b) => a + b, 0);
+        const realPeak = Math.max(...buckets);
+        const peak = Math.max(1, realPeak);
+        const bars = buckets.map((count, i) => {
+            const pct = (count / peak) * 100;
+            const h = labels[i];
+            const isCurrent = i === 23;
+            const color = count === 0 ? 'var(--border)' : (count >= peak * 0.66 ? '#ef4444' : count >= peak * 0.33 ? '#f59e0b' : '#06b6d4');
+            return `<div title="${h.toString().padStart(2, '0')}:00 — ${count} block${count === 1 ? '' : 's'}" style="flex:1; display:flex; flex-direction:column; align-items:center; gap:2px; min-width:0;">
+                <div style="width:100%; height:60px; display:flex; align-items:flex-end;">
+                    <div style="width:100%; height:${pct}%; background:${color}; border-radius:2px 2px 0 0; min-height:${count > 0 ? '2px' : '0'}; transition:height 200ms;"></div>
+                </div>
+                <div style="font-size:9px; color:${isCurrent ? 'var(--text-primary)' : 'var(--text-muted)'}; font-family:var(--font-mono);">${h.toString().padStart(2, '0')}</div>
+            </div>`;
+        }).join('');
+        chartEl.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;">
+            <div style="font-size:12px; font-weight:600;">Blocks in the last 24h</div>
+            <div style="font-size:11px; color:var(--text-muted);">${total} total${realPeak > 0 ? ` · peak ${realPeak}/hr` : ''}</div>
+        </div>
+        <div style="display:flex; gap:2px; align-items:flex-end; padding:4px 0;">${bars}</div>`;
+    }
+
+    // Currently locked IPs — collapsed by default behind a count
+    // summary so the list doesn't dominate the page when there are
+    // many. Click to expand.
     const lockoutEl = document.getElementById('security-lockout-list');
     if (lockouts.length === 0) {
         lockoutEl.innerHTML = '<div style="font-size:12px; color:var(--text-muted);">No IPs are currently blocked.</div>';
     } else {
-        lockoutEl.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:13px;">
-            <thead><tr style="text-align:left; border-bottom:1px solid var(--border);">
-                <th style="padding:6px 10px;">IP</th>
-                <th style="padding:6px 10px;">Time remaining</th>
-                <th style="padding:6px 10px;">Last username</th>
-                <th style="padding:6px 10px;"></th>
-            </tr></thead>
-            <tbody>${lockouts.map(l => {
-                const hours = Math.floor(l.remaining_seconds / 3600);
-                const mins = Math.floor((l.remaining_seconds % 3600) / 60);
-                const tStr = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
-                return `<tr>
-                    <td style="padding:6px 10px; font-family:var(--font-mono);">${vlanEsc(l.ip)}</td>
-                    <td style="padding:6px 10px; color:#fbbf24;">${tStr}</td>
-                    <td style="padding:6px 10px; color:var(--text-muted); font-size:11px;">${vlanEsc(l.last_username || '—')}</td>
-                    <td style="padding:6px 10px;"><button class="btn btn-sm" onclick="securityUnblockIp('${vlanEsc(l.ip)}')" style="font-size:11px;">Unblock</button></td>
-                </tr>`;
-            }).join('')}</tbody>
-        </table>`;
+        const rows = lockouts.map(l => {
+            const hours = Math.floor(l.remaining_seconds / 3600);
+            const mins = Math.floor((l.remaining_seconds % 3600) / 60);
+            const tStr = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+            return `<tr>
+                <td style="padding:6px 10px; font-family:var(--font-mono);">${vlanEsc(l.ip)}</td>
+                <td style="padding:6px 10px; color:#fbbf24;">${tStr}</td>
+                <td style="padding:6px 10px; color:var(--text-muted); font-size:11px;">${vlanEsc(l.last_username || '—')}</td>
+                <td style="padding:6px 10px;"><button class="btn btn-sm" onclick="securityUnblockIp('${vlanEsc(l.ip)}')" style="font-size:11px;">Unblock</button></td>
+            </tr>`;
+        }).join('');
+        lockoutEl.innerHTML = `<details>
+            <summary style="cursor:pointer; padding:6px 0; font-size:13px; font-weight:600;">
+                Currently blocked IPs (${lockouts.length}) <span style="color:var(--text-muted); font-weight:400; font-size:11px;">— click to expand</span>
+            </summary>
+            <table style="width:100%; border-collapse:collapse; font-size:13px; margin-top:6px;">
+                <thead><tr style="text-align:left; border-bottom:1px solid var(--border);">
+                    <th style="padding:6px 10px;">IP</th>
+                    <th style="padding:6px 10px;">Time remaining</th>
+                    <th style="padding:6px 10px;">Last username</th>
+                    <th style="padding:6px 10px;"></th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </details>`;
     }
 
     // Audit log — newest 100 entries.
@@ -17004,6 +17058,55 @@ async function securityUnblockIp(ip) {
 window.securityRefreshLockouts = securityRefreshLockouts;
 window.securitySaveLockoutConfig = securitySaveLockoutConfig;
 window.securityUnblockIp = securityUnblockIp;
+
+async function gandalfRefresh() {
+    const cb = document.getElementById('gandalf-checkbox');
+    const status = document.getElementById('gandalf-status');
+    if (!cb || !status) return;
+    try {
+        const r = await fetch(apiUrl('/api/security/gandalf'));
+        if (!r.ok) {
+            status.textContent = 'unavailable';
+            return;
+        }
+        const d = await r.json();
+        cb.checked = !!d.enabled;
+        status.textContent = d.enabled ? 'on' : 'off';
+    } catch (e) {
+        status.textContent = 'unavailable';
+    }
+}
+
+async function gandalfToggle(enabled) {
+    const status = document.getElementById('gandalf-status');
+    const cb = document.getElementById('gandalf-checkbox');
+    if (status) status.textContent = '…';
+    try {
+        const r = await fetch(apiUrl('/api/security/gandalf'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled }),
+        });
+        if (!r.ok) {
+            const d = await r.json().catch(() => ({}));
+            showToast(d.error || 'Toggle failed', 'error');
+            // Revert checkbox to the actual server state on failure.
+            gandalfRefresh();
+            return;
+        }
+        const d = await r.json();
+        if (cb) cb.checked = !!d.enabled;
+        if (status) status.textContent = d.enabled ? 'on' : 'off';
+        showToast(`Gandalf ${d.enabled ? 'enabled' : 'disabled'}`, 'success');
+    } catch (e) {
+        if (status) status.textContent = 'error';
+        showToast(`Toggle failed: ${e.message || e}`, 'error');
+        gandalfRefresh();
+    }
+}
+
+window.gandalfRefresh = gandalfRefresh;
+window.gandalfToggle = gandalfToggle;
 
 // ─── Fleet Security page ───────────────────────────────────────────
 //

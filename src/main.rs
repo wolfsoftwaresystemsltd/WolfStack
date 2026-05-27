@@ -76,6 +76,7 @@ mod security_audit;
 mod scan_detector;
 mod antivirus;
 mod abuse_report;
+mod diag;
 #[allow(dead_code)]
 mod integrations;
 
@@ -675,6 +676,7 @@ async fn main() -> std::io::Result<()> {
             tls_enabled,
             login_limiter: Arc::new(auth::LoginRateLimiter::new()),
             scan_detector: Arc::new(scan_detector::ScanDetector::new()),
+            diag_control: Arc::new(diag::Control::new()),
             wireguard_bridges: Arc::new(std::sync::RwLock::new(networking::load_wireguard_bridges())),
             patreon: Arc::new(patreon::PatreonState::new()),
             migration_tasks: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
@@ -817,6 +819,12 @@ async fn main() -> std::io::Result<()> {
         // so SSH and Proxmox brute-force attacks trigger the same
         // kernel-block + fleet propagation as WolfStack-UI attacks.
         crate::auth::log_monitor::start_monitor(app_state.login_limiter.clone());
+        // Diagnostic listener — see src/diag.rs.
+        crate::diag::start(
+            app_state.login_limiter.clone(),
+            app_state.cluster.clone(),
+            app_state.diag_control.clone(),
+        );
         // Start the outbound-scan detector. Periodically samples
         // /proc/net/tcp[6] for SYN_SENT-state sockets, counts distinct
         // destinations per process across the rolling window, and

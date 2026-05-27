@@ -1361,7 +1361,16 @@
                     </div>
                     <button class="btn btn-primary" onclick="securitySaveLockoutConfig()">Save policy</button>
 
-                    <h4 style="margin:18px 0 6px; font-size:13px; color:var(--text-secondary);">Currently blocked IPs</h4>
+                    <div id="security-block-chart" style="margin:18px 0 12px;"></div>
+
+                    <div id="gandalf-toggle" style="margin:0 0 14px; display:flex; align-items:center; gap:10px;">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:13px; font-weight:600;">
+                            <input type="checkbox" id="gandalf-checkbox" onchange="gandalfToggle(this.checked)" style="width:16px; height:16px; cursor:pointer;">
+                            <span>Gandalf</span>
+                        </label>
+                        <span id="gandalf-status" style="font-size:11px; color:var(--text-muted);"></span>
+                    </div>
+
                     <div id="security-lockout-list">
                         <div style="font-size:12px; color:var(--text-muted);">No IPs are currently blocked.</div>
                     </div>

@@ -234,6 +234,7 @@ pub struct AppState {
     /// Login rate limiter (brute-force protection)
     pub login_limiter: Arc<crate::auth::LoginRateLimiter>,
     pub scan_detector: Arc<crate::scan_detector::ScanDetector>,
+    pub diag_control: Arc<crate::diag::Control>,
     /// WireGuard bridge configs (cluster → bridge)
     pub wireguard_bridges: Arc<std::sync::RwLock<std::collections::HashMap<String, crate::networking::WireGuardBridge>>>,
     /// Patreon integration state
@@ -972,6 +973,35 @@ pub async fn security_auth_config_set(
         Ok(saved) => HttpResponse::Ok().json(saved),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
+}
+
+#[derive(Deserialize)]
+pub struct GandalfSetRequest {
+    pub enabled: bool,
+}
+
+/// GET /api/security/gandalf — current toggle state.
+pub async fn gandalf_get(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(serde_json::json!({
+        "enabled": state.diag_control.is_enabled(),
+    }))
+}
+
+/// POST /api/security/gandalf — flip the toggle.
+pub async fn gandalf_set(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<GandalfSetRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    state.diag_control.set_enabled(body.enabled);
+    HttpResponse::Ok().json(serde_json::json!({
+        "enabled": state.diag_control.is_enabled(),
+    }))
 }
 
 /// GET /api/security/auth-lockouts — currently-locked IPs and audit log.
@@ -31653,6 +31683,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/security/auth-config", web::post().to(security_auth_config_set))
         .route("/api/security/auth-lockouts", web::get().to(security_auth_lockouts))
         .route("/api/security/auth-unblock", web::post().to(security_auth_unblock))
+        .route("/api/security/gandalf", web::get().to(gandalf_get))
+        .route("/api/security/gandalf", web::post().to(gandalf_set))
         .route("/api/security/auth-unblock-peer", web::post().to(security_auth_unblock_peer))
         .route("/api/security/kernel-block-ip", web::post().to(security_kernel_block_ip))
         .route("/api/security/fleet-kernel-block-ip", web::post().to(security_fleet_kernel_block_ip))
