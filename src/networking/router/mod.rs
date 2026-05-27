@@ -517,6 +517,28 @@ pub enum LoadOutcome {
         /// support can paste it into a bug report.
         parse_error: String,
     },
+    /// File parsed up to a complete JSON value but had **trailing
+    /// garbage** after it (classic torn-write signature: `…}<garbage>`).
+    /// The leading valid JSON has been adopted as the live config and
+    /// the cleaned-up bytes written back to disk. Distinct from
+    /// `AutoRecovered` because we used the *live* file (after surgery),
+    /// not a rolling backup — useful when no `.bak.*` exists.
+    ///
+    /// klasSponsor 2026-05-27: 14-node cluster whose corruption pre-
+    /// dated v24.7.8, so no rolling backups existed to fall back to.
+    /// `AutoRecovered` had nothing to work with; manual recovery on
+    /// every node was the only path. This variant turns the trailing-
+    /// garbage shape into a no-op self-heal because the operator's
+    /// real config IS in the file, just followed by junk.
+    RecoveredFromTornWrite {
+        /// Bytes that came after the first complete JSON value (and
+        /// were discarded). Length is logged for the audit trail.
+        discarded_trailing_bytes: usize,
+        /// Where the original (full) file was preserved.
+        broken_quarantine: String,
+        /// The serde error from the naive parse attempt.
+        parse_error: String,
+    },
 }
 
 impl RouterConfig {
@@ -607,7 +629,87 @@ impl RouterConfig {
                     }
                 };
 
-                // Self-heal: walk `.bak.<ts>` newest-first, adopt the
+                // Self-heal step 1: trailing-garbage recovery. The
+                // torn-write failure mode leaves the more-recent
+                // writer's complete JSON at the start of the file
+                // followed by stale bytes from the earlier writer.
+                // serde_json::Deserializer can parse the first
+                // complete value and tell us where it ended; if the
+                // rest is just whitespace + junk, the operator's
+                // real config IS already in the file — we just need
+                // to throw away the trailing noise and save the
+                // cleaned-up bytes.
+                //
+                // Conservative: we only trust this path when the
+                // serde error literally mentions "trailing characters".
+                // Any other parse error (missing field, type mismatch,
+                // unknown enum variant) falls through to the backup
+                // recovery flow — the trailing-garbage parser would
+                // happily eat a struct-incompatible config and pretend
+                // it succeeded, which is the exact silent-wipe failure
+                // mode v24.7.0 was added to prevent.
+                if parse_error.contains("trailing characters") {
+                    // StreamDeserializer (via into_iter) is the only
+                    // shape that exposes byte_offset() — the plain
+                    // Deserializer doesn't. Take the first complete
+                    // RouterConfig out of the stream; everything after
+                    // the first value's end-byte is the trailing
+                    // garbage we discard.
+                    let mut stream = serde_json::Deserializer::from_str(&raw)
+                        .into_iter::<Self>();
+                    if let Some(Ok(recovered_cfg)) = stream.next() {
+                        let consumed = stream.byte_offset();
+                        let discarded = raw.len().saturating_sub(consumed);
+
+                        // Persist the cleaned-up bytes so the next
+                        // restart loads cleanly without re-running
+                        // this recovery. Bypass save() because the
+                        // load-failed latch is currently set; use
+                        // the same atomic-rename pattern by hand.
+                        let cleaned = &raw[..consumed];
+                        let nanos = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0);
+                        let tmp = format!(
+                            "{}.tmp.recover.{}.{}",
+                            path,
+                            std::process::id(),
+                            nanos,
+                        );
+                        let persisted = std::fs::write(&tmp, cleaned)
+                            .and_then(|_| std::fs::rename(&tmp, &path));
+                        if let Err(e) = persisted {
+                            let _ = std::fs::remove_file(&tmp);
+                            warn!(
+                                "WolfRouter: recovered config from trailing-garbage \
+                                 torn write but FAILED to persist the cleaned bytes \
+                                 ({}). Using the in-memory recovery anyway — the \
+                                 next startup will repeat this recovery.",
+                                e,
+                            );
+                        }
+
+                        LOAD_FAILED.store(false, Ordering::SeqCst);
+                        warn!(
+                            "WolfRouter: auto-recovered {} from a torn write — \
+                             stripped {} trailing byte(s) of garbage after the \
+                             first complete JSON value. Original (full) file is \
+                             preserved at {}. Saves are now permitted.",
+                            path, discarded, quarantine_path,
+                        );
+                        return (
+                            recovered_cfg,
+                            LoadOutcome::RecoveredFromTornWrite {
+                                discarded_trailing_bytes: discarded,
+                                broken_quarantine: quarantine_path,
+                                parse_error,
+                            },
+                        );
+                    }
+                }
+
+                // Self-heal step 2: walk `.bak.<ts>` newest-first, adopt the
                 // first one that parses with the current binary. Saves
                 // the operator from having to hand-rollback per node
                 // across an entire cluster. The broken file is already
@@ -1171,6 +1273,30 @@ impl RouterState {
                 Some(AutoRecoveryNotice {
                     from_backup,
                     from_timestamp,
+                    broken_quarantine,
+                    parse_error,
+                    observed_at: now,
+                }),
+            ),
+            LoadOutcome::RecoveredFromTornWrite {
+                discarded_trailing_bytes,
+                broken_quarantine,
+                parse_error,
+            } => (
+                true,
+                None,
+                Some(AutoRecoveryNotice {
+                    // Reuse the same shape as AutoRecovered so the UI
+                    // banner needs no new fields. `from_backup` is a
+                    // human-readable marker for the in-place surgery
+                    // path; `from_timestamp` is 0 because no `.bak.*`
+                    // snapshot was involved.
+                    from_backup: format!(
+                        "(in-place torn-write recovery — stripped {} \
+                         trailing byte(s) of garbage from config.json)",
+                        discarded_trailing_bytes,
+                    ),
+                    from_timestamp: 0,
                     broken_quarantine,
                     parse_error,
                     observed_at: now,

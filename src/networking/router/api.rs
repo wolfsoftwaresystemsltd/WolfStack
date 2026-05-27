@@ -6788,6 +6788,28 @@ async fn restore_recovery(
                     }
                     state.router.mark_clean();
                 }
+                super::LoadOutcome::RecoveredFromTornWrite {
+                    discarded_trailing_bytes, broken_quarantine, parse_error,
+                } => {
+                    // Same shape as AutoRecovered for the UI banner —
+                    // the in-place torn-write fix.
+                    if let Ok(mut g) = state.router.auto_recovery.write() {
+                        *g = Some(super::AutoRecoveryNotice {
+                            from_backup: format!(
+                                "(in-place torn-write recovery — stripped {} \
+                                 trailing byte(s))",
+                                discarded_trailing_bytes,
+                            ),
+                            from_timestamp: 0,
+                            broken_quarantine,
+                            parse_error,
+                            observed_at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs()).unwrap_or(0),
+                        });
+                    }
+                    state.router.mark_clean();
+                }
                 super::LoadOutcome::ParseError { error, .. } => {
                     // The user picked a snapshot that doesn't parse
                     // either — keep the latch up and surface the
