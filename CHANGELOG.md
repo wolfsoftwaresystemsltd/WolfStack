@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.7.29: auth-monitor — wire pveproxy failed-login events** _(2026-05-27 — [`72e5278`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/72e5278995e64710800b2dce40a46f76c1a9ae96))_
 - **v24.7.28: WolfRouter — auto-recover from "trailing characters" torn write** _(2026-05-27 — [`416810f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/416810fd40e046a828f1601955026cd557fa5096))_
 - **v24.7.27: bring AI knowledge base up to date** _(2026-05-27 — [`cc26e99`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cc26e99d1951b7c3f0842f101a9c31e4e633b108))_
 - **v24.7.26: ClamAV repair button, on-access pre-seed, cross-cluster subnet route diagnostics** _(2026-05-27 — [`4f49709`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4f49709d54ec9ca4dbcc8e5036962280b7194223))_
