@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.7.24: AI agent toggle, Cloudflare Workers AI, custom model input** _(2026-05-27 — [`9acd755`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9acd7554e0d8bfb143522b879c0a51f689a1daaa))_
 - **v24.7.23: Auto-recover ClamAV scan when signature DB is missing** _(2026-05-27 — [`f6b65d7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f6b65d7525e1565ca6bdc2dd74e8e0aa2d2beb02))_
 - **v24.7.20: poll + route-push senders re-read cluster_secret from disk every iteration** _(2026-05-26 — [`4ec95bd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4ec95bd8f9c1e3fbcea6a64a790d6a94ffc29804))_
 - **v24.7.19: ensure_lxc_bridge — also self-heal missing per-container /32 host routes** _(2026-05-26 — [`3300bfc`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3300bfc7de538e325d6d9aeff5abb86a1f5a2a13))_
