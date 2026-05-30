@@ -287,6 +287,12 @@
                 <h2 id="page-title">Dashboard</h2>
             </div>
             <div class="top-bar-actions" style="display:flex; align-items:center; gap:12px;">
+                <button id="learn-help-btn" onclick="learnContextHelp()" title="Help for this page — opens the matching lesson"
+                    style="display:flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:6px; background:rgba(255,255,255,0.06); color:var(--text-muted); border:none; cursor:pointer; font-size:14px; transition:all 0.2s;"
+                    onmouseover="this.style.background='rgba(255,255,255,0.15)';this.style.color='#fff'"
+                    onmouseout="this.style.background='rgba(255,255,255,0.06)';this.style.color='var(--text-muted)'">
+                    <span class="ws-icon-clean-wrap" data-icon="help"></span>
+                </button>
                 <button id="task-log-toggle-btn" onclick="toggleTaskLogVisible()" title="Toggle Task Log"
                     style="display:flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:6px; background:rgba(255,255,255,0.06); color:var(--text-muted); border:none; cursor:pointer; font-size:14px; transition:all 0.2s; position:relative;"
                     onmouseover="this.style.background='rgba(255,255,255,0.15)';this.style.color='#fff'"
@@ -9720,6 +9726,9 @@ region = us-east-1"></textarea>
             <div class="learn-d-title">Getting Started</div>
             <div class="learn-d-progress-label" id="learn-d-progress-label">0 of 0</div>
         </div>
+        <button type="button" class="learn-d-iconbtn" onclick="learnAskAi()" title="Ask the AI about this lesson" aria-label="Ask the AI about this lesson">
+            <span class="ws-icon-clean-wrap" data-icon="robot"></span>
+        </button>
         <button type="button" class="learn-d-iconbtn" onclick="learnExpandToPage()" title="Open full screen" aria-label="Open full screen">&#10530;</button>
         <button type="button" class="learn-d-iconbtn" onclick="learnPopOut()" title="Pop out to its own window" aria-label="Pop out to its own window">&#8599;</button>
         <button type="button" class="learn-d-iconbtn" onclick="closeLearnDrawer()" title="Close (Esc)" aria-label="Close course">&times;</button>

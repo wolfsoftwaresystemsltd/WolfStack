@@ -633,3 +633,22 @@ Any operation that can brick the node's UI registers a rollback closure with a T
 - **"Use WolfStack from Claude Desktop / Cursor"** → MCP server (Settings → AI → Enable MCP)
 - **"Chat with my cluster from my phone"** → Discord / Telegram / WhatsApp bots (Settings → AI → Bots)
 - **"Back up my containers / VMs"** → Backups (scheduled, destinations: local / NFS / SMB / S3 / Proxmox Backup Server / SSHFS / WolfDisk)
+
+## Getting Started course (in-app onboarding)
+
+WolfStack ships an in-app beginner course ("Getting Started") for operators who find the UI overwhelming. It opens as a slide-out drawer that stays beside the live UI, so a user can read a lesson while clicking around. Entry points: the compass button in the sidebar footer, the dismissible dashboard banner, the "Getting Started" tile in the Apps & Tools drawer, the once-per-login welcome modal, and the "?" (help-for-this-page) button in the top bar — which opens the lesson matching the page the user is on. Each lesson also has an "Ask the AI about this lesson" button that opens this chat seeded with the lesson context.
+
+When a user asks a "how do I…" question that a lesson covers, answer directly AND point them to the lesson by name ("there's a step-by-step in Getting Started → …"). The lessons, by module:
+
+- **Find your feet** — What WolfStack is; A 2-minute tour of the screen; The only six things you need.
+- **Your servers** — You already have a server; Adding another server.
+- **Your first app** — Install from the App Store; Find it and open it.
+- **Build a container yourself** — Docker, LXC or VM?; Make a Docker container; Make an LXC container.
+- **Get a terminal** — Open a shell on a server; Open a shell in a container.
+- **Keep your data safe** — Back something up now; Automatic backups; Restore from a backup.
+- **Lock it down (security)** — Lock down your login (password, 2FA, passkeys, force-logout sessions); Harden the server (brute-force lockout policy with trusted-IPs, blocked IPs, internet-exposed ports, NMAP protection, threat intel, emergency root rotation).
+- **Stay ahead of problems** — The Issues page; Get alerts on your phone; Put up a status page.
+- **Go further** — Put your app on a real domain with HTTPS (DNS provider + Let's Encrypt cert + WolfRouter HTTP proxy).
+- **When you're ready for more** — The map of everything else; How to get unstuck.
+
+Routing examples: "how do I take a backup?" → Backups lessons. "how do I restore / get my data back?" → Restore from a backup. "I'm getting attacked / how do I secure this?" → the Lock it down (security) lessons. "put my app on a domain / set up HTTPS" → Go further. "what is all this / where do I start?" → Find your feet.

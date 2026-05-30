@@ -1643,8 +1643,11 @@ function mountClusterPill() {
     if (!title || !title.parentElement) return;
     const pill = document.createElement('span');
     pill.id = 'ws-cluster-pill';
-    pill.style.cssText = 'display:none;align-items:center;gap:6px;margin-left:14px;padding:4px 12px;border-radius:999px;'
-        + 'font-size:11px;font-weight:600;letter-spacing:0.2px;'
+    // Stacked: cluster name on the first line, server name on the second —
+    // reads cleaner than "cluster › server" squeezed onto one line, and the
+    // page title no longer repeats the server name.
+    pill.style.cssText = 'display:none;flex-direction:column;align-items:flex-start;gap:0;margin-left:14px;padding:4px 12px;border-radius:12px;'
+        + 'font-weight:600;letter-spacing:0.2px;line-height:1.25;'
         + 'background:rgba(59, 130, 246,0.12);border:1px solid rgba(59, 130, 246,0.35);color:#93c5fd;cursor:default;';
     pill.title = 'Current scope — actions on this page apply here';
     title.parentElement.appendChild(pill);
@@ -1670,10 +1673,9 @@ function updateClusterPill() {
         return;
     }
     pill.style.display = 'inline-flex';
-    pill.innerHTML = '<span aria-hidden="true" style="opacity:0.8;"></span>'
-        + (cluster ? '<span>' + escapeHtmlSafe(cluster) + '</span>' : '')
-        + (cluster && node ? '<span style="opacity:0.5;">›</span>' : '')
-        + (node ? '<span style="opacity:0.85;">' + escapeHtmlSafe(node) + '</span>' : '');
+    pill.innerHTML =
+        (cluster ? '<span style="font-size:9.5px;opacity:0.75;text-transform:uppercase;letter-spacing:0.4px;white-space:nowrap;">' + escapeHtmlSafe(cluster) + '</span>' : '')
+        + (node ? '<span style="font-size:12px;white-space:nowrap;">' + escapeHtmlSafe(node) + '</span>' : '');
 }
 
 // ─── Trust-signal footer — version, identity, last-checked ───
@@ -1988,8 +1990,13 @@ function selectServerView(nodeId, view) {
         'wolfram': 'Wolfram',
         'wolfrouter': 'WolfRouter',
     };
-    document.getElementById('page-title').textContent = `${hostname} — ${viewTitles[view] || view}`;
-    document.getElementById('hostname-display').textContent = `${hostname} (${node?.address}:${node?.port})`;
+    // Page title is just the view name — the server name already lives in the
+    // cluster pill beside it, so "wolfstack-2 — LXC" became plain "LXC".
+    document.getElementById('page-title').textContent = viewTitles[view] || view;
+    // Address line: drop the redundant leading hostname (now in the pill);
+    // show just the reachable address:port, falling back to the name if absent.
+    document.getElementById('hostname-display').textContent =
+        node?.address ? `${node.address}:${node?.port}` : hostname;
 
     // Update Header Info
     const headerHostname = document.getElementById('server-header-hostname');
@@ -51356,11 +51363,19 @@ const LEARN_COURSE = [
     { title: 'Keep your data safe', lessons: [
         { id: '6-1', title: 'Back something up now', mins: 4, file: '6-1-backup-now.md' },
         { id: '6-2', title: 'Automatic backups', mins: 3, file: '6-2-schedule-backups.md' },
+        { id: '6-3', title: 'Restore from a backup', mins: 4, file: '6-3-restore.md' },
+    ] },
+    { title: 'Lock it down (security)', lessons: [
+        { id: 'sec-1', title: 'Lock down your login', mins: 4, file: 'sec-1-secure-your-login.md' },
+        { id: 'sec-2', title: 'Harden the server', mins: 5, file: 'sec-2-harden-the-server.md' },
     ] },
     { title: 'Stay ahead of problems', lessons: [
         { id: '7-1', title: 'The Issues page', mins: 3, file: '7-1-issues-page.md' },
         { id: '7-2', title: 'Get alerts on your phone', mins: 4, file: '7-2-alerts.md' },
         { id: '7-3', title: 'Put up a status page', mins: 5, file: '7-3-status-page.md' },
+    ] },
+    { title: 'Go further', lessons: [
+        { id: 'adv-1', title: 'Put your app on a real domain (HTTPS)', mins: 6, file: 'adv-1-domain-https.md' },
     ] },
     { title: 'When you are ready for more', lessons: [
         { id: '8-1', title: 'The map of everything else', mins: 4, file: '8-1-the-map.md' },
@@ -51430,7 +51445,7 @@ function learnInit() {
 // throws the full course into its own window (reusing the #learn hash
 // route), mirroring the inline-terminal "Pop Out" pattern.
 
-function openLearnDrawer() {
+function openLearnDrawer(lessonId) {
     const drawer = document.getElementById('learn-drawer');
     if (!drawer) return;
     // Re-parent to <body> so an ancestor with transform/filter/will-change
@@ -51443,10 +51458,13 @@ function openLearnDrawer() {
     requestAnimationFrame(() => drawer.classList.add('open'));
     learnRenderToc();
     learnUpdateProgress();
-    // Resume where they left off (same rule as the page view).
     const flat = learnFlatLessons();
-    let target = null;
-    try { target = localStorage.getItem(LEARN_LAST_KEY); } catch (_) {}
+    // If a specific lesson was requested (contextual "?" help) jump straight
+    // there; otherwise resume where they left off.
+    let target = (lessonId && flat.some(l => l.id === lessonId)) ? lessonId : null;
+    if (!target) {
+        try { target = localStorage.getItem(LEARN_LAST_KEY); } catch (_) {}
+    }
     if (!target || !flat.some(l => l.id === target)) {
         const prog = learnLoadProgress();
         const firstIncomplete = flat.find(l => !prog[l.id]);
@@ -51498,6 +51516,58 @@ function learnPopOut() {
     window.open(location.pathname + '#learn', 'wolfstack_learn',
         'width=960,height=860,menubar=no,toolbar=no,scrollbars=yes,resizable=yes');
     closeLearnDrawer();
+}
+
+// Contextual "?" help. currentPage holds the active view for BOTH datacenter
+// views (selectView) and per-node views (selectServerView sets currentPage =
+// view), so one map covers everything. Unknown view → resume the course.
+const LEARN_PAGE_MAP = {
+    datacenter: '1-2',
+    appstore: '3-1',
+    issues: '7-1',
+    inbox: '7-1',
+    'fleet-security': 'sec-2',
+    containers: '4-2',   // per-node Docker view
+    lxc: '4-3',
+    vms: '4-1',
+    terminal: '5-1',
+    backups: '6-1',
+    security: 'sec-2',
+    wolfrouter: 'adv-1',
+    statuspage: '7-3',
+};
+
+function learnContextHelp() {
+    let lessonId;
+    try { lessonId = LEARN_PAGE_MAP[currentPage]; } catch (_) {}
+    openLearnDrawer(lessonId);
+}
+
+// "Ask AI about this lesson" — opens the floating AI chat and seeds the input
+// with the current lesson's context, so the user just types their question.
+// sendAiMessage already attaches the current view + node context to the
+// /api/ai/chat call, and the agent answers from its built-in WolfStack
+// knowledge base (which now includes a course index). If the agent isn't set
+// up, the chat widget isn't mounted — guide the user to enable it.
+function learnAskAi() {
+    const panel = document.getElementById('ai-chat-panel');
+    if (!panel) {
+        if (typeof showToast === 'function') {
+            showToast('Turn on the AI agent first: Settings → AI Agent.', 'info');
+        }
+        return;
+    }
+    if (typeof aiChatOpen !== 'undefined' && !aiChatOpen && typeof toggleAiChat === 'function') {
+        toggleAiChat();
+    }
+    const lesson = learnFlatLessons().find(l => l.id === _learnCurrentId);
+    const title = lesson ? lesson.title : 'Getting Started';
+    const input = document.getElementById('ai-chat-input');
+    if (input) {
+        input.value = `I'm on the Getting Started lesson "${title}". `;
+        input.focus();
+        try { input.setSelectionRange(input.value.length, input.value.length); } catch (_) {}
+    }
 }
 
 function learnRenderToc() {
