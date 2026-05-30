@@ -22374,6 +22374,74 @@ pub struct Issue {
     pub detail: String,
 }
 
+/// A one-click recovery the operator can run from the issues page for a
+/// fixable issue. `kind` selects the server-side recipe; `target` is the
+/// concrete thing it acts on (a systemd unit, or a fixed token like
+/// "journal"); `label` is the button text. Computed per-issue at scan
+/// time by [`repair_for`] rather than stored on every `Issue`, so the
+/// ~18 existing issue producers stay untouched.
+#[derive(Serialize, Clone)]
+pub struct IssueRepair {
+    pub kind: String,    // "service" | "clamav" | "chkrootkit" | "certbot" | "journal" | "apt" | "dnf"
+    pub target: String,  // unit name, or a fixed token for disk-cleanup kinds
+    pub label: String,   // button text: "Repair" | "Clean"
+}
+
+/// Classify a failed systemd unit into the repair recipe that actually
+/// recovers it. Service-specific where it matters, generic otherwise.
+fn repair_kind_for_unit(unit: &str) -> &'static str {
+    let u = unit.to_ascii_lowercase();
+    if u.contains("clamav") || u.contains("freshclam") {
+        "clamav"
+    } else if u.contains("chkrootkit") {
+        "chkrootkit"
+    } else if u.contains("certbot") || u.contains("letsencrypt") {
+        "certbot"
+    } else {
+        "service"
+    }
+}
+
+/// Given an issue, return the repair the operator can run for it — or
+/// None when there's no safe one-click action (CPU/RAM/load/swap, k8s
+/// pods, and /tmp are deliberately excluded: /tmp may stage malware, so
+/// it's never auto-cleaned). Service units are parsed from the issue's
+/// `detail` ("systemd unit X is in failed state") and re-validated by
+/// `valid_unit_name`; the disk-cleanup kinds key off the `title` prefix
+/// (they carry no unit). Both couplings fail closed — if a producer string
+/// in `collect_issues` is reworded, the button simply doesn't appear
+/// rather than misfiring.
+pub fn repair_for(issue: &Issue) -> Option<IssueRepair> {
+    match issue.category.as_str() {
+        "service" => {
+            let unit = issue.detail
+                .strip_prefix("systemd unit ")
+                .and_then(|s| s.strip_suffix(" is in failed state"))
+                .map(|s| s.trim())
+                .filter(|s| valid_unit_name(s))?;
+            Some(IssueRepair {
+                kind: repair_kind_for_unit(unit).to_string(),
+                target: unit.to_string(),
+                label: "Repair".into(),
+            })
+        }
+        "disk" => {
+            // Only the three caches we know how to clean safely.
+            let (kind, target) = if issue.title.starts_with("Journal logs using") {
+                ("journal", "journal")
+            } else if issue.title.starts_with("APT cache") {
+                ("apt", "apt")
+            } else if issue.title.starts_with("DNF cache") {
+                ("dnf", "dnf")
+            } else {
+                return None; // /tmp, low-disk warnings: no blind one-click
+            };
+            Some(IssueRepair { kind: kind.into(), target: target.into(), label: "Clean".into() })
+        }
+        _ => None,
+    }
+}
+
 /// Collect system issues (reusable — called by HTTP handler and background scheduler)
 pub fn collect_issues(metrics: &crate::monitoring::SystemMetrics) -> Vec<Issue> {
     let mut issues: Vec<Issue> = Vec::new();
@@ -22706,10 +22774,24 @@ pub async fn scan_issues(
     }).await.unwrap();
     let issues = collect_issues(&metrics);
 
+    // Enrich each issue with its one-click repair (when one exists) without
+    // bloating the Issue struct or its ~18 producers. Serialising the issue
+    // and grafting `repair` on keeps the wire shape additive — older nodes
+    // simply omit the field and the frontend treats them as non-repairable.
+    let issues_json: Vec<serde_json::Value> = issues.iter().map(|i| {
+        let mut v = serde_json::to_value(i).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(rep) = repair_for(i) {
+            if let Ok(rv) = serde_json::to_value(&rep) {
+                v["repair"] = rv;
+            }
+        }
+        v
+    }).collect();
+
     HttpResponse::Ok().json(serde_json::json!({
         "hostname": metrics.hostname,
         "version": env!("CARGO_PKG_VERSION"),
-        "issues": issues,
+        "issues": issues_json,
         "ai_analysis": null,
     }))
 }
@@ -22848,6 +22930,41 @@ pub async fn update_file_locations(
     }
 }
 
+/// Vacuum the systemd journal to 200 MB; returns MB freed (≥0). Shared by
+/// the Issues "Clean" bulk action and the per-issue repair so both stay in
+/// lockstep if the target size or journalctl output format ever changes.
+fn reclaim_journal_mb() -> f64 {
+    let read_mb = || run_shell("journalctl --disk-usage 2>/dev/null").ok()
+        .and_then(|o| o.split("take up ").nth(1).and_then(|s| s.split(' ').next()).map(|s| parse_size_to_mb(s)));
+    let before = read_mb().unwrap_or(0.0);
+    let _ = run_shell("journalctl --vacuum-size=200M 2>/dev/null");
+    let after = read_mb().unwrap_or(before);
+    (before - after).max(0.0)
+}
+
+/// Clean the APT archive cache + autoremove; returns MB freed (≥0).
+/// Caller must confirm `apt` exists. Shared with [`clean_system`].
+fn reclaim_apt_mb() -> f64 {
+    let read_mb = || run_shell("du -sm /var/cache/apt/archives 2>/dev/null").ok()
+        .and_then(|o| o.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()));
+    let before = read_mb().unwrap_or(0.0);
+    let _ = run_shell("apt-get clean -y 2>/dev/null");
+    let _ = run_shell("apt-get autoremove -y 2>/dev/null");
+    let after = read_mb().unwrap_or(0.0);
+    (before - after).max(0.0)
+}
+
+/// Clean the DNF cache; returns MB freed (≥0). Caller must confirm `dnf`
+/// exists. Shared with [`clean_system`].
+fn reclaim_dnf_mb() -> f64 {
+    let read_mb = || run_shell("du -sm /var/cache/dnf 2>/dev/null").ok()
+        .and_then(|o| o.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()));
+    let before = read_mb().unwrap_or(0.0);
+    let _ = run_shell("dnf clean all 2>/dev/null");
+    let after = read_mb().unwrap_or(0.0);
+    (before - after).max(0.0)
+}
+
 /// POST /api/issues/clean — run safe cleanup to free disk space
 pub async fn clean_system(
     req: HttpRequest,
@@ -22859,61 +22976,27 @@ pub async fn clean_system(
     let mut total_freed_mb: f64 = 0.0;
 
     // ── Journal logs → vacuum to 200M ──
-    if let Ok(before_out) = run_shell("journalctl --disk-usage 2>/dev/null") {
-        let before_mb = before_out.split("take up ").nth(1)
-            .and_then(|s| s.split(' ').next())
-            .map(|s| parse_size_to_mb(s))
-            .unwrap_or(0.0);
-
-        let _ = run_shell("journalctl --vacuum-size=200M 2>/dev/null");
-
-        let after_mb = run_shell("journalctl --disk-usage 2>/dev/null").ok()
-            .and_then(|o| o.split("take up ").nth(1).and_then(|s| s.split(' ').next()).map(|s| parse_size_to_mb(s)))
-            .unwrap_or(before_mb);
-
-        let freed = (before_mb - after_mb).max(0.0);
-        if freed > 1.0 {
-            total_freed_mb += freed;
-            cleaned.push(format!("Journal logs: freed {:.0} MB", freed));
-        }
+    let jfreed = reclaim_journal_mb();
+    if jfreed > 1.0 {
+        total_freed_mb += jfreed;
+        cleaned.push(format!("Journal logs: freed {:.0} MB", jfreed));
     }
 
     // ── APT cache ──
     if command_exists("apt") {
-        let before_mb = run_shell("du -sm /var/cache/apt/archives 2>/dev/null").ok()
-            .and_then(|o| o.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()))
-            .unwrap_or(0.0);
-
-        let _ = run_shell("apt-get clean -y 2>/dev/null");
-        let _ = run_shell("apt-get autoremove -y 2>/dev/null");
-
-        let after_mb = run_shell("du -sm /var/cache/apt/archives 2>/dev/null").ok()
-            .and_then(|o| o.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()))
-            .unwrap_or(0.0);
-
-        let freed = (before_mb - after_mb).max(0.0);
-        if freed > 1.0 {
-            total_freed_mb += freed;
-            cleaned.push(format!("APT cache: freed {:.0} MB", freed));
+        let afreed = reclaim_apt_mb();
+        if afreed > 1.0 {
+            total_freed_mb += afreed;
+            cleaned.push(format!("APT cache: freed {:.0} MB", afreed));
         }
     }
 
     // ── DNF/YUM cache ──
     if command_exists("dnf") {
-        let before_mb = run_shell("du -sm /var/cache/dnf 2>/dev/null").ok()
-            .and_then(|o| o.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()))
-            .unwrap_or(0.0);
-
-        let _ = run_shell("dnf clean all 2>/dev/null");
-
-        let after_mb = run_shell("du -sm /var/cache/dnf 2>/dev/null").ok()
-            .and_then(|o| o.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()))
-            .unwrap_or(0.0);
-
-        let freed = (before_mb - after_mb).max(0.0);
-        if freed > 1.0 {
-            total_freed_mb += freed;
-            cleaned.push(format!("DNF cache: freed {:.0} MB", freed));
+        let dfreed = reclaim_dnf_mb();
+        if dfreed > 1.0 {
+            total_freed_mb += dfreed;
+            cleaned.push(format!("DNF cache: freed {:.0} MB", dfreed));
         }
     } else if command_exists("yum") {
         let _ = run_shell("yum clean all 2>/dev/null");
@@ -22959,6 +23042,213 @@ pub async fn clean_system(
         "cleaned": cleaned,
         "freed_mb": total_freed_mb.round() as u64,
     }))
+}
+
+/// Strict allowlist for a systemd unit name before it is ever handed to
+/// `systemctl`. This is the security boundary for `/api/issues/repair`:
+/// the unit arrives from the client, so we never interpolate it into a
+/// shell and we never accept anything that isn't a plain unit name.
+/// Allowed chars match systemd's own (`[A-Za-z0-9:_.\-@\]`) plus a hard
+/// length cap and a required known unit suffix; everything else (spaces,
+/// `/`, `;`, `&`, `$`, `..`, globs) is rejected.
+fn valid_unit_name(unit: &str) -> bool {
+    if unit.is_empty() || unit.len() > 128 {
+        return false;
+    }
+    let suffix_ok = [
+        ".service", ".timer", ".socket", ".target",
+        ".mount", ".path", ".scope", ".slice",
+    ].iter().any(|s| unit.ends_with(s));
+    if !suffix_ok {
+        return false;
+    }
+    unit.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '.' | '-' | '@' | '\\'))
+}
+
+/// True iff systemd currently reports `unit` as failed. Doubles as an
+/// authorisation gate for repair: we only ever act on units that are
+/// genuinely in the failed state the operator was shown — this endpoint
+/// can't be repurposed to restart or poke arbitrary running services.
+fn unit_is_failed(unit: &str) -> bool {
+    std::process::Command::new("systemctl")
+        .arg("is-failed")
+        .arg(unit)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "failed")
+        .unwrap_or(false)
+}
+
+#[derive(serde::Deserialize)]
+pub struct RepairRequest {
+    pub kind: String,
+    pub target: String,
+}
+
+/// POST /api/issues/repair — run the one-click recovery for a single
+/// issue surfaced by `/api/issues/scan`. `kind` picks the recipe and
+/// `target` is the unit (for service kinds) or a fixed token (for the
+/// disk-cleanup kinds). Every service action goes through
+/// [`valid_unit_name`] + [`unit_is_failed`] and is executed with argv
+/// (never a shell), so a hostile `target` cannot inject a command or
+/// touch a healthy service.
+pub async fn repair_issue(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<RepairRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let kind = body.kind.clone();
+    let target = body.target.clone();
+
+    let result = web::block(move || run_repair(&kind, &target)).await;
+    match result {
+        Ok(Ok(payload)) => HttpResponse::Ok().json(payload),
+        Ok(Err(msg)) => HttpResponse::BadRequest().json(serde_json::json!({"ok": false, "error": msg})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": format!("repair task failed: {}", e)})),
+    }
+}
+
+/// Blocking core of [`repair_issue`]. Returns the JSON payload on success
+/// or a human-readable error string (surfaced as 400) on bad input. All
+/// subprocess work is argv-based.
+fn run_repair(kind: &str, target: &str) -> Result<serde_json::Value, String> {
+    // Helpers — argv only, capture combined stdout/stderr tail.
+    fn systemctl(args: &[&str]) -> (bool, String) {
+        match std::process::Command::new("systemctl").args(args).output() {
+            Ok(o) => {
+                let mut out = String::from_utf8_lossy(&o.stdout).to_string();
+                out.push_str(&String::from_utf8_lossy(&o.stderr));
+                (o.status.success(), out.trim().to_string())
+            }
+            Err(e) => (false, format!("failed to run systemctl: {}", e)),
+        }
+    }
+
+    match kind {
+        // ── Disk cleanups: fixed targets, no unit, no shell interpolation.
+        //    Share the exact reclaim helpers used by /api/issues/clean so
+        //    the bulk and per-issue paths can never drift. ──
+        "journal" => {
+            let freed = reclaim_journal_mb();
+            Ok(serde_json::json!({
+                "ok": true, "kind": kind, "target": "journal",
+                "action": "Vacuumed systemd journal to 200 MB",
+                "log": format!("Freed {:.0} MB.", freed),
+            }))
+        }
+        "apt" => {
+            if !command_exists("apt") { return Err("apt is not available on this host".into()); }
+            let freed = reclaim_apt_mb();
+            Ok(serde_json::json!({
+                "ok": true, "kind": kind, "target": "apt",
+                "action": "Cleaned APT cache",
+                "log": format!("apt-get clean + autoremove freed {:.0} MB.", freed),
+            }))
+        }
+        "dnf" => {
+            if !command_exists("dnf") { return Err("dnf is not available on this host".into()); }
+            let freed = reclaim_dnf_mb();
+            Ok(serde_json::json!({
+                "ok": true, "kind": kind, "target": "dnf",
+                "action": "Cleaned DNF cache",
+                "log": format!("dnf clean all freed {:.0} MB.", freed),
+            }))
+        }
+
+        // ── Service recipes: target is a unit and must pass the gate ──
+        "service" | "clamav" | "chkrootkit" | "certbot" => {
+            if !valid_unit_name(target) {
+                return Err(format!("'{}' is not a valid systemd unit name", target));
+            }
+            if !unit_is_failed(target) {
+                // Already healthy (operator may have fixed it, or another
+                // repair raced us). Clear any lingering failed marker and
+                // report success rather than churning the unit.
+                let _ = systemctl(&["reset-failed", target]);
+                return Ok(serde_json::json!({
+                    "ok": true, "kind": kind, "target": target,
+                    "action": "No action needed",
+                    "log": format!("{} is not in a failed state.", target),
+                }));
+            }
+
+            let (action, log) = match kind {
+                "clamav" => {
+                    // Rebuild signatures (ensures clamav user, runs freshclam,
+                    // verifies DB) then clear the failed marker.
+                    let r = crate::antivirus::repair_clamav_signatures();
+                    let _ = systemctl(&["reset-failed", target]);
+                    let (_ok, restart_log) = systemctl(&["restart", target]);
+                    let summary = match &r.error {
+                        None => format!(
+                            "freshclam ok: {}, signatures present: {}{}",
+                            r.freshclam_ok, r.signatures_present_after,
+                            if r.healed_user { ", created missing clamav user" } else { "" },
+                        ),
+                        Some(e) => format!("ClamAV repair reported: {}", e),
+                    };
+                    (
+                        "Rebuilt ClamAV signature DB and restarted unit".to_string(),
+                        format!("{}\n{}", summary, restart_log),
+                    )
+                }
+                "chkrootkit" => {
+                    // chkrootkit.service exits non-zero on systemd false
+                    // positives (bindshell on 465/mosh, Linux/Ebury via
+                    // `ssh -G`, /sbin/init Suckit). We clear the failed
+                    // state but do NOT auto-suppress findings — the operator
+                    // is told to cross-check with rkhunter.
+                    let (_ok, l) = systemctl(&["reset-failed", target]);
+                    (
+                        "Cleared chkrootkit failed state".to_string(),
+                        format!("chkrootkit.service commonly false-positives on systemd hosts. \
+                                 Cleared the failed marker; cross-check with `rkhunter --check` if unsure.\n{}", l),
+                    )
+                }
+                "certbot" => {
+                    // Guard the renew like the apt/dnf branches — a snap-only
+                    // or binary-less host must not silently report a blank
+                    // renew step; say so plainly and still clear+restart.
+                    let renew_note = if command_exists("certbot") {
+                        run_shell("certbot renew --quiet 2>&1").unwrap_or_default().trim().to_string()
+                    } else {
+                        "certbot binary not on PATH — skipped renew (snap-only host? run `certbot renew` manually).".to_string()
+                    };
+                    let _ = systemctl(&["reset-failed", target]);
+                    let (_ok, restart_log) = systemctl(&["restart", target]);
+                    (
+                        "Cleared failed state and restarted unit".to_string(),
+                        format!("{}\n{}", renew_note, restart_log),
+                    )
+                }
+                _ => {
+                    // Generic: clear the failed marker then restart.
+                    let _ = systemctl(&["reset-failed", target]);
+                    let (ok, restart_log) = systemctl(&["restart", target]);
+                    (
+                        if ok { "Reset and restarted unit".to_string() }
+                        else { "Reset failed; restart did not succeed".to_string() },
+                        restart_log,
+                    )
+                }
+            };
+
+            // Report the post-repair truth so the UI doesn't claim success
+            // on a unit that immediately re-failed.
+            let still_failed = unit_is_failed(target);
+            Ok(serde_json::json!({
+                "ok": !still_failed,
+                "kind": kind,
+                "target": target,
+                "action": action,
+                "log": log,
+                "still_failed": still_failed,
+            }))
+        }
+
+        other => Err(format!("unknown repair kind '{}'", other)),
+    }
 }
 
 // ═══════════════════════════════════════════════
@@ -32265,6 +32555,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // Issues Scanner
         .route("/api/issues/scan", web::get().to(scan_issues))
         .route("/api/issues/clean", web::post().to(clean_system))
+        .route("/api/issues/repair", web::post().to(repair_issue))
         .route("/api/alerts", web::get().to(get_alert_log))
         // v24.0.0 — paginated, filterable history view used by the
         // new Alerts page. Reads the same in-memory alert_log as the
@@ -33461,5 +33752,117 @@ mod passkey_origin_tests {
         let r = derive_passkey_rp_origin(Some("[fe80::1]"), None, None, false).unwrap();
         assert_eq!(r.0, "[fe80::1]");
         assert_eq!(r.1, "http://[fe80::1]");
+    }
+}
+
+#[cfg(test)]
+mod issue_repair_tests {
+    use super::{valid_unit_name, repair_kind_for_unit, repair_for, Issue};
+
+    fn svc_issue(unit: &str) -> Issue {
+        Issue {
+            severity: "warning".into(),
+            category: "service".into(),
+            title: format!("Service {} failed", unit),
+            detail: format!("systemd unit {} is in failed state", unit),
+        }
+    }
+
+    // ── Security boundary: only well-formed unit names reach systemctl ──
+    #[test]
+    fn valid_unit_names_accepted() {
+        for u in [
+            "logrotate.service", "clamav-freshclam.service", "chkrootkit.service",
+            "snap.certbot.renew.service", "lxc-net.service", "minio.service",
+            "getty@tty1.service", "systemd-networkd.socket", "foo.timer",
+        ] {
+            assert!(valid_unit_name(u), "should accept {}", u);
+        }
+    }
+
+    #[test]
+    fn injection_and_malformed_unit_names_rejected() {
+        for u in [
+            "",                                   // empty
+            "foo",                                // no suffix
+            "foo.conf",                           // wrong suffix
+            "foo.service; rm -rf /",              // shell metachars
+            "foo.service && reboot",
+            "foo.service\nrm -rf /",              // newline
+            "../../etc/passwd.service",           // path traversal chars (/)
+            "foo bar.service",                    // space
+            "$(id).service",                      // command substitution
+            "`id`.service",                       // backticks
+            "foo|bar.service",                    // pipe
+        ] {
+            assert!(!valid_unit_name(u), "should reject {:?}", u);
+        }
+    }
+
+    #[test]
+    fn overlong_unit_name_rejected() {
+        let long = format!("{}.service", "a".repeat(130));
+        assert!(!valid_unit_name(&long));
+    }
+
+    // ── Per-service classification ──
+    #[test]
+    fn unit_classification_routes_to_correct_recipe() {
+        assert_eq!(repair_kind_for_unit("clamav-freshclam.service"), "clamav");
+        assert_eq!(repair_kind_for_unit("clamav-daemon.service"), "clamav");
+        assert_eq!(repair_kind_for_unit("chkrootkit.service"), "chkrootkit");
+        assert_eq!(repair_kind_for_unit("certbot.service"), "certbot");
+        assert_eq!(repair_kind_for_unit("snap.certbot.renew.service"), "certbot");
+        assert_eq!(repair_kind_for_unit("lxc-net.service"), "service");
+        assert_eq!(repair_kind_for_unit("minio.service"), "service");
+    }
+
+    // ── repair_for: parses the unit from detail and picks the recipe ──
+    #[test]
+    fn repair_for_service_issue() {
+        let rep = repair_for(&svc_issue("logrotate.service")).expect("repairable");
+        assert_eq!(rep.kind, "service");
+        assert_eq!(rep.target, "logrotate.service");
+        assert_eq!(rep.label, "Repair");
+
+        let rep = repair_for(&svc_issue("clamav-freshclam.service")).unwrap();
+        assert_eq!(rep.kind, "clamav");
+    }
+
+    #[test]
+    fn repair_for_malformed_service_detail_is_none() {
+        // A service issue whose detail doesn't carry a valid unit yields no button.
+        let bad = Issue {
+            severity: "warning".into(), category: "service".into(),
+            title: "Service weird".into(),
+            detail: "systemd unit not a; unit is in failed state".into(),
+        };
+        assert!(repair_for(&bad).is_none());
+    }
+
+    #[test]
+    fn repair_for_disk_kinds() {
+        let journal = Issue { severity: "info".into(), category: "disk".into(),
+            title: "Journal logs using 3.1G".into(), detail: "…".into() };
+        assert_eq!(repair_for(&journal).unwrap().kind, "journal");
+        assert_eq!(repair_for(&journal).unwrap().label, "Clean");
+
+        let apt = Issue { severity: "info".into(), category: "disk".into(),
+            title: "APT cache using 500M".into(), detail: "…".into() };
+        assert_eq!(repair_for(&apt).unwrap().kind, "apt");
+
+        // /tmp is deliberately NOT one-click cleanable (malware staging path).
+        let tmp = Issue { severity: "info".into(), category: "disk".into(),
+            title: "/tmp using 2.3G".into(), detail: "…".into() };
+        assert!(repair_for(&tmp).is_none());
+    }
+
+    #[test]
+    fn non_repairable_categories_have_no_button() {
+        for cat in ["cpu", "memory", "load", "swap", "kubernetes", "container"] {
+            let i = Issue { severity: "warning".into(), category: cat.into(),
+                title: "x".into(), detail: "y".into() };
+            assert!(repair_for(&i).is_none(), "{} should not be one-click repairable", cat);
+        }
     }
 }
