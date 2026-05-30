@@ -15248,7 +15248,10 @@ pub async fn pbs_config_save(
         } else {
             body.pbs_password.clone()
         },
-        pbs_fingerprint: body.pbs_fingerprint.clone(),
+        // Store the fingerprint in the canonical colon-separated form so it
+        // round-trips correctly to proxmox-backup-client and shows cleanly in
+        // the UI, whether the operator pasted it with or without colons.
+        pbs_fingerprint: backup::format_pbs_fingerprint(&body.pbs_fingerprint),
         pbs_namespace: body.pbs_namespace.clone(),
         ..backup::BackupStorage::default()
     };

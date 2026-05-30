@@ -341,6 +341,30 @@ mod tests {
     }
 
     #[test]
+    fn pbs_fingerprint_gets_colons_when_pasted_without_them() {
+        // 64 hex chars, no separators → colon-separated (what the client needs).
+        let raw = "650b69e1c2d3a4b5e6f70819202122232425262728292a2b2c2d2e2f30313233";
+        let out = format_pbs_fingerprint(raw);
+        assert_eq!(out, "65:0b:69:e1:c2:d3:a4:b5:e6:f7:08:19:20:21:22:23:24:25:26:27:28:29:2a:2b:2c:2d:2e:2f:30:31:32:33");
+        assert_eq!(out.matches(':').count(), 31); // 32 bytes → 31 separators
+    }
+
+    #[test]
+    fn pbs_fingerprint_already_coloned_is_idempotent() {
+        let coloned = "65:0b:69:e1:c2:d3:a4:b5:e6:f7:08:19:20:21:22:23:24:25:26:27:28:29:2a:2b:2c:2d:2e:2f:30:31:32:33";
+        assert_eq!(format_pbs_fingerprint(coloned), coloned);
+        // Whitespace/newlines from a paste are tolerated too.
+        assert_eq!(format_pbs_fingerprint(&format!("  {coloned}\n")), coloned);
+    }
+
+    #[test]
+    fn pbs_fingerprint_non_sha256_passes_through_untouched() {
+        // Not a clean 64-char hex string → returned trimmed, never mangled.
+        assert_eq!(format_pbs_fingerprint("  not-a-fingerprint  "), "not-a-fingerprint");
+        assert_eq!(format_pbs_fingerprint(""), "");
+    }
+
+    #[test]
     fn resolved_local_path_joins_subpath() {
         let s = wd("/mnt/wolfdisk-data", "backups/prod");
         assert_eq!(s.resolved_local_path(), "/mnt/wolfdisk-data/backups/prod");
@@ -1946,6 +1970,26 @@ fn pbs_repo_string(storage: &BackupStorage) -> String {
     }
 }
 
+/// Normalize a PBS server TLS fingerprint to the colon-separated form
+/// `proxmox-backup-client` expects (`65:0b:69:…`). Operators paste it in either
+/// form (the PBS UI and `proxmox-backup-manager cert info` show different ones);
+/// passed un-coloned, the client can't match it and drops to an interactive
+/// y/n prompt the daemon can't answer, so the connection just fails. We strip
+/// any separators, then re-insert a colon every byte. A value that isn't a
+/// clean 64-char SHA-256 hex string is returned trimmed-but-unchanged rather
+/// than mangled — a faithful pass-through beats a corrupted fingerprint.
+pub fn format_pbs_fingerprint(fp: &str) -> String {
+    let hex: String = fp.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    if hex.len() != 64 {
+        return fp.trim().to_string();
+    }
+    hex.as_bytes()
+        .chunks(2)
+        .map(|pair| std::str::from_utf8(pair).unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 /// Store backup to Proxmox Backup Server
 fn store_pbs_with_notes(local_path: &Path, storage: &BackupStorage, filename: &str, notes: Option<&str>) -> Result<(), String> {
     store_pbs_with_notes_and_log(local_path, storage, filename, notes, None)
@@ -2003,7 +2047,7 @@ fn store_pbs_with_notes_and_log(local_path: &Path, storage: &BackupStorage, file
        .arg("--backup-type").arg(backup_type);
 
     if !storage.pbs_fingerprint.is_empty() {
-        cmd.env("PBS_FINGERPRINT", &storage.pbs_fingerprint);
+        cmd.env("PBS_FINGERPRINT", format_pbs_fingerprint(&storage.pbs_fingerprint));
     }
     if !storage.pbs_namespace.is_empty() {
         cmd.arg("--ns").arg(&storage.pbs_namespace);
@@ -2080,7 +2124,7 @@ fn store_pbs_with_notes_and_log(local_path: &Path, storage: &BackupStorage, file
         let mut list_cmd = Command::new("proxmox-backup-client");
         list_cmd.args(["snapshot", "list", "--output-format", "json", "--repository", &repo]);
         if !storage.pbs_fingerprint.is_empty() {
-            list_cmd.env("PBS_FINGERPRINT", &storage.pbs_fingerprint);
+            list_cmd.env("PBS_FINGERPRINT", format_pbs_fingerprint(&storage.pbs_fingerprint));
         }
         if !storage.pbs_namespace.is_empty() {
             list_cmd.arg("--ns").arg(&storage.pbs_namespace);
@@ -2136,7 +2180,7 @@ fn store_pbs_with_notes_and_log(local_path: &Path, storage: &BackupStorage, file
                         let mut notes_cmd = Command::new("proxmox-backup-client");
                         notes_cmd.args(["snapshot", "notes", "update", "--repository", &repo]);
                         if !storage.pbs_fingerprint.is_empty() {
-                            notes_cmd.env("PBS_FINGERPRINT", &storage.pbs_fingerprint);
+                            notes_cmd.env("PBS_FINGERPRINT", format_pbs_fingerprint(&storage.pbs_fingerprint));
                         }
                         if !storage.pbs_namespace.is_empty() {
                             notes_cmd.arg("--ns").arg(&storage.pbs_namespace);
@@ -4588,7 +4632,7 @@ fn retrieve_from_pbs(entry: &BackupEntry, dest: &Path) -> Result<(), String> {
     // List snapshots to find the latest matching one (PBS needs exact timestamp, not "latest")
     let mut list_cmd = Command::new("proxmox-backup-client");
     list_cmd.args(["snapshot", "list", "--output-format", "json", "--repository", &repo]);
-    if !storage.pbs_fingerprint.is_empty() { list_cmd.env("PBS_FINGERPRINT", &storage.pbs_fingerprint); }
+    if !storage.pbs_fingerprint.is_empty() { list_cmd.env("PBS_FINGERPRINT", format_pbs_fingerprint(&storage.pbs_fingerprint)); }
     if !storage.pbs_namespace.is_empty() { list_cmd.arg("--ns").arg(&storage.pbs_namespace); }
     if !pbs_pw.is_empty() { list_cmd.env("PBS_PASSWORD", pbs_pw); }
 
@@ -4629,7 +4673,7 @@ fn retrieve_from_pbs(entry: &BackupEntry, dest: &Path) -> Result<(), String> {
        .arg("--repository").arg(&repo);
 
     if !storage.pbs_fingerprint.is_empty() {
-        cmd.env("PBS_FINGERPRINT", &storage.pbs_fingerprint);
+        cmd.env("PBS_FINGERPRINT", format_pbs_fingerprint(&storage.pbs_fingerprint));
     }
     if !storage.pbs_namespace.is_empty() {
         cmd.arg("--ns").arg(&storage.pbs_namespace);
@@ -4663,7 +4707,7 @@ pub fn list_pbs_snapshots(storage: &BackupStorage) -> Result<serde_json::Value, 
        .arg("--repository").arg(&repo);
 
     if !storage.pbs_fingerprint.is_empty() {
-        cmd.env("PBS_FINGERPRINT", &storage.pbs_fingerprint);
+        cmd.env("PBS_FINGERPRINT", format_pbs_fingerprint(&storage.pbs_fingerprint));
     }
     if !storage.pbs_namespace.is_empty() {
         cmd.arg("--ns").arg(&storage.pbs_namespace);
@@ -4852,7 +4896,7 @@ where
        .arg("--ignore-ownership").arg("true");
 
     if !storage.pbs_fingerprint.is_empty() {
-        cmd.env("PBS_FINGERPRINT", &storage.pbs_fingerprint);
+        cmd.env("PBS_FINGERPRINT", format_pbs_fingerprint(&storage.pbs_fingerprint));
     }
     if !storage.pbs_namespace.is_empty() {
         cmd.arg("--ns").arg(&storage.pbs_namespace);
@@ -5018,7 +5062,7 @@ fn detect_pbs_archive(storage: &BackupStorage, snapshot: &str) -> Option<String>
        .arg("--repository").arg(&repo);
 
     if !storage.pbs_fingerprint.is_empty() {
-        cmd.env("PBS_FINGERPRINT", &storage.pbs_fingerprint);
+        cmd.env("PBS_FINGERPRINT", format_pbs_fingerprint(&storage.pbs_fingerprint));
     }
     if !storage.pbs_namespace.is_empty() {
         cmd.arg("--ns").arg(&storage.pbs_namespace);
