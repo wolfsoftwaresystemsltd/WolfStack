@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.7.36: clear stale logrotate.service failure after clamav self-heal** _(2026-05-30 — [`2d01432`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2d01432ffc3857c8523d8d543fe6fc1f14c3a5fb))_
 - **v24.7.35: app store — self-healing ISO version resolver fixes Debian 13.5.0** _(2026-05-30 — [`01ceb84`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/01ceb84b6652b5d1dc5aba097bd2e692c52c97de))_
 - **v24.7.34: dashboard sync — operator-driven push to chosen peers** _(2026-05-29 — [`6b89e8f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6b89e8fdbfd32ad41c20da03cbae0233d9b60def))_
 - **v24.7.33: site-aware WolfNet cluster sync (klasSponsor multi-VLAN fix Part 2)** _(2026-05-29 — [`19adba9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/19adba99858bc595359286c89fbde650d4c02a41))_
