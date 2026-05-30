@@ -23,6 +23,7 @@ mod vr_terminal;
 mod storage;
 mod networking;
 mod backup;
+mod galera;
 mod vms;
 mod proxmox;
 mod xo;

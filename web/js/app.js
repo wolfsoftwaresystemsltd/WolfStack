@@ -1870,7 +1870,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', learn: 'Getting Started', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', 'fleet-security': 'Fleet Security', 'dashboard-sync': 'Dashboard Sync' };
+    const titles = { datacenter: 'Datacenter', learn: 'Getting Started', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', galera: 'Galera Clusters', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', 'fleet-security': 'Fleet Security', 'dashboard-sync': 'Dashboard Sync' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -1918,6 +1918,8 @@ function selectView(page) {
         loadClusterBrowser();
     } else if (page === 'databases') {
         dbLoadConnections();
+    } else if (page === 'galera') {
+        galeraInit();
     } else if (page === 'control-panel') {
         cpInit();
     } else if (page === 'array') {
@@ -11336,6 +11338,9 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
     });
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
+    // Failures must interrupt assistive tech, not wait politely behind the
+    // queue — give error/warning toasts an assertive alert role on the element.
+    if (type === 'error' || type === 'warning') toast.setAttribute('role', 'alert');
     if (id) toast.id = id;
     const icons = { success: '', error: '', warning: '', info: '' };
     const bgColors = { success: 'linear-gradient(135deg, #1a3a2a, #162b22)', error: 'linear-gradient(135deg, #3b1111, #2d0e0e)', warning: 'linear-gradient(135deg, #3b2e0e, #2d2408)', info: 'linear-gradient(135deg, #1a2a3f, #141f30)' };
@@ -26439,7 +26444,10 @@ function renderPciList(vmName, pcis) {
 }
 
 function escapeAttr(s) {
-    return String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Escape the single-quote too: this declaration hoists over the earlier
+    // one (same name), so it's the effective global — it must be safe for
+    // BOTH "..." and '...' delimited attributes / inline handlers.
+    return String(s || '').replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function collectPassthroughDevices() {
@@ -61423,6 +61431,10 @@ const APP_DRAWER_TILES = [
         desc: 'Query any configured SQL connection across the cluster.',
     },
     {
+        id: 'galera', icon: '', name: 'Galera Clusters',
+        desc: 'Build or adopt MariaDB Galera clusters on LXC. Live wsrep status, split-brain detection, evidence-based recovery.',
+    },
+    {
         id: 'appstore', icon: '', name: 'App Store',
         desc: 'Browse and install applications onto any host.',
     },
@@ -63105,3 +63117,581 @@ window.arrayStop = arrayStop;
 window.arrayParity = arrayParity;
 window.arrayParityCancel = arrayParityCancel;
 window.arraySchedulePrompt = arraySchedulePrompt;
+
+// ─── Galera cluster manager ───────────────────────────────────────────
+//
+// Build/adopt and run MariaDB Galera clusters made of LXC containers. A
+// cluster is "owned" by one WolfStack host: its galera.json definition and
+// (for provisioned clusters) its containers live there. Lifecycle + recovery
+// shell out to lxc-attach on that host, so every call is directed at it via
+// the node proxy. Live status is queried over MySQL TCP, which works
+// cross-host. The host selector at the top picks which host to manage.
+
+const galeraState = { host: '', clusters: [], statuses: {}, statusErrors: {}, loading: false, gen: 0, activeJobAbort: null };
+
+/// Build a galera API URL routed to the currently-selected host. The node
+/// proxy path is WITHOUT the /api/ prefix (per the proxy route contract).
+function galeraBase(path) {
+    const hostId = galeraState.host;
+    const node = (Array.isArray(allNodes) ? allNodes : []).find(n => n.id === hostId);
+    // Use the local API when there's no host, the host is self, OR the host id
+    // isn't in allNodes yet (avoids a self-proxy loop while the list loads).
+    if (!hostId || !node || node.is_self) return '/api/galera/' + path;
+    return `/api/nodes/${encodeURIComponent(hostId)}/proxy/galera/${path}`;
+}
+
+function galeraHostName(id) {
+    const n = (Array.isArray(allNodes) ? allNodes : []).find(x => x.id === id);
+    return n ? (n.hostname || n.id) : (id || 'this host');
+}
+
+async function galeraInit() {
+    // Ensure we have a node list for the host selector + proxy routing.
+    if (!Array.isArray(allNodes) || allNodes.length === 0) {
+        try { const r = await fetch('/api/nodes'); if (r.ok) allNodes = await r.json(); } catch (_) {}
+    }
+    if (!galeraState.host) {
+        const self = (allNodes || []).find(n => n.is_self);
+        galeraState.host = self ? self.id : ((allNodes && allNodes[0]) ? allNodes[0].id : '');
+    }
+    await galeraLoadClusters();
+}
+
+function galeraOnHostChange(sel) {
+    galeraState.host = sel.value;
+    galeraLoadClusters();
+}
+
+async function galeraLoadClusters() {
+    const content = document.getElementById('galera-content');
+    if (!content) return;
+    // Generation guard: a rapid host switch starts a new load; responses from
+    // the previous one must not paint over it.
+    const myGen = ++galeraState.gen;
+    galeraState.loading = true;
+    galeraState.statuses = {};
+    galeraState.statusErrors = {};
+    galeraState.loadError = '';
+    galeraRender(); // paint host bar + "loading" immediately
+    try {
+        const r = await fetch(galeraBase('clusters'));
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        if (myGen !== galeraState.gen) return; // superseded
+        galeraState.clusters = data;
+    } catch (e) {
+        if (myGen !== galeraState.gen) return; // superseded
+        galeraState.clusters = [];
+        galeraState.loadError = (e && e.message) || String(e);
+    }
+    galeraState.loading = false;
+    galeraRender();
+    // Fetch live status for each cluster in parallel, repaint as they land.
+    (galeraState.clusters || []).forEach(c => {
+        fetch(galeraBase('clusters/' + encodeURIComponent(c.id) + '/status'))
+            .then(r => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
+            .then(st => { if (myGen === galeraState.gen) { galeraState.statuses[c.id] = st; galeraRender(); } })
+            .catch(e => { if (myGen === galeraState.gen) { galeraState.statusErrors[c.id] = (e && e.message) || 'unreachable'; galeraRender(); } });
+    });
+}
+
+function galeraHostBarHtml() {
+    const opts = (Array.isArray(allNodes) ? allNodes : []).map(n =>
+        `<option value="${escapeAttr(n.id)}" ${n.id === galeraState.host ? 'selected' : ''}>${escapeHtml(n.hostname || n.id)}${n.is_self ? ' (this host)' : ''}</option>`
+    ).join('');
+    return `
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap;">
+            <label style="font-size:12px; color:var(--text-muted);">Manage on host</label>
+            <select onchange="galeraOnHostChange(this)" style="padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-input); color:var(--text); font-size:13px;">
+                ${opts || `<option value="">this host</option>`}
+            </select>
+            <span style="font-size:11px; color:var(--text-muted);">Containers, recovery and lifecycle run on this host. Status is read over the network.</span>
+        </div>`;
+}
+
+function galeraNodeStateBadge(ns) {
+    if (!ns) return `<span style="color:var(--text-muted);">—</span>`;
+    if (!ns.reachable) {
+        return `<span title="${escapeAttr(ns.error || 'unreachable')}" style="display:inline-block;padding:1px 7px;border-radius:3px;font-size:10px;font-weight:600;background:#6b728022;color:#9ca3af;">unreachable</span>`;
+    }
+    const synced = (ns.state || '').toLowerCase() === 'synced' && ns.ready;
+    const color = synced ? '#22c55e' : ((ns.state || '').toLowerCase().includes('join') || (ns.state || '').toLowerCase().includes('donor') ? '#f59e0b' : '#ef4444');
+    // Tooltip carries the wsrep details useful when diagnosing split-brain.
+    const tip = `connected: ${ns.connected ? 'yes' : 'no'} · ready: ${ns.ready ? 'yes' : 'no'}${ns.cluster_uuid ? ' · uuid: ' + ns.cluster_uuid : ''}`;
+    return `<span title="${escapeAttr(tip)}" style="display:inline-block;padding:1px 7px;border-radius:3px;font-size:10px;font-weight:600;background:${color}22;color:${color};">${escapeHtml(ns.state || 'unknown')}</span>`;
+}
+
+function galeraClusterCardHtml(c) {
+    const st = galeraState.statuses[c.id];
+    const statusErr = galeraState.statusErrors[c.id];
+    const nodeCount = (c.nodes || []).length;
+    let badge;
+    if (!st && statusErr) {
+        badge = `<span title="${escapeAttr(statusErr)}" style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:600;background:#6b728022;color:#9ca3af;">status unavailable</span>`;
+    } else if (!st) {
+        badge = `<span style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:600;background:#6b728022;color:#9ca3af;">checking…</span>`;
+    } else if (st.split_brain) {
+        badge = `<span title="Reachable nodes disagree on cluster identity or size" style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:700;background:#ef444422;color:#ef4444;">⚠ SPLIT-BRAIN</span>`;
+    } else if (st.healthy) {
+        badge = `<span style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:600;background:#22c55e22;color:#22c55e;">● healthy</span>`;
+    } else {
+        badge = `<span style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:600;background:#f59e0b22;color:#f59e0b;">degraded</span>`;
+    }
+
+    const statusById = {};
+    if (st && Array.isArray(st.nodes)) st.nodes.forEach(ns => { statusById[ns.container] = ns; });
+
+    const rows = (c.nodes || []).map(n => {
+        const ns = statusById[n.container];
+        const size = ns && ns.reachable ? ns.cluster_size : '—';
+        const prim = ns && ns.reachable ? (ns.cluster_status || '—') : '—';
+        // Identifiers ride in data-* attributes (safe via escapeAttr) and are
+        // dispatched by a delegated listener — never interpolated into a JS
+        // string inside an onclick, where `&#39;` decodes back to `'` and a
+        // crafted name could break out. See galeraBindDelegation().
+        const cid = escapeAttr(c.id), cont = escapeAttr(n.container);
+        const act = (label, action, cls) =>
+            `<button class="btn btn-sm" title="${label} MariaDB on ${escapeAttr(n.container)}" data-galera-act="node" data-cid="${cid}" data-cont="${cont}" data-action="${action}" style="padding:2px 8px;font-size:11px;${cls || ''}">${label}</button>`;
+        return `<tr style="border-top:1px solid var(--border);">
+            <td style="padding:6px 8px;font-family:var(--font-mono,monospace);font-size:12px;">${escapeHtml(n.container)}</td>
+            <td style="padding:6px 8px;font-family:var(--font-mono,monospace);font-size:12px;color:var(--text-muted);">${escapeHtml(n.address)}:${escapeHtml(String(n.port || 3306))}</td>
+            <td style="padding:6px 8px;">${galeraNodeStateBadge(ns)}</td>
+            <td style="padding:6px 8px;font-size:12px;">${escapeHtml(String(prim))}</td>
+            <td style="padding:6px 8px;font-size:12px;text-align:center;">${escapeHtml(String(size))}</td>
+            <td style="padding:6px 8px;text-align:right;white-space:nowrap;">
+                ${act('Start', 'start')}
+                ${act('Stop', 'stop')}
+                ${act('Restart', 'restart')}
+            </td>
+        </tr>`;
+    }).join('');
+
+    const summary = st ? escapeHtml(st.summary || '') : 'Querying node status…';
+    const splitWarn = st && st.split_brain
+        ? `<div role="alert" style="margin:10px 0;padding:8px 12px;border:1px solid #ef4444;border-radius:6px;background:#ef444411;color:#fca5a5;font-size:12px;">
+             Split-brain detected — the cluster has fractured into separate components. Use <b>Recover</b> to stop every node, find the most up-to-date one, and rebuild around it. WolfStack will refuse to bootstrap a node whose position is unknown.
+           </div>` : '';
+
+    return `<div class="card" style="margin-bottom:16px;">
+        <div class="card-body">
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                    <h3 style="margin:0;font-size:16px;">${escapeHtml(c.name)}</h3>
+                    ${badge}
+                    <span style="font-size:11px;color:var(--text-muted);">${nodeCount} node${nodeCount === 1 ? '' : 's'} · SST ${escapeHtml(c.sst_method || 'mariabackup')} · ${c.provisioned ? 'provisioned' : 'adopted'}</span>
+                </div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <button class="btn btn-sm" data-galera-act="refresh" title="Refresh status">↻</button>
+                    <button class="btn btn-sm" data-galera-act="recover" data-cid="${escapeAttr(c.id)}" style="border-color:#f59e0b;color:#f59e0b;">Recover</button>
+                    <button class="btn btn-sm" data-galera-act="forget" data-cid="${escapeAttr(c.id)}" title="Forget this cluster (does not destroy containers)" style="border-color:var(--danger);color:var(--danger);">Forget</button>
+                </div>
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:6px;">${summary}</div>
+            ${splitWarn}
+            <div style="overflow-x:auto;margin-top:10px;">
+                <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                    <thead><tr style="text-align:left;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.4px;">
+                        <th style="padding:4px 8px;">Container</th>
+                        <th style="padding:4px 8px;">Address</th>
+                        <th style="padding:4px 8px;">State</th>
+                        <th style="padding:4px 8px;">Cluster</th>
+                        <th style="padding:4px 8px;text-align:center;">Size</th>
+                        <th style="padding:4px 8px;text-align:right;">Lifecycle</th>
+                    </tr></thead>
+                    <tbody>${rows || `<tr><td colspan="6" style="padding:10px;color:var(--text-muted);">No nodes registered.</td></tr>`}</tbody>
+                </table>
+            </div>
+        </div>
+    </div>`;
+}
+
+function galeraRender() {
+    const content = document.getElementById('galera-content');
+    if (!content) return;
+    let html = galeraHostBarHtml();
+    if (galeraState.loading) {
+        html += `<div style="color:var(--text-muted);text-align:center;padding:30px;font-size:13px;">Loading clusters on ${escapeHtml(galeraHostName(galeraState.host))}…</div>`;
+    } else if (galeraState.loadError) {
+        // Don't clear the error here — a racing status repaint would erase it
+        // before the operator reads it. It's reset when the next load starts.
+        html += `<div role="alert" class="card"><div class="card-body" style="color:var(--danger);font-size:13px;">Couldn't load clusters: ${escapeHtml(galeraState.loadError)}</div></div>`;
+    } else if (!galeraState.clusters || galeraState.clusters.length === 0) {
+        html += `<div class="card"><div class="card-body" style="text-align:center;padding:40px 20px;color:var(--text-muted);">
+            <div style="font-size:36px;margin-bottom:8px;"><span class="ws-icon-clean-wrap" data-icon="database"></span></div>
+            <div style="font-size:14px;">No Galera clusters on ${escapeHtml(galeraHostName(galeraState.host))} yet.</div>
+            <div style="font-size:12px;margin-top:4px;">Spin up a fresh one, or adopt containers you already run.</div>
+            <div style="margin-top:14px;display:flex;gap:8px;justify-content:center;">
+                <button class="btn btn-primary btn-sm" onclick="galeraCreateOpen()">+ New cluster</button>
+                <button class="btn btn-sm" onclick="galeraAdoptOpen()">Adopt existing</button>
+            </div>
+        </div></div>`;
+    } else {
+        html += galeraState.clusters.map(galeraClusterCardHtml).join('');
+    }
+    content.innerHTML = html;
+    galeraBindDelegation();
+    // `data-icon` placeholders are hydrated automatically by the global
+    // observeForDataIcons MutationObserver — no manual pass needed.
+}
+
+/// Attach ONE delegated click listener to #galera-content (which persists
+/// across re-renders). Card buttons carry their identifiers in data-* attrs,
+/// so no untrusted value is ever placed in a JS-string onclick. Idempotent.
+function galeraBindDelegation() {
+    const content = document.getElementById('galera-content');
+    if (!content || content.dataset.galeraBound) return;
+    content.dataset.galeraBound = '1';
+    content.addEventListener('click', ev => {
+        const btn = ev.target.closest('[data-galera-act]');
+        if (!btn) return;
+        const act = btn.getAttribute('data-galera-act');
+        const cid = btn.getAttribute('data-cid') || '';
+        if (act === 'node') galeraNodeAction(cid, btn.getAttribute('data-cont') || '', btn.getAttribute('data-action') || '');
+        else if (act === 'recover') galeraRecover(cid);
+        else if (act === 'forget') galeraDelete(cid);
+        else if (act === 'refresh') galeraLoadClusters();
+    });
+}
+
+// ── Modal scaffolding ────────────────────────────────────────────────
+
+function galeraCloseModal() {
+    const o = document.getElementById('galera-modal-overlay');
+    if (o) o.remove();
+    document.removeEventListener('keydown', galeraModalEsc);
+    // If a streaming job (provision/recover) is being watched, stop watching —
+    // the server-side job continues; we just release the SSE connection.
+    if (galeraState.activeJobAbort) {
+        try { galeraState.activeJobAbort.abort(); } catch (_) {}
+        galeraState.activeJobAbort = null;
+    }
+}
+function galeraModalEsc(e) { if (e.key === 'Escape') galeraCloseModal(); }
+
+function galeraOpenModal(title, innerHtml, widthPx) {
+    galeraCloseModal();
+    const overlay = document.createElement('div');
+    overlay.id = 'galera-modal-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:flex-start;justify-content:center;padding:5vh 16px;overflow-y:auto;';
+    overlay.onclick = e => { if (e.target === overlay) galeraCloseModal(); };
+    const modal = document.createElement('div');
+    modal.style.cssText = `background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:22px 24px;max-width:${widthPx || 560}px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit;`;
+    modal.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+            <div style="font-size:15px;font-weight:600;color:var(--accent-light,#60a5fa);">${escapeHtml(title)}</div>
+            <button onclick="galeraCloseModal()" style="background:none;border:none;color:var(--text-muted);font-size:20px;cursor:pointer;line-height:1;">×</button>
+        </div>${innerHtml}`;
+    overlay.appendChild(modal);
+    (document.fullscreenElement || document.body).appendChild(overlay);
+    document.addEventListener('keydown', galeraModalEsc);
+    return modal;
+}
+
+// ── Create (provision) wizard ────────────────────────────────────────
+
+function galeraCreateOpen() {
+    const html = `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px;">
+            <label style="grid-column:1/-1;">Cluster name
+                <input id="gc-name" class="form-control" placeholder="my-galera" style="margin-top:4px;">
+            </label>
+            <label>Number of nodes
+                <input id="gc-count" type="number" min="1" max="9" value="3" class="form-control" style="margin-top:4px;">
+            </label>
+            <label>Container name prefix
+                <input id="gc-prefix" class="form-control" value="galera" style="margin-top:4px;">
+            </label>
+            <label>Distribution
+                <select id="gc-distro" class="form-control" style="margin-top:4px;" onchange="galeraDistroChanged()">
+                    <option value="debian">Debian</option>
+                    <option value="ubuntu">Ubuntu</option>
+                    <option value="rocky">Rocky / RHEL</option>
+                    <option value="alpine">Alpine</option>
+                </select>
+            </label>
+            <label>Release
+                <input id="gc-release" class="form-control" value="bookworm" style="margin-top:4px;">
+            </label>
+            <label>SST method
+                <select id="gc-sst" class="form-control" style="margin-top:4px;">
+                    <option value="mariabackup">mariabackup (recommended)</option>
+                    <option value="rsync">rsync</option>
+                </select>
+            </label>
+            <label>Root DB password
+                <input id="gc-pw" type="password" class="form-control" style="margin-top:4px;" autocomplete="new-password">
+            </label>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:10px;line-height:1.5;">
+            Creates the containers on <b>${escapeHtml(galeraHostName(galeraState.host))}</b>, installs MariaDB + Galera, configures wsrep, bootstraps the first node and joins the rest. The root password is stored encrypted and used only for status queries.
+        </div>
+        <div id="gc-error" role="alert" style="display:none;color:var(--danger);font-size:12px;margin-top:10px;"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+            <button class="btn btn-sm" onclick="galeraCloseModal()">Cancel</button>
+            <button class="btn btn-primary btn-sm" onclick="galeraCreateSubmit()">Build cluster</button>
+        </div>`;
+    galeraOpenModal('New Galera cluster', html, 560);
+}
+
+// Default the release box to a sensible value when the distro changes.
+function galeraDistroChanged() {
+    const d = (document.getElementById('gc-distro') || {}).value;
+    const rel = { debian: 'bookworm', ubuntu: 'noble', rocky: '9', alpine: '3.20' }[d] || '';
+    const relEl = document.getElementById('gc-release');
+    if (relEl) relEl.value = rel;
+}
+
+function galeraCreateSubmit() {
+    const name = (document.getElementById('gc-name').value || '').trim();
+    const count = parseInt(document.getElementById('gc-count').value, 10);
+    const prefix = (document.getElementById('gc-prefix').value || 'galera').trim();
+    const distro = document.getElementById('gc-distro').value;
+    const release = (document.getElementById('gc-release').value || '').trim();
+    const sst = document.getElementById('gc-sst').value;
+    const pw = document.getElementById('gc-pw').value || '';
+    const err = document.getElementById('gc-error');
+    const fail = m => { if (err) { err.textContent = m; err.style.display = 'block'; } };
+    const nameOk = /^[A-Za-z0-9._-]+$/;
+    if (!name) return fail('Cluster name is required.');
+    if (!nameOk.test(name)) return fail('Cluster name may only contain letters, digits, - _ .');
+    if (!nameOk.test(prefix)) return fail('Container prefix may only contain letters, digits, - _ .');
+    if (!(count >= 1 && count <= 9)) return fail('Number of nodes must be between 1 and 9.');
+    if (!release) return fail('Release is required.');
+    if (!pw) return fail('A root password is required.');
+    const body = {
+        cluster_name: name, node_count: count, name_prefix: prefix,
+        distribution: distro, release: release, root_password: pw,
+        sst_method: sst, node_id: galeraState.host || '',
+    };
+    galeraCloseModal();
+    galeraStreamJob('Building cluster “' + name + '”', galeraBase('provision'), body);
+}
+
+// ── Adopt existing ───────────────────────────────────────────────────
+
+let _galeraAdoptRow = 0;
+function galeraAdoptRowHtml(idx) {
+    return `<div class="galera-adopt-row" data-idx="${idx}" style="display:grid;grid-template-columns:1.3fr 1.3fr 0.7fr auto;gap:8px;margin-bottom:8px;align-items:center;">
+        <input class="form-control ga-container" placeholder="container name" style="font-size:12px;">
+        <input class="form-control ga-address" placeholder="address / WolfNet IP" style="font-size:12px;">
+        <input class="form-control ga-port" placeholder="3306" value="3306" style="font-size:12px;">
+        <button class="btn btn-sm" onclick="galeraAdoptRemoveRow(${idx})" title="Remove" style="padding:4px 10px;">×</button>
+    </div>`;
+}
+function galeraAdoptAddRow() {
+    const wrap = document.getElementById('ga-rows');
+    if (!wrap) return;
+    wrap.insertAdjacentHTML('beforeend', galeraAdoptRowHtml(_galeraAdoptRow++));
+}
+function galeraAdoptRemoveRow(idx) {
+    const row = document.querySelector(`.galera-adopt-row[data-idx="${idx}"]`);
+    if (row) row.remove();
+}
+function galeraAdoptOpen() {
+    _galeraAdoptRow = 0;
+    const html = `
+        <div style="font-size:13px;display:grid;gap:10px;">
+            <label>Cluster name (existing wsrep_cluster_name)
+                <input id="ga-name" class="form-control" placeholder="my-galera" style="margin-top:4px;">
+            </label>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                <label>DB user
+                    <input id="ga-user" class="form-control" value="root" style="margin-top:4px;">
+                </label>
+                <label>DB password
+                    <input id="ga-pw" type="password" class="form-control" style="margin-top:4px;" autocomplete="new-password">
+                </label>
+            </div>
+            <div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                    <span style="font-size:12px;color:var(--text-muted);">Nodes (LXC container + address)</span>
+                    <button class="btn btn-sm" onclick="galeraAdoptAddRow()" style="padding:2px 10px;">+ Add node</button>
+                </div>
+                <div id="ga-rows"></div>
+            </div>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:10px;line-height:1.5;">
+            Adopt containers that already run MariaDB + Galera on <b>${escapeHtml(galeraHostName(galeraState.host))}</b>. WolfStack will monitor wsrep status and, for containers on this host, drive lifecycle + recovery. The password is stored encrypted and used only for status queries.
+        </div>
+        <div id="ga-error" role="alert" style="display:none;color:var(--danger);font-size:12px;margin-top:10px;"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+            <button class="btn btn-sm" onclick="galeraCloseModal()">Cancel</button>
+            <button class="btn btn-primary btn-sm" onclick="galeraAdoptSubmit()">Adopt cluster</button>
+        </div>`;
+    galeraOpenModal('Adopt an existing Galera cluster', html, 620);
+    galeraAdoptAddRow();
+    galeraAdoptAddRow();
+    galeraAdoptAddRow();
+}
+async function galeraAdoptSubmit() {
+    const err = document.getElementById('ga-error');
+    const fail = m => { if (err) { err.textContent = m; err.style.display = 'block'; } };
+    const name = (document.getElementById('ga-name').value || '').trim();
+    const user = (document.getElementById('ga-user').value || 'root').trim();
+    const pw = document.getElementById('ga-pw').value || '';
+    // Same character set the backend enforces (safe_token / valid_address) —
+    // reject early with a clear message rather than a 400.
+    const nameOk = /^[A-Za-z0-9._-]+$/;
+    const addrOk = /^[A-Za-z0-9.:_-]+$/;
+    if (!name) return fail('Cluster name is required.');
+    if (!nameOk.test(name)) return fail('Cluster name may only contain letters, digits, - _ .');
+    const nodes = [];
+    document.querySelectorAll('.galera-adopt-row').forEach(row => {
+        const container = (row.querySelector('.ga-container').value || '').trim();
+        const address = (row.querySelector('.ga-address').value || '').trim();
+        const port = parseInt(row.querySelector('.ga-port').value, 10) || 3306;
+        if (container || address) {
+            nodes.push({ node_id: galeraState.host || '', container, address, port, node_name: container });
+        }
+    });
+    if (nodes.length === 0) return fail('Add at least one node.');
+    for (const n of nodes) {
+        if (!n.container) return fail('Every node needs a container name.');
+        if (!nameOk.test(n.container)) return fail(`Container name "${n.container}" may only contain letters, digits, - _ .`);
+        if (!n.address) return fail('Every node needs an address.');
+        if (!addrOk.test(n.address)) return fail(`Address "${n.address}" looks invalid (use an IP or hostname).`);
+    }
+    const payload = {
+        name, nodes, sst_method: 'mariabackup', db_user: user,
+        provisioned: false, db_password: pw,
+    };
+    try {
+        const r = await fetch(galeraBase('clusters'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+        showToast('Cluster adopted', 'success');
+        galeraCloseModal();
+        galeraLoadClusters();
+    } catch (e) {
+        fail((e && e.message) || String(e));
+        showToast('Adopt failed', 'error', 0);
+    }
+}
+
+// ── Lifecycle + recovery ─────────────────────────────────────────────
+
+async function galeraNodeAction(clusterId, container, action) {
+    if (action === 'stop' || action === 'restart') {
+        const ok = await showConfirm(`${action === 'stop' ? 'Stop' : 'Restart'} MariaDB on “${container}”?\n\nStopping a node removes it from the cluster until it rejoins.`, `${action[0].toUpperCase() + action.slice(1)} node`);
+        if (!ok) return;
+    }
+    try {
+        const r = await fetch(galeraBase('clusters/' + encodeURIComponent(clusterId) + '/nodes/' + encodeURIComponent(container) + '/' + encodeURIComponent(action)), { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+        showToast(`${container}: ${action} ok`, 'success');
+        setTimeout(galeraLoadClusters, 1200);
+    } catch (e) {
+        showToast(`${action} failed: ${(e && e.message) || e}`, 'error', 0);
+    }
+}
+
+async function galeraRecover(clusterId) {
+    const c = (galeraState.clusters || []).find(x => x.id === clusterId);
+    const name = c ? c.name : clusterId;
+    const ok = await showConfirm(
+        `Recover cluster “${name}”?\n\nThis STOPS MariaDB on every node, reads each node's last-committed position, then bootstraps the most up-to-date one and rejoins the rest. There will be a brief outage. WolfStack refuses to act if no node reports a known position.`,
+        'Recover cluster');
+    if (!ok) return;
+    galeraStreamJob('Recovering “' + name + '”', galeraBase('clusters/' + encodeURIComponent(clusterId) + '/recover'), {});
+}
+
+async function galeraDelete(clusterId) {
+    const c = (galeraState.clusters || []).find(x => x.id === clusterId);
+    const name = c ? c.name : clusterId;
+    const ok = await showConfirm(`Forget cluster “${name}”?\n\nThis only removes it from WolfStack — the containers and their data are left untouched.`, 'Forget cluster');
+    if (!ok) return;
+    try {
+        const r = await fetch(galeraBase('clusters/' + encodeURIComponent(clusterId)), { method: 'DELETE' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+        showToast('Cluster forgotten', 'success');
+        galeraLoadClusters();
+    } catch (e) {
+        showToast('Forget failed: ' + ((e && e.message) || e), 'error', 0);
+    }
+}
+
+/// Shared SSE-streaming job modal (provision + recover). POSTs `body` to `url`,
+/// streams `data:` lines into a live log, and resolves on RESULT:OK/ERR.
+async function galeraStreamJob(title, url, body) {
+    const modal = galeraOpenModal(title, `
+        <pre id="galera-job-log" role="log" aria-live="polite" style="background:var(--bg-input,#0d0f14);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;line-height:1.5;max-height:50vh;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;">Starting…</pre>
+        <div id="galera-job-result" style="margin-top:12px;font-size:13px;"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;">
+            <button id="galera-job-close" class="btn btn-sm" onclick="galeraCloseModal()" disabled>Close</button>
+        </div>`, 640);
+    const log = modal.querySelector('#galera-job-log');
+    const resultEl = modal.querySelector('#galera-job-result');
+    const closeBtn = modal.querySelector('#galera-job-close');
+    const append = line => {
+        if (!log) return;
+        if (log.textContent === 'Starting…') log.textContent = '';
+        log.textContent += (log.textContent ? '\n' : '') + line;
+        log.scrollTop = log.scrollHeight;
+    };
+    // Abortable so closing the modal releases the SSE connection (the job
+    // itself continues server-side). galeraCloseModal() calls .abort().
+    const ctrl = new AbortController();
+    galeraState.activeJobAbort = ctrl;
+    let ok = null, finalMsg = '', aborted = false;
+    try {
+        const resp = await fetch(url, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body), signal: ctrl.signal,
+        });
+        if (!resp.ok && (resp.headers.get('content-type') || '').includes('application/json')) {
+            const d = await resp.json();
+            throw new Error(d.error || ('HTTP ' + resp.status));
+        }
+        if (!resp.body) throw new Error('HTTP ' + resp.status + ' (no response body)');
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            const lines = buf.split('\n'); buf = lines.pop();
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const msg = line.slice(6);
+                if (msg.startsWith('RESULT:OK:')) { ok = true; finalMsg = msg.slice(10); }
+                else if (msg.startsWith('RESULT:ERR:')) { ok = false; finalMsg = msg.slice(11); }
+                else append(msg);
+            }
+        }
+    } catch (e) {
+        if (ctrl.signal.aborted) { aborted = true; } // user closed the modal
+        else { ok = false; finalMsg = (e && e.message) || String(e); }
+    }
+    if (galeraState.activeJobAbort === ctrl) galeraState.activeJobAbort = null;
+    if (!aborted && resultEl) {
+        if (ok === true) {
+            resultEl.innerHTML = `<div style="color:var(--success);">✅ ${escapeHtml(finalMsg || 'Done')}</div>`;
+            showToast('Galera: ' + (finalMsg || 'done'), 'success');
+        } else {
+            resultEl.innerHTML = `<div role="alert" style="color:var(--danger);">❌ ${escapeHtml(finalMsg || 'Failed')}</div>`;
+            showToast('Galera job failed', 'error', 0);
+        }
+    }
+    if (closeBtn) closeBtn.disabled = false;
+    galeraLoadClusters();
+}
+
+window.galeraInit = galeraInit;
+window.galeraLoadClusters = galeraLoadClusters;
+window.galeraOnHostChange = galeraOnHostChange;
+window.galeraCreateOpen = galeraCreateOpen;
+window.galeraDistroChanged = galeraDistroChanged;
+window.galeraCreateSubmit = galeraCreateSubmit;
+window.galeraAdoptOpen = galeraAdoptOpen;
+window.galeraAdoptAddRow = galeraAdoptAddRow;
+window.galeraAdoptRemoveRow = galeraAdoptRemoveRow;
+window.galeraAdoptSubmit = galeraAdoptSubmit;
+window.galeraNodeAction = galeraNodeAction;
+window.galeraRecover = galeraRecover;
+window.galeraDelete = galeraDelete;
+window.galeraCloseModal = galeraCloseModal;

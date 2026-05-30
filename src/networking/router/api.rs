@@ -4577,6 +4577,152 @@ pub async fn create_http_proxy(
     }))
 }
 
+/// Request body for issuing a Let's Encrypt cert for an existing HTTP proxy.
+#[derive(serde::Deserialize)]
+pub struct ProxyCertRequest {
+    #[serde(default)]
+    pub email: String,
+    /// "webroot" (HTTP-01, default). Ignored when `dns_provider_id` is set.
+    #[serde(default)]
+    pub challenge: String,
+    /// Saved DNS provider id — when set, issue via DNS-01 (works behind a
+    /// firewall / for wildcards) instead of the webroot HTTP-01 challenge.
+    #[serde(default)]
+    pub dns_provider_id: String,
+}
+
+/// POST /api/router/http-proxies/{id}/certificate — issue a Let's Encrypt
+/// certificate for this proxy's server_names and wire it straight into the
+/// site (TLS cert/key + force-HTTPS), then apply + reload. Removes the
+/// "issue on the certs page, then come back and paste the paths" round-trip.
+///
+/// Deliberately NOT `certbot --nginx`: WolfStack owns the nginx config for
+/// this proxy, so we issue via the existing webroot/DNS flow and wire the
+/// cert paths into our own config — same one-click result, no config fight.
+/// Runs on whichever node serves the request; proxy the call to a target
+/// node to issue + install the cert on that node.
+pub async fn issue_proxy_certificate(
+    req: HttpRequest, state: S,
+    path: web::Path<String>,
+    body: web::Json<ProxyCertRequest>,
+) -> HttpResponse {
+    auth_or_return!(req, state);
+    let id = path.into_inner();
+    let b = body.into_inner();
+
+    let domains: Vec<String> = {
+        let cur = state.router.config.read().unwrap();
+        match cur.http_proxies.iter().find(|p| p.id == id) {
+            Some(p) => p.server_names.clone(),
+            None => return HttpResponse::NotFound().json(serde_json::json!({
+                "error": format!("HTTP proxy '{}' not found", id)
+            })),
+        }
+    };
+    if domains.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "this proxy has no server names to certify"
+        }));
+    }
+
+    // Validate inputs at the boundary so a bad value yields a clear 400 rather
+    // than a confusing certbot error deep inside the thread pool.
+    if !b.email.is_empty() && (!b.email.contains('@') || b.email.chars().any(|c| c.is_whitespace()) || b.email.len() > 254) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "that doesn't look like a valid email address"
+        }));
+    }
+    // The HTTP path only knows how to solve a webroot (HTTP-01) challenge;
+    // DNS-01 must come through `dns_provider_id`. Reject anything else early.
+    if b.dns_provider_id.is_empty() && !matches!(b.challenge.as_str(), "" | "webroot") {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("unsupported challenge '{}' without a DNS provider (use webroot, or pick a DNS provider for DNS-01)", b.challenge)
+        }));
+    }
+
+    tracing::info!(
+        "cert issuance requested for proxy '{}' domains={:?} via {}",
+        id, domains,
+        if b.dns_provider_id.is_empty() { "HTTP-01/webroot" } else { "DNS-01" }
+    );
+
+    // Issue the certificate (blocking — certbot takes ~a minute). A saved DNS
+    // provider wins over the HTTP-01 challenge, exactly like the certs page.
+    let email = b.email.clone();
+    let issue_domains = domains.clone();
+    let result = if !b.dns_provider_id.is_empty() {
+        let pid = b.dns_provider_id.clone();
+        web::block(move || crate::certbot::issue_via_provider(&issue_domains, &email, &pid, false)).await
+    } else {
+        let challenge = if b.challenge.is_empty() { "webroot".to_string() } else { b.challenge.clone() };
+        web::block(move || crate::certbot::issue(&issue_domains, &email, &challenge, None, false)).await
+    };
+    let log = match result {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            tracing::warn!("cert issuance for proxy '{}' failed: {}", id, e);
+            return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
+        }
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    };
+
+    // Resolve the freshly-issued cert's real lineage (handles certbot's
+    // `-0001` suffix) by matching SANs; fall back to the first domain.
+    // `list_certs` walks /etc/letsencrypt + shells out to openssl per cert, so
+    // it runs on the blocking pool, not the actix worker.
+    let first = domains[0].clone();
+    let first_for_block = first.clone();
+    let resolved = web::block(move || {
+        crate::certbot::list_certs().into_iter()
+            .find(|c| c.domains.iter().any(|d| d == &first_for_block))
+            .map(|c| {
+                let cp = if c.cert_path.is_empty() { format!("/etc/letsencrypt/live/{}/fullchain.pem", c.name) } else { c.cert_path.clone() };
+                let kp = if c.key_path.is_empty() { format!("/etc/letsencrypt/live/{}/privkey.pem", c.name) } else { c.key_path.clone() };
+                (c.name.clone(), cp, kp)
+            })
+    }).await.unwrap_or(None);
+    let (cert_name, cert_path, key_path) = resolved
+        .unwrap_or_else(|| (first.clone(),
+            format!("/etc/letsencrypt/live/{}/fullchain.pem", first),
+            format!("/etc/letsencrypt/live/{}/privkey.pem", first)));
+
+    // Wire the cert into the proxy + force HTTPS, then save.
+    {
+        let mut cur = state.router.config.write().unwrap();
+        match cur.http_proxies.iter_mut().find(|p| p.id == id) {
+            Some(p) => {
+                p.tls = Some(crate::networking::router::http_proxy::TlsConfig {
+                    cert_path: cert_path.clone(),
+                    key_path: key_path.clone(),
+                    cert_name: cert_name.clone(),
+                });
+                p.force_https = true;
+            }
+            None => return HttpResponse::NotFound().json(serde_json::json!({
+                "error": format!("HTTP proxy '{}' was deleted while the certificate was issued", id)
+            })),
+        }
+        if let Err(e) = cur.save() {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("certificate issued but saving the proxy failed: {}", e)
+            }));
+        }
+    }
+
+    let cfg_snapshot = state.router.config.read().unwrap().http_proxies.clone();
+    let self_id = crate::agent::self_node_id();
+    let warnings = crate::networking::router::http_proxy::apply_for_node(&cfg_snapshot, &self_id);
+    replicate_config_to_cluster(state);
+
+    tracing::info!("cert '{}' issued + wired into proxy '{}' ({} apply warning(s))", cert_name, id, warnings.len());
+    HttpResponse::Ok().json(serde_json::json!({
+        "ok": true,
+        "cert_name": cert_name,
+        "apply_warnings": warnings,
+        "log": log,
+    }))
+}
+
 /// PUT /api/router/http-proxies/{id} — update.
 pub async fn update_http_proxy(
     req: HttpRequest, state: S,
@@ -6601,6 +6747,7 @@ pub fn configure(cfg: &mut actix_web::web::ServiceConfig) {
         // operators can replicate a proxy across cluster nodes for HA.
         .route("/api/router/http-proxies",                  web::get().to(list_http_proxies))
         .route("/api/router/http-proxies",                  web::post().to(create_http_proxy))
+        .route("/api/router/http-proxies/{id}/certificate", web::post().to(issue_proxy_certificate))
         .route("/api/router/http-proxies/runtime",          web::get().to(http_proxy_runtime))
         .route("/api/router/http-proxies/install/{which}",  web::post().to(http_proxy_install_runtime))
         .route("/api/router/http-proxies/{id}",             web::put().to(update_http_proxy))

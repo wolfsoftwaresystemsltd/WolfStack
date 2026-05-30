@@ -14713,6 +14713,146 @@ pub async fn backup_restore_from_path_stream(
         .streaming(stream)
 }
 
+// ── Galera cluster manager ───────────────────────────────────────────
+
+/// Request to create/adopt a Galera cluster. The cluster fields are flattened
+/// at the top level; `db_password` is the plaintext DB password (encrypted
+/// server-side, never stored or returned in plaintext).
+#[derive(serde::Deserialize)]
+pub struct GaleraSaveRequest {
+    #[serde(flatten)]
+    pub cluster: crate::galera::GaleraCluster,
+    #[serde(default)]
+    pub db_password: String,
+}
+
+/// GET /api/galera/clusters — list managed clusters (password stripped).
+pub async fn galera_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let mut cfg = crate::galera::load_config();
+    for c in cfg.clusters.iter_mut() { c.db_password_enc = String::new(); }
+    HttpResponse::Ok().json(cfg.clusters)
+}
+
+/// POST /api/galera/clusters — create or adopt a cluster (upsert by id).
+pub async fn galera_save(req: HttpRequest, state: web::Data<AppState>, body: web::Json<GaleraSaveRequest>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let b = body.into_inner();
+    let mut cluster = b.cluster;
+    if cluster.id.trim().is_empty() { cluster.id = uuid::Uuid::new_v4().to_string(); }
+    if cluster.name.trim().is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "cluster name required" }));
+    }
+    if cluster.created_at.is_empty() { cluster.created_at = chrono::Utc::now().to_rfc3339(); }
+    let pw = if b.db_password.is_empty() { None } else { Some(b.db_password.as_str()) };
+    match crate::galera::upsert_cluster(cluster, pw) {
+        Ok(mut saved) => { saved.db_password_enc = String::new(); HttpResponse::Ok().json(serde_json::json!({ "ok": true, "cluster": saved })) }
+        // Most upsert failures are validation (bad name/address) — a client error.
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/galera/clusters/{id} — forget a cluster (does NOT destroy the
+/// containers; use the per-node controls for that).
+pub async fn galera_delete(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match crate::galera::delete_cluster(&path.into_inner()) {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
+        Err(e) => HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/galera/clusters/{id}/status — live wsrep status across all nodes,
+/// with split-brain detection.
+pub async fn galera_status(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = path.into_inner();
+    match crate::galera::get_cluster(&id) {
+        Some(c) => HttpResponse::Ok().json(crate::galera::cluster_status(&c).await),
+        None => HttpResponse::NotFound().json(serde_json::json!({ "error": format!("cluster '{}' not found", id) })),
+    }
+}
+
+/// Stream a blocking Galera job (provision/recover) to the browser as SSE.
+/// `job` runs on a dedicated OS thread (it shells out to lxc/mariadb for
+/// minutes); its log lines and a final `RESULT:OK:`/`RESULT:ERR:` are relayed.
+fn galera_stream_job<F>(job: F) -> HttpResponse
+where
+    F: FnOnce(std::sync::mpsc::Sender<String>) + Send + 'static,
+{
+    let (std_tx, std_rx) = std::sync::mpsc::channel::<String>();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
+    let job_tx = std_tx.clone();
+    std::thread::spawn(move || { job(job_tx); });
+    drop(std_tx); // close the original handle so the relay loop ends with the job
+    tokio::task::spawn_blocking(move || {
+        while let Ok(msg) = std_rx.recv() {
+            if tx.blocking_send(msg).is_err() { break; }
+        }
+    });
+    let stream = async_stream::stream! {
+        while let Some(msg) = rx.recv().await {
+            let event = format!("data: {}\n\n", msg.replace('\n', "\ndata: "));
+            yield Ok::<_, actix_web::Error>(actix_web::web::Bytes::from(event));
+        }
+    };
+    HttpResponse::Ok()
+        .insert_header(("Content-Type", "text/event-stream"))
+        .insert_header(("Cache-Control", "no-cache"))
+        .insert_header(("Connection", "keep-alive"))
+        .insert_header(("X-Accel-Buffering", "no"))
+        .streaming(stream)
+}
+
+/// POST /api/galera/provision — create N new LXC containers on THIS host, install
+/// MariaDB+Galera, bootstrap a fresh cluster, then persist it. SSE progress.
+pub async fn galera_provision_stream(req: HttpRequest, state: web::Data<AppState>, body: web::Json<crate::galera::ProvisionRequest>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let p = body.into_inner();
+    galera_stream_job(move |tx| {
+        let _ = tx.send(format!("Provisioning {}-node Galera cluster '{}'…", p.node_count, p.cluster_name));
+        match crate::galera::provision_cluster(&p, &tx) {
+            Ok(c) => { let _ = tx.send(format!("RESULT:OK:Cluster '{}' provisioned with {} node(s).", c.name, c.nodes.len())); }
+            Err(e) => { let _ = tx.send(format!("RESULT:ERR:{}", e)); }
+        }
+    })
+}
+
+/// POST /api/galera/clusters/{id}/recover — evidence-based recovery: stop all
+/// nodes, bootstrap the most-advanced (highest grastate seqno), rejoin the rest.
+/// Refuses to act when no node reports a known position. SSE progress.
+pub async fn galera_recover_stream(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = path.into_inner();
+    let cluster = match crate::galera::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": format!("cluster '{}' not found", id) })),
+    };
+    galera_stream_job(move |tx| {
+        let _ = tx.send(format!("Recovering cluster '{}'…", cluster.name));
+        match crate::galera::recover_cluster(&cluster, &tx) {
+            Ok(msg) => { let _ = tx.send(format!("RESULT:OK:{}", msg)); }
+            Err(e) => { let _ = tx.send(format!("RESULT:ERR:{}", e)); }
+        }
+    })
+}
+
+/// POST /api/galera/clusters/{id}/nodes/{container}/{action} — start/stop/restart
+/// MariaDB on one node of a managed cluster.
+pub async fn galera_node_action(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String, String)>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let (id, container, action) = path.into_inner();
+    let cluster = match crate::galera::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": format!("cluster '{}' not found", id) })),
+    };
+    match web::block(move || crate::galera::node_service(&cluster, &container, &action)).await {
+        Ok(Ok(_)) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
 /// DELETE /api/backups/{id} — delete a backup entry + file
 pub async fn backup_delete(
     req: HttpRequest, state: web::Data<AppState>,
@@ -32436,6 +32576,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups/import", web::post().to(backup_import))
         .route("/api/backups/scan-folder", web::get().to(backup_scan_folder))
         .route("/api/backups/restore-from-path/stream", web::post().to(backup_restore_from_path_stream))
+        .route("/api/galera/clusters", web::get().to(galera_list))
+        .route("/api/galera/clusters", web::post().to(galera_save))
+        .route("/api/galera/clusters/{id}", web::delete().to(galera_delete))
+        .route("/api/galera/clusters/{id}/status", web::get().to(galera_status))
+        .route("/api/galera/provision", web::post().to(galera_provision_stream))
+        .route("/api/galera/clusters/{id}/recover", web::post().to(galera_recover_stream))
+        .route("/api/galera/clusters/{id}/nodes/{container}/{action}", web::post().to(galera_node_action))
         // PBS (Proxmox Backup Server) — must be before {id} routes
         .route("/api/backups/pbs/status", web::get().to(pbs_status))
         .route("/api/backups/pbs/snapshots", web::get().to(pbs_snapshots))

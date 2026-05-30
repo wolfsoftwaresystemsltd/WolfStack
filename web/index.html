@@ -2751,6 +2751,31 @@
             </div>
         </div>
 
+        <!-- ═══ Galera Clusters Page ═══ -->
+        <div id="page-galera" class="page-view" style="display:none;">
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-body" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
+                    <div>
+                        <h2 style="margin:0; display:flex; align-items:center; gap:10px;">
+                            <span style="font-size:28px;"><span class="ws-icon-clean-wrap" data-icon="database"></span></span> Galera Clusters
+                        </h2>
+                        <div style="font-size:12px; color:var(--text-muted); margin-top:4px; max-width:680px;">
+                            Build, adopt and run MariaDB Galera clusters on your LXC containers — synchronous multi-primary
+                            replication with live wsrep status, split-brain detection, and evidence-based recovery.
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn btn-sm" onclick="galeraInit()">Refresh</button>
+                        <button class="btn btn-sm" onclick="galeraAdoptOpen()"><span class="ws-icon-clean-wrap" data-icon="link"></span> Adopt existing</button>
+                        <button class="btn btn-primary btn-sm" onclick="galeraCreateOpen()">+ New cluster</button>
+                    </div>
+                </div>
+            </div>
+            <div id="galera-content">
+                <div style="color:var(--text-muted); text-align:center; padding:40px; font-size:13px;">Loading…</div>
+            </div>
+        </div>
+
         <!-- ═══ Control Panel Page ═══ -->
         <div id="page-control-panel" class="page-view" style="display:none;">
             <div class="card" style="margin-bottom:16px;">

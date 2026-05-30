@@ -9304,6 +9304,7 @@
                   '<div class="form-group"><label>Cert dropdown</label>' +
                   '<select id="hp-cert-picker" class="form-control" onchange="hpApplyCertPick()" style="max-width:380px;">' + certOpts + '</select>' +
                   '<small style="color:var(--text-muted);">Local-node certs only — cluster-wide cert distribution lands in v23.2.x.</small></div>' +
+                  '<div class="form-group" style="margin-top:8px;"><button class="btn btn-sm" type="button" onclick="hpRequestCert()" title="Issue a free certificate for the domains above and wire it into this site"><span class="ws-icon-clean-wrap" data-icon="lock"></span> Get HTTPS certificate</button> <small style="color:var(--text-muted);">Issues a Let&rsquo;s Encrypt certificate for the domains above and fills these paths in. Save the site first.</small></div>' +
                   '<div class="form-group" style="margin-top:8px;"><label>Cert path</label>' +
                   '<input id="hp-tls-cert" class="form-control" value="' + escHtml((d.tls && d.tls.cert_path) || '') + '" placeholder="/etc/letsencrypt/live/zone/fullchain.pem"></div>' +
                   '<div class="form-group" style="margin-top:8px;"><label>Key path</label>' +
@@ -9506,6 +9507,61 @@
         }
     }
 
+    // Issue a Let's Encrypt cert for the site being edited and wire it in.
+    // Requires the proxy to be saved first (the backend works by id).
+    async function hpRequestCert() {
+        hpReadDraftFromForm();
+        const d = hpState.draft;
+        if (!d) return;
+        if (!hpState.editing) {
+            if (typeof showToast === 'function') showToast('Save the site first, then click Get HTTPS certificate.', 'warning');
+            else alert('Save the site first, then request a certificate.');
+            return;
+        }
+        if (!d.server_names || !d.server_names.length) {
+            if (typeof showToast === 'function') showToast('Add at least one domain (server name) first.', 'warning');
+            return;
+        }
+        // Use DNS-01 automatically when this proxy's edge already carries a DNS
+        // provider (works behind a firewall / for wildcards); else HTTP-01.
+        let dnsPid = '';
+        try {
+            const e = d.edge || {};
+            dnsPid = e.dns_provider_id
+                || (e.CloudflareDns && e.CloudflareDns.dns_provider_id)
+                || (e.DnsRoundRobin && e.DnsRoundRobin.dns_provider_id) || '';
+        } catch (_) {}
+        const how = dnsPid ? 'DNS-01 (via the configured DNS provider)' : 'HTTP-01 (port 80 must be reachable for these domains)';
+        if (!confirm('Request a Let’s Encrypt certificate for:\n\n' + d.server_names.join('\n') + '\n\nChallenge: ' + how + '\n\nThis takes about a minute.')) return;
+        const btn = document.querySelector('button[onclick="hpRequestCert()"]');
+        const prev = btn ? btn.innerHTML : '';
+        if (btn) { btn.disabled = true; btn.textContent = 'Requesting certificate…'; }
+        try {
+            const resp = await fetch(wrUrl('/api/router/http-proxies/' + encodeURIComponent(d.id) + '/certificate'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: '', challenge: 'webroot', dns_provider_id: dnsPid }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (resp.ok) {
+                if (typeof showToast === 'function') showToast('Certificate issued & applied: ' + (data.cert_name || ''), 'success');
+                // Surface any nginx-apply warnings so a half-applied cert isn't silent.
+                if (data.apply_warnings && data.apply_warnings.length) {
+                    alert('Certificate issued, but applying the nginx config produced warnings:\n\n' + data.apply_warnings.join('\n'));
+                }
+                hpCloseEditor();
+                hpLoad();
+            } else {
+                const emailHint = (data.error && /email/i.test(data.error)) ? '\n\nTip: set a Let’s Encrypt email on the Certificates page first.' : '';
+                alert('Certificate request failed:\n\n' + (data.error || ('HTTP ' + resp.status)) + emailHint);
+                if (btn) { btn.disabled = false; btn.innerHTML = prev; }
+            }
+        } catch (e) {
+            alert('Certificate request failed: ' + e.message);
+            if (btn) { btn.disabled = false; btn.innerHTML = prev; }
+        }
+    }
+
     async function hpDelete(id) {
         if (!confirm('Delete HTTP proxy "' + id + '"?\n\nThe nginx config on every target node will be removed and the runtime reloaded. If the proxy uses a Hetzner/DigitalOcean Load Balancer or a Cloudflare Tunnel, those cloud resources will also be torn down.')) return;
         try {
@@ -9667,6 +9723,7 @@
     window.hpDelete = hpDelete;
     window.hpAddUpstream = hpAddUpstream;
     window.hpApplyCertPick = hpApplyCertPick;
+    window.hpRequestCert = hpRequestCert;
     window.hpRenderEditor = hpRenderEditor;
     window.hpOpenInstallPicker = hpOpenInstallPicker;
     window.hpCloseInstallPicker = hpCloseInstallPicker;
