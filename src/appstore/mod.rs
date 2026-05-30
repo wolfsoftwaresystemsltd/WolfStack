@@ -972,22 +972,27 @@ fn install_bare_metal(
     Ok(format!("{} installed on host", app.name))
 }
 
-/// Given an ISO URL that 404s (e.g. an invalidated `_latest.iso` alias),
+/// Given an ISO URL that 404s (e.g. Debian's `current/` symlink rolling
+/// from 13.4.0 to 13.5.0, or a Proxmox `_latest.iso` alias being retired),
 /// scrape the parent directory's HTML index and pick the newest file
-/// matching the same base name. Works for Proxmox's enterprise ISO
-/// directory and any Apache-style auto-index of a flat folder. Returns
-/// None if the parent directory can't be fetched or no ISOs match.
+/// carrying the same name template with a bumped version number.
+///
+/// The version number in the original filename is located and treated as
+/// a hole: everything before it is a fixed prefix, everything after is a
+/// fixed suffix. We then match directory entries against `<prefix><ver><suffix>`
+/// exactly and pick the highest `<ver>` by numeric comparison. Anchoring on
+/// both prefix and suffix is what keeps us from picking sibling variants
+/// that share a prefix — `debian-edu-13.5.0-amd64-netinst.iso` and
+/// `debian-mac-13.5.0-...` live in the same directory as the plain
+/// `debian-13.5.0-amd64-netinst.iso` we actually want.
+///
+/// Handles hyphen-delimited names (Debian/Ubuntu: `debian-13.4.0-amd64-netinst.iso`)
+/// and underscore-delimited names (Proxmox: `proxmox-ve_9.1-1.iso`) alike.
+/// Returns None if the directory can't be fetched, the filename has no
+/// dotted version to anchor on, or nothing matches the template.
 fn resolve_latest_iso(original_url: &str) -> Option<String> {
-    // Split `https://host/dir/file.iso` into (`https://host/dir/`, `file`)
     let last_slash = original_url.rfind('/')?;
     let base = &original_url[..=last_slash];
-    let file = &original_url[last_slash + 1..];
-    // Strip a trailing `_latest.iso` or `_<version>.iso` to get the stem.
-    let stem = file
-        .strip_suffix(".iso")?
-        .rsplit_once('_')
-        .map(|(s, _)| s)
-        .unwrap_or(file);
 
     let output = std::process::Command::new("wget")
         .args(["-q", "-O", "-", base])
@@ -996,24 +1001,55 @@ fn resolve_latest_iso(original_url: &str) -> Option<String> {
     if !output.status.success() { return None; }
     let html = String::from_utf8_lossy(&output.stdout);
 
-    // Find every `href="<stem>_<ver>.iso"` in the listing.
-    let needle = format!("{}_", stem);
-    let mut candidates: Vec<&str> = Vec::new();
+    pick_latest_iso_from_listing(original_url, &html)
+}
+
+/// Pure core of [`resolve_latest_iso`] — given the original URL and the
+/// fetched directory HTML, return the newest matching ISO URL (or None).
+/// Split out from the network fetch so it can be unit-tested offline.
+fn pick_latest_iso_from_listing(original_url: &str, html: &str) -> Option<String> {
+    // Split `https://host/dir/file.iso` into (`https://host/dir/`, `file`)
+    let last_slash = original_url.rfind('/')?;
+    let base = &original_url[..=last_slash];
+    let file = &original_url[last_slash + 1..];
+
+    // Locate the dotted version number embedded in the filename — the
+    // `13.4.0` in `debian-13.4.0-amd64-netinst.iso` or the `9.1` in
+    // `proxmox-ve_9.1-1.iso`. Requires at least one dot so we don't latch
+    // onto a stray single digit (e.g. the `64` in `64bit`).
+    let ver_re = regex::Regex::new(r"\d+(?:\.\d+)+").ok()?;
+    let m = ver_re.find(file)?;
+    let prefix = &file[..m.start()];
+    let suffix = &file[m.end()..];
+
+    // Exact template match: same prefix, a dotted version capture, same suffix.
+    let pat = format!(
+        "^{}({}){}$",
+        regex::escape(prefix),
+        r"\d+(?:\.\d+)+",
+        regex::escape(suffix),
+    );
+    let entry_re = regex::Regex::new(&pat).ok()?;
+
+    // Pick the entry with the highest version by component-wise numeric
+    // comparison (`13.10.0` > `13.9.0`, which a lexical sort gets wrong).
+    let mut best: Option<(Vec<u64>, String)> = None;
     for part in html.split("href=\"").skip(1) {
         if let Some(end) = part.find('"') {
             let href = &part[..end];
-            if href.starts_with(&needle) && href.ends_with(".iso") {
-                candidates.push(href);
+            if let Some(caps) = entry_re.captures(href) {
+                let ver: Vec<u64> = caps[1]
+                    .split('.')
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                let is_newer = best.as_ref().map_or(true, |(b, _)| ver > *b);
+                if is_newer {
+                    best = Some((ver, href.to_string()));
+                }
             }
         }
     }
-    if candidates.is_empty() { return None; }
-    // `sort -V` equivalent — the filenames are of the form `stem_M.N-R.iso`
-    // which sorts correctly lexicographically when the numeric parts are
-    // zero-padded; in practice Proxmox uses simple single-digit majors, so
-    // a lexical sort picks the right version. Good enough for now.
-    candidates.sort();
-    let latest = candidates.last()?;
+    let (_, latest) = best?;
     Some(format!("{}{}", base, latest))
 }
 
@@ -2565,9 +2601,10 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
         // Firewall, hypervisors, NAS, Linux server distros. All install as
         // KVM VMs via the PBS pattern: download ISO, create VM, auto-start,
         // user finishes the installer over VNC. URLs are pinned to a known
-        // version; `resolve_latest_iso` handles Proxmox-style directory
-        // scrapes if the pin 404s. OPNsense ships .iso.bz2 — the downloader
-        // decompresses in place.
+        // version; `resolve_latest_iso` rescrapes the directory for a newer
+        // image (matching prefix + version + suffix) if the pin 404s, which
+        // is how a rolling distro like Debian self-heals when `current/`
+        // bumps. OPNsense ships .iso.bz2 — the downloader decompresses in place.
 
         AppManifest {
             id: "opnsense".into(),
@@ -2709,7 +2746,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             website: Some("https://www.debian.org".into()),
             docker: None, lxc: None, bare_metal: None,
             vm: Some(VmTarget {
-                iso_url: "https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.4.0-amd64-netinst.iso".into(),
+                iso_url: "https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.5.0-amd64-netinst.iso".into(),
                 memory_mb: 1024,
                 cores: 1,
                 disk_gb: 20,
@@ -2928,7 +2965,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             website: Some("https://www.debian.org".into()),
             docker: None, lxc: None, bare_metal: None,
             vm: Some(VmTarget {
-                iso_url: "https://cdimage.debian.org/debian-cd/current-live/amd64/iso-hybrid/debian-live-13.4.0-amd64-gnome.iso".into(),
+                iso_url: "https://cdimage.debian.org/debian-cd/current-live/amd64/iso-hybrid/debian-live-13.5.0-amd64-gnome.iso".into(),
                 memory_mb: 4096,
                 cores: 2,
                 disk_gb: 40,
@@ -9654,5 +9691,78 @@ mod tests {
             "Apps referencing undeclared ${{VAR}} placeholders: {:?}",
             dangling,
         );
+    }
+
+    /// The reported Gary/KO4BSR bug: Debian's `current/` symlink rolled
+    /// from 13.4.0 to 13.5.0, 404ing our pinned netinst URL. The resolver
+    /// must rescrape the directory and pick `debian-13.5.0-amd64-netinst.iso`
+    /// — NOT the sibling `debian-edu-` / `debian-mac-` variants that share
+    /// the `debian-` prefix and live in the same listing.
+    #[test]
+    fn resolve_latest_iso_picks_bumped_debian_netinst() {
+        let original = "https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.4.0-amd64-netinst.iso";
+        let html = r#"
+            <a href="debian-edu-13.5.0-amd64-netinst.iso">debian-edu</a>
+            <a href="debian-mac-13.5.0-amd64-netinst.iso">debian-mac</a>
+            <a href="debian-13.5.0-amd64-netinst.iso">debian</a>
+            <a href="SHA256SUMS">checksums</a>
+        "#;
+        assert_eq!(
+            pick_latest_iso_from_listing(original, html).as_deref(),
+            Some("https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.5.0-amd64-netinst.iso"),
+        );
+    }
+
+    /// Live (GNOME) image template, same rolling-`current` scenario.
+    #[test]
+    fn resolve_latest_iso_picks_bumped_debian_live() {
+        let original = "https://cdimage.debian.org/debian-cd/current-live/amd64/iso-hybrid/debian-live-13.4.0-amd64-gnome.iso";
+        let html = r#"
+            <a href="debian-live-13.5.0-amd64-kde.iso">kde</a>
+            <a href="debian-live-13.5.0-amd64-gnome.iso">gnome</a>
+            <a href="debian-live-13.5.0-amd64-xfce.iso">xfce</a>
+        "#;
+        assert_eq!(
+            pick_latest_iso_from_listing(original, html).as_deref(),
+            Some("https://cdimage.debian.org/debian-cd/current-live/amd64/iso-hybrid/debian-live-13.5.0-amd64-gnome.iso"),
+        );
+    }
+
+    /// Underscore-delimited Proxmox layout must still resolve (the case
+    /// the original resolver was written for).
+    #[test]
+    fn resolve_latest_iso_handles_proxmox_underscore() {
+        let original = "https://enterprise.proxmox.com/iso/proxmox-ve_9.1-1.iso";
+        let html = r#"
+            <a href="proxmox-ve_9.1-1.iso">9.1</a>
+            <a href="proxmox-ve_9.2-1.iso">9.2</a>
+        "#;
+        assert_eq!(
+            pick_latest_iso_from_listing(original, html).as_deref(),
+            Some("https://enterprise.proxmox.com/iso/proxmox-ve_9.2-1.iso"),
+        );
+    }
+
+    /// Numeric (not lexical) comparison: `13.10.0` must beat `13.9.0`.
+    #[test]
+    fn resolve_latest_iso_compares_versions_numerically() {
+        let original = "https://example.org/iso/debian-13.4.0-amd64-netinst.iso";
+        let html = r#"
+            <a href="debian-13.9.0-amd64-netinst.iso">9</a>
+            <a href="debian-13.10.0-amd64-netinst.iso">10</a>
+        "#;
+        assert_eq!(
+            pick_latest_iso_from_listing(original, html).as_deref(),
+            Some("https://example.org/iso/debian-13.10.0-amd64-netinst.iso"),
+        );
+    }
+
+    /// No matching template in the listing → None (caller surfaces the
+    /// original download error rather than a bogus URL).
+    #[test]
+    fn resolve_latest_iso_returns_none_when_nothing_matches() {
+        let original = "https://example.org/iso/debian-13.4.0-amd64-netinst.iso";
+        let html = r#"<a href="some-other-distro-1.0.iso">nope</a>"#;
+        assert_eq!(pick_latest_iso_from_listing(original, html), None);
     }
 }
