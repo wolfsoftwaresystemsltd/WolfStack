@@ -11313,6 +11313,8 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
         if (container) container.remove();
         container = document.createElement('div');
         container.id = 'toast-container';
+        container.setAttribute('role', 'status');
+        container.setAttribute('aria-live', 'polite');
         document.body.appendChild(container);
     }
     Object.assign(container.style, {
@@ -31538,6 +31540,187 @@ function escapeHtml(str) {
 var issuesScanResults = []; // cached for upgrade-all
 var issuesLatestVersion = '0.0.0'; // GitHub-resolved latest, cached after each scan
 
+// Stable DOM id for a node's card (and helper to mirror it everywhere).
+function issCardId(nodeId) { return 'issue-card-' + String(nodeId || 'local').replace(/[^a-z0-9_-]/gi, '-'); }
+
+// Small inline SVGs — lucide isn't wired for dynamically-injected markup
+// (app.js never calls lucide.createIcons), so we ship self-contained paths.
+function issIcon(name) {
+    var paths = {
+        wrench: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.1 2.1a1.5 1.5 0 1 1-2.1-2.1z"/>',
+        broom: '<path d="m13 11 6-6M5 21l5.5-5.5M3 21l9-9 3 3-9 9H3v-3z"/><path d="m14 4 6 6"/>',
+        check: '<path d="M20 6 9 17l-5-5"/>',
+        up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+        spinner: '<circle cx="12" cy="12" r="9" stroke-opacity=".25"/><path d="M21 12a9 9 0 0 0-9-9"/>'
+    };
+    var spin = name === 'spinner' ? ' style="animation:spin .7s linear infinite"' : '';
+    return '<svg class="iss-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+        + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"' + spin + '>' + (paths[name] || '') + '</svg>';
+}
+
+// Severity summary chips (e.g. "2 warnings · 1 info"), or an All-clear chip.
+function issChips(issues) {
+    var c = { critical: 0, warning: 0, info: 0 };
+    issues.forEach(function (i) { if (c[i.severity] !== undefined) c[i.severity]++; });
+    var out = '';
+    if (c.critical) out += '<span class="iss-chip iss-chip-critical">' + c.critical + ' critical</span>';
+    if (c.warning) out += '<span class="iss-chip iss-chip-warning">' + c.warning + ' warning' + (c.warning !== 1 ? 's' : '') + '</span>';
+    if (c.info) out += '<span class="iss-chip iss-chip-info">' + c.info + ' info</span>';
+    if (!out) out = '<span class="iss-chip iss-chip-ok">' + issIcon('check') + ' All clear</span>';
+    return '<div class="iss-chips">' + out + '</div>';
+}
+
+// Render one node's full card body (header + issue rows). `latestVersion`
+// may be null/​'0.0.0' during the live scan — the upgrade affordance only
+// appears once the cluster-wide latest is known.
+function issNodeCardInner(r, latestVersion) {
+    var order = { critical: 0, warning: 1, info: 2 };
+    var issues = (r.issues || []).slice().sort(function (a, b) { return (order[a.severity] || 9) - (order[b.severity] || 9); });
+    var nodeVersion = r.version || '?';
+    var isBehind = latestVersion && nodeVersion !== '?' && latestVersion !== '0.0.0' && compareVersions(nodeVersion, latestVersion) < 0;
+
+    var html = '<div class="iss-card-head">';
+    html += '<span class="iss-host">' + escapeHtml(r.hostname || 'Unknown') + (r.is_self ? '<span class="iss-local">local</span>' : '') + '</span>';
+    html += issChips(issues);
+    html += '<span class="iss-ver">';
+    if (isBehind) {
+        html += '<span><span class="iss-ver-badge iss-ver-old">v' + escapeHtml(nodeVersion) + '</span>'
+            + '<div class="iss-ver-latest">latest v' + escapeHtml(latestVersion) + '</div></span>';
+        html += '<button class="iss-btn iss-btn-up" onclick="issuesUpgradeNode(\'' + escapeHtml(r.node_id) + '\')">'
+            + issIcon('up') + 'Upgrade</button>';
+    } else {
+        html += '<span class="iss-ver-badge iss-ver-ok">v' + escapeHtml(nodeVersion) + '</span>';
+    }
+    html += '</span></div>';
+
+    html += '<div class="iss-body">';
+    if (issues.length === 0) {
+        html += '<div class="iss-empty">' + issIcon('check') + 'No issues detected</div>';
+    } else {
+        issues.forEach(function (issue) {
+            html += '<div class="iss-row">';
+            html += '<span class="iss-dot iss-dot-' + (issue.severity || 'info') + '"></span>';
+            html += '<div class="iss-text"><div class="iss-title">' + escapeHtml(issue.title) + '</div>';
+            if (issue.detail) html += '<div class="iss-detail">' + escapeHtml(issue.detail) + '</div>';
+            html += '</div>';
+            html += '<div class="iss-actions">';
+            var rep = issue.repair;
+            if (rep && rep.kind && rep.target) {
+                // kind/target are server-validated enums/unit names (no quotes); node_id is controlled.
+                html += '<button class="iss-btn iss-btn-fix" '
+                    + 'onclick="issuesRepair(this, \'' + escapeHtml(r.node_id) + '\', \'' + escapeHtml(rep.kind) + '\', \'' + escapeHtml(rep.target) + '\')">'
+                    + issIcon(rep.label === 'Clean' ? 'broom' : 'wrench') + escapeHtml(rep.label || 'Repair') + '</button>';
+            }
+            html += '</div></div>';
+        });
+    }
+    html += '</div>';
+    return html;
+}
+
+// Run a one-click repair for a single issue. Visible feedback throughout:
+// spinner on the button, a toast on completion (errors persist so they can
+// be read/copied), an inline result line, then a targeted re-scan.
+async function issuesRepair(btn, nodeId, kind, target) {
+    if (!btn || btn.disabled) return;
+    var origHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = issIcon('spinner') + 'Working…';
+
+    var node = (typeof allNodes !== 'undefined') ? allNodes.find(function (n) { return (n.id || 'local') === nodeId; }) : null;
+    // Only treat as local when we positively know it: the literal 'local'
+    // id or a node flagged is_self. An unknown id (e.g. the node left the
+    // cluster between scan and click) must route to the proxy — a 404 is
+    // far safer than silently repairing the unit on THIS host.
+    var isLocal = nodeId === 'local' || (node && node.is_self);
+    var url = isLocal ? '/api/issues/repair' : '/api/nodes/' + encodeURIComponent(nodeId) + '/proxy/issues/repair';
+
+    try {
+        var resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ kind: kind, target: target })
+        });
+        var data = await resp.json().catch(function () { return {}; });
+
+        if (!resp.ok || data.ok === false) {
+            var emsg = data.error || data.log || ('HTTP ' + resp.status);
+            showToast('Repair failed: ' + emsg, 'error', 0); // persist — operator must read it
+            issRowResult(btn, false, (data.action ? data.action + '\n' : '') + emsg);
+            btn.disabled = false;
+            btn.innerHTML = origHtml;
+            return;
+        }
+
+        if (data.still_failed) {
+            showToast((data.action || 'Repair ran') + ' — ' + target + ' is still failing. See details.', 'warning', 0);
+            issRowResult(btn, false, (data.action || 'Ran') + '\n' + (data.log || ''));
+            btn.disabled = false;
+            btn.innerHTML = origHtml;
+        } else {
+            showToast((data.action || 'Repaired') + ' — ' + target, 'success');
+            issRowResult(btn, true, (data.action || 'Done') + (data.log ? '\n' + data.log : ''));
+            btn.innerHTML = issIcon('check') + 'Done';
+            setTimeout(function () { issRescanNode(nodeId); }, 1300); // refresh the card from ground truth
+        }
+    } catch (e) {
+        showToast('Repair failed: ' + e.message, 'error', 0);
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+    }
+}
+
+// Append/replace an inline result line under the row that owns `btn`.
+function issRowResult(btn, ok, text) {
+    var row = btn.closest('.iss-row');
+    if (!row) return;
+    var existing = row.nextElementSibling;
+    if (existing && existing.classList.contains('iss-result')) existing.remove();
+    var div = document.createElement('div');
+    div.className = 'iss-result ' + (ok ? 'iss-result-ok' : 'iss-result-err');
+    div.setAttribute('role', ok ? 'status' : 'alert');
+    div.textContent = text;
+    row.parentNode.insertBefore(div, row.nextSibling);
+}
+
+// Re-scan a single node and repaint its card in place.
+async function issRescanNode(nodeId) {
+    var card = document.getElementById(issCardId(nodeId));
+    if (!card) return;
+    var node = (typeof allNodes !== 'undefined') ? allNodes.find(function (n) { return (n.id || 'local') === nodeId; }) : null;
+    var isLocal = nodeId === 'local' || (node && node.is_self); // see issuesRepair: unknown id → proxy, never local
+    var url = isLocal ? '/api/issues/scan' : '/api/nodes/' + encodeURIComponent(nodeId) + '/proxy/issues/scan';
+    try {
+        var r = await fetch(url, { credentials: 'include' });
+        if (!r.ok) return;
+        var data = await r.json();
+        data.node_id = nodeId;
+        data.is_self = isLocal;
+        if (Array.isArray(issuesScanResults)) {
+            var idx = issuesScanResults.findIndex(function (x) { return x.node_id === nodeId; });
+            if (idx >= 0) issuesScanResults[idx] = data;
+        }
+        card.innerHTML = issNodeCardInner(data, issuesLatestVersion);
+        issRefreshCounts(); // keep the top-of-page severity tallies in sync after a repair
+    } catch (e) { /* leave the card showing the pre-repair state */ }
+}
+
+// Recompute the page's critical/warning/info summary counters from the
+// cached scan results. Used after a single-node rescan, since the live-scan
+// `counts` object is scoped to scanForIssues and can't be reached here.
+function issRefreshCounts() {
+    if (!Array.isArray(issuesScanResults)) return;
+    var c = { critical: 0, warning: 0, info: 0 };
+    issuesScanResults.forEach(function (r) {
+        (r.issues || []).forEach(function (i) { if (c[i.severity] !== undefined) c[i.severity]++; });
+    });
+    var set = function (id, n) { var el = document.getElementById(id); if (el) el.textContent = n; };
+    set('issues-count-critical', c.critical);
+    set('issues-count-warning', c.warning);
+    set('issues-count-info', c.info);
+}
+
 // Gate the beta channel dropdown based on ANY of three grants:
 // (1) Patreon Advanced+ sponsorship, (2) paid WolfStack licence, or
 // (3) operator self-attested GitHub Sponsor. Backend reports
@@ -31746,52 +31929,25 @@ async function scanForIssues() {
     var totalNodes = wsNodes.length;
     var completedNodes = 0;
 
-    // Render cluster-grouped layout with placeholder "Scanning..." rows
+    // Render cluster-grouped card layout with "Scanning…" placeholder cards
     if (listEl) {
         var scaffoldHtml = '';
         // Global progress bar
-        scaffoldHtml += '<div id="issues-progress" style="padding:12px 16px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:12px; margin-bottom:16px; display:flex; align-items:center; gap:12px;">'
-            + '<div style="flex:1; height:6px; background:var(--bg-tertiary); border-radius:3px; overflow:hidden;">'
-            + '<div id="issues-progress-bar" style="width:0%; height:100%; background:var(--accent-primary); border-radius:3px; transition:width 0.3s ease;"></div></div>'
-            + '<span id="issues-progress-text" style="font-size:12px; color:var(--text-muted); white-space:nowrap;">Scanning 0/' + totalNodes + ' nodes...</span></div>';
+        scaffoldHtml += '<div id="issues-progress" style="padding:12px 16px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius-lg); margin-bottom:16px; display:flex; align-items:center; gap:12px;">'
+            + '<div style="flex:1; height:6px; background:var(--bg-card-hover); border-radius:3px; overflow:hidden;">'
+            + '<div id="issues-progress-bar" style="width:0%; height:100%; background:var(--accent); border-radius:3px; transition:width 0.3s ease;"></div></div>'
+            + '<span id="issues-progress-text" style="font-size:12px; color:var(--text-muted); white-space:nowrap;">Scanning 0/' + totalNodes + ' nodes…</span></div>';
 
         clusterKeys.forEach(function (clusterName) {
             var clusterNodes = clusters[clusterName];
-            var clusterId = 'issues-cluster-' + clusterName.replace(/[^a-z0-9]/gi, '-');
-            scaffoldHtml += '<div class="card" style="margin-bottom:16px;">';
-            // Cluster header
-            scaffoldHtml += '<div style="padding:12px 16px; background:linear-gradient(90deg, rgba(59, 130, 246,0.06), transparent); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px;">';
-            scaffoldHtml += '<span style="font-size:18px;"></span>';
-            scaffoldHtml += '<span style="font-weight:600; font-size:14px; color:var(--text-primary);">' + escapeHtml(clusterName) + '</span>';
-            scaffoldHtml += '<span style="font-size:12px; color:var(--text-muted);">' + clusterNodes.length + ' node' + (clusterNodes.length !== 1 ? 's' : '') + '</span>';
-            scaffoldHtml += '</div>';
-            // Table
-            scaffoldHtml += '<div class="card-body" style="padding:0; overflow-x:auto; max-height:520px; overflow-y:auto;">';
-            scaffoldHtml += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
-            scaffoldHtml += '<thead style="position:sticky; top:0; z-index:1;"><tr style="background:var(--bg-secondary); border-bottom:1px solid var(--border);">';
-            scaffoldHtml += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Node</th>';
-            scaffoldHtml += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">WolfStack</th>';
-            scaffoldHtml += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Issues</th>';
-            scaffoldHtml += '<th style="padding:10px 16px; text-align:right; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Action</th>';
-            scaffoldHtml += '</tr></thead><tbody id="' + clusterId + '-tbody">';
-            // Placeholder rows for each node
+            scaffoldHtml += '<div class="iss-cluster">' + escapeHtml(clusterName)
+                + '<span class="iss-cluster-count">' + clusterNodes.length + ' node' + (clusterNodes.length !== 1 ? 's' : '') + '</span></div>';
             clusterNodes.forEach(function (node) {
-                var safeId = 'issue-row-' + (node.id || 'local').replace(/[^a-z0-9_-]/gi, '-');
-                scaffoldHtml += '<tr id="' + safeId + '" style="border-bottom:1px solid var(--border);">';
-                scaffoldHtml += '<td style="padding:12px 16px; white-space:nowrap;">';
-                scaffoldHtml += '<div style="display:flex; align-items:center; gap:8px;">';
-                scaffoldHtml += '<span style="font-size:16px;"></span>';
-                scaffoldHtml += '<div>';
-                scaffoldHtml += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(node.hostname || node.id || 'local') + '</div>';
-                if (node.is_self) scaffoldHtml += '<div style="font-size:11px; color:var(--text-muted);">local</div>';
-                scaffoldHtml += '</div></div></td>';
-                scaffoldHtml += '<td style="padding:12px 16px;" colspan="3">';
-                scaffoldHtml += '<div style="display:flex; align-items:center; gap:8px; color:var(--text-muted); font-size:13px;">';
-                scaffoldHtml += '<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(59, 130, 246,0.2);border-top-color:rgba(59, 130, 246,0.8);border-radius:50%;animation:spin 0.7s linear infinite;"></span>';
-                scaffoldHtml += 'Scanning ' + escapeHtml(node.hostname || node.id || 'local') + '...</div>';
-                scaffoldHtml += '</td></tr>';
+                scaffoldHtml += '<div class="iss-card" id="' + issCardId(node.id || 'local') + '">'
+                    + '<div class="iss-card-head"><span class="iss-host">' + escapeHtml(node.hostname || node.id || 'local')
+                    + (node.is_self ? '<span class="iss-local">local</span>' : '') + '</span></div>'
+                    + '<div class="iss-scanning">' + issIcon('spinner') + 'Scanning…</div></div>';
             });
-            scaffoldHtml += '</tbody></table></div></div>';
         });
         listEl.innerHTML = scaffoldHtml;
     }
@@ -31827,59 +31983,12 @@ async function scanForIssues() {
         updateProgress();
         updateCounts();
 
-        var safeId = 'issue-row-' + (nodeId || 'local').replace(/[^a-z0-9_-]/gi, '-');
-        var tr = document.getElementById(safeId);
-        if (!tr) return;
-
-        var issues = data.issues || [];
-        var nodeVersion = data.version || '?';
-
-        var severityBadge = function (sev) {
-            var colors = { critical: { bg: 'rgba(239,68,68,0.15)', text: '#ef4444', icon: '' }, warning: { bg: 'rgba(234,179,8,0.15)', text: '#eab308', icon: '' }, info: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', icon: '' } };
-            var c = colors[sev] || colors.info;
-            return '<span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:' + c.bg + '; color:' + c.text + ';">' + c.icon + ' ' + sev.toUpperCase() + '</span>';
-        };
-        var categoryIcons = { cpu: '', memory: '', disk: '', swap: '', load: '', service: '', container: '', scan: '' };
-
-        var html = '';
-        // Node
-        html += '<td style="padding:12px 16px; white-space:nowrap;">';
-        html += '<div style="display:flex; align-items:center; gap:8px;">';
-        html += '<span style="font-size:16px;"></span><div>';
-        html += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(data.hostname || 'Unknown') + '</div>';
-        if (data.is_self) html += '<div style="font-size:11px; color:var(--text-muted);">local</div>';
-        html += '</div></div></td>';
-
-        // Version
-        html += '<td style="padding:12px 16px; white-space:nowrap;">';
-        html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(255,255,255,0.06); color:var(--text-secondary); border:1px solid var(--border);">v' + escapeHtml(nodeVersion) + '</span>';
-        html += '</td>';
-
-        // Issues
-        html += '<td style="padding:12px 16px;">';
-        if (issues.length === 0) {
-            html += '<span style="color:#10b981; font-weight:500;">All clear</span>';
-        } else {
-            var order = { critical: 0, warning: 1, info: 2 };
-            var sorted = issues.slice().sort(function (a, b) { return (order[a.severity] || 9) - (order[b.severity] || 9); });
-            sorted.forEach(function (issue) {
-                var catIcon = categoryIcons[issue.category] || '';
-                html += '<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">';
-                html += severityBadge(issue.severity);
-                html += '<span style="font-size:14px;">' + catIcon + '</span>';
-                html += '<span style="color:var(--text-primary); font-weight:500;">' + escapeHtml(issue.title) + '</span>';
-                html += '<span style="color:var(--text-muted); font-size:12px;"> — ' + escapeHtml(issue.detail) + '</span>';
-                html += '</div>';
-            });
-        }
-        html += '</td>';
-
-        // Action placeholder (final render adds upgrade buttons)
-        html += '<td style="padding:12px 16px; text-align:right; white-space:nowrap;">';
-        html += '<span style="color:var(--text-muted); font-size:12px;">—</span></td>';
-
-        tr.innerHTML = html;
-        tr.style.animation = 'fadeIn 0.3s ease';
+        var card = document.getElementById(issCardId(nodeId));
+        if (!card) return;
+        // Live fill — latestVersion isn't known yet, so no upgrade button
+        // until the final pass; repair buttons render immediately.
+        card.innerHTML = issNodeCardInner(data, null);
+        card.style.animation = 'fadeIn 0.3s ease';
     }
 
     // Scan all nodes concurrently, replacing placeholder rows as results arrive
@@ -31903,7 +32012,6 @@ async function scanForIssues() {
     await Promise.all(scanPromises);
 
     issuesScanResults = results;
-    issuesLatestVersion = latestVersion; // cache GitHub-resolved version for upgrade-all
 
     // Hide progress bar
     var progressEl = document.getElementById('issues-progress');
@@ -31920,6 +32028,11 @@ async function scanForIssues() {
     if (ghLatest && compareVersions(ghLatest, latestVersion) > 0) {
         latestVersion = ghLatest;
     }
+
+    // Cache the resolved latest AFTER it's computed (was previously assigned
+    // from the still-hoisted-undefined `latestVersion` above) — single-node
+    // post-repair rescans rely on this to keep the Upgrade affordance correct.
+    issuesLatestVersion = latestVersion;
 
     renderIssueResults(results, latestVersion, clusters, clusterKeys);
 
@@ -31963,20 +32076,13 @@ function renderIssueResults(results, latestVersion, clusters, clusterKeys) {
     var resultMap = {};
     results.forEach(function (r) { resultMap[r.node_id] = r; });
 
-    var severityBadge = function (sev) {
-        var colors = { critical: { bg: 'rgba(239,68,68,0.15)', text: '#ef4444', icon: '' }, warning: { bg: 'rgba(234,179,8,0.15)', text: '#eab308', icon: '' }, info: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', icon: '' } };
-        var c = colors[sev] || colors.info;
-        return '<span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:' + c.bg + '; color:' + c.text + ';">' + c.icon + ' ' + sev.toUpperCase() + '</span>';
-    };
-    var categoryIcons = { cpu: '', memory: '', disk: '', swap: '', load: '', service: '', container: '', scan: '' };
-
-    var html = '';
-    // If no cluster info, fall back to a simple list
+    // Fall back to a single group if cluster info is missing.
     if (!clusters || !clusterKeys) {
         clusters = { 'WolfStack': results.map(function (r) { return { id: r.node_id, hostname: r.hostname, is_self: r.is_self }; }) };
         clusterKeys = ['WolfStack'];
     }
 
+    var html = '';
     clusterKeys.forEach(function (clusterName) {
         var clusterNodes = clusters[clusterName] || [];
         var clusterIssueCount = 0;
@@ -31985,91 +32091,18 @@ function renderIssueResults(results, latestVersion, clusters, clusterKeys) {
             if (r) clusterIssueCount += (r.issues || []).length;
         });
 
-        html += '<div class="card" style="margin-bottom:16px;">';
-        // Cluster header
-        html += '<div style="padding:12px 16px; background:linear-gradient(90deg, rgba(59, 130, 246,0.06), transparent); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px;">';
-        html += '<span style="font-size:18px;"></span>';
-        html += '<span style="font-weight:600; font-size:14px; color:var(--text-primary);">' + escapeHtml(clusterName) + '</span>';
-        html += '<span style="font-size:12px; color:var(--text-muted);">' + clusterNodes.length + ' node' + (clusterNodes.length !== 1 ? 's' : '') + '</span>';
-        if (clusterIssueCount === 0) {
-            html += '<span style="margin-left:auto; font-size:12px; color:#10b981; font-weight:500;">All clear</span>';
-        } else {
-            html += '<span style="margin-left:auto; font-size:12px; color:#eab308; font-weight:500;">' + clusterIssueCount + ' issue' + (clusterIssueCount !== 1 ? 's' : '') + '</span>';
-        }
-        html += '</div>';
-        // Table
-        html += '<div class="card-body" style="padding:0; overflow-x:auto; max-height:520px; overflow-y:auto;">';
-        html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
-        html += '<thead style="position:sticky; top:0; z-index:1;"><tr style="background:var(--bg-secondary); border-bottom:1px solid var(--border);">';
-        html += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Node</th>';
-        html += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">WolfStack</th>';
-        html += '<th style="padding:10px 16px; text-align:left; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Issues</th>';
-        html += '<th style="padding:10px 16px; text-align:right; font-weight:600; color:var(--text-secondary); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Action</th>';
-        html += '</tr></thead><tbody>';
+        html += '<div class="iss-cluster">' + escapeHtml(clusterName)
+            + '<span class="iss-cluster-count">' + clusterNodes.length + ' node' + (clusterNodes.length !== 1 ? 's' : '') + '</span>'
+            + (clusterIssueCount === 0
+                ? '<span class="iss-cluster-ok">All clear</span>'
+                : '<span class="iss-cluster-warn">' + clusterIssueCount + ' issue' + (clusterIssueCount !== 1 ? 's' : '') + '</span>')
+            + '</div>';
 
-        var rowIdx = 0;
         clusterNodes.forEach(function (node) {
             var r = resultMap[node.id || 'local'];
             if (!r) return;
-            var issues = r.issues || [];
-            var rowBg = rowIdx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)';
-            var nodeVersion = r.version || '?';
-            var isBehind = nodeVersion !== '?' && latestVersion !== '0.0.0' && compareVersions(nodeVersion, latestVersion) < 0;
-
-            html += '<tr style="border-bottom:1px solid var(--border); background:' + rowBg + ';">';
-
-            // Node
-            html += '<td style="padding:12px 16px; white-space:nowrap;">';
-            html += '<div style="display:flex; align-items:center; gap:8px;">';
-            html += '<span style="font-size:16px;"></span><div>';
-            html += '<div style="font-weight:600; color:var(--text-primary);">' + escapeHtml(r.hostname || 'Unknown') + '</div>';
-            if (r.is_self) html += '<div style="font-size:11px; color:var(--text-muted);">local</div>';
-            html += '</div></div></td>';
-
-            // Version
-            html += '<td style="padding:12px 16px; white-space:nowrap;">';
-            if (isBehind) {
-                html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(234,179,8,0.15); color:#eab308; border:1px solid rgba(234,179,8,0.3);">v' + escapeHtml(nodeVersion) + ' ↑</span>';
-                html += '<div style="font-size:10px; color:var(--text-muted); margin-top:2px;">latest: v' + escapeHtml(latestVersion) + '</div>';
-            } else {
-                html += '<span style="padding:3px 10px; border-radius:6px; font-size:12px; font-weight:500; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3);">v' + escapeHtml(nodeVersion) + ' </span>';
-            }
-            html += '</td>';
-
-            // Issues
-            html += '<td style="padding:12px 16px;">';
-            if (issues.length === 0) {
-                html += '<span style="color:#10b981; font-weight:500;">All clear</span>';
-            } else {
-                var order = { critical: 0, warning: 1, info: 2 };
-                var sorted = issues.slice().sort(function (a, b) { return (order[a.severity] || 9) - (order[b.severity] || 9); });
-                sorted.forEach(function (issue) {
-                    var catIcon = categoryIcons[issue.category] || '';
-                    html += '<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">';
-                    html += severityBadge(issue.severity);
-                    html += '<span style="font-size:14px;">' + catIcon + '</span>';
-                    html += '<span style="color:var(--text-primary); font-weight:500;">' + escapeHtml(issue.title) + '</span>';
-                    html += '<span style="color:var(--text-muted); font-size:12px;"> — ' + escapeHtml(issue.detail) + '</span>';
-                    html += '</div>';
-                });
-            }
-            html += '</td>';
-
-            // Action
-            html += '<td style="padding:12px 16px; text-align:right; white-space:nowrap;">';
-            if (isBehind) {
-                html += '<button class="btn" onclick="issuesUpgradeNode(\'' + escapeHtml(r.node_id) + '\')" ';
-                html += 'style="padding:6px 14px; font-size:12px; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.3); border-radius:6px; cursor:pointer;">';
-                html += 'Upgrade WolfStack</button>';
-            } else {
-                html += '<span style="color:var(--text-muted); font-size:12px;">Up to date</span>';
-            }
-            html += '</td>';
-            html += '</tr>';
-            rowIdx++;
+            html += '<div class="iss-card" id="' + issCardId(r.node_id) + '">' + issNodeCardInner(r, latestVersion) + '</div>';
         });
-
-        html += '</tbody></table></div></div>';
     });
 
     listEl.innerHTML = html;

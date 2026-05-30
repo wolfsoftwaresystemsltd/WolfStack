@@ -3812,3 +3812,110 @@ body.sidebar-collapsed #task-log-footer {
     padding: 16px;
     overflow: auto;
 }
+
+
+/* ════════════════════════════════════════════════
+   Issues / Health page — card-per-node layout.
+   Colours come exclusively from the theme variables
+   (--success/--warning/--danger/--info + their -bg,
+   --bg-*, --text-*, --border, --radius*) so the page
+   follows every theme (dark/light/glass/tty/punk/trek).
+   ════════════════════════════════════════════════ */
+.iss-cluster {
+    margin: 18px 0 10px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: .4px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.iss-cluster:first-child { margin-top: 0; }
+.iss-cluster-count { font-weight: 500; text-transform: none; letter-spacing: 0; }
+.iss-cluster-ok { color: var(--success); margin-left: auto; font-weight: 500; text-transform: none; }
+.iss-cluster-warn { color: var(--warning); margin-left: auto; font-weight: 500; text-transform: none; }
+
+.iss-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    margin-bottom: 12px;
+    overflow: hidden;
+}
+.iss-card-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 13px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+}
+.iss-host { font-weight: 600; color: var(--text-primary); font-size: 14px; }
+.iss-local { font-size: 11px; font-weight: 500; color: var(--text-muted); margin-left: 6px; }
+
+.iss-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.iss-chip {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 9px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.iss-chip-critical { background: var(--danger-bg);  color: var(--danger); }
+.iss-chip-warning  { background: var(--warning-bg); color: var(--warning); }
+.iss-chip-info     { background: var(--info-bg);    color: var(--info); }
+.iss-chip-ok       { background: var(--success-bg); color: var(--success); }
+
+.iss-ver { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.iss-ver-badge { font-size: 12px; font-weight: 500; padding: 3px 9px; border-radius: var(--radius); border: 1px solid var(--border); white-space: nowrap; }
+.iss-ver-ok  { background: var(--success-bg); color: var(--success); border-color: var(--success); }
+.iss-ver-old { background: var(--warning-bg); color: var(--warning); border-color: var(--warning); }
+.iss-ver-latest { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+
+.iss-body { display: flex; flex-direction: column; }
+.iss-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 16px;
+}
+.iss-row + .iss-row { border-top: 1px solid var(--border); }
+.iss-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.iss-dot-critical { background: var(--danger); }
+.iss-dot-warning  { background: var(--warning); }
+.iss-dot-info     { background: var(--info); }
+.iss-text { min-width: 0; flex: 1; }
+.iss-title { color: var(--text-primary); font-weight: 500; font-size: 13px; }
+.iss-detail { color: var(--text-muted); font-size: 12px; margin-top: 1px; word-break: break-word; }
+
+.iss-actions { margin-left: auto; flex: none; display: flex; align-items: center; gap: 8px; }
+.iss-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: var(--radius);
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    transition: var(--transition);
+}
+.iss-btn:hover { background: var(--bg-card-hover); }
+.iss-btn:disabled { opacity: .6; cursor: default; }
+.iss-btn-fix { background: var(--info-bg);    color: var(--info);    border-color: var(--info); }
+.iss-btn-up  { background: var(--success-bg); color: var(--success); border-color: var(--success); }
+
+.iss-empty { padding: 14px 16px; color: var(--success); font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 8px; }
+.iss-scanning { padding: 14px 16px; color: var(--text-muted); font-size: 13px; display: flex; align-items: center; gap: 10px; }
+.iss-svg { width: 14px; height: 14px; flex: none; }
+
+.iss-result { font-size: 12px; padding: 9px 16px; border-top: 1px solid var(--border); white-space: pre-wrap; word-break: break-word; }
+.iss-result-ok  { color: var(--success); background: var(--success-bg); }
+.iss-result-err { color: var(--danger);  background: var(--danger-bg); }
