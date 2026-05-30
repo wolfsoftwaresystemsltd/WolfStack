@@ -25,6 +25,11 @@ pub struct FileLocations {
     pub backup_staging_dir: String,
     #[serde(default = "default_backup_received_dir")]
     pub backup_received_dir: String,
+    // Where "Local" backups are written. Defaults to the WolfStack data dir,
+    // but an operator can point it at any mount (e.g. an R2/S3 fuse mount) so
+    // backups don't depend on the WolfStack folder structure.
+    #[serde(default = "default_backup_local_dir")]
+    pub backup_local_dir: String,
 
     // ── Storage ───────────────────────────────────
     #[serde(default = "default_storage_config")]
@@ -164,6 +169,7 @@ fn default_config_dir() -> String { "/etc/wolfstack".into() }
 fn default_backup_config() -> String { "/etc/wolfstack/backups.json".into() }
 fn default_backup_staging_dir() -> String { "/tmp/wolfstack-backups".into() }
 fn default_backup_received_dir() -> String { "/var/lib/wolfstack/backups/received".into() }
+fn default_backup_local_dir() -> String { "/var/lib/wolfstack/backups".into() }
 
 fn default_storage_config() -> String { "/etc/wolfstack/storage.json".into() }
 fn default_storage_mount_base() -> String { "/mnt/wolfstack".into() }

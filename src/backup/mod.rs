@@ -280,6 +280,19 @@ impl BackupStorage {
         format!("{}/{}", base, safe.join("/"))
     }
 
+    /// Return a copy with an empty Local `path` filled in from the configured
+    /// default backup directory. Called when a backup entry is created so the
+    /// concrete destination is baked into the stored entry — restore then reads
+    /// exactly where the backup was written, independent of any later change to
+    /// the default. Non-Local types and already-set paths are returned as-is.
+    fn with_concrete_local(&self, default_dir: &str) -> BackupStorage {
+        let mut s = self.clone();
+        if matches!(s.storage_type, StorageType::Local) && s.path.trim().is_empty() {
+            s.path = default_dir.to_string();
+        }
+        s
+    }
+
     /// Validate a WolfDisk subpath at the API save boundary. Strict
     /// — any `..` or `.` segment is rejected (vs the lenient
     /// resolver which silently strips them). Empty subpath is
@@ -357,6 +370,38 @@ mod tests {
             ..BackupStorage::default()
         };
         assert_eq!(s.resolved_local_path(), "/var/lib/wolfstack/backups");
+    }
+
+    #[test]
+    fn with_concrete_local_fills_empty_local_path() {
+        let s = BackupStorage {
+            storage_type: StorageType::Local,
+            path: String::new(),
+            ..BackupStorage::default()
+        };
+        // An empty Local path is concretized to the configured default, so the
+        // stored entry is self-sufficient at restore time.
+        assert_eq!(s.with_concrete_local("/mnt/r2-backups").path, "/mnt/r2-backups");
+    }
+
+    #[test]
+    fn with_concrete_local_keeps_nonempty_local_path() {
+        let s = BackupStorage {
+            storage_type: StorageType::Local,
+            path: "/data/backups".into(),
+            ..BackupStorage::default()
+        };
+        assert_eq!(s.with_concrete_local("/mnt/r2-backups").path, "/data/backups");
+    }
+
+    #[test]
+    fn with_concrete_local_ignores_non_local_types() {
+        let s = BackupStorage {
+            storage_type: StorageType::S3,
+            path: String::new(),
+            ..BackupStorage::default()
+        };
+        assert_eq!(s.with_concrete_local("/mnt/r2-backups").path, "");
     }
 
     #[test]
@@ -1537,6 +1582,9 @@ fn backup_comments_with_cluster(target: &BackupTarget, cluster: &str) -> String 
 
 /// Create a single backup entry — performs the backup and stores it
 fn create_backup_entry(target: BackupTarget, storage: &BackupStorage) -> BackupEntry {
+    // Bake the concrete Local directory into the entry up front so the stored
+    // destination is self-sufficient (restore reads it back unchanged).
+    let storage = &storage.with_concrete_local(&crate::paths::get().backup_local_dir);
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let hostname = local_hostname();
@@ -3659,6 +3707,9 @@ pub fn create_backup_with_log(
     log: std::sync::mpsc::Sender<String>,
     cluster_name: Option<String>,
 ) -> Vec<BackupEntry> {
+    // Bake the concrete Local directory in up front (see with_concrete_local)
+    // so restore is independent of any later default-dir change.
+    let storage = storage.with_concrete_local(&crate::paths::get().backup_local_dir);
     let targets = match target {
         Some(t) => vec![t],
         None => list_available_targets(),

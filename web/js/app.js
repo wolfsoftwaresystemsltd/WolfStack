@@ -1991,12 +1991,11 @@ function selectServerView(nodeId, view) {
         'wolfrouter': 'WolfRouter',
     };
     // Page title is just the view name — the server name already lives in the
-    // cluster pill beside it, so "wolfstack-2 — LXC" became plain "LXC".
+    // cluster pill beside it, so "wolfstack-2 — LXC" became plain "LXC". The
+    // server's address is deliberately NOT shown in the top bar: it would leak
+    // in screen recordings / videos (operator request), and the friendly name
+    // in the cluster pill is identification enough.
     document.getElementById('page-title').textContent = viewTitles[view] || view;
-    // Address line: drop the redundant leading hostname (now in the pill);
-    // show just the reachable address:port, falling back to the name if absent.
-    document.getElementById('hostname-display').textContent =
-        node?.address ? `${node.address}:${node?.port}` : hostname;
 
     // Update Header Info
     const headerHostname = document.getElementById('server-header-hostname');
@@ -23363,15 +23362,16 @@ async function doMigrateLxc(name) {
 // platform (native / Proxmox / libvirt) and produces a portable
 // WolfStack-format archive that restores cleanly anywhere.
 async function backupSingleVm(vmName) {
+    await refreshBackupLocalDir();
     if (!await wolfConfirm(
-        `Back up VM "${vmName}" now to local storage (/var/lib/wolfstack/backups)?\n\n` +
+        `Back up VM "${vmName}" now to local storage (${_backupLocalDir})?\n\n` +
         `The backup is a portable tar.gz archive: VM config + every disk as qcow2. ` +
         `It restores cleanly on this host (native KVM, Proxmox, or libvirt) AND on ` +
         `any other WolfStack node — the file is platform-independent.\n\n` +
         `For S3 / NFS / PBS destinations, use the Backups page directly.`,
         'Backup VM', { okText: 'Backup now' }
     )) return;
-    const storage = { type: 'local', path: '/var/lib/wolfstack/backups' };
+    const storage = { type: 'local', path: _backupLocalDir };
     const target = { target_type: 'vm', name: vmName, hostname: null, state: null, specs: null };
     // The /api/backups endpoint is synchronous (it returns once the
     // tarball is written). On a stopped Proxmox VM with multi-GB
@@ -26787,10 +26787,32 @@ async function loadBackups() {
     }
 }
 
+// The operator-configurable "Local" backup directory (Settings → File
+// Locations → "Backup Directory (Local)"). Cached so the storage dropdown,
+// quick-backup actions and labels reflect it. Refreshed at init, before the
+// Backups dropdown is built, and before each quick backup — so the CONCRETE
+// path is baked into the backup entry (restore reads that same path back; a
+// later config change must not redirect old restores). The backend is also
+// authoritative: an empty Local path resolves to this dir there.
+var _backupLocalDir = '/var/lib/wolfstack/backups';
+async function refreshBackupLocalDir() {
+    try {
+        const r = await fetch(apiUrl('/api/settings/paths'));
+        if (r.ok) {
+            const j = await r.json();
+            if (j && typeof j.backup_local_dir === 'string' && j.backup_local_dir.trim()) {
+                _backupLocalDir = j.backup_local_dir.trim();
+            }
+        }
+    } catch (_) {}
+}
+document.addEventListener('DOMContentLoaded', refreshBackupLocalDir);
+
 async function populateStorageDropdown() {
     const sel = document.getElementById('backup-storage-select');
     if (!sel) return;
-    sel.innerHTML = '<option value="local:/var/lib/wolfstack/backups">Local — /var/lib/wolfstack/backups</option>';
+    await refreshBackupLocalDir();
+    sel.innerHTML = `<option value="local:${escapeAttr(_backupLocalDir)}">Local — ${escapeHtml(_backupLocalDir)}</option>`;
     try {
         const resp = await fetch(apiUrl('/api/storage/mounts'));
         if (resp.ok) {
@@ -26824,6 +26846,59 @@ async function populateStorageDropdown() {
             }
         }
     } catch (e) { /* PBS not configured, skip */ }
+    onBackupStorageChange();
+}
+
+// Persist the inline "Local folder" field as the default backup directory
+// (same setting as Settings → File Locations → "Backup Directory (Local)"), so
+// the operator never has to leave the Backups page to set it. Schedules and
+// quick backups read the same value.
+async function saveBackupLocalDir() {
+    const lp = document.getElementById('backup-local-path');
+    const dir = (lp && lp.value.trim()) || '';
+    if (!dir) { showToast('Enter a backup folder first', 'warning'); return; }
+    if (!dir.startsWith('/')) { showToast('Use an absolute path (starting with /)', 'warning'); return; }
+    try {
+        const r = await fetch(apiUrl('/api/settings/paths'));
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const cfg = await r.json();
+        cfg.backup_local_dir = dir;
+        const p = await fetch(apiUrl('/api/settings/paths'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cfg),
+        });
+        if (!p.ok) throw new Error('HTTP ' + p.status);
+        _backupLocalDir = dir;
+        showToast(`Local backups will go to ${dir}`, 'success');
+        await populateStorageDropdown();
+        const sel = document.getElementById('backup-storage-select');
+        if (sel && [...sel.options].some(o => o.value === `local:${dir}`)) sel.value = `local:${dir}`;
+        onBackupStorageChange();
+        if (lp) lp.value = dir;
+    } catch (e) {
+        showToast('Could not save backup folder: ' + ((e && e.message) || e), 'error');
+    }
+}
+
+// Folder picker for the inline "Local folder" field.
+function browseBackupLocalPath() {
+    if (typeof openFileBrowser !== 'function') {
+        showToast('Folder browser unavailable — type the path instead', 'warning');
+        return;
+    }
+    const lp = document.getElementById('backup-local-path');
+    const start = (lp && lp.value.trim()) || _backupLocalDir || '/';
+    openFileBrowser({
+        start: start,
+        kind: 'dir',
+        title: 'Choose a folder for Local backups',
+        onSelect: (chosen) => {
+            const norm = String(chosen || '').replace(/\/+$/, '') || '/';
+            const el = document.getElementById('backup-local-path');
+            if (el) el.value = norm;
+        },
+    });
 }
 
 function renderBackupTargets(targets) {
@@ -26921,6 +26996,20 @@ function onBackupStorageChange() {
     sub.style.display = isWolfdisk ? '' : 'none';
     if (browse) browse.style.display = isWolfdisk ? '' : 'none';
     if (!isWolfdisk) sub.value = '';
+    // Local destination — reveal an inline, editable folder field so the
+    // operator sets where backups go right here on the Backups page, not in
+    // Settings. Prefilled with the saved default; the save button persists it
+    // (so schedules + quick backups use it too).
+    const isLocal = val.startsWith('local:');
+    const lp = document.getElementById('backup-local-path');
+    const lb = document.getElementById('backup-local-browse');
+    const ls = document.getElementById('backup-local-save');
+    if (lp) {
+        lp.style.display = isLocal ? '' : 'none';
+        if (isLocal && !lp.value.trim()) lp.value = _backupLocalDir || val.substring(6);
+    }
+    if (lb) lb.style.display = isLocal ? '' : 'none';
+    if (ls) ls.style.display = isLocal ? '' : 'none';
 }
 
 /// Launch the file browser starting at the currently-selected
@@ -26965,10 +27054,13 @@ function browseWolfDiskSubpath() {
 
 async function getSelectedStorage() {
     const sel = document.getElementById('backup-storage-select');
-    if (!sel) return { type: 'local', path: '/var/lib/wolfstack/backups' };
+    if (!sel) return { type: 'local', path: _backupLocalDir };
     const val = sel.value;
     if (val.startsWith('local:')) {
-        return { type: 'local', path: val.substring(6) };
+        // Prefer the inline editable folder field when it's shown.
+        const lp = document.getElementById('backup-local-path');
+        const typed = lp && lp.value.trim();
+        return { type: 'local', path: typed || val.substring(6) };
     } else if (val.startsWith('mount:')) {
         // New encoding: mount:<type>:<mount_point>. The colon in
         // <mount_point> is theoretically allowed in a Linux path but
@@ -27022,7 +27114,7 @@ async function getSelectedStorage() {
             };
         }
     }
-    return { type: 'local', path: '/var/lib/wolfstack/backups' };
+    return { type: 'local', path: _backupLocalDir };
 }
 
 function renderBackupHistory(backups) {
@@ -27146,7 +27238,7 @@ function renderSchedules(schedules) {
 function formatStorageLabel(storage) {
     if (!storage) return '—';
     switch (storage.type) {
-        case 'local': return `${storage.path || '/var/lib/wolfstack/backups'}`;
+        case 'local': return `${storage.path || _backupLocalDir}`;
         case 's3': return `s3://${storage.bucket || '?'}`;
         case 'remote': return `${storage.remote_url || '?'}`;
         case 'wolfdisk': {
@@ -28663,11 +28755,12 @@ async function pushClusterSchedule() {
         : 'backing up selected targets';
     if (!await showConfirm(`Create schedule "${name}" (${frequency} at ${time} UTC) on ${nodes.length} node(s), ${summary}?\n\n${nodes.map(n => n.hostname).join(', ')}`)) return;
 
+    await refreshBackupLocalDir();
     let storage;
     if (storageType === 'pbs') {
         storage = { type: 'pbs' };
     } else {
-        storage = { type: 'local', path: '/var/lib/wolfstack/backups' };
+        storage = { type: 'local', path: _backupLocalDir };
     }
 
     let success = 0, failed = 0;
@@ -36788,7 +36881,11 @@ async function wolfnoteFromCurrentView() {
     if (!visible) return;
 
     const pageTitle = document.getElementById('page-title')?.textContent || 'WolfStack';
-    const hostname = document.getElementById('hostname-display')?.textContent || '';
+    // Hostname for the report subtitle, sourced from the current node — the
+    // top-bar address element was removed so it can't leak in screen videos.
+    const _wnNode = (typeof allNodes !== 'undefined' && Array.isArray(allNodes))
+        ? allNodes.find(n => n.id === currentNodeId) : null;
+    const hostname = _wnNode ? (_wnNode.hostname || '') : '';
     const timestamp = new Date().toLocaleString();
     const title = `${pageTitle} — ${timestamp}`;
 
@@ -37216,6 +37313,7 @@ const _pathFields = [
     { key: 'backup_config', label: 'Backup Config', group: 'Backup' },
     { key: 'backup_staging_dir', label: 'Backup Staging Directory', group: 'Backup' },
     { key: 'backup_received_dir', label: 'Backup Received Directory', group: 'Backup' },
+    { key: 'backup_local_dir', label: 'Backup Directory (Local)', group: 'Backup' },
     { key: 'pbs_config', label: 'PBS Config', group: 'Backup' },
     { key: 'storage_config', label: 'Storage Config', group: 'Storage' },
     { key: 'storage_mount_base', label: 'Mount Base Directory', group: 'Storage' },

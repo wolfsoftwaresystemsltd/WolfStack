@@ -305,7 +305,6 @@
                     onmouseout="this.style.background='rgba(255,255,255,0.06)';this.style.color='var(--text-muted)'">
                     <span class="ws-icon-clean-wrap" data-icon="edit"></span>
                 </button>
-                <span id="hostname-display" style="color: var(--text-secondary); font-size: 13px;"></span>
                 <div class="share-icons" style="display:flex; gap:6px; align-items:center; margin-left:8px;" title="Share WolfStack">
                     <a href="https://x.com/intent/tweet?url=https%3A%2F%2Fwolfstack.org&text=WolfStack%20%E2%80%94%20free%20open-source%20server%20management%20platform.%20Docker%2C%20LXC%2C%20VMs%2C%20clustering%20%26%20more." target="_blank" rel="noopener"
                         title="Share on X"
@@ -3708,6 +3707,11 @@
                             title="Optional subdirectory under the WolfDisk mount root. Leave empty to back up to the mount root."
                             style="display:none; width:auto; min-width:160px; padding:5px 10px; font-size:12px; border-radius:6px; border:1px solid var(--border); background:var(--bg-input); color:var(--text-primary); font-family:var(--font-mono);">
                         <button id="backup-storage-subpath-browse" class="btn btn-sm" onclick="browseWolfDiskSubpath()" title="Browse to pick a subdirectory" style="display:none; font-size:12px; padding:5px 10px;"><span class="ws-icon-clean-wrap" data-icon="folder"></span></button>
+                        <input type="text" id="backup-local-path" placeholder="/var/lib/wolfstack/backups"
+                            title="Folder where Local backups are written. Point it at any mounted path (e.g. a Cloudflare R2 / S3 fuse mount). Click the save button to remember it as the default for schedules and quick backups too."
+                            style="display:none; width:auto; min-width:200px; padding:5px 10px; font-size:12px; border-radius:6px; border:1px solid var(--border); background:var(--bg-input); color:var(--text-primary); font-family:var(--font-mono);">
+                        <button id="backup-local-browse" class="btn btn-sm" onclick="browseBackupLocalPath()" title="Browse for a folder" style="display:none; font-size:12px; padding:5px 10px;"><span class="ws-icon-clean-wrap" data-icon="folder"></span></button>
+                        <button id="backup-local-save" class="btn btn-sm" onclick="saveBackupLocalDir()" title="Remember this folder as the default for Local backups" style="display:none; font-size:12px; padding:5px 10px;"><span class="ws-icon-clean-wrap" data-icon="save"></span></button>
                         <button class="btn btn-sm btn-primary" onclick="backupSelected()"><span class="ws-icon-clean-wrap" data-icon="lightning"></span> Backup Now</button>
                         <button class="btn btn-sm"
                             style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"
