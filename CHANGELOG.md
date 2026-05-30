@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.8.0: in-app Getting Started course for new operators** _(2026-05-30 — [`5928c83`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5928c837e78a8810eeecdaeaab37a4d36b755ae5))_
 - **v24.7.37: one-click repair for failed services on the issues page** _(2026-05-30 — [`fd883fb`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/fd883fb452b06a9fc1f97d8097922fb846c4e980))_
 - **v24.7.36: clear stale logrotate.service failure after clamav self-heal** _(2026-05-30 — [`2d01432`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2d01432ffc3857c8523d8d543fe6fc1f14c3a5fb))_
 - **v24.7.35: app store — self-healing ISO version resolver fixes Debian 13.5.0** _(2026-05-30 — [`01ceb84`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/01ceb84b6652b5d1dc5aba097bd2e692c52c97de))_
