@@ -51373,6 +51373,15 @@ const LEARN_LAST_KEY = 'wolfstack_learn_last';
 const LEARN_BANNER_KEY = 'wolfstack_learn_banner_dismissed';
 let _learnCache = {};
 let _learnCurrentId = null;
+// Which surface is currently showing lessons: the full-page view ('page')
+// or the follow-along slide-out ('drawer'). The render helpers target the
+// matching element set (learn-* vs learn-d-*) via learnEl().
+let _learnActive = 'page';
+
+function learnEl(name) {
+    const prefix = _learnActive === 'drawer' ? 'learn-d-' : 'learn-';
+    return document.getElementById(prefix + name);
+}
 
 function learnFlatLessons() {
     const out = [];
@@ -51397,6 +51406,7 @@ function learnIsDone(id) {
 
 // Entry hook from selectView('learn'). Safe to call repeatedly.
 function learnInit() {
+    _learnActive = 'page';
     learnRenderToc();
     learnUpdateProgress();
     // Resume at the last-viewed lesson; otherwise the first not-yet-done
@@ -51412,8 +51422,86 @@ function learnInit() {
     learnOpenLesson(target);
 }
 
+// ── Follow-along slide-out ("Learn drawer") ──────────────────────────
+// The course as a docked side panel so the operator can read a lesson AND
+// click around their actual WolfStack at the same time — the whole point
+// of a course full of "now click your server → Docker" steps. Non-modal:
+// it pushes the main content aside rather than covering it. A ↗ button
+// throws the full course into its own window (reusing the #learn hash
+// route), mirroring the inline-terminal "Pop Out" pattern.
+
+function openLearnDrawer() {
+    const drawer = document.getElementById('learn-drawer');
+    if (!drawer) return;
+    // Re-parent to <body> so an ancestor with transform/filter/will-change
+    // can't turn this fixed panel into a clipped or mis-anchored mess (the
+    // same containing-block gotcha the apps drawer guards against).
+    if (drawer.parentElement !== document.body) document.body.appendChild(drawer);
+    _learnActive = 'drawer';
+    drawer.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('learn-drawer-open');
+    requestAnimationFrame(() => drawer.classList.add('open'));
+    learnRenderToc();
+    learnUpdateProgress();
+    // Resume where they left off (same rule as the page view).
+    const flat = learnFlatLessons();
+    let target = null;
+    try { target = localStorage.getItem(LEARN_LAST_KEY); } catch (_) {}
+    if (!target || !flat.some(l => l.id === target)) {
+        const prog = learnLoadProgress();
+        const firstIncomplete = flat.find(l => !prog[l.id]);
+        target = firstIncomplete ? firstIncomplete.id : flat[0].id;
+    }
+    learnOpenLesson(target);
+    document.addEventListener('keydown', learnDrawerEscHandler);
+}
+
+function closeLearnDrawer() {
+    const drawer = document.getElementById('learn-drawer');
+    if (!drawer) return;
+    drawer.classList.remove('open');
+    drawer.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('learn-drawer-open');
+    learnDrawerHideToc();
+    document.removeEventListener('keydown', learnDrawerEscHandler);
+}
+
+function learnDrawerEscHandler(e) {
+    if (e.key !== 'Escape') return;
+    // Dismiss the lessons overlay first if it's open; otherwise close.
+    const toc = document.getElementById('learn-d-toc');
+    if (toc && !toc.hidden) { learnDrawerHideToc(); return; }
+    closeLearnDrawer();
+}
+
+function toggleLearnDrawerToc() {
+    const toc = document.getElementById('learn-d-toc');
+    if (!toc) return;
+    if (toc.hidden) { learnRenderToc(); toc.hidden = false; }
+    else { toc.hidden = true; }
+}
+
+function learnDrawerHideToc() {
+    const toc = document.getElementById('learn-d-toc');
+    if (toc) toc.hidden = true;
+}
+
+function learnExpandToPage() {
+    closeLearnDrawer();
+    selectView('learn');
+}
+
+function learnPopOut() {
+    // Reuse the existing #learn hash route (handled at app init) so the
+    // popped window lands straight on the full-page course — no duplicated
+    // course logic to maintain.
+    window.open(location.pathname + '#learn', 'wolfstack_learn',
+        'width=960,height=860,menubar=no,toolbar=no,scrollbars=yes,resizable=yes');
+    closeLearnDrawer();
+}
+
 function learnRenderToc() {
-    const toc = document.getElementById('learn-toc');
+    const toc = learnEl('toc');
     if (!toc) return;
     const prog = learnLoadProgress();
     let html = '';
@@ -51438,8 +51526,8 @@ function learnUpdateProgress() {
     const done = flat.filter(l => prog[l.id]).length;
     const total = flat.length;
     const pct = total ? Math.round((done / total) * 100) : 0;
-    const fill = document.getElementById('learn-progress-fill');
-    const label = document.getElementById('learn-progress-label');
+    const fill = learnEl('progress-fill');
+    const label = learnEl('progress-label');
     if (fill) fill.style.width = pct + '%';
     if (label) label.textContent = `${done} of ${total} complete`;
 }
@@ -51451,7 +51539,7 @@ async function learnOpenLesson(id) {
     _learnCurrentId = id;
     try { localStorage.setItem(LEARN_LAST_KEY, id); } catch (_) {}
     learnRenderToc();
-    const content = document.getElementById('learn-content');
+    const content = learnEl('content');
     if (!content) return;
     let md = _learnCache[lesson.file];
     if (md === undefined) {
@@ -51473,17 +51561,21 @@ async function learnOpenLesson(id) {
     }
     content.innerHTML = learnMd(md);
     learnUpdateNavButtons();
-    // Scroll the lesson into view and move focus for keyboard/SR users.
-    const main = document.querySelector('.learn-main');
+    // Scroll the lesson to the top and move focus for keyboard/SR users.
+    // The drawer's content article scrolls itself; the page view scrolls
+    // its .learn-main wrapper — handle both.
+    content.scrollTop = 0;
+    const main = content.closest('.learn-main');
     if (main) main.scrollTop = 0;
     try { content.focus({ preventScroll: true }); } catch (_) {}
+    if (_learnActive === 'drawer') learnDrawerHideToc();
 }
 
 function learnUpdateNavButtons() {
     const flat = learnFlatLessons();
     const idx = flat.findIndex(l => l.id === _learnCurrentId);
-    const prevBtn = document.getElementById('learn-prev');
-    const compBtn = document.getElementById('learn-complete');
+    const prevBtn = learnEl('prev');
+    const compBtn = learnEl('complete');
     if (prevBtn) prevBtn.style.visibility = idx > 0 ? 'visible' : 'hidden';
     if (compBtn) {
         const done = learnIsDone(_learnCurrentId);
@@ -51553,6 +51645,60 @@ function dismissLearnBanner() {
     const el = document.getElementById('dc-learn-banner');
     if (el) el.style.display = 'none';
 }
+
+// ── Login welcome modal ──────────────────────────────────────────────
+// Shown once per login: login.html sets a per-login sessionStorage flag on a
+// genuine sign-in (password or passkey), which we consume here on first show
+// — so it does NOT reappear on refresh or in-app navigation within the same
+// session, only on the next login. Ticking "Don't show again" sets a
+// permanent localStorage flag that suppresses it for good. Promotes the
+// Getting Started course, the Discord community, and sponsorship.
+const WELCOME_DISMISS_KEY = 'wolfstack_welcome_dismissed';
+const WELCOME_FRESH_KEY = 'wolfstack_fresh_login';
+
+function maybeShowWelcomeModal() {
+    let permanent = false, fresh = false;
+    try { permanent = localStorage.getItem(WELCOME_DISMISS_KEY) === '1'; } catch (_) {}
+    try { fresh = sessionStorage.getItem(WELCOME_FRESH_KEY) === '1'; } catch (_) {}
+    if (permanent || !fresh) return;
+    // Consume the per-login flag so the modal shows once per login only.
+    try { sessionStorage.removeItem(WELCOME_FRESH_KEY); } catch (_) {}
+    showWelcomeModal();
+}
+
+function showWelcomeModal() {
+    const el = document.getElementById('welcome-modal');
+    if (!el) return;
+    el.style.display = 'flex';
+    requestAnimationFrame(() => el.classList.add('open'));
+    document.addEventListener('keydown', welcomeEscHandler);
+    const close = document.getElementById('welcome-close-btn');
+    if (close) { try { close.focus(); } catch (_) {} }
+}
+
+function welcomeEscHandler(e) { if (e.key === 'Escape') closeWelcomeModal(); }
+
+function closeWelcomeModal() {
+    const el = document.getElementById('welcome-modal');
+    if (!el) return;
+    // Honor "Don't show again" before dismissing.
+    const cb = document.getElementById('welcome-dontshow');
+    if (cb && cb.checked) {
+        try { localStorage.setItem(WELCOME_DISMISS_KEY, '1'); } catch (_) {}
+    }
+    el.classList.remove('open');
+    document.removeEventListener('keydown', welcomeEscHandler);
+    setTimeout(() => { el.style.display = 'none'; }, 200);
+}
+
+// "Take the course" → dismiss the welcome (respecting the checkbox) and open
+// the follow-along drawer.
+function welcomeStartCourse() {
+    closeWelcomeModal();
+    openLearnDrawer();
+}
+
+document.addEventListener('DOMContentLoaded', maybeShowWelcomeModal);
 
 // Build (possibly nested) list HTML from a contiguous run of markdown list
 // lines starting at `start`. Nesting is by leading indentation, so a numbered
@@ -61064,6 +61210,9 @@ function appDrawerNav(pageId) {
         // `settings-tab:<tabId>` — `loadAppDrawerPluginTiles` builds
         // them that way because those plugins have no standalone page.
         // Land on Settings and switch to the right tab.
+        // The Getting Started tile opens the follow-along drawer, not a
+        // full page — same "read while you click around" experience.
+        if (pageId === 'learn') { openLearnDrawer(); return; }
         if (typeof pageId === 'string' && pageId.startsWith('settings-tab:')) {
             const tabName = pageId.slice('settings-tab:'.length);
             selectView('settings');

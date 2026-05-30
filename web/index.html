@@ -267,7 +267,7 @@
                 <button class="btn btn-icon" onclick="selectView('settings')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>
                 <button class="btn btn-icon" onclick="window.open('https://wolfscale.org', '_blank')"
                     title="Help & Docs"><span class="ws-icon-clean-wrap" data-icon="help"></span></button>
-                <button class="btn btn-icon" onclick="selectView('learn')" title="Getting Started"><span class="ws-icon-clean-wrap" data-icon="compass"></span></button>
+                <button class="btn btn-icon" onclick="openLearnDrawer()" title="Getting Started"><span class="ws-icon-clean-wrap" data-icon="compass"></span></button>
                 <button class="btn btn-icon" onclick="openAddServerModal()" title="Add Server"><span class="ws-icon-clean-wrap" data-icon="add"></span></button>
                 <button class="btn btn-icon mobile-only" onclick="toggleTaskLogMobile()" title="Task Log" id="sidebar-tasklog-btn"><span class="ws-icon-clean-wrap" data-icon="clipboard"></span></button>
                 <button class="btn btn-icon" onclick="handleLogout()" title="Sign Out"><span class="ws-icon-clean-wrap" data-icon="door"></span></button>
@@ -407,7 +407,7 @@
                         <strong>New to WolfStack?</strong>
                         <span>Take the short Getting Started course — one calm step at a time, nothing overwhelming.</span>
                     </div>
-                    <button type="button" class="learn-banner-go" onclick="selectView('learn')">Start here →</button>
+                    <button type="button" class="learn-banner-go" onclick="openLearnDrawer()">Start here →</button>
                     <button type="button" class="learn-banner-dismiss" onclick="dismissLearnBanner()" title="Dismiss" aria-label="Dismiss getting started banner">&times;</button>
                 </div>
 
@@ -9702,6 +9702,88 @@ region = us-east-1"></textarea>
         Press <kbd style="background:var(--bg-tertiary,#2d2f3a);padding:1px 6px;border-radius:4px;border:1px solid var(--border-color,#3f4150);font-size:10px;">Esc</kbd> to close · Click outside the panel to dismiss
     </footer>
 </aside>
+
+<!-- ============ Getting Started slide-out ("Learn drawer") ============
+     A NON-modal docked panel: read a lesson while you click around your
+     actual WolfStack at the same time. Re-parented to <body> and toggled by
+     openLearnDrawer() in app.js. Deliberately NOT a .page-view, so
+     selectView()/selectServerView() never touch it — it stays open, on the
+     lesson you were reading, as you navigate the rest of the UI. Opening it
+     adds body.learn-drawer-open, which pushes .main-content aside so nothing
+     is covered. The ↗ button pops the full course into its own window. -->
+<aside id="learn-drawer" class="learn-drawer" aria-label="Getting Started course" aria-hidden="true">
+    <header class="learn-d-head">
+        <button type="button" class="learn-d-iconbtn" onclick="toggleLearnDrawerToc()" title="All lessons" aria-label="All lessons">
+            <span class="ws-icon-clean-wrap" data-icon="menu"></span>
+        </button>
+        <div class="learn-d-titlewrap">
+            <div class="learn-d-title">Getting Started</div>
+            <div class="learn-d-progress-label" id="learn-d-progress-label">0 of 0</div>
+        </div>
+        <button type="button" class="learn-d-iconbtn" onclick="learnExpandToPage()" title="Open full screen" aria-label="Open full screen">&#10530;</button>
+        <button type="button" class="learn-d-iconbtn" onclick="learnPopOut()" title="Pop out to its own window" aria-label="Pop out to its own window">&#8599;</button>
+        <button type="button" class="learn-d-iconbtn" onclick="closeLearnDrawer()" title="Close (Esc)" aria-label="Close course">&times;</button>
+    </header>
+    <div class="learn-d-progress-track"><span id="learn-d-progress-fill" class="learn-progress-fill"></span></div>
+    <div class="learn-d-body">
+        <article id="learn-d-content" class="learn-content learn-d-content" tabindex="-1"></article>
+        <nav id="learn-d-toc" class="learn-d-toc" aria-label="Course lessons" hidden></nav>
+    </div>
+    <div class="learn-d-footer">
+        <button type="button" id="learn-d-prev" class="learn-btn learn-btn-secondary" onclick="learnPrev()">&larr; Previous</button>
+        <button type="button" id="learn-d-complete" class="learn-btn learn-btn-primary" onclick="learnCompleteAndNext()">Mark complete &amp; continue &rarr;</button>
+    </div>
+</aside>
+
+<!-- ============ Login welcome modal ============
+     Shown once per login (a per-login sessionStorage flag set by login.html
+     is consumed on first show), or never again once "Don't show again" is
+     ticked (permanent localStorage flag). Promotes the Getting Started
+     course, the Discord community, and sponsorship. See maybeShowWelcomeModal
+     in app.js. -->
+<div id="welcome-modal" class="welcome-modal" role="dialog" aria-modal="true" aria-labelledby="welcome-modal-title" style="display:none;">
+    <div class="welcome-backdrop" onclick="closeWelcomeModal()"></div>
+    <div class="welcome-card" role="document">
+        <button type="button" class="welcome-x" id="welcome-close-btn" onclick="closeWelcomeModal()" aria-label="Close welcome">&times;</button>
+        <div class="welcome-hero">
+            <img src="images/wolfstack-logo.png" alt="" class="welcome-logo" aria-hidden="true">
+            <h2 id="welcome-modal-title">Welcome to WolfStack</h2>
+            <p class="welcome-sub">Glad you're here. A few quick ways to get the most out of it:</p>
+        </div>
+        <div class="welcome-actions">
+            <button type="button" class="welcome-action welcome-action-primary" onclick="welcomeStartCourse()">
+                <span class="welcome-action-ico"><span class="ws-icon-clean-wrap" data-icon="compass"></span></span>
+                <span class="welcome-action-txt">
+                    <strong>Take the Getting Started course</strong>
+                    <span>A calm, one-step-at-a-time tour that opens right beside your dashboard.</span>
+                </span>
+                <span class="welcome-action-arrow">&rarr;</span>
+            </button>
+            <a class="welcome-action" href="https://discord.gg/q9qMjHjUQY" target="_blank" rel="noopener noreferrer">
+                <span class="welcome-action-ico"><span class="ws-icon-clean-wrap" data-icon="chat"></span></span>
+                <span class="welcome-action-txt">
+                    <strong>Join the community on Discord</strong>
+                    <span>Ask questions, get help, and hear what other operators are building.</span>
+                </span>
+                <span class="welcome-action-arrow">&#8599;</span>
+            </a>
+            <a class="welcome-action" href="https://github.com/sponsors/wolfsoftwaresystemsltd" target="_blank" rel="noopener noreferrer">
+                <span class="welcome-action-ico welcome-ico-heart">&#9829;</span>
+                <span class="welcome-action-txt">
+                    <strong>Support WolfStack</strong>
+                    <span>Sponsor the project and help keep it independent and improving.</span>
+                </span>
+                <span class="welcome-action-arrow">&#8599;</span>
+            </a>
+        </div>
+        <div class="welcome-foot">
+            <label class="welcome-dontshow-lbl">
+                <input type="checkbox" id="welcome-dontshow"> Don't show this again
+            </label>
+            <button type="button" class="welcome-getstarted" onclick="closeWelcomeModal()">Get started &rarr;</button>
+        </div>
+    </div>
+</div>
 
 </body>
 

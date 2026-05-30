@@ -613,6 +613,10 @@
                 const data = await resp.json();
 
                 if (data.success) {
+                    // Mark this as a fresh login so the dashboard shows the
+                    // welcome modal exactly once (it's consumed on first show,
+                    // and never returns if the user ticked "don't show again").
+                    try { sessionStorage.setItem('wolfstack_fresh_login', '1'); } catch (_) {}
                     btn.innerHTML = '✓ Welcome';
                     btn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
                     setTimeout(() => {
@@ -754,6 +758,8 @@
                     const data = await finishResp.json().catch(() => ({}));
                     throw new Error(data.error || ('Server returned ' + finishResp.status));
                 }
+                // Fresh login (passkey) — show the welcome modal once.
+                try { sessionStorage.setItem('wolfstack_fresh_login', '1'); } catch (_) {}
                 window.location.href = '/';
             } catch (err) {
                 errEl.textContent = (err && err.message) || 'Passkey login failed';
