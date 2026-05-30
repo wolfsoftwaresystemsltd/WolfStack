@@ -463,6 +463,38 @@ if systemctl list-unit-files dnsmasq.service >/dev/null 2>&1; then
     fi
 fi
 
+# Install packages resiliently — NEVER abort setup if some are unavailable.
+# set -e is active, so an unguarded `apt/dnf/... install` of a long list dies
+# entirely when one package is renamed/missing or a mirror/third-party repo is
+# flaky, taking the whole installer down with it. We try a bulk install first
+# (fast, co-resolves deps); on failure we retry each package alone so one bad
+# name doesn't block the rest, warn about what's left, and carry on. A package
+# that's genuinely required but still missing fails loudly later at build time.
+ws_install_pkgs() {
+    local cmd
+    case "$PKG_MANAGER" in
+        apt)    cmd="apt install -y" ;;
+        dnf)    cmd="dnf install -y" ;;
+        yum)    cmd="yum install -y" ;;
+        zypper) cmd="zypper install -y" ;;
+        pacman) cmd="pacman -Sy --noconfirm --needed" ;;
+        *) echo "  ⚠ Unknown package manager '$PKG_MANAGER' — skipping install of: $*"; return 0 ;;
+    esac
+    if $cmd "$@"; then
+        return 0
+    fi
+    echo "  ⚠ Bulk package install failed — retrying individually so one bad package doesn't stop the rest..."
+    local pkg failed=""
+    for pkg in "$@"; do
+        $cmd "$pkg" >/dev/null 2>&1 || failed="$failed $pkg"
+    done
+    if [ -n "$failed" ]; then
+        echo "  ⚠ Could not install:$failed"
+        echo "    Continuing anyway — install these by hand if a feature turns out to be missing."
+    fi
+    return 0
+}
+
 if [ "$PKG_MANAGER" = "apt" ]; then
     apt update -qq 2>/dev/null || true
     # On Proxmox hosts, QEMU and LXC are already provided by pve-qemu-kvm and lxc-pve.
@@ -507,7 +539,7 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         # Debian/Ubuntu — minimal cloud images skip them with -y, then the
         # first `lxc-start` fails with "apparmor_parser not available".
         # Pin them explicitly so containers actually start out of the box.
-        apt install -y git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates apparmor apparmor-utils dnsmasq-base bridge-utils $QEMU_PKG socat nfs-common fuse3
+        ws_install_pkgs git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates apparmor apparmor-utils dnsmasq-base bridge-utils $QEMU_PKG socat nfs-common fuse3
         apt install -y s3fs-fuse 2>/dev/null || apt install -y s3fs 2>/dev/null || echo "  ⚠ s3fs not available — S3 mounts will use built-in sync"
     fi
 elif [ "$PKG_MANAGER" = "dnf" ]; then
@@ -517,7 +549,7 @@ elif [ "$PKG_MANAGER" = "dnf" ]; then
     else
         QEMU_DNF="qemu-kvm qemu-img"
     fi
-    dnf install -y git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils $QEMU_DNF socat s3fs-fuse nfs-utils fuse3
+    ws_install_pkgs git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils $QEMU_DNF socat s3fs-fuse nfs-utils fuse3
 elif [ "$PKG_MANAGER" = "yum" ]; then
     ARCH=$(uname -m)
     if [ "$ARCH" = "aarch64" ]; then
@@ -525,7 +557,7 @@ elif [ "$PKG_MANAGER" = "yum" ]; then
     else
         QEMU_YUM="qemu-kvm qemu-img"
     fi
-    yum install -y git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils $QEMU_YUM socat s3fs-fuse nfs-utils fuse
+    ws_install_pkgs git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils $QEMU_YUM socat s3fs-fuse nfs-utils fuse
 elif [ "$PKG_MANAGER" = "zypper" ]; then
     ARCH=$(uname -m)
     if [ "$ARCH" = "aarch64" ]; then
@@ -534,7 +566,7 @@ elif [ "$PKG_MANAGER" = "zypper" ]; then
         QEMU_ZYPP="qemu-kvm qemu-tools"
     fi
     # SUSE uses AppArmor by default — same Recommends-not-Depends trap.
-    zypper install -y git curl gcc gcc-c++ make libopenssl-devel pkg-config lxc apparmor-parser apparmor-utils dnsmasq bridge-utils $QEMU_ZYPP socat s3fs nfs-client fuse3
+    ws_install_pkgs git curl gcc gcc-c++ make libopenssl-devel pkg-config lxc apparmor-parser apparmor-utils dnsmasq bridge-utils $QEMU_ZYPP socat s3fs nfs-client fuse3
 elif [ "$PKG_MANAGER" = "pacman" ]; then
     ARCH=$(uname -m)
     if [ "$ARCH" = "aarch64" ]; then
@@ -542,7 +574,7 @@ elif [ "$PKG_MANAGER" = "pacman" ]; then
     else
         QEMU_PAC="qemu-full"
     fi
-    pacman -Sy --noconfirm --needed git curl base-devel openssl pkg-config lxc dnsmasq $QEMU_PAC socat s3fs-fuse nfs-utils fuse3 rustup
+    ws_install_pkgs git curl base-devel openssl pkg-config lxc dnsmasq $QEMU_PAC socat s3fs-fuse nfs-utils fuse3 rustup
 fi
 
 # Decide whether to disable the freshly-installed dnsmasq.service.
@@ -969,13 +1001,17 @@ if ! command -v docker >/dev/null 2>&1; then
                 echo "  ✓ Installed docker.io from distro repos"
                 DOCKER_INSTALLED=true
             else
-                # Fall back to Docker's official repo
-                apt install -y ca-certificates curl gnupg 2>/dev/null
-                install -m 0755 -d /etc/apt/keyrings
-                curl -fsSL "https://download.docker.com/linux/${UPSTREAM}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
-                chmod a+r /etc/apt/keyrings/docker.gpg
-                echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${UPSTREAM} ${CODENAME} stable" > /etc/apt/sources.list.d/docker.list
-                apt update -qq 2>/dev/null
+                # Fall back to Docker's official repo. Docker is optional, so
+                # every step here is best-effort — a failed key fetch or apt
+                # update must not abort the whole installer (set -e). If any
+                # step fails the final `docker-ce` install simply won't flip
+                # DOCKER_INSTALLED and setup carries on without Docker.
+                apt install -y ca-certificates curl gnupg 2>/dev/null || true
+                install -m 0755 -d /etc/apt/keyrings || true
+                curl -fsSL "https://download.docker.com/linux/${UPSTREAM}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null || true
+                chmod a+r /etc/apt/keyrings/docker.gpg 2>/dev/null || true
+                echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${UPSTREAM} ${CODENAME} stable" > /etc/apt/sources.list.d/docker.list || true
+                apt update -qq 2>/dev/null || true
                 if apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null; then
                     DOCKER_INSTALLED=true
                 fi
