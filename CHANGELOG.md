@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.12.2: fix PBS connection failing on a colon-less fingerprint** _(2026-05-30 — [`087e29d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/087e29dff715dbae94a1f254298cc082ef720309))_
+- **v24.12.1: Galera lifecycle + recovery become host-aware (cross-host clusters)** _(2026-05-30 — [`c6963ed`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c6963ede1403cde4c0d562854797b48d0f123f3a))_
 - **v24.12.0: one-click Let's Encrypt in the proxy editor + Galera cluster manager** _(2026-05-30 — [`73dc3d3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/73dc3d398b24279a8cf7fb5d3530220ba1c16ebd))_
 - **v24.11.0: restore from a folder / to a different place (disaster recovery)** _(2026-05-30 — [`9c12421`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9c12421cc6884bdcc111114297ba9080637c3c68))_
 - **v24.10.1: fix unreadable lessons menu on translucent themes** _(2026-05-30 — [`aa58129`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/aa58129004e12765828b5170b8ffc0ea69fbfeae))_
