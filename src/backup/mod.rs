@@ -3995,7 +3995,13 @@ pub fn restore_by_id_with_log(id: &str, overwrite: bool, storage: &str, new_name
     let config = load_config();
     let entry = config.entries.iter().find(|e| e.id == id)
         .ok_or_else(|| format!("Backup not found: {}", id))?;
+    restore_entry_with_log(entry, overwrite, storage, new_name, log)
+}
 
+/// Restore one backup entry — shared by id-based restore and the folder /
+/// disaster-recovery restore (which builds an ephemeral entry, see
+/// `restore_from_path`). Everything below operates purely on `entry`.
+fn restore_entry_with_log(entry: &BackupEntry, overwrite: bool, storage: &str, new_name: &str, log: std::sync::mpsc::Sender<String>) -> Result<String, String> {
     let type_name = entry.target.target_type.to_string().to_uppercase();
     let display_name = entry.target.hostname.as_deref()
         .map(|h| format!("{} ({})", entry.target.name, h))
@@ -4058,6 +4064,105 @@ pub fn restore_by_id_with_log(id: &str, overwrite: bool, storage: &str, new_name
             result
         }
     }
+}
+
+/// Restore a backup directly from a folder + filename, WITHOUT a backups.json
+/// entry — for disaster recovery: restore onto a surviving node from a shared
+/// mount when the original server (and its entry) is gone. Builds an ephemeral
+/// entry and reuses the normal restore dispatch. The file must be reachable at
+/// `source_path`/`filename` on THIS node; the frontend proxies the request to
+/// the chosen target node so the workload is recreated there.
+pub fn restore_from_path(
+    source_path: &str,
+    filename: &str,
+    overwrite: bool,
+    storage: &str,
+    new_name: &str,
+    log: std::sync::mpsc::Sender<String>,
+) -> Result<String, String> {
+    if filename.trim().is_empty() || filename.contains('/') || filename.contains("..") {
+        return Err("Invalid backup filename (must be a bare file name)".into());
+    }
+    let target_type = guess_target_type(filename);
+    // Config backups extract via `tar xzf -C /` (can touch any path); restoring
+    // one from an ARBITRARY folder would be a write-anywhere vector. Folder /
+    // disaster-recovery restore is for workloads (Docker/LXC/VM) only.
+    if matches!(target_type, BackupTargetType::Config) {
+        return Err("Config backups can't be restored from a folder — restore them from the Backups list.".into());
+    }
+    let size_bytes = fs::metadata(Path::new(source_path).join(filename))
+        .map(|m| m.len()).unwrap_or(0);
+    let entry = BackupEntry {
+        id: Uuid::new_v4().to_string(),
+        target: BackupTarget {
+            target_type,
+            name: extract_name_from_filename(filename),
+            hostname: None, state: None, specs: None,
+        },
+        storage: BackupStorage::local(source_path),
+        filename: filename.to_string(),
+        size_bytes,
+        created_at: Utc::now().to_rfc3339(),
+        status: BackupStatus::Completed,
+        error: String::new(),
+        schedule_id: String::new(),
+        comments: String::new(),
+        node_hostname: local_hostname(),
+        docker_config: String::new(),
+        mounts: Vec::new(),
+    };
+    restore_entry_with_log(&entry, overwrite, storage, new_name, log)
+}
+
+/// A backup file discovered by scanning a folder (no backups.json needed).
+#[derive(Debug, Clone, Serialize)]
+pub struct ScannedBackup {
+    pub filename: String,
+    pub target_type: String,
+    pub name: String,
+    pub size_bytes: u64,
+    pub modified: String,
+}
+
+/// List WolfStack backup files (`{docker,lxc,vm,config}-*.tar.gz`) in a folder,
+/// identifying each from its filename alone — powers "restore from a folder".
+pub fn scan_backup_folder(path: &str) -> Result<Vec<ScannedBackup>, String> {
+    let dir = Path::new(path);
+    if !dir.is_dir() {
+        return Err(format!("Not a folder: {}", path));
+    }
+    let rd = fs::read_dir(dir).map_err(|e| format!("Cannot read folder: {}", e))?;
+    let mut out = Vec::new();
+    for ent in rd.flatten() {
+        let p = ent.path();
+        if !p.is_file() { continue; }
+        let fname = match p.file_name().and_then(|n| n.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        // Workload backups only — config backups are intentionally excluded:
+        // they can't be restored from a folder (see restore_from_path).
+        let is_backup = fname.ends_with(".tar.gz")
+            && (fname.starts_with("docker-") || fname.starts_with("lxc-")
+                || fname.starts_with("vm-"));
+        if !is_backup { continue; }
+        let meta = ent.metadata().ok();
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified = meta.as_ref()
+            .and_then(|m| m.modified().ok())
+            .map(|t| chrono::DateTime::<Utc>::from(t).to_rfc3339())
+            .unwrap_or_default();
+        let type_str = match guess_target_type(&fname) {
+            BackupTargetType::Docker => "docker",
+            BackupTargetType::Lxc => "lxc",
+            BackupTargetType::Vm => "vm",
+            BackupTargetType::Config => "config",
+        }.to_string();
+        let name = extract_name_from_filename(&fname);
+        out.push(ScannedBackup { filename: fname, target_type: type_str, name, size_bytes: size, modified });
+    }
+    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    Ok(out)
 }
 
 // ─── Schedule Management ───

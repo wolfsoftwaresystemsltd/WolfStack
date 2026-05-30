@@ -14636,6 +14636,83 @@ pub async fn backup_restore_stream(
         .streaming(stream)
 }
 
+/// GET /api/backups/scan-folder?path=<folder> — list WolfStack backup files in
+/// a folder (restore-from-folder / disaster recovery, no backups.json needed).
+pub async fn backup_scan_folder(
+    req: HttpRequest, state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let path = query.get("path").cloned().unwrap_or_default();
+    if path.trim().is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "path required"}));
+    }
+    let safe = match sanitize_file_path(&path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    };
+    if is_sensitive_path(&safe) {
+        return HttpResponse::Forbidden().json(serde_json::json!({"error": "That path is off-limits"}));
+    }
+    match backup::scan_backup_folder(&safe.to_string_lossy()) {
+        Ok(list) => HttpResponse::Ok().json(list),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    }
+}
+
+/// POST /api/backups/restore-from-path/stream?path=&filename=&overwrite=&storage=&name=
+/// Restore a backup from a folder + filename WITHOUT a backups.json entry —
+/// disaster recovery. Proxy this to a chosen node to restore the workload there.
+pub async fn backup_restore_from_path_stream(
+    req: HttpRequest, state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let path = query.get("path").cloned().unwrap_or_default();
+    let filename = query.get("filename").cloned().unwrap_or_default();
+    let overwrite = query.get("overwrite").map(|v| v == "true").unwrap_or(false);
+    let storage = query.get("storage").cloned().unwrap_or_default();
+    let new_name = query.get("name").cloned().unwrap_or_default();
+    if path.trim().is_empty() || filename.trim().is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "path and filename required"}));
+    }
+    let safe = match sanitize_file_path(&path) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    };
+    if is_sensitive_path(&safe) {
+        return HttpResponse::Forbidden().json(serde_json::json!({"error": "That path is off-limits"}));
+    }
+    let safe_path = safe.to_string_lossy().to_string();
+
+    let (std_tx, std_rx) = std::sync::mpsc::channel::<String>();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
+    std::thread::spawn(move || {
+        let result = backup::restore_from_path(&safe_path, &filename, overwrite, &storage, &new_name, std_tx.clone());
+        match result {
+            Ok(msg) => { let _ = std_tx.send(format!("RESULT:OK:{}", msg)); }
+            Err(e) => { let _ = std_tx.send(format!("RESULT:ERR:{}", e)); }
+        }
+    });
+    tokio::task::spawn_blocking(move || {
+        while let Ok(msg) = std_rx.recv() {
+            if tx.blocking_send(msg).is_err() { break; }
+        }
+    });
+    let stream = async_stream::stream! {
+        while let Some(msg) = rx.recv().await {
+            let event = format!("data: {}\n\n", msg.replace('\n', "\ndata: "));
+            yield Ok::<_, actix_web::Error>(actix_web::web::Bytes::from(event));
+        }
+    };
+    HttpResponse::Ok()
+        .insert_header(("Content-Type", "text/event-stream"))
+        .insert_header(("Cache-Control", "no-cache"))
+        .insert_header(("Connection", "keep-alive"))
+        .insert_header(("X-Accel-Buffering", "no"))
+        .streaming(stream)
+}
+
 /// DELETE /api/backups/{id} — delete a backup entry + file
 pub async fn backup_delete(
     req: HttpRequest, state: web::Data<AppState>,
@@ -32357,6 +32434,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups/test-storage", web::post().to(backup_test_storage))
         .route("/api/backups/schedules/{id}", web::delete().to(backup_schedule_delete))
         .route("/api/backups/import", web::post().to(backup_import))
+        .route("/api/backups/scan-folder", web::get().to(backup_scan_folder))
+        .route("/api/backups/restore-from-path/stream", web::post().to(backup_restore_from_path_stream))
         // PBS (Proxmox Backup Server) — must be before {id} routes
         .route("/api/backups/pbs/status", web::get().to(pbs_status))
         .route("/api/backups/pbs/snapshots", web::get().to(pbs_snapshots))

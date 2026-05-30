@@ -26901,6 +26901,187 @@ function browseBackupLocalPath() {
     });
 }
 
+// ── Restore from a folder (disaster recovery) ───────────────────────
+// Point at any folder holding WolfStack backups (e.g. an R2/S3 mount), scan
+// it, and restore a backup onto a CHOSEN node — even when the original server
+// (and its backups.json entry) is gone. Covers: restore-from-folder, pick
+// target node, override source folder, restore-as-name + replace.
+function rffSize(b) {
+    b = Number(b) || 0;
+    if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
+    if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+    if (b >= 1024) return (b / 1024).toFixed(1) + ' KB';
+    return b + ' B';
+}
+
+function openRestoreFromFolder() {
+    rffClose();
+    const nodeOptions = (Array.isArray(allNodes) ? allNodes : [])
+        .filter(n => n.online !== false)
+        .map(n => `<option value="${escapeAttr(n.id)}"${n.is_self ? ' selected' : ''}>${escapeHtml(n.hostname || n.address || n.id)}${n.is_self ? ' (this node)' : ''}</option>`).join('');
+    const overlay = document.createElement('div');
+    overlay.id = 'rff-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px;';
+    overlay.innerHTML = `
+      <div role="dialog" aria-modal="true" aria-label="Restore from folder" style="background:var(--bg-card);border:1px solid var(--border-light);border-radius:14px;width:760px;max-width:100%;max-height:90vh;overflow:auto;padding:22px 24px;box-shadow:0 25px 60px rgba(0,0,0,0.5);">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <h3 style="margin:0;color:var(--text-primary);">Restore from a folder</h3>
+          <button onclick="rffClose()" aria-label="Close" style="background:transparent;border:none;color:var(--text-muted);font-size:22px;cursor:pointer;line-height:1;">&times;</button>
+        </div>
+        <p style="margin:0 0 14px;font-size:13px;color:var(--text-secondary);line-height:1.5;">Restore a backup onto a chosen server from any folder it can reach (e.g. an R2/S3 mount) &mdash; even if the original server is gone. Pick the server, point at the folder, and scan. (Browse works on this node; for another node, type its path.)</p>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+          <select id="rff-node" onchange="var r=document.getElementById('rff-results'); if(r) r.innerHTML='';" title="The server that has the folder and runs the restore" style="padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);font-size:13px;">${nodeOptions}</select>
+          <input type="text" id="rff-folder" placeholder="/mnt/r2-backups" value="${escapeAttr(_backupLocalDir || '')}" style="flex:1;min-width:200px;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);font-family:var(--font-mono);font-size:13px;">
+          <button class="btn btn-sm" onclick="rffBrowse()" title="Browse for a folder (on this node)"><span class="ws-icon-clean-wrap" data-icon="folder"></span></button>
+          <button class="btn btn-sm btn-primary" onclick="rffScan()"><span class="ws-icon-clean-wrap" data-icon="search"></span> Scan</button>
+        </div>
+        <div id="rff-results"></div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', e => { if (e.target === overlay) rffClose(); });
+    document.addEventListener('keydown', rffEsc);
+}
+
+// Build an API URL that runs on the node chosen in the modal — proxied when
+// it isn't this node. apiPath has NO leading /api/. Used for BOTH scan and
+// restore so they always run on the same machine (the one with the folder).
+function rffNodeBase(apiPath) {
+    const nodeId = (document.getElementById('rff-node') || {}).value || '';
+    const node = (Array.isArray(allNodes) ? allNodes : []).find(n => n.id === nodeId);
+    if (!nodeId || (node && node.is_self)) return '/api/' + apiPath;
+    return `/api/nodes/${encodeURIComponent(nodeId)}/proxy/${apiPath}`;
+}
+
+function rffClose() {
+    const o = document.getElementById('rff-overlay');
+    if (o) o.remove();
+    document.removeEventListener('keydown', rffEsc);
+}
+function rffEsc(e) { if (e.key === 'Escape') rffClose(); }
+
+function rffBrowse() {
+    if (typeof openFileBrowser !== 'function') { showToast('Folder browser unavailable — type the path', 'warning'); return; }
+    const el = document.getElementById('rff-folder');
+    openFileBrowser({
+        start: (el && el.value.trim()) || _backupLocalDir || '/', kind: 'dir',
+        title: 'Choose a backup folder',
+        onSelect: c => { const e2 = document.getElementById('rff-folder'); if (e2) e2.value = String(c || '').replace(/\/+$/, '') || '/'; },
+    });
+}
+
+async function rffScan() {
+    const el = document.getElementById('rff-folder');
+    const results = document.getElementById('rff-results');
+    const path = el && el.value.trim();
+    if (!path) { showToast('Enter a folder first', 'warning'); return; }
+    results.innerHTML = '<div role="status" style="padding:16px;color:var(--text-muted);">Scanning&hellip;</div>';
+    try {
+        const r = await fetch(rffNodeBase('backups/scan-folder?path=' + encodeURIComponent(path)));
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+        if (!Array.isArray(data) || !data.length) {
+            results.innerHTML = '<div role="status" style="padding:16px;color:var(--text-muted);">No WolfStack backups found in that folder on this server.</div>';
+            return;
+        }
+        const rows = data.map(b => `<tr>
+            <td style="padding:6px 8px;"><span style="text-transform:uppercase;font-size:10px;color:var(--text-muted);">${escapeHtml(b.target_type)}</span></td>
+            <td style="padding:6px 8px;color:var(--text-primary);">${escapeHtml(b.name)}</td>
+            <td style="padding:6px 8px;color:var(--text-muted);font-size:12px;">${rffSize(b.size_bytes)}</td>
+            <td style="padding:6px 8px;color:var(--text-muted);font-size:12px;">${escapeHtml((b.modified || '').slice(0, 10))}</td>
+            <td style="padding:6px 8px;text-align:right;"><button class="btn btn-sm btn-primary rff-pick" data-filename="${escapeAttr(b.filename)}" data-type="${escapeAttr(b.target_type)}" data-name="${escapeAttr(b.name)}">Restore&hellip;</button></td>
+          </tr>`).join('');
+        results.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="text-align:left;color:var(--text-muted);font-size:11px;border-bottom:1px solid var(--border);"><th style="padding:4px 8px;">Type</th><th style="padding:4px 8px;">Name</th><th style="padding:4px 8px;">Size</th><th style="padding:4px 8px;">Date</th><th></th></tr></thead><tbody>${rows}</tbody></table><div id="rff-restore-form"></div>`;
+        // Wire each Restore button via dataset — no code interpolation, so a
+        // filename with a quote can't break or inject into an onclick string.
+        results.querySelectorAll('.rff-pick').forEach(btn => {
+            btn.addEventListener('click', () => rffPick(btn.dataset.filename, btn.dataset.type, btn.dataset.name));
+        });
+    } catch (e) {
+        results.innerHTML = `<div role="alert" style="padding:16px;color:var(--danger);">Couldn't scan: ${escapeHtml((e && e.message) || String(e))}</div>`;
+    }
+}
+
+function rffPick(filename, type, name) {
+    const form = document.getElementById('rff-restore-form');
+    if (!form) return;
+    const isLxc = type === 'lxc';
+    form.innerHTML = `
+      <div style="margin-top:14px;padding:14px;border:1px solid var(--accent);border-radius:10px;background:var(--accent-glow);">
+        <div style="font-weight:600;color:var(--text-primary);margin-bottom:10px;">Restore <code style="font-family:var(--font-mono);"></code></div>
+        ${isLxc ? `<label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:8px;">Restore as name
+            <input id="rff-name" style="width:100%;margin-top:4px;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);">
+          </label>` : ''}
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-secondary);"><input type="checkbox" id="rff-overwrite"> Replace the target if it already exists</label>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">
+          <button id="rff-run-btn" class="btn btn-sm btn-primary"><span class="ws-icon-clean-wrap" data-icon="refresh"></span> Restore now</button>
+        </div>
+        <pre id="rff-progress" role="status" aria-live="polite" style="display:none;margin-top:10px;max-height:200px;overflow:auto;background:var(--bg-input);border:1px solid var(--border);border-radius:8px;padding:10px;font-size:12px;color:var(--text-secondary);white-space:pre-wrap;"></pre>
+        <div id="rff-result" role="alert"></div>
+      </div>`;
+    // Set filename + name via textContent/value — no interpolation into markup.
+    const codeEl = form.querySelector('code');
+    if (codeEl) codeEl.textContent = filename;
+    const nameEl = form.querySelector('#rff-name');
+    if (nameEl) nameEl.value = name || '';
+    const runBtn = form.querySelector('#rff-run-btn');
+    if (runBtn) runBtn.addEventListener('click', () => rffRun(filename));
+    form.scrollIntoView({ block: 'nearest' });
+}
+
+async function rffRun(filename) {
+    const folder = (document.getElementById('rff-folder') || {}).value || '';
+    const nodeId = (document.getElementById('rff-node') || {}).value || '';
+    const nameEl = document.getElementById('rff-name');
+    const name = nameEl ? nameEl.value.trim() : '';
+    const overwrite = !!(document.getElementById('rff-overwrite') || {}).checked;
+    const progress = document.getElementById('rff-progress');
+    const resultEl = document.getElementById('rff-result');
+    const btn = document.getElementById('rff-run-btn');
+    if (!folder.trim()) { showToast('Folder missing', 'warning'); return; }
+    if (!nodeId) { showToast('Select a server', 'warning'); return; }
+    if (btn) btn.disabled = true;
+    progress.style.display = 'block'; progress.textContent = 'Starting restore…'; resultEl.textContent = '';
+    const qs = new URLSearchParams({ path: folder, filename: filename, overwrite: overwrite ? 'true' : 'false', name: name });
+    try {
+        const resp = await fetch(rffNodeBase('backups/restore-from-path/stream?' + qs.toString()), { method: 'POST' });
+        if (!resp.ok && (resp.headers.get('content-type') || '').includes('application/json')) {
+            const d = await resp.json();
+            throw new Error(d.error || ('HTTP ' + resp.status));
+        }
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '', ok = null, finalMsg = '';
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            const lines = buf.split('\n'); buf = lines.pop();
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const msg = line.slice(6);
+                if (msg.startsWith('RESULT:OK:')) { ok = true; finalMsg = msg.slice(10); }
+                else if (msg.startsWith('RESULT:ERR:')) { ok = false; finalMsg = msg.slice(11); }
+                // Guard the DOM writes — the operator may close the modal mid-
+                // restore (the server keeps going); don't throw on detached els.
+                else if (progress) { progress.textContent += '\n' + msg; progress.scrollTop = progress.scrollHeight; }
+            }
+        }
+        if (ok === true) {
+            if (resultEl) resultEl.innerHTML = `<div style="margin-top:8px;color:var(--success);">✅ ${escapeHtml(finalMsg || 'Restored')}</div>`;
+            showToast('Restore complete', 'success');
+            if (typeof loadBackups === 'function') loadBackups();
+        } else {
+            if (resultEl) resultEl.innerHTML = `<div style="margin-top:8px;color:var(--danger);">❌ ${escapeHtml(finalMsg || 'Restore failed')}</div>`;
+            showToast('Restore failed', 'error');
+        }
+    } catch (e) {
+        if (resultEl) resultEl.innerHTML = `<div style="margin-top:8px;color:var(--danger);">❌ ${escapeHtml((e && e.message) || String(e))}</div>`;
+        showToast('Restore failed', 'error');
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
 function renderBackupTargets(targets) {
     const container = document.getElementById('backup-targets-list');
     if (!container) return;
