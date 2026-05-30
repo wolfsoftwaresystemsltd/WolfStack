@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.10.0: configurable local backup directory + hide server address in top bar** _(2026-05-30 — [`9cea370`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9cea370502e2acae387624ab31183a3eb83cd78e))_
 - **v24.9.0: security course module, restore/domain lessons, contextual help, AI hookup** _(2026-05-30 — [`4d15c3b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4d15c3bccb0e7e9ff5fed04f3d37fdf018955ccb))_
 - **v24.8.1: follow-along course drawer + login welcome modal** _(2026-05-30 — [`5938d6f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5938d6fb5a282fba287852fd354e26cf08a1ae91))_
 - **v24.8.0: in-app Getting Started course for new operators** _(2026-05-30 — [`5928c83`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5928c837e78a8810eeecdaeaab37a4d36b755ae5))_
