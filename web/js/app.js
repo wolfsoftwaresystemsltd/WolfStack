@@ -1870,7 +1870,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', learn: 'Getting Started', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', galera: 'Galera Clusters', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', 'fleet-security': 'Fleet Security', 'dashboard-sync': 'Dashboard Sync' };
+    const titles = { datacenter: 'Datacenter', learn: 'Getting Started', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', 'fleet-security': 'Fleet Security', 'dashboard-sync': 'Dashboard Sync' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -1918,8 +1918,6 @@ function selectView(page) {
         loadClusterBrowser();
     } else if (page === 'databases') {
         dbLoadConnections();
-    } else if (page === 'galera') {
-        galeraInit();
     } else if (page === 'control-panel') {
         cpInit();
     } else if (page === 'array') {
@@ -3353,6 +3351,9 @@ function buildServerTree(nodes) {
                 </a>
                 <a class="nav-item server-child-item wolfrouter-cluster-item" data-cluster="${escapedName}" data-view="wolfrouter-cluster" onclick="showWolfRouterForCluster('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
                     <span class="icon ws-icon-clean-wrap" data-icon="compass" style="font-size:15px;"></span> <span style="font-weight:600;">WolfRouter</span>
+                </a>
+                <a class="nav-item server-child-item galera-cluster-item" data-cluster="${escapedName}" data-view="galera-cluster" onclick="showGaleraForCluster('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
+                    <span class="icon ws-icon-clean-wrap" data-icon="database" style="font-size:15px;"></span> <span style="font-weight:600;">Galera</span>
                 </a>`;
 
         // Each node within the cluster
@@ -61431,10 +61432,6 @@ const APP_DRAWER_TILES = [
         desc: 'Query any configured SQL connection across the cluster.',
     },
     {
-        id: 'galera', icon: '', name: 'Galera Clusters',
-        desc: 'Build or adopt MariaDB Galera clusters on LXC. Live wsrep status, split-brain detection, evidence-based recovery.',
-    },
-    {
         id: 'appstore', icon: '', name: 'App Store',
         desc: 'Browse and install applications onto any host.',
     },
@@ -63127,17 +63124,21 @@ window.arraySchedulePrompt = arraySchedulePrompt;
 // the node proxy. Live status is queried over MySQL TCP, which works
 // cross-host. The host selector at the top picks which host to manage.
 
-const galeraState = { host: '', clusters: [], statuses: {}, statusErrors: {}, loading: false, gen: 0, activeJobAbort: null };
+// Galera is managed per WolfStack cluster (reached from the cluster in the
+// sidebar). Each Galera cluster's definition lives on the host it was built/
+// adopted on (its owner_node); this view aggregates definitions across the WS
+// cluster's hosts and routes each cluster's ops back to its owner. Containers
+// can sit on different hosts — the backend dispatches lifecycle/recovery to the
+// right host automatically.
+const galeraState = { cluster: '', clusters: [], statuses: {}, statusErrors: {}, loading: false, gen: 0, activeJobAbort: null };
 
-/// Build a galera API URL routed to the currently-selected host. The node
-/// proxy path is WITHOUT the /api/ prefix (per the proxy route contract).
-function galeraBase(path) {
-    const hostId = galeraState.host;
-    const node = (Array.isArray(allNodes) ? allNodes : []).find(n => n.id === hostId);
-    // Use the local API when there's no host, the host is self, OR the host id
-    // isn't in allNodes yet (avoids a self-proxy loop while the list loads).
-    if (!hostId || !node || node.is_self) return '/api/galera/' + path;
-    return `/api/nodes/${encodeURIComponent(hostId)}/proxy/galera/${path}`;
+// The WS cluster a node belongs to (matches buildServerTree's grouping key).
+function galeraNodeCluster(n) { return n.cluster_name || 'WolfStack'; }
+
+// WolfStack hosts (not Proxmox) in the currently-viewed WS cluster.
+function galeraClusterNodes() {
+    return (Array.isArray(allNodes) ? allNodes : [])
+        .filter(n => galeraNodeCluster(n) === galeraState.cluster && n.node_type !== 'proxmox');
 }
 
 function galeraHostName(id) {
@@ -63145,68 +63146,95 @@ function galeraHostName(id) {
     return n ? (n.hostname || n.id) : (id || 'this host');
 }
 
-async function galeraInit() {
-    // Ensure we have a node list for the host selector + proxy routing.
+// Route a galera API call to a SPECIFIC host. Proxy path is WITHOUT the /api/
+// prefix; local API when it's self or the host isn't in allNodes yet.
+function galeraNodeBase(hostId, path) {
+    const node = (Array.isArray(allNodes) ? allNodes : []).find(n => n.id === hostId);
+    if (!hostId || !node || node.is_self) return '/api/galera/' + path;
+    return `/api/nodes/${encodeURIComponent(hostId)}/proxy/galera/${path}`;
+}
+
+// Enter the Galera view for a WolfStack cluster (sidebar → cluster → Galera).
+async function showGaleraForCluster(clusterName) {
+    if (typeof closeSidebarMobile === 'function') closeSidebarMobile();
+    galeraState.cluster = clusterName;
+    currentPage = 'galera-cluster';
+    currentNodeId = null;
+    try { if (typeof updateClusterPill === 'function') updateClusterPill(); } catch (_) {}
+    document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
+    const el = document.getElementById('page-galera');
+    if (el) el.style.display = 'block';
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    const item = document.querySelector('.galera-cluster-item[data-cluster="' + (typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(clusterName) : clusterName) + '"]');
+    if (item) item.classList.add('active');
+    const t = document.getElementById('page-title');
+    if (t) t.textContent = 'Galera — ' + clusterName;
     if (!Array.isArray(allNodes) || allNodes.length === 0) {
         try { const r = await fetch('/api/nodes'); if (r.ok) allNodes = await r.json(); } catch (_) {}
-    }
-    if (!galeraState.host) {
-        const self = (allNodes || []).find(n => n.is_self);
-        galeraState.host = self ? self.id : ((allNodes && allNodes[0]) ? allNodes[0].id : '');
     }
     await galeraLoadClusters();
 }
 
-function galeraOnHostChange(sel) {
-    galeraState.host = sel.value;
-    galeraLoadClusters();
-}
+// Refresh the currently-viewed cluster.
+function galeraInit() { return galeraLoadClusters(); }
 
 async function galeraLoadClusters() {
     const content = document.getElementById('galera-content');
     if (!content) return;
-    // Generation guard: a rapid host switch starts a new load; responses from
-    // the previous one must not paint over it.
+    // Generation guard: a re-entrant load must not be painted over by a stale one.
     const myGen = ++galeraState.gen;
     galeraState.loading = true;
     galeraState.statuses = {};
     galeraState.statusErrors = {};
     galeraState.loadError = '';
-    galeraRender(); // paint host bar + "loading" immediately
+    galeraRender();
+    // Aggregate Galera definitions across every host in this WS cluster (each
+    // cluster lives on the host it was built/adopted on).
+    const hosts = galeraClusterNodes();
+    const targets = hosts.length ? hosts.map(h => h.id) : [''];
     try {
-        const r = await fetch(galeraBase('clusters'));
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        const data = await r.json();
+        const scope = 'clusters?cluster=' + encodeURIComponent(galeraState.cluster);
+        const lists = await Promise.all(targets.map(id =>
+            fetch(galeraNodeBase(id, scope))
+                .then(r => (r.ok ? r.json() : []))
+                .catch(() => [])
+        ));
         if (myGen !== galeraState.gen) return; // superseded
-        galeraState.clusters = data;
+        // Dedup by id across hosts. A cluster's definition normally lives on one
+        // host (owner_node). If a stray copy exists elsewhere, prefer the copy
+        // whose owner_node matches the host it came from — that's the one ops
+        // route to correctly.
+        const byId = {};
+        lists.forEach((list, i) => {
+            const fetchHost = targets[i];
+            (Array.isArray(list) ? list : []).forEach(c => {
+                const auth = !fetchHost || c.owner_node === fetchHost;
+                const ex = byId[c.id];
+                if (!ex || (auth && !ex.auth)) byId[c.id] = { c, auth };
+            });
+        });
+        galeraState.clusters = Object.keys(byId).map(k => byId[k].c);
     } catch (e) {
-        if (myGen !== galeraState.gen) return; // superseded
+        if (myGen !== galeraState.gen) return;
         galeraState.clusters = [];
         galeraState.loadError = (e && e.message) || String(e);
     }
     galeraState.loading = false;
     galeraRender();
-    // Fetch live status for each cluster in parallel, repaint as they land.
+    // Live status per cluster → routed to the host that owns its definition.
     (galeraState.clusters || []).forEach(c => {
-        fetch(galeraBase('clusters/' + encodeURIComponent(c.id) + '/status'))
+        fetch(galeraNodeBase(c.owner_node, 'clusters/' + encodeURIComponent(c.id) + '/status'))
             .then(r => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
             .then(st => { if (myGen === galeraState.gen) { galeraState.statuses[c.id] = st; galeraRender(); } })
             .catch(e => { if (myGen === galeraState.gen) { galeraState.statusErrors[c.id] = (e && e.message) || 'unreachable'; galeraRender(); } });
     });
 }
 
-function galeraHostBarHtml() {
-    const opts = (Array.isArray(allNodes) ? allNodes : []).map(n =>
-        `<option value="${escapeAttr(n.id)}" ${n.id === galeraState.host ? 'selected' : ''}>${escapeHtml(n.hostname || n.id)}${n.is_self ? ' (this host)' : ''}</option>`
-    ).join('');
-    return `
-        <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap;">
-            <label style="font-size:12px; color:var(--text-muted);">Manage on host</label>
-            <select onchange="galeraOnHostChange(this)" style="padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-input); color:var(--text); font-size:13px;">
-                ${opts || `<option value="">this host</option>`}
-            </select>
-            <span style="font-size:11px; color:var(--text-muted);">Containers, recovery and lifecycle run on this host. Status is read over the network.</span>
-        </div>`;
+function galeraContextBarHtml() {
+    const n = galeraClusterNodes().length;
+    return `<div style="display:flex; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap;">
+        <span style="font-size:11px; color:var(--text-muted);">Galera in cluster <b>${escapeHtml(galeraState.cluster)}</b> · ${n} host${n === 1 ? '' : 's'}. Containers can live on any host; lifecycle &amp; recovery route automatically.</span>
+    </div>`;
 }
 
 function galeraNodeStateBadge(ns) {
@@ -63311,9 +63339,9 @@ function galeraClusterCardHtml(c) {
 function galeraRender() {
     const content = document.getElementById('galera-content');
     if (!content) return;
-    let html = galeraHostBarHtml();
+    let html = galeraContextBarHtml();
     if (galeraState.loading) {
-        html += `<div style="color:var(--text-muted);text-align:center;padding:30px;font-size:13px;">Loading clusters on ${escapeHtml(galeraHostName(galeraState.host))}…</div>`;
+        html += `<div style="color:var(--text-muted);text-align:center;padding:30px;font-size:13px;">Loading Galera clusters in ${escapeHtml(galeraState.cluster)}…</div>`;
     } else if (galeraState.loadError) {
         // Don't clear the error here — a racing status repaint would erase it
         // before the operator reads it. It's reset when the next load starts.
@@ -63321,7 +63349,7 @@ function galeraRender() {
     } else if (!galeraState.clusters || galeraState.clusters.length === 0) {
         html += `<div class="card"><div class="card-body" style="text-align:center;padding:40px 20px;color:var(--text-muted);">
             <div style="font-size:36px;margin-bottom:8px;"><span class="ws-icon-clean-wrap" data-icon="database"></span></div>
-            <div style="font-size:14px;">No Galera clusters on ${escapeHtml(galeraHostName(galeraState.host))} yet.</div>
+            <div style="font-size:14px;">No Galera clusters in ${escapeHtml(galeraState.cluster)} yet.</div>
             <div style="font-size:12px;margin-top:4px;">Spin up a fresh one, or adopt containers you already run.</div>
             <div style="margin-top:14px;display:flex;gap:8px;justify-content:center;">
                 <button class="btn btn-primary btn-sm" onclick="galeraCreateOpen()">+ New cluster</button>
@@ -63389,19 +63417,44 @@ function galeraOpenModal(title, innerHtml, widthPx) {
     return modal;
 }
 
+// Self if it's in this cluster, else the first cluster host — the node that
+// will store/serve a newly-adopted cluster's definition.
+function galeraPrimaryHost() {
+    const hosts = galeraClusterNodes();
+    const self = hosts.find(h => h.is_self);
+    return self ? self.id : (hosts[0] ? hosts[0].id : '');
+}
+
 // ── Create (provision) wizard ────────────────────────────────────────
 
+function galeraCreateHostOptions() {
+    return galeraClusterNodes().map(n =>
+        `<option value="${escapeAttr(n.id)}">${escapeHtml(n.hostname || n.id)}${n.is_self ? ' (this host)' : ''}</option>`
+    ).join('') || `<option value="">no hosts in this cluster</option>`;
+}
+
+let _gcNodeRow = 0;
+function galeraCreateAddRow(name) {
+    const w = document.getElementById('gc-rows'); if (!w) return;
+    const idx = _gcNodeRow++;
+    w.insertAdjacentHTML('beforeend', `<div class="gc-node-row" data-idx="${idx}" style="display:flex;gap:8px;margin-bottom:6px;align-items:center;">
+        <input class="form-control gc-cname" value="${escapeAttr(name || '')}" placeholder="container name" style="font-size:12px;">
+        <button class="btn btn-sm" onclick="galeraCreateRemoveRow(${idx})" title="Remove" style="padding:4px 10px;">×</button>
+    </div>`);
+}
+function galeraCreateRemoveRow(idx) {
+    const r = document.querySelector(`.gc-node-row[data-idx="${idx}"]`); if (r) r.remove();
+}
+
 function galeraCreateOpen() {
+    _gcNodeRow = 0;
     const html = `
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px;">
             <label style="grid-column:1/-1;">Cluster name
                 <input id="gc-name" class="form-control" placeholder="my-galera" style="margin-top:4px;">
             </label>
-            <label>Number of nodes
-                <input id="gc-count" type="number" min="1" max="9" value="3" class="form-control" style="margin-top:4px;">
-            </label>
-            <label>Container name prefix
-                <input id="gc-prefix" class="form-control" value="galera" style="margin-top:4px;">
+            <label>Build on host
+                <select id="gc-host" class="form-control" style="margin-top:4px;">${galeraCreateHostOptions()}</select>
             </label>
             <label>Distribution
                 <select id="gc-distro" class="form-control" style="margin-top:4px;" onchange="galeraDistroChanged()">
@@ -63424,15 +63477,25 @@ function galeraCreateOpen() {
                 <input id="gc-pw" type="password" class="form-control" style="margin-top:4px;" autocomplete="new-password">
             </label>
         </div>
+        <div style="margin-top:12px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                <span style="font-size:12px;color:var(--text-muted);">Containers to create — name each node</span>
+                <button class="btn btn-sm" onclick="galeraCreateAddRow()" style="padding:2px 10px;">+ Add node</button>
+            </div>
+            <div id="gc-rows"></div>
+        </div>
         <div style="font-size:11px;color:var(--text-muted);margin-top:10px;line-height:1.5;">
-            Creates the containers on <b>${escapeHtml(galeraHostName(galeraState.host))}</b>, installs MariaDB + Galera, configures wsrep, bootstraps the first node and joins the rest. The root password is stored encrypted and used only for status queries.
+            Creates LXC containers on the chosen host, installs MariaDB + Galera, bootstraps the first and joins the rest. To spread nodes across hosts for hardware HA, build here then migrate — or adopt containers you already run on any host.
         </div>
         <div id="gc-error" role="alert" style="display:none;color:var(--danger);font-size:12px;margin-top:10px;"></div>
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
             <button class="btn btn-sm" onclick="galeraCloseModal()">Cancel</button>
             <button class="btn btn-primary btn-sm" onclick="galeraCreateSubmit()">Build cluster</button>
         </div>`;
-    galeraOpenModal('New Galera cluster', html, 560);
+    galeraOpenModal('New Galera cluster in ' + galeraState.cluster, html, 580);
+    galeraCreateAddRow('galera-1');
+    galeraCreateAddRow('galera-2');
+    galeraCreateAddRow('galera-3');
 }
 
 // Default the release box to a sensible value when the distro changes.
@@ -63445,8 +63508,7 @@ function galeraDistroChanged() {
 
 function galeraCreateSubmit() {
     const name = (document.getElementById('gc-name').value || '').trim();
-    const count = parseInt(document.getElementById('gc-count').value, 10);
-    const prefix = (document.getElementById('gc-prefix').value || 'galera').trim();
+    const host = document.getElementById('gc-host').value;
     const distro = document.getElementById('gc-distro').value;
     const release = (document.getElementById('gc-release').value || '').trim();
     const sst = document.getElementById('gc-sst').value;
@@ -63454,113 +63516,126 @@ function galeraCreateSubmit() {
     const err = document.getElementById('gc-error');
     const fail = m => { if (err) { err.textContent = m; err.style.display = 'block'; } };
     const nameOk = /^[A-Za-z0-9._-]+$/;
+    const names = [];
+    document.querySelectorAll('.gc-cname').forEach(i => { const v = (i.value || '').trim(); if (v) names.push(v); });
     if (!name) return fail('Cluster name is required.');
     if (!nameOk.test(name)) return fail('Cluster name may only contain letters, digits, - _ .');
-    if (!nameOk.test(prefix)) return fail('Container prefix may only contain letters, digits, - _ .');
-    if (!(count >= 1 && count <= 9)) return fail('Number of nodes must be between 1 and 9.');
+    if (!host) return fail('Pick a host to build on.');
+    if (names.length < 1 || names.length > 9) return fail('A cluster needs between 1 and 9 nodes.');
+    for (const n of names) if (!nameOk.test(n)) return fail(`Container name "${n}" may only contain letters, digits, - _ .`);
+    if (new Set(names).size !== names.length) return fail('Container names must be unique.');
     if (!release) return fail('Release is required.');
     if (!pw) return fail('A root password is required.');
     const body = {
-        cluster_name: name, node_count: count, name_prefix: prefix,
-        distribution: distro, release: release, root_password: pw,
-        sst_method: sst, node_id: galeraState.host || '',
+        cluster_name: name, cluster: galeraState.cluster, container_names: names, node_count: names.length,
+        distribution: distro, release: release, root_password: pw, sst_method: sst, node_id: host,
     };
     galeraCloseModal();
-    galeraStreamJob('Building cluster “' + name + '”', galeraBase('provision'), body);
+    galeraStreamJob('Building “' + name + '”', galeraNodeBase(host, 'provision'), body);
 }
 
-// ── Adopt existing ───────────────────────────────────────────────────
+// ── Adopt from a container picker ────────────────────────────────────
 
-let _galeraAdoptRow = 0;
-function galeraAdoptRowHtml(idx) {
-    return `<div class="galera-adopt-row" data-idx="${idx}" style="display:grid;grid-template-columns:1.3fr 1.3fr 0.7fr auto;gap:8px;margin-bottom:8px;align-items:center;">
-        <input class="form-control ga-container" placeholder="container name" style="font-size:12px;">
-        <input class="form-control ga-address" placeholder="address / WolfNet IP" style="font-size:12px;">
-        <input class="form-control ga-port" placeholder="3306" value="3306" style="font-size:12px;">
-        <button class="btn btn-sm" onclick="galeraAdoptRemoveRow(${idx})" title="Remove" style="padding:4px 10px;">×</button>
-    </div>`;
-}
-function galeraAdoptAddRow() {
-    const wrap = document.getElementById('ga-rows');
-    if (!wrap) return;
-    wrap.insertAdjacentHTML('beforeend', galeraAdoptRowHtml(_galeraAdoptRow++));
-}
-function galeraAdoptRemoveRow(idx) {
-    const row = document.querySelector(`.galera-adopt-row[data-idx="${idx}"]`);
-    if (row) row.remove();
-}
+let _galeraAdoptInv = [];
 function galeraAdoptOpen() {
-    _galeraAdoptRow = 0;
+    _galeraAdoptInv = [];
     const html = `
         <div style="font-size:13px;display:grid;gap:10px;">
-            <label>Cluster name (existing wsrep_cluster_name)
+            <label>Cluster name (wsrep_cluster_name)
                 <input id="ga-name" class="form-control" placeholder="my-galera" style="margin-top:4px;">
             </label>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-                <label>DB user
-                    <input id="ga-user" class="form-control" value="root" style="margin-top:4px;">
-                </label>
-                <label>DB password
-                    <input id="ga-pw" type="password" class="form-control" style="margin-top:4px;" autocomplete="new-password">
-                </label>
+                <label>DB user <input id="ga-user" class="form-control" value="root" style="margin-top:4px;"></label>
+                <label>DB password <input id="ga-pw" type="password" class="form-control" style="margin-top:4px;" autocomplete="new-password"></label>
             </div>
             <div>
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-                    <span style="font-size:12px;color:var(--text-muted);">Nodes (LXC container + address)</span>
-                    <button class="btn btn-sm" onclick="galeraAdoptAddRow()" style="padding:2px 10px;">+ Add node</button>
+                    <span style="font-size:12px;color:var(--text-muted);">Pick the MariaDB containers to adopt</span>
+                    <button class="btn btn-sm" onclick="galeraAdoptLoadInventory()" style="padding:2px 10px;">↻ Refresh</button>
                 </div>
-                <div id="ga-rows"></div>
+                <div id="ga-picker" style="max-height:38vh;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:8px;">
+                    <div style="color:var(--text-muted);font-size:12px;padding:10px;">Loading containers…</div>
+                </div>
             </div>
         </div>
         <div style="font-size:11px;color:var(--text-muted);margin-top:10px;line-height:1.5;">
-            Adopt containers that already run MariaDB + Galera on <b>${escapeHtml(galeraHostName(galeraState.host))}</b>. WolfStack will monitor wsrep status and, for containers on this host, drive lifecycle + recovery. The password is stored encrypted and used only for status queries.
+            WolfStack resolves each container's address on its host — no typing IPs. Docker nodes get status + start/stop/restart; automated recovery is LXC-only.
         </div>
         <div id="ga-error" role="alert" style="display:none;color:var(--danger);font-size:12px;margin-top:10px;"></div>
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
             <button class="btn btn-sm" onclick="galeraCloseModal()">Cancel</button>
-            <button class="btn btn-primary btn-sm" onclick="galeraAdoptSubmit()">Adopt cluster</button>
+            <button class="btn btn-primary btn-sm" onclick="galeraAdoptSubmit()">Adopt selected</button>
         </div>`;
-    galeraOpenModal('Adopt an existing Galera cluster', html, 620);
-    galeraAdoptAddRow();
-    galeraAdoptAddRow();
-    galeraAdoptAddRow();
+    galeraOpenModal('Adopt into a Galera cluster — ' + galeraState.cluster, html, 640);
+    galeraAdoptLoadInventory();
 }
+
+async function galeraAdoptLoadInventory() {
+    const picker = document.getElementById('ga-picker');
+    if (picker) picker.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:10px;">Loading containers…</div>`;
+    const hosts = galeraClusterNodes();
+    try {
+        const results = await Promise.all(hosts.map(h =>
+            fetch('/api/control-panel/inventory/node/' + encodeURIComponent(h.id))
+                .then(r => (r.ok ? r.json() : { items: [] }))
+                .catch(() => ({ items: [] }))
+        ));
+        const inv = [];
+        results.forEach(d => (d.items || []).forEach(it => {
+            if (it.kind === 'lxc' || it.kind === 'docker') inv.push(it);
+        }));
+        _galeraAdoptInv = inv;
+        galeraAdoptRenderPicker();
+    } catch (e) {
+        if (picker) picker.innerHTML = `<div role="alert" style="color:var(--danger);font-size:12px;padding:10px;">Couldn't load containers: ${escapeHtml((e && e.message) || String(e))}</div>`;
+    }
+}
+
+function galeraAdoptRenderPicker() {
+    const picker = document.getElementById('ga-picker');
+    if (!picker) return;
+    if (!_galeraAdoptInv.length) {
+        picker.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:10px;">No LXC or Docker containers found in this cluster.</div>`;
+        return;
+    }
+    const byHost = {};
+    _galeraAdoptInv.forEach((it, i) => { (byHost[it.node_id] = byHost[it.node_id] || []).push({ it, i }); });
+    let html = '';
+    Object.keys(byHost).forEach(hostId => {
+        html += `<div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;margin:6px 0 4px;">${escapeHtml(galeraHostName(hostId))}</div>`;
+        byHost[hostId].forEach(({ it, i }) => {
+            const kindColor = it.kind === 'docker' ? '#3b82f6' : '#22c55e';
+            const running = (it.status || '').toLowerCase() === 'running';
+            html += `<label style="display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:6px;cursor:pointer;font-size:12px;" onmouseover="this.style.background='var(--bg-card-hover,#2a2d3a)'" onmouseout="this.style.background='transparent'">
+                <input type="checkbox" class="ga-pick" data-idx="${i}">
+                <span style="font-family:var(--font-mono,monospace);">${escapeHtml(it.name)}</span>
+                <span style="padding:0 6px;border-radius:3px;font-size:10px;font-weight:600;background:${kindColor}22;color:${kindColor};">${escapeHtml(it.kind)}</span>
+                <span style="margin-left:auto;font-size:10px;color:${running ? '#22c55e' : 'var(--text-muted)'};">${escapeHtml(it.status || '')}</span>
+            </label>`;
+        });
+    });
+    picker.innerHTML = html;
+}
+
 async function galeraAdoptSubmit() {
     const err = document.getElementById('ga-error');
     const fail = m => { if (err) { err.textContent = m; err.style.display = 'block'; } };
     const name = (document.getElementById('ga-name').value || '').trim();
     const user = (document.getElementById('ga-user').value || 'root').trim();
     const pw = document.getElementById('ga-pw').value || '';
-    // Same character set the backend enforces (safe_token / valid_address) —
-    // reject early with a clear message rather than a 400.
     const nameOk = /^[A-Za-z0-9._-]+$/;
-    const addrOk = /^[A-Za-z0-9.:_-]+$/;
     if (!name) return fail('Cluster name is required.');
     if (!nameOk.test(name)) return fail('Cluster name may only contain letters, digits, - _ .');
     const nodes = [];
-    document.querySelectorAll('.galera-adopt-row').forEach(row => {
-        const container = (row.querySelector('.ga-container').value || '').trim();
-        const address = (row.querySelector('.ga-address').value || '').trim();
-        const port = parseInt(row.querySelector('.ga-port').value, 10) || 3306;
-        if (container || address) {
-            nodes.push({ node_id: galeraState.host || '', container, address, port, node_name: container });
-        }
+    document.querySelectorAll('.ga-pick:checked').forEach(cb => {
+        const it = _galeraAdoptInv[parseInt(cb.getAttribute('data-idx'), 10)];
+        if (it) nodes.push({ node_id: it.node_id, container: it.name, kind: it.kind });
     });
-    if (nodes.length === 0) return fail('Add at least one node.');
-    for (const n of nodes) {
-        if (!n.container) return fail('Every node needs a container name.');
-        if (!nameOk.test(n.container)) return fail(`Container name "${n.container}" may only contain letters, digits, - _ .`);
-        if (!n.address) return fail('Every node needs an address.');
-        if (!addrOk.test(n.address)) return fail(`Address "${n.address}" looks invalid (use an IP or hostname).`);
-    }
-    const payload = {
-        name, nodes, sst_method: 'mariabackup', db_user: user,
-        provisioned: false, db_password: pw,
-    };
+    if (!nodes.length) return fail('Tick at least one container.');
+    const payload = { cluster_name: name, cluster: galeraState.cluster, db_user: user, db_password: pw, sst_method: 'mariabackup', nodes };
     try {
-        const r = await fetch(galeraBase('clusters'), {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
+        const r = await fetch(galeraNodeBase(galeraPrimaryHost(), 'adopt'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
@@ -63575,13 +63650,19 @@ async function galeraAdoptSubmit() {
 
 // ── Lifecycle + recovery ─────────────────────────────────────────────
 
+// Route a cluster's ops to the host whose galera.json owns its definition.
+function galeraOwnerBase(clusterId, path) {
+    const c = (galeraState.clusters || []).find(x => x.id === clusterId);
+    return galeraNodeBase(c ? c.owner_node : '', path);
+}
+
 async function galeraNodeAction(clusterId, container, action) {
     if (action === 'stop' || action === 'restart') {
         const ok = await showConfirm(`${action === 'stop' ? 'Stop' : 'Restart'} MariaDB on “${container}”?\n\nStopping a node removes it from the cluster until it rejoins.`, `${action[0].toUpperCase() + action.slice(1)} node`);
         if (!ok) return;
     }
     try {
-        const r = await fetch(galeraBase('clusters/' + encodeURIComponent(clusterId) + '/nodes/' + encodeURIComponent(container) + '/' + encodeURIComponent(action)), { method: 'POST' });
+        const r = await fetch(galeraOwnerBase(clusterId, 'clusters/' + encodeURIComponent(clusterId) + '/nodes/' + encodeURIComponent(container) + '/' + encodeURIComponent(action)), { method: 'POST' });
         const d = await r.json().catch(() => ({}));
         if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
         showToast(`${container}: ${action} ok`, 'success');
@@ -63598,7 +63679,7 @@ async function galeraRecover(clusterId) {
         `Recover cluster “${name}”?\n\nThis STOPS MariaDB on every node, reads each node's last-committed position, then bootstraps the most up-to-date one and rejoins the rest. There will be a brief outage. WolfStack refuses to act if no node reports a known position.`,
         'Recover cluster');
     if (!ok) return;
-    galeraStreamJob('Recovering “' + name + '”', galeraBase('clusters/' + encodeURIComponent(clusterId) + '/recover'), {});
+    galeraStreamJob('Recovering “' + name + '”', galeraOwnerBase(clusterId, 'clusters/' + encodeURIComponent(clusterId) + '/recover'), {});
 }
 
 async function galeraDelete(clusterId) {
@@ -63607,7 +63688,7 @@ async function galeraDelete(clusterId) {
     const ok = await showConfirm(`Forget cluster “${name}”?\n\nThis only removes it from WolfStack — the containers and their data are left untouched.`, 'Forget cluster');
     if (!ok) return;
     try {
-        const r = await fetch(galeraBase('clusters/' + encodeURIComponent(clusterId)), { method: 'DELETE' });
+        const r = await fetch(galeraOwnerBase(clusterId, 'clusters/' + encodeURIComponent(clusterId)), { method: 'DELETE' });
         const d = await r.json().catch(() => ({}));
         if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
         showToast('Cluster forgotten', 'success');
@@ -63684,15 +63765,16 @@ async function galeraStreamJob(title, url, body) {
     galeraLoadClusters();
 }
 
+window.showGaleraForCluster = showGaleraForCluster;
 window.galeraInit = galeraInit;
 window.galeraLoadClusters = galeraLoadClusters;
-window.galeraOnHostChange = galeraOnHostChange;
 window.galeraCreateOpen = galeraCreateOpen;
+window.galeraCreateAddRow = galeraCreateAddRow;
+window.galeraCreateRemoveRow = galeraCreateRemoveRow;
 window.galeraDistroChanged = galeraDistroChanged;
 window.galeraCreateSubmit = galeraCreateSubmit;
 window.galeraAdoptOpen = galeraAdoptOpen;
-window.galeraAdoptAddRow = galeraAdoptAddRow;
-window.galeraAdoptRemoveRow = galeraAdoptRemoveRow;
+window.galeraAdoptLoadInventory = galeraAdoptLoadInventory;
 window.galeraAdoptSubmit = galeraAdoptSubmit;
 window.galeraNodeAction = galeraNodeAction;
 window.galeraRecover = galeraRecover;

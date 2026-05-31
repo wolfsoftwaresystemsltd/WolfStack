@@ -14726,12 +14726,21 @@ pub struct GaleraSaveRequest {
     pub db_password: String,
 }
 
-/// GET /api/galera/clusters — list managed clusters (password stripped).
-pub async fn galera_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+/// GET /api/galera/clusters[?cluster=NAME] — list managed clusters (password
+/// stripped). When `cluster` is given, only that WolfStack cluster's Galera
+/// clusters are returned (cluster-scoped UI).
+pub async fn galera_list(req: HttpRequest, state: web::Data<AppState>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
+    let scope = query.get("cluster").cloned().unwrap_or_default();
     let mut cfg = crate::galera::load_config();
-    for c in cfg.clusters.iter_mut() { c.db_password_enc = String::new(); }
-    HttpResponse::Ok().json(cfg.clusters)
+    // Match the requested scope; also surface legacy clusters (written before
+    // cluster-scoping, `cluster` empty) in every scoped view so an upgrade
+    // doesn't silently hide them — the operator can re-home or forget them.
+    let mut clusters: Vec<_> = cfg.clusters.drain(..)
+        .filter(|c| scope.is_empty() || c.cluster == scope || c.cluster.is_empty())
+        .collect();
+    for c in clusters.iter_mut() { c.db_password_enc = String::new(); }
+    HttpResponse::Ok().json(clusters)
 }
 
 /// POST /api/galera/clusters — create or adopt a cluster (upsert by id).
@@ -14749,6 +14758,49 @@ pub async fn galera_save(req: HttpRequest, state: web::Data<AppState>, body: web
         Ok(mut saved) => { saved.db_password_enc = String::new(); HttpResponse::Ok().json(serde_json::json!({ "ok": true, "cluster": saved })) }
         // Most upsert failures are validation (bad name/address) — a client error.
         Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// One container picked in the adopt UI.
+#[derive(serde::Deserialize)]
+pub struct GaleraAdoptNodeReq {
+    #[serde(default)] pub node_id: String,
+    pub container: String,
+    #[serde(default)] pub kind: String,
+}
+
+/// Body for POST /api/galera/adopt.
+#[derive(serde::Deserialize)]
+pub struct GaleraAdoptReq {
+    pub cluster_name: String,
+    #[serde(default)] pub cluster: String,
+    #[serde(default)] pub db_user: String,
+    #[serde(default)] pub db_password: String,
+    #[serde(default)] pub sst_method: String,
+    #[serde(default)] pub nodes: Vec<GaleraAdoptNodeReq>,
+}
+
+/// POST /api/galera/adopt — adopt picked containers (LXC/Docker) into a new
+/// managed cluster. WolfStack resolves each container's address on its host, so
+/// the operator never types IPs.
+pub async fn galera_adopt(req: HttpRequest, state: web::Data<AppState>, body: web::Json<GaleraAdoptReq>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let b = body.into_inner();
+    if b.cluster_name.trim().is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "cluster name required" }));
+    }
+    if b.nodes.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "select at least one container" }));
+    }
+    let ctx = galera_op_ctx(&state);
+    let picks: Vec<crate::galera::AdoptPick> = b.nodes.into_iter()
+        .map(|n| crate::galera::AdoptPick { node_id: n.node_id, container: n.container, kind: n.kind })
+        .collect();
+    let (name, cluster, sst, user, pass) = (b.cluster_name, b.cluster, b.sst_method, b.db_user, b.db_password);
+    match web::block(move || crate::galera::adopt_cluster(&cluster, &name, &sst, &user, &pass, &picks, &ctx)).await {
+        Ok(Ok(mut saved)) => { saved.db_password_enc = String::new(); HttpResponse::Ok().json(serde_json::json!({ "ok": true, "cluster": saved })) }
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
     }
 }
 
@@ -14867,18 +14919,21 @@ pub async fn galera_node_action(req: HttpRequest, state: web::Data<AppState>, pa
     }
 }
 
-/// POST /api/galera/local/{op}/{container} — run ONE galera node op on a
-/// container that lives on THIS host. The cluster-owning node calls this on
-/// peer hosts (over the inter-node channel) to manage nodes that sit elsewhere.
-/// Accepts a session OR the inter-node cluster secret (both via require_auth).
-pub async fn galera_local_node_op(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>) -> HttpResponse {
+/// POST /api/galera/local/{kind}/{op}/{container} — run ONE galera node op on a
+/// container (LXC or Docker) that lives on THIS host. The cluster-owning node
+/// calls this on peer hosts (over the inter-node channel) to manage nodes that
+/// sit elsewhere. Accepts a session OR the inter-node cluster secret.
+pub async fn galera_local_node_op(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String, String)>) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    let (op_s, container) = path.into_inner();
+    let (kind, op_s, container) = path.into_inner();
+    if !matches!(kind.as_str(), "lxc" | "docker") {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": format!("unknown container kind '{}'", kind) }));
+    }
     let op = match crate::galera::NodeOp::from_str(&op_s) {
         Some(o) => o,
         None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": format!("unknown galera node op '{}'", op_s) })),
     };
-    match web::block(move || crate::galera::local_node_op(&container, op)).await {
+    match web::block(move || crate::galera::local_node_op(&kind, &container, op)).await {
         Ok(Ok(output)) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": output })),
         Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
@@ -32613,12 +32668,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups/restore-from-path/stream", web::post().to(backup_restore_from_path_stream))
         .route("/api/galera/clusters", web::get().to(galera_list))
         .route("/api/galera/clusters", web::post().to(galera_save))
+        .route("/api/galera/adopt", web::post().to(galera_adopt))
         .route("/api/galera/clusters/{id}", web::delete().to(galera_delete))
         .route("/api/galera/clusters/{id}/status", web::get().to(galera_status))
         .route("/api/galera/provision", web::post().to(galera_provision_stream))
         .route("/api/galera/clusters/{id}/recover", web::post().to(galera_recover_stream))
         .route("/api/galera/clusters/{id}/nodes/{container}/{action}", web::post().to(galera_node_action))
-        .route("/api/galera/local/{op}/{container}", web::post().to(galera_local_node_op))
+        .route("/api/galera/local/{kind}/{op}/{container}", web::post().to(galera_local_node_op))
         // PBS (Proxmox Backup Server) — must be before {id} routes
         .route("/api/backups/pbs/status", web::get().to(pbs_status))
         .route("/api/backups/pbs/snapshots", web::get().to(pbs_snapshots))

@@ -32,15 +32,20 @@ static GALERA_IO_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn default_mysql_port() -> u16 { 3306 }
 fn default_sst() -> String { "mariabackup".into() }
 fn default_db_user() -> String { "root".into() }
+fn default_kind() -> String { "lxc".into() }
 
-/// One MariaDB/Galera node — an LXC container on a WolfStack host.
+/// One MariaDB/Galera node — a container on a WolfStack host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GaleraNode {
     /// WolfStack host node id that runs this container.
     #[serde(default)]
     pub node_id: String,
-    /// LXC container name on that host.
+    /// Container name on that host.
     pub container: String,
+    /// Container runtime: "lxc" (default) or "docker" — decides how lifecycle
+    /// ops exec into it (lxc-attach/pct vs docker exec).
+    #[serde(default = "default_kind")]
+    pub kind: String,
     /// Address other nodes reach it on (WolfNet IP recommended) — used for
     /// gcomm:// peering and for status queries.
     pub address: String,
@@ -57,6 +62,15 @@ pub struct GaleraCluster {
     pub id: String,
     /// wsrep_cluster_name.
     pub name: String,
+    /// WolfStack cluster this Galera cluster belongs to (scopes the UI). Empty
+    /// on configs written before cluster-scoping; treated as unscoped.
+    #[serde(default)]
+    pub cluster: String,
+    /// WolfStack host node id whose galera.json stores this cluster's definition
+    /// (the node it was built/adopted on). The UI aggregates configs across the
+    /// WS cluster's nodes and routes each cluster's ops back to its owner.
+    #[serde(default)]
+    pub owner_node: String,
     #[serde(default)]
     pub nodes: Vec<GaleraNode>,
     /// SST method: "mariabackup" (recommended) or "rsync".
@@ -133,6 +147,11 @@ pub fn upsert_cluster(mut cluster: GaleraCluster, plain_password: Option<&str>) 
         if n.node_name.trim().is_empty() {
             n.node_name = n.container.clone();
         }
+    }
+    // The config lives wherever it's saved — record that host so the UI can
+    // aggregate across the cluster and route this cluster's ops back here.
+    if cluster.owner_node.is_empty() {
+        cluster.owner_node = crate::agent::self_node_id();
     }
 
     // Hold the IO lock across the read-modify-write so a concurrent writer
@@ -350,12 +369,24 @@ fn valid_address(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_'))
 }
 
-/// Run a command inside an LXC container; stdout on success, stderr on failure.
-fn lxc_exec(container: &str, cmd: &str) -> Result<String, String> {
-    let out = std::process::Command::new("lxc-attach")
-        .args(["-n", container, "--", "sh", "-c", cmd])
-        .output()
-        .map_err(|e| format!("lxc-attach {}: {}", container, e))?;
+/// Run a command inside a container by runtime; stdout on success, stderr on
+/// failure. "docker" → `docker exec`; "lxc" → `pct exec` on Proxmox else
+/// `lxc-attach`. So an adopted Docker MariaDB is managed the same as an LXC one.
+fn cexec(kind: &str, container: &str, cmd: &str) -> Result<String, String> {
+    let mut c = if kind == "docker" {
+        let mut c = std::process::Command::new("docker");
+        c.arg("exec").arg(container).arg("sh").arg("-c").arg(cmd);
+        c
+    } else if std::process::Command::new("which").arg("pct").output().map(|o| o.status.success()).unwrap_or(false) {
+        let mut c = std::process::Command::new("pct");
+        c.arg("exec").arg(container).arg("--").arg("sh").arg("-c").arg(cmd);
+        c
+    } else {
+        let mut c = std::process::Command::new("lxc-attach");
+        c.arg("-n").arg(container).arg("--").arg("sh").arg("-c").arg(cmd);
+        c
+    };
+    let out = c.output().map_err(|e| format!("{} exec {}: {}", kind, container, e))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
@@ -363,12 +394,24 @@ fn lxc_exec(container: &str, cmd: &str) -> Result<String, String> {
     }
 }
 
+/// LXC-only exec wrapper for the provisioner (which only ever builds LXC nodes).
+fn lxc_exec(container: &str, cmd: &str) -> Result<String, String> {
+    cexec("lxc", container, cmd)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProvisionRequest {
     pub cluster_name: String,
+    /// WolfStack cluster this Galera cluster belongs to (scopes the UI).
+    #[serde(default)]
+    pub cluster: String,
     pub node_count: usize,
     #[serde(default = "default_prefix")]
     pub name_prefix: String,
+    /// Explicit per-node container names. When non-empty, these are used (and
+    /// drive node_count); otherwise `{name_prefix}-{i}` is generated.
+    #[serde(default)]
+    pub container_names: Vec<String>,
     #[serde(default = "default_distro")]
     pub distribution: String,
     #[serde(default = "default_release")]
@@ -453,13 +496,30 @@ fn galera_cnf(provider: &str, cluster_name: &str, gcomm: &str, node_addr: &str, 
     )
 }
 
-/// systemctl-or-fallback service control inside a container (handles distros
-/// where the unit is `mariadb` vs `mysqld`, and Alpine's OpenRC).
-fn svc(container: &str, action: &str) -> Result<String, String> {
-    lxc_exec(container, &format!(
-        "systemctl {a} mariadb 2>/dev/null || systemctl {a} mysqld 2>/dev/null || rc-service mariadb {a} 2>/dev/null || true",
-        a = action
-    ))
+/// Container-level lifecycle for a Docker node (`docker start|stop|restart`).
+/// A MariaDB Docker container's PID 1 *is* mysqld, so the DB is controlled by
+/// controlling the container — not by systemctl inside it.
+fn docker_lifecycle(action: &str, container: &str) -> Result<String, String> {
+    let out = std::process::Command::new("docker").arg(action).arg(container).output()
+        .map_err(|e| format!("docker {} {}: {}", action, container, e))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(format!("[{}] docker {} failed: {}", container, action, String::from_utf8_lossy(&out.stderr).trim()))
+    }
+}
+
+/// Start/stop/restart MariaDB in a node by runtime. Docker → container-level;
+/// LXC → systemctl-or-fallback inside (handles mariadb vs mysqld, Alpine OpenRC).
+fn svc(kind: &str, container: &str, action: &str) -> Result<String, String> {
+    if kind == "docker" {
+        docker_lifecycle(action, container)
+    } else {
+        cexec(kind, container, &format!(
+            "systemctl {a} mariadb 2>/dev/null || systemctl {a} mysqld 2>/dev/null || rc-service mariadb {a} 2>/dev/null || true",
+            a = action
+        ))
+    }
 }
 
 /// Best-effort wait for a freshly-started container's init + network to settle
@@ -493,13 +553,20 @@ fn run_install(container: &str, install: &str) -> Result<String, String> {
 /// with MariaDB+Galera installed and configured, bootstrapped in order.
 /// Returns the persisted cluster on success.
 pub fn provision_cluster(p: &ProvisionRequest, log: &Sender<String>) -> Result<GaleraCluster, String> {
-    if p.node_count == 0 || p.node_count > 9 {
-        return Err("node_count must be between 1 and 9".into());
+    // Explicit names (from the create wizard) win and set the count; otherwise
+    // generate `{prefix}-{i}`.
+    let names: Vec<String> = if !p.container_names.is_empty() {
+        p.container_names.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    } else {
+        safe_token(&p.name_prefix)?;
+        (1..=p.node_count).map(|i| format!("{}-{}", p.name_prefix, i)).collect()
+    };
+    if names.is_empty() || names.len() > 9 {
+        return Err("a cluster needs between 1 and 9 nodes".into());
     }
     if p.root_password.is_empty() {
         return Err("a root password is required".into());
     }
-    safe_token(&p.name_prefix)?;
     safe_token(&p.cluster_name)?;
     let _ = install_cmd(&p.distribution)?; // validate distro up front
 
@@ -509,17 +576,16 @@ pub fn provision_cluster(p: &ProvisionRequest, log: &Sender<String>) -> Result<G
 
     // 1. Create + start each container, give it a cluster-reachable WolfNet IP.
     let mut nodes: Vec<GaleraNode> = Vec::new();
-    for i in 1..=p.node_count {
-        let cname = format!("{}-{}", p.name_prefix, i);
-        safe_token(&cname)?;
+    for cname in &names {
+        safe_token(cname)?;
         logln(log, format!("[{}] creating container…", cname));
-        crate::containers::lxc_create(&cname, &p.distribution, &p.release, "amd64", None, None)?;
-        crate::containers::lxc_start(&cname)?;
+        crate::containers::lxc_create(cname, &p.distribution, &p.release, "amd64", None, None)?;
+        crate::containers::lxc_start(cname)?;
         let ip = crate::containers::next_available_wolfnet_ip()
             .ok_or("no free WolfNet IP available for the new node")?;
         logln(log, format!("[{}] attaching WolfNet IP {}…", cname, ip));
-        let _ = crate::containers::lxc_attach_wolfnet(&cname, &ip);
-        nodes.push(GaleraNode { node_id: p.node_id.clone(), container: cname.clone(), address: ip, port: 3306, node_name: cname });
+        let _ = crate::containers::lxc_attach_wolfnet(cname, &ip);
+        nodes.push(GaleraNode { node_id: p.node_id.clone(), container: cname.clone(), kind: "lxc".into(), address: ip, port: 3306, node_name: cname.clone() });
     }
 
     // 2. Install MariaDB + Galera on each node (after its init settles).
@@ -529,7 +595,7 @@ pub fn provision_cluster(p: &ProvisionRequest, log: &Sender<String>) -> Result<G
         wait_container_ready(&n.container);
         logln(log, format!("[{}] installing MariaDB + Galera…", n.container));
         run_install(&n.container, install)?;
-        let _ = svc(&n.container, "stop"); // configure offline; bootstrap explicitly below
+        let _ = svc("lxc", &n.container, "stop"); // configure offline; bootstrap explicitly below
     }
 
     // 3. Write the Galera config on each node (full gcomm member list). The
@@ -573,13 +639,15 @@ pub fn provision_cluster(p: &ProvisionRequest, log: &Sender<String>) -> Result<G
     // 6. Join the remaining nodes in order.
     for n in nodes.iter().skip(1) {
         logln(log, format!("[{}] joining cluster (SST)…", n.container));
-        svc(&n.container, "start")?;
+        svc("lxc", &n.container, "start")?;
     }
 
     logln(log, "Verifying cluster size…");
     let saved = upsert_cluster(GaleraCluster {
         id: cluster_id,
         name: p.cluster_name.clone(),
+        cluster: p.cluster.clone(),
+        owner_node: String::new(), // filled by upsert_cluster = this (build) node
         nodes,
         sst_method: p.sst_method.clone(),
         db_user: "root".into(),
@@ -602,23 +670,24 @@ pub fn provision_cluster(p: &ProvisionRequest, log: &Sender<String>) -> Result<G
 // stored host. This requires the container's host to be in the same WolfStack
 // cluster — otherwise there's nothing to route through.
 
-/// One atomic node operation, dispatched locally or to a peer host.
+/// One atomic node operation, dispatched locally or to a peer host. `Address`
+/// resolves a container's reachable IP (used when adopting from the picker).
 #[derive(Clone, Copy, PartialEq)]
-pub enum NodeOp { Start, Stop, Restart, Bootstrap, Seqno, IsDown, Exists }
+pub enum NodeOp { Start, Stop, Restart, Bootstrap, Seqno, IsDown, Exists, Address }
 
 impl NodeOp {
     fn as_str(self) -> &'static str {
         match self {
             NodeOp::Start => "start", NodeOp::Stop => "stop", NodeOp::Restart => "restart",
             NodeOp::Bootstrap => "bootstrap", NodeOp::Seqno => "seqno",
-            NodeOp::IsDown => "isdown", NodeOp::Exists => "exists",
+            NodeOp::IsDown => "isdown", NodeOp::Exists => "exists", NodeOp::Address => "address",
         }
     }
     pub fn from_str(s: &str) -> Option<NodeOp> {
         Some(match s {
             "start" => NodeOp::Start, "stop" => NodeOp::Stop, "restart" => NodeOp::Restart,
             "bootstrap" => NodeOp::Bootstrap, "seqno" => NodeOp::Seqno,
-            "isdown" => NodeOp::IsDown, "exists" => NodeOp::Exists,
+            "isdown" => NodeOp::IsDown, "exists" => NodeOp::Exists, "address" => NodeOp::Address,
             _ => return None,
         })
     }
@@ -626,7 +695,7 @@ impl NodeOp {
     /// blocking slot if a peer hangs; service/bootstrap ops legitimately take time.
     fn timeout_secs(self) -> u64 {
         match self {
-            NodeOp::Seqno | NodeOp::IsDown | NodeOp::Exists => 20,
+            NodeOp::Seqno | NodeOp::IsDown | NodeOp::Exists | NodeOp::Address => 20,
             NodeOp::Start | NodeOp::Stop | NodeOp::Restart | NodeOp::Bootstrap => 180,
         }
     }
@@ -643,22 +712,56 @@ pub struct GaleraOpCtx {
 
 /// Read the last-committed seqno from a node's grastate.dat. Returns -1 when
 /// unknown (file missing, or the node crashed mid-transaction = `-1`).
-fn node_seqno(container: &str) -> i64 {
-    lxc_exec(container, "awk -F': *' '/^seqno:/{print $2}' /var/lib/mysql/grastate.dat 2>/dev/null")
+fn node_seqno(kind: &str, container: &str) -> i64 {
+    cexec(kind, container, "awk -F': *' '/^seqno:/{print $2}' /var/lib/mysql/grastate.dat 2>/dev/null")
         .ok()
         .and_then(|s| s.trim().parse::<i64>().ok())
         .unwrap_or(-1)
 }
 
-/// Is this LXC container present on THIS host?
-fn container_exists_local(container: &str) -> bool {
-    crate::containers::lxc_list_all_cached().iter().any(|c| c.name == container)
+/// Is this container present on THIS host? Docker → `docker ps -a`; LXC → list.
+fn container_exists_local(kind: &str, container: &str) -> bool {
+    if kind == "docker" {
+        std::process::Command::new("docker")
+            .args(["ps", "-a", "--format", "{{.Names}}"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.trim() == container))
+            .unwrap_or(false)
+    } else {
+        crate::containers::lxc_list_all_cached().iter().any(|c| c.name == container)
+    }
+}
+
+/// Resolve a (local) container's reachable address for Galera peering + status
+/// queries. LXC → its WolfNet IP (cluster-routable) falling back to its primary
+/// IP; Docker → its network IP via `docker inspect`. Empty if not resolvable.
+fn node_address_local(kind: &str, container: &str) -> String {
+    if kind == "docker" {
+        std::process::Command::new("docker")
+            .args(["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", container])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().next().unwrap_or("").to_string())
+            .unwrap_or_default()
+    } else {
+        crate::containers::lxc_list_all_cached().iter()
+            .find(|c| c.name == container)
+            .map(|c| c.ip_address.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// Is MariaDB stopped in this (local) container? Unreadable ⇒ false (can't
 /// confirm ⇒ treat as not-down, so recovery refuses rather than risks data).
-fn node_is_down_local(container: &str) -> bool {
-    lxc_exec(container, "if pgrep -x mariadbd >/dev/null 2>&1 || pgrep -x mysqld >/dev/null 2>&1; then echo UP; else echo DOWN; fi")
+fn node_is_down_local(kind: &str, container: &str) -> bool {
+    if kind == "docker" {
+        // A stopped container can't be exec'd — ask the daemon if it's running.
+        return std::process::Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Running}}", container])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "false")
+            .unwrap_or(false);
+    }
+    cexec(kind, container, "if pgrep -x mariadbd >/dev/null 2>&1 || pgrep -x mysqld >/dev/null 2>&1; then echo UP; else echo DOWN; fi")
         .map(|s| s.trim() == "DOWN")
         .unwrap_or(false)
 }
@@ -666,41 +769,50 @@ fn node_is_down_local(container: &str) -> bool {
 /// Bootstrap a NEW primary component on this (local) container. We force
 /// safe_to_bootstrap:1 deliberately — the caller has already proven (every node
 /// down + this one holding the highest committed seqno) what that flag certifies.
-fn bootstrap_local(container: &str) -> Result<String, String> {
-    lxc_exec(container, "sed -i 's/^safe_to_bootstrap:.*/safe_to_bootstrap: 1/' /var/lib/mysql/grastate.dat 2>/dev/null || true")?;
-    lxc_exec(container, "galera_new_cluster 2>/dev/null || (systemctl set-environment _WSREP_NEW_CLUSTER='--wsrep-new-cluster' >/dev/null 2>&1; systemctl start mariadb)")?;
+/// (Docker isn't reached here — recovery refuses Docker clusters upstream.)
+fn bootstrap_local(kind: &str, container: &str) -> Result<String, String> {
+    if kind == "docker" {
+        // A stopped Docker MariaDB can't be exec'd (its PID 1 is mysqld), so we
+        // can't sed grastate first — a restart re-reads safe_to_bootstrap from
+        // the volume. (Recovery refuses Docker upstream; this is best-effort.)
+        docker_lifecycle("restart", container)?;
+    } else {
+        cexec(kind, container, "sed -i 's/^safe_to_bootstrap:.*/safe_to_bootstrap: 1/' /var/lib/mysql/grastate.dat 2>/dev/null || true")?;
+        cexec(kind, container, "galera_new_cluster 2>/dev/null || (systemctl set-environment _WSREP_NEW_CLUSTER='--wsrep-new-cluster' >/dev/null 2>&1; systemctl start mariadb)")?;
+    }
     Ok("bootstrapped".into())
 }
 
 /// Run ONE node op against a container that lives on THIS host. The single
 /// entry point the local-op HTTP primitive calls. `Exists` is the probe used to
 /// locate a container's host; every other op first requires the container here.
-pub fn local_node_op(container: &str, op: NodeOp) -> Result<String, String> {
+pub fn local_node_op(kind: &str, container: &str, op: NodeOp) -> Result<String, String> {
     safe_token(container)?;
     if op == NodeOp::Exists {
-        return Ok(if container_exists_local(container) { "yes".into() } else { "no".into() });
+        return Ok(if container_exists_local(kind, container) { "yes".into() } else { "no".into() });
     }
-    if !container_exists_local(container) {
+    if !container_exists_local(kind, container) {
         return Err(format!("container '{}' is not on this host", container));
     }
     match op {
-        NodeOp::Start => svc(container, "start"),
-        NodeOp::Stop => svc(container, "stop"),
-        NodeOp::Restart => svc(container, "restart"),
-        NodeOp::Seqno => Ok(node_seqno(container).to_string()),
-        NodeOp::IsDown => Ok(if node_is_down_local(container) { "down".into() } else { "up".into() }),
-        NodeOp::Bootstrap => bootstrap_local(container),
+        NodeOp::Start => svc(kind, container, "start"),
+        NodeOp::Stop => svc(kind, container, "stop"),
+        NodeOp::Restart => svc(kind, container, "restart"),
+        NodeOp::Seqno => Ok(node_seqno(kind, container).to_string()),
+        NodeOp::IsDown => Ok(if node_is_down_local(kind, container) { "down".into() } else { "up".into() }),
+        NodeOp::Bootstrap => bootstrap_local(kind, container),
+        NodeOp::Address => Ok(node_address_local(kind, container)),
         NodeOp::Exists => unreachable!(),
     }
 }
 
-/// Run a node op on a peer host via its `/api/galera/local/{op}/{container}`
+/// Run a node op on a peer host via its `/api/galera/local/{kind}/{op}/{container}`
 /// primitive, authenticated with the cluster secret. Tries the standard URL
 /// fallback list (HTTPS / WolfNet / HTTP).
-fn remote_op(ctx: &GaleraOpCtx, host: &str, container: &str, op: NodeOp) -> Result<String, String> {
+fn remote_op(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str, op: NodeOp) -> Result<String, String> {
     let target = ctx.nodes.iter().find(|n| n.id == host)
         .ok_or_else(|| format!("host '{}' is not a node in this cluster", host))?;
-    let path = format!("/api/galera/local/{}/{}", op.as_str(), container);
+    let path = format!("/api/galera/local/{}/{}/{}", kind, op.as_str(), container);
     let urls = crate::api::build_node_urls(&target.address, target.port, &path);
     let secret = ctx.cluster_secret.clone();
     ctx.rt.block_on(async move {
@@ -727,21 +839,21 @@ fn remote_op(ctx: &GaleraOpCtx, host: &str, container: &str, op: NodeOp) -> Resu
 }
 
 /// Run a node op against `host` — local fast-path when it's this node.
-fn run_op(ctx: &GaleraOpCtx, host: &str, container: &str, op: NodeOp) -> Result<String, String> {
+fn run_op(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str, op: NodeOp) -> Result<String, String> {
     if host.is_empty() || host == ctx.self_id {
-        local_node_op(container, op)
+        local_node_op(kind, container, op)
     } else {
-        remote_op(ctx, host, container, op)
+        remote_op(ctx, host, kind, container, op)
     }
 }
 
 /// Does `host` currently run `container`? Local check for self, `Exists` probe
 /// for a peer. Unreachable peers answer "no" (skip), not an error.
-fn exists_on_host(ctx: &GaleraOpCtx, host: &str, container: &str) -> bool {
+fn exists_on_host(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str) -> bool {
     if host.is_empty() || host == ctx.self_id {
-        return container_exists_local(container);
+        return container_exists_local(kind, container);
     }
-    remote_op(ctx, host, container, NodeOp::Exists)
+    remote_op(ctx, host, kind, container, NodeOp::Exists)
         .map(|o| o.trim() == "yes")
         .unwrap_or(false)
 }
@@ -749,7 +861,7 @@ fn exists_on_host(ctx: &GaleraOpCtx, host: &str, container: &str) -> bool {
 /// Find which WolfStack host currently runs `container`. Tries the recorded
 /// host first (one check in the common case), then this node, then every other
 /// cluster node — so a migrated container is located where it now lives.
-fn locate_host(ctx: &GaleraOpCtx, container: &str, recorded: &str) -> Result<String, String> {
+fn locate_host(ctx: &GaleraOpCtx, kind: &str, container: &str, recorded: &str) -> Result<String, String> {
     let mut candidates: Vec<String> = Vec::new();
     for id in std::iter::once(recorded.to_string())
         .chain(std::iter::once(ctx.self_id.clone()))
@@ -760,7 +872,7 @@ fn locate_host(ctx: &GaleraOpCtx, container: &str, recorded: &str) -> Result<Str
         }
     }
     for host in &candidates {
-        if exists_on_host(ctx, host, container) {
+        if exists_on_host(ctx, host, kind, container) {
             return Ok(host.clone());
         }
     }
@@ -795,17 +907,27 @@ pub fn recover_cluster(cluster: &GaleraCluster, log: &Sender<String>, ctx: &Gale
     if cluster.nodes.is_empty() {
         return Err("cluster has no nodes".into());
     }
+    // Automated recovery is LXC-only: a stopped Docker MariaDB container can't
+    // be exec'd to read its grastate position (its PID 1 is mysqld), so we can't
+    // safely pick the most-advanced survivor. Refuse rather than guess.
+    if let Some(d) = cluster.nodes.iter().find(|n| n.kind == "docker") {
+        return Err(format!(
+            "Automated recovery is LXC-only — this cluster has a Docker node ('{}'). \
+             Recover Docker Galera nodes through whatever orchestrates them (it controls \
+             how each container is restarted with the bootstrap flag).",
+            d.container));
+    }
     // Resolve each node's CURRENT host once (handles migration) + self-heal.
     let mut located: Vec<(GaleraNode, String)> = Vec::with_capacity(cluster.nodes.len());
     for n in &cluster.nodes {
-        let host = locate_host(ctx, &n.container, &n.node_id)
+        let host = locate_host(ctx, &n.kind, &n.container, &n.node_id)
             .map_err(|e| format!("[{}] {}", n.container, e))?;
         persist_node_host(&cluster.id, &n.container, &host);
         located.push((n.clone(), host));
     }
     for (n, host) in &located {
         logln(log, format!("[{}] stopping mariadb to flush its position…", n.container));
-        let _ = run_op(ctx, host, &n.container, NodeOp::Stop);
+        let _ = run_op(ctx, host, &n.kind, &n.container, NodeOp::Stop);
     }
     // Verify every node is actually DOWN before reading positions. A node still
     // running reports seqno -1 (grastate is only written on clean shutdown), and
@@ -813,7 +935,7 @@ pub fn recover_cluster(cluster: &GaleraCluster, log: &Sender<String>, ctx: &Gale
     // confirm a node is stopped (including: host unreachable), refuse — a wrong
     // bootstrap here rolls the database back. Data safety > convenience.
     for (n, host) in &located {
-        let down = run_op(ctx, host, &n.container, NodeOp::IsDown)
+        let down = run_op(ctx, host, &n.kind, &n.container, NodeOp::IsDown)
             .map(|s| s.trim() == "down").unwrap_or(false);
         if !down {
             return Err(format!(
@@ -825,7 +947,7 @@ pub fn recover_cluster(cluster: &GaleraCluster, log: &Sender<String>, ctx: &Gale
     }
     let mut best: Option<(GaleraNode, String, i64)> = None;
     for (n, host) in &located {
-        let seq = run_op(ctx, host, &n.container, NodeOp::Seqno)
+        let seq = run_op(ctx, host, &n.kind, &n.container, NodeOp::Seqno)
             .ok().and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(-1);
         logln(log, format!("[{}] grastate seqno = {}", n.container, seq));
         if best.as_ref().map(|(_, _, b)| seq > *b).unwrap_or(true) {
@@ -842,20 +964,20 @@ pub fn recover_cluster(cluster: &GaleraCluster, log: &Sender<String>, ctx: &Gale
         );
     }
     logln(log, format!("[{}] is most-advanced (seqno {}) — bootstrapping it.", boot.container, boot_seq));
-    run_op(ctx, &boot_host, &boot.container, NodeOp::Bootstrap)?;
+    run_op(ctx, &boot_host, &boot.kind, &boot.container, NodeOp::Bootstrap)?;
     for (n, host) in &located {
         if n.container == boot.container { continue; }
         logln(log, format!("[{}] rejoining…", n.container));
-        let _ = run_op(ctx, host, &n.container, NodeOp::Start);
+        let _ = run_op(ctx, host, &n.kind, &n.container, NodeOp::Start);
     }
     Ok(format!("Recovered from '{}' (seqno {}); rejoined {} node(s).", boot.container, boot_seq, cluster.nodes.len() - 1))
 }
 
 /// Start / stop / restart MariaDB on one node of a cluster (lifecycle),
-/// dispatched to the host that currently runs the container.
+/// dispatched to the host that currently runs the container (LXC or Docker).
 pub fn node_service(cluster: &GaleraCluster, container: &str, action: &str, ctx: &GaleraOpCtx) -> Result<String, String> {
-    let recorded = match cluster.nodes.iter().find(|n| n.container == container) {
-        Some(n) => n.node_id.clone(),
+    let (recorded, kind) = match cluster.nodes.iter().find(|n| n.container == container) {
+        Some(n) => (n.node_id.clone(), n.kind.clone()),
         None => return Err(format!("'{}' is not a node of this cluster", container)),
     };
     let op = match action {
@@ -864,7 +986,69 @@ pub fn node_service(cluster: &GaleraCluster, container: &str, action: &str, ctx:
         "restart" => NodeOp::Restart,
         _ => return Err("action must be start, stop or restart".into()),
     };
-    let host = locate_host(ctx, container, &recorded)?;
+    let host = locate_host(ctx, &kind, container, &recorded)?;
     persist_node_host(&cluster.id, container, &host);
-    run_op(ctx, &host, container, op)
+    run_op(ctx, &host, &kind, container, op)
+}
+
+/// One container the operator picked to adopt: which host runs it, its name,
+/// and its runtime.
+pub struct AdoptPick {
+    pub node_id: String,
+    pub container: String,
+    pub kind: String,
+}
+
+/// Adopt existing containers into a new managed Galera cluster. For each picked
+/// container we resolve its reachable address ON ITS HOST (no typing IPs), then
+/// persist the cluster scoped to `ws_cluster`. Returns the saved cluster.
+pub fn adopt_cluster(
+    ws_cluster: &str, name: &str, sst: &str, db_user: &str, db_password: &str,
+    picks: &[AdoptPick], ctx: &GaleraOpCtx,
+) -> Result<GaleraCluster, String> {
+    if picks.is_empty() {
+        return Err("select at least one container".into());
+    }
+    safe_token(name)?;
+    let mut nodes: Vec<GaleraNode> = Vec::with_capacity(picks.len());
+    for p in picks {
+        safe_token(&p.container)?;
+        let kind = if p.kind == "docker" { "docker" } else { "lxc" };
+        // Trust the picker's host, but fall back to discovery if it's blank.
+        let host = if p.node_id.is_empty() {
+            locate_host(ctx, kind, &p.container, "")?
+        } else {
+            p.node_id.clone()
+        };
+        let addr = run_op(ctx, &host, kind, &p.container, NodeOp::Address)
+            .map_err(|e| format!("[{}] couldn't resolve address: {}", p.container, e))?;
+        let addr = addr.trim().to_string();
+        if !valid_address(&addr) {
+            return Err(format!(
+                "[{}] no reachable address found (got '{}') — is the container running and on WolfNet?",
+                p.container, addr));
+        }
+        nodes.push(GaleraNode {
+            node_id: host,
+            container: p.container.clone(),
+            kind: kind.to_string(),
+            address: addr,
+            port: 3306,
+            node_name: p.container.clone(),
+        });
+    }
+    let cluster = GaleraCluster {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: name.to_string(),
+        cluster: ws_cluster.to_string(),
+        owner_node: String::new(), // filled by upsert_cluster = this node
+        nodes,
+        sst_method: if sst.is_empty() { default_sst() } else { sst.to_string() },
+        db_user: if db_user.is_empty() { default_db_user() } else { db_user.to_string() },
+        db_password_enc: String::new(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        provisioned: false,
+    };
+    let pw = if db_password.is_empty() { None } else { Some(db_password) };
+    upsert_cluster(cluster, pw)
 }
