@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.12.8: fix Galera "owning host 404" for clusters built before owner_node** _(2026-05-31 — [`7f4a236`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7f4a236de786b56432f02945d564aa4d621a28af))_
 - **v24.12.7: fix PBS token auth — doubled principal when the full token is in the name field** _(2026-05-31 — [`398f17d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/398f17d961dc979dfee4b283648d123ac0020aef))_
 - **v24.12.6: Galera per-node SQL terminal, replication charts, and a tuning analyzer** _(2026-05-31 — [`9b4a7cc`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9b4a7cc490fc5a8aa1dc65a8a4947d0f823b8e7f))_
 - **v24.12.5: Galera create — live terminal output, persist-on-create, faster status** _(2026-05-31 — [`304b881`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/304b881f41f17c44fd6b2e1aff83e666fffd9c72))_
