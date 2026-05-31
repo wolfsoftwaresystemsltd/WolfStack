@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.12.3: Galera is cluster-scoped — pick-from-list adopt, named create, LXC+Docker** _(2026-05-31 — [`db593ec`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/db593ec52886a7526442877e6aa951fc2c5e1a01))_
 - **v24.12.2: fix PBS connection failing on a colon-less fingerprint** _(2026-05-30 — [`087e29d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/087e29dff715dbae94a1f254298cc082ef720309))_
 - **v24.12.1: Galera lifecycle + recovery become host-aware (cross-host clusters)** _(2026-05-30 — [`c6963ed`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c6963ede1403cde4c0d562854797b48d0f123f3a))_
 - **v24.12.0: one-click Let's Encrypt in the proxy editor + Galera cluster manager** _(2026-05-30 — [`73dc3d3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/73dc3d398b24279a8cf7fb5d3530220ba1c16ebd))_
