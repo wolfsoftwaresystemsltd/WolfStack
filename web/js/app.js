@@ -63289,10 +63289,9 @@ function galeraDrawSparklines() {
             const cv = document.getElementById('galera-spark-' + c.id + '-' + n.container);
             const hist = (galeraState.history || {})[c.id + '|' + n.container];
             if (cv && hist) {
-                galeraDrawSpark(cv, [
-                    { series: hist.recvq, color: '#60a5fa' },
-                    { series: hist.sendq, color: '#f59e0b' },
-                ]);
+                // One clean line: the apply (recv) queue — the key "is this node
+                // keeping up with replication" signal.
+                galeraDrawSpark(cv, [{ series: hist.recvq, color: '#60a5fa' }]);
             }
         });
     });
@@ -63370,11 +63369,10 @@ function galeraClusterCardHtml(c) {
             <td style="padding:6px 8px;font-size:12px;">${escapeHtml(String(prim))}</td>
             <td style="padding:6px 8px;font-size:12px;text-align:center;">${escapeHtml(String(size))}</td>
             <td style="padding:6px 8px;white-space:nowrap;">
-                <canvas id="galera-spark-${c.id}-${n.container}" width="84" height="24" title="recv queue (blue) / send queue (orange) avg over time" style="vertical-align:middle;"></canvas>
-                ${ns && ns.reachable && (ns.flow_control_paused || 0) > 0.001 ? `<span style="color:#f59e0b;font-size:9px;margin-left:4px;" title="flow control paused fraction">fc ${((ns.flow_control_paused || 0) * 100).toFixed(0)}%</span>` : ''}
+                <canvas id="galera-spark-${c.id}-${n.container}" width="84" height="24" title="replication apply (recv) queue, average over time — rising means this node is falling behind" style="vertical-align:middle;"></canvas>
             </td>
             <td style="padding:6px 8px;text-align:right;white-space:nowrap;">
-                <button class="btn btn-sm" title="Open a terminal on ${escapeAttr(n.container)} to run the MariaDB client" data-galera-act="console" data-cid="${cid}" data-cont="${cont}" data-kind="${escapeAttr(n.kind || 'lxc')}" data-host="${escapeAttr(n.node_id || '')}" style="padding:2px 8px;font-size:11px;border-color:var(--accent,#3b82f6);color:var(--accent,#60a5fa);">SQL</button>
+                <button class="btn btn-sm" title="Open a terminal on ${escapeAttr(n.container)} (run mariadb there to reach the database)" data-galera-act="console" data-cid="${cid}" data-cont="${cont}" data-kind="${escapeAttr(n.kind || 'lxc')}" data-host="${escapeAttr(n.node_id || '')}" style="padding:2px 8px;font-size:11px;border-color:var(--accent,#3b82f6);color:var(--accent,#60a5fa);"><span class="ws-icon-clean-wrap" data-icon="terminal"></span> Console</button>
                 ${act('Start', 'start')}
                 ${act('Stop', 'stop')}
                 ${act('Restart', 'restart')}
