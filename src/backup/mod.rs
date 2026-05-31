@@ -383,6 +383,15 @@ mod tests {
     }
 
     #[test]
+    fn pbs_repo_full_principal_in_token_field() {
+        // Livid's case: user=root@pam, and the WHOLE `root@pam!wolfstack-backup`
+        // (the form the PBS UI shows) pasted into the token-NAME field. Must not
+        // double the user prefix.
+        assert_eq!(pbs_repo_string(&pbs("root@pam", "root@pam!wolfstack-backup")),
+                   "root@pam!wolfstack-backup@pbs.example.com:store");
+    }
+
+    #[test]
     fn pbs_repo_full_token_in_user_with_no_token_name() {
         assert_eq!(pbs_repo_string(&pbs("root@pam!wolfstack-backup", "")),
                    "root@pam!wolfstack-backup@pbs.example.com:store");
@@ -1999,17 +2008,27 @@ fn store_remote(local_path: &Path, remote_url: &str, filename: &str) -> Result<(
 
 /// Build the PBS repository string: user!token@server:datastore
 fn pbs_repo_string(storage: &BackupStorage) -> String {
-    // PBS token auth repo form: `user@realm!tokenid@server:datastore`.
-    // Only append the token id when the user field doesn't ALREADY carry it —
-    // operators often paste the whole `root@pam!wolfstack-backup` (the form the
-    // PBS UI shows) into the user field, and doubling the `!tokenid` produces an
-    // invalid principal that PBS rejects as "token disabled or expired".
-    if !storage.pbs_token_name.is_empty() && !storage.pbs_user.contains('!') {
-        format!("{}!{}@{}:{}", storage.pbs_user, storage.pbs_token_name,
-                storage.pbs_server, storage.pbs_datastore)
+    // PBS token-auth repo form: `user@realm!tokenid@server:datastore`.
+    // The principal is `user@realm!tokenid`. Operators paste the token in
+    // assorted ways: the bare id (`wolfstack-backup`) in the token field, OR the
+    // WHOLE `root@pam!wolfstack-backup` that the PBS UI shows — into either the
+    // token field or the user field. We must NOT re-prepend the user when a
+    // field already carries the full principal, or we get the doubled
+    // `root@pam!root@pam!wolfstack-backup` PBS rejects as "token disabled".
+    let user = storage.pbs_user.trim();
+    let token = storage.pbs_token_name.trim();
+    let principal = if token.is_empty() {
+        user.to_string()
+    } else if token.contains('!') || token.contains('@') {
+        // The token field already holds the full `user@realm!tokenid`.
+        token.to_string()
+    } else if user.contains('!') {
+        // The user field already holds the full principal; token is the bare id.
+        user.to_string()
     } else {
-        format!("{}@{}:{}", storage.pbs_user, storage.pbs_server, storage.pbs_datastore)
-    }
+        format!("{}!{}", user, token)
+    };
+    format!("{}@{}:{}", principal, storage.pbs_server, storage.pbs_datastore)
 }
 
 /// Normalize a PBS server TLS fingerprint to the colon-separated form
