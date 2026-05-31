@@ -63217,6 +63217,10 @@ async function galeraLoadClusters() {
         lists.forEach((list, i) => {
             const fetchHost = targets[i];
             (Array.isArray(list) ? list : []).forEach(c => {
+                // Legacy clusters (built before owner_node existed) come back with
+                // no owner — they live on whichever host just returned them, so
+                // route ops there instead of falling back to the wrong node (404).
+                if (!c.owner_node && fetchHost) c.owner_node = fetchHost;
                 const auth = !fetchHost || c.owner_node === fetchHost;
                 const ex = byId[c.id];
                 if (!ex || (auth && !ex.auth)) byId[c.id] = { c, auth };

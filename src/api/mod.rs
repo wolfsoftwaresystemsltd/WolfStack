@@ -14739,7 +14739,14 @@ pub async fn galera_list(req: HttpRequest, state: web::Data<AppState>, query: we
     let mut clusters: Vec<_> = cfg.clusters.drain(..)
         .filter(|c| scope.is_empty() || c.cluster == scope || c.cluster.is_empty())
         .collect();
-    for c in clusters.iter_mut() { c.db_password_enc = String::new(); }
+    // This node's galera.json holds these clusters, so it IS their owner. Fill
+    // owner_node for legacy configs written before the field existed — otherwise
+    // the UI can't route status/ops back here and gets a 404.
+    let self_id = crate::agent::self_node_id();
+    for c in clusters.iter_mut() {
+        c.db_password_enc = String::new();
+        if c.owner_node.is_empty() { c.owner_node = self_id.clone(); }
+    }
     HttpResponse::Ok().json(clusters)
 }
 
