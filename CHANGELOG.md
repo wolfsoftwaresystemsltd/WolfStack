@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.12.10: Galera nodes — clearer "Console" terminal button, single replication line** _(2026-05-31 — [`0edc575`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0edc5758e8f5b45d2c22f796e849f23912457341))_
 - **v24.12.9: fix Galera "owning host 404" — route ops to where the config actually lives** _(2026-05-31 — [`c1de1e3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c1de1e3ad58a6d8cc874e51de1e88cdd657602c8))_
 - **v24.12.8: fix Galera "owning host 404" for clusters built before owner_node** _(2026-05-31 — [`7f4a236`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7f4a236de786b56432f02945d564aa4d621a28af))_
 - **v24.12.7: fix PBS token auth — doubled principal when the full token is in the name field** _(2026-05-31 — [`398f17d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/398f17d961dc979dfee4b283648d123ac0020aef))_
